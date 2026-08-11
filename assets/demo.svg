@@ -1,0 +1,663 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="949" height="608" viewBox="0 0 949 608" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14">
+<rect width="100%" height="100%" fill="#1d1f21" rx="6"/>
+<style>@keyframes k0{0%,10.2210%{opacity:1}10.2211%,100%{opacity:0}}#f0{opacity:0;animation:k0 7.827s infinite}@keyframes k1{0%,10.2210%{opacity:0}10.2211%,15.0249%{opacity:1}15.0250%,100%{opacity:0}}#f1{opacity:0;animation:k1 7.827s infinite}@keyframes k2{0%,15.0249%{opacity:0}15.0250%,25.2459%{opacity:1}25.2460%,100%{opacity:0}}#f2{opacity:0;animation:k2 7.827s infinite}@keyframes k3{0%,25.2459%{opacity:0}25.2460%,35.4670%{opacity:1}35.4671%,100%{opacity:0}}#f3{opacity:0;animation:k3 7.827s infinite}@keyframes k4{0%,35.4670%{opacity:0}35.4671%,38.6738%{opacity:1}38.6739%,100%{opacity:0}}#f4{opacity:0;animation:k4 7.827s infinite}@keyframes k5{0%,38.6738%{opacity:0}38.6739%,48.8949%{opacity:1}48.8950%,100%{opacity:0}}#f5{opacity:0;animation:k5 7.827s infinite}@keyframes k6{0%,48.8949%{opacity:0}48.8950%,59.1159%{opacity:1}59.1160%,100%{opacity:0}}#f6{opacity:0;animation:k6 7.827s infinite}@keyframes k7{0%,59.1159%{opacity:0}59.1160%,69.3369%{opacity:1}69.3370%,100%{opacity:0}}#f7{opacity:0;animation:k7 7.827s infinite}@keyframes k8{0%,69.3369%{opacity:0}69.3370%,79.5579%{opacity:1}79.5580%,100%{opacity:0}}#f8{opacity:0;animation:k8 7.827s infinite}@keyframes k9{0%,79.5579%{opacity:0}79.5580%,89.7790%{opacity:1}89.7791%,100%{opacity:0}}#f9{opacity:0;animation:k9 7.827s infinite}@keyframes k10{0%,89.7790%{opacity:0}89.7791%,100.0000%{opacity:1}100.0000%,100%{opacity:0}}#f10{opacity:0;animation:k10 7.827s infinite}</style>
+<g id="f0" data-dur="800">
+<rect x="8.0" y="174.5" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                      40s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ rank the files here by size                                                 </text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="8.0" y="204.2" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="204.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">1 tool · took 8s</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="546.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ✓ bash · ls -lS 2&gt;/dev/null || ls -la · /tmp/demo-proj/api · 0s</text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">125M     –</text>
+<text x="8.0" y="259.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I'll check the directory.                                                   </text>
+<text x="671.6" y="259.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="278.2" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="296.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Ranked largest to smallest:                                                 </text>
+<text x="671.6" y="296.7" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="296.7" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="671.6" y="315.2" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="315.2" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="333.7" textLength="310.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">  # │ File      │ Size               </text>
+<text x="671.6" y="333.7" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="333.7" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="8.0" y="352.2" textLength="310.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ──┼───────────┼────────────────────</text>
+<text x="671.6" y="352.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="352.2" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="370.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  1 │ server.ts │ 40,000 B (~39 KB)                                           </text>
+<text x="671.6" y="370.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  2 │ routes.ts │ 12,000 B (~11.7 KB)                                         </text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  3 │ auth.ts   │ 3,000 B (~2.9 KB)                                           </text>
+<text x="8.0" y="426.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  4 │ index.ts  │ 800 B                                                       </text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  5 │ types.ts  │ 250 B                                                       </text>
+<text x="24.8" y="481.7" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="100.4" y="481.7" textLength="562.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> dominates at ~71% of the 56 KB total, and is over 3x the next     </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  largest file, which is a reasonable candidate for splitting.                </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">19.0k/1.0M · $0.02</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="277.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; which one should I split first?</text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f1" data-dur="376">
+<rect x="8.0" y="174.5" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                      40s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ rank the files here by size                                                 </text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="8.0" y="204.2" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="204.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">1 tool · took 8s</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="546.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ✓ bash · ls -lS 2&gt;/dev/null || ls -la · /tmp/demo-proj/api · 0s</text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">125M  0.3%</text>
+<text x="8.0" y="259.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I'll check the directory.                                                   </text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">472M     –</text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Ranked largest to smallest:                                                 </text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="8.0" y="333.7" textLength="310.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">  # │ File      │ Size               </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="352.2" textLength="310.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ──┼───────────┼────────────────────</text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="8.0" y="370.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  1 │ server.ts │ 40,000 B (~39 KB)                                           </text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  2 │ routes.ts │ 12,000 B (~11.7 KB)                                         </text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  3 │ auth.ts   │ 3,000 B (~2.9 KB)                                           </text>
+<text x="8.0" y="426.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  4 │ index.ts  │ 800 B                                                       </text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  5 │ types.ts  │ 250 B                                                       </text>
+<text x="24.8" y="481.7" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="100.4" y="481.7" textLength="562.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> dominates at ~71% of the 56 KB total, and is over 3x the next     </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  largest file, which is a reasonable candidate for splitting.                </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">19.0k/1.0M · $0.02</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="277.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; which one should I split first?</text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f2" data-dur="800">
+<rect x="8.0" y="137.5" width="655.2" height="18.5" fill="#444452"/>
+<rect x="8.0" y="489.0" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="37.7" textLength="260.4" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">● thinking                   0s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="8.0" y="148.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ rank the files here by size                                                 </text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="8.0" y="167.2" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="167.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">1 tool · took 8s</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="546.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ✓ bash · ls -lS 2&gt;/dev/null || ls -la · /tmp/demo-proj/api · 0s</text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I'll check the directory.                                                   </text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">125M  0.3%</text>
+<text x="8.0" y="259.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Ranked largest to smallest:                                                 </text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">472M     –</text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="310.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">  # │ File      │ Size               </text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="315.2" textLength="310.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ──┼───────────┼────────────────────</text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="8.0" y="333.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  1 │ server.ts │ 40,000 B (~39 KB)                                           </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="352.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  2 │ routes.ts │ 12,000 B (~11.7 KB)                                         </text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="8.0" y="370.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  3 │ auth.ts   │ 3,000 B (~2.9 KB)                                           </text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  4 │ index.ts  │ 800 B                                                       </text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  5 │ types.ts  │ 250 B                                                       </text>
+<text x="24.8" y="444.7" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="100.4" y="444.7" textLength="562.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> dominates at ~71% of the 56 KB total, and is over 3x the next     </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  largest file, which is a reasonable candidate for splitting.                </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ which one should I split first?                                             </text>
+<text x="8.0" y="518.7" textLength="126.0" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">⚙ thinking · 0s</text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="33.6" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">Busy</text>
+<text x="66.8" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="234.8" y="537.2" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">───────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">19.0k/1.0M · $0.02</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f3" data-dur="800">
+<rect x="8.0" y="137.5" width="655.2" height="18.5" fill="#444452"/>
+<rect x="8.0" y="489.0" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="37.7" textLength="260.4" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">● thinking                   1s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="8.0" y="148.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ rank the files here by size                                                 </text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="8.0" y="167.2" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="167.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">1 tool · took 8s</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="546.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ✓ bash · ls -lS 2&gt;/dev/null || ls -la · /tmp/demo-proj/api · 0s</text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I'll check the directory.                                                   </text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">125M  0.3%</text>
+<text x="8.0" y="259.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Ranked largest to smallest:                                                 </text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">472M     –</text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="310.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">  # │ File      │ Size               </text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="315.2" textLength="310.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  ──┼───────────┼────────────────────</text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="8.0" y="333.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  1 │ server.ts │ 40,000 B (~39 KB)                                           </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="352.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  2 │ routes.ts │ 12,000 B (~11.7 KB)                                         </text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="8.0" y="370.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  3 │ auth.ts   │ 3,000 B (~2.9 KB)                                           </text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  4 │ index.ts  │ 800 B                                                       </text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  5 │ types.ts  │ 250 B                                                       </text>
+<text x="24.8" y="444.7" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="100.4" y="444.7" textLength="562.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> dominates at ~71% of the 56 KB total, and is over 3x the next     </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  largest file, which is a reasonable candidate for splitting.                </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ which one should I split first?                                             </text>
+<text x="8.0" y="518.7" textLength="126.0" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">⚙ thinking · 0s</text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="33.6" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">Busy</text>
+<text x="75.2" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">1s</text>
+<text x="92.0" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="260.0" y="537.2" textLength="504.0" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">19.0k/1.0M · $0.02</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f4" data-dur="251">
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="8.0" y="37.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  None of these are TypeScript. All five are high-entropy binary data with no </text>
+<text x="671.6" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="37.7" textLength="260.4" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">● thinking                  26s</text>
+<text x="8.0" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  recognizable header (not gzip </text>
+<text x="276.8" y="56.2" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">1f8b</text>
+<text x="310.4" y="56.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not zip </text>
+<text x="394.4" y="56.2" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">504b</text>
+<text x="428.0" y="56.2" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not any common archive    </text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="74.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  magic). There is no code here to split.                                     </text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="8.0" y="111.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I have to walk back the framing in my previous message. I ranked the files  </text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="130.2" textLength="319.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  by size and then editorialized that </text>
+<text x="327.2" y="130.2" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="402.8" y="130.2" textLength="260.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> was "a reasonable candidate   </text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="8.0" y="148.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  for splitting" as if I'd seen an oversized module. I hadn't looked inside   </text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="8.0" y="167.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  it. The size ranking was correct, but the implication that these are source </text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  files was mine, not the data's.                                             </text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  So the answer to "which should I split first" is: none of them, and the     </text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="8.0" y="241.2" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  real question is why your </text>
+<text x="243.2" y="241.2" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="268.4" y="241.2" textLength="394.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> files contain random bytes. Some              </text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">128M  0.9%</text>
+<text x="8.0" y="259.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  possibilities worth checking:                                               </text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">481M  7.6%</text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="296.7" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Encrypted or corrupted checkout.</text>
+<text x="310.4" y="296.7" textLength="352.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> A failed transfer, or a filter/smudge    </text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="315.2" textLength="546.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    driver that mangled the working tree. If this is a git repo, </text>
+<text x="554.0" y="315.2" textLength="84.0" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git status</text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="8.0" y="333.7" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    and </text>
+<text x="75.2" y="333.7" textLength="117.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git stash list</text>
+<text x="192.8" y="333.7" textLength="470.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> would show it, but this directory isn't one.           </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="352.2" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="352.2" textLength="218.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Placeholder/scaffold data.</text>
+<text x="260.0" y="352.2" textLength="403.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> Something generated fixtures with              </text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="41.6" y="370.7" textLength="100.8" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">/dev/urandom</text>
+<text x="142.4" y="370.7" textLength="75.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> and the </text>
+<text x="218.0" y="370.7" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="243.2" y="370.7" textLength="420.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> extension is incidental.                         </text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="389.2" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="389.2" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Wrong directory.</text>
+<text x="176.0" y="389.2" textLength="100.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> The actual </text>
+<text x="276.8" y="389.2" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">api</text>
+<text x="302.0" y="389.2" textLength="361.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> source may live elsewhere.                </text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="426.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  The sizes are also suspiciously round: exactly 40000, 12000, 3000, 800, and </text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  250 bytes. Real source files essentially never land on such numbers, which  </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  points to deliberate generation rather than corruption of real code.        </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Worth telling me: is this directory supposed to contain real source, and    </text>
+<text x="8.0" y="518.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  where did it come from? If there                                            </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="33.6" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">Busy</text>
+<text x="75.2" y="537.2" textLength="25.2" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">26s</text>
+<text x="100.4" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="268.4" y="537.2" textLength="495.6" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">───────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">19.0k/1.0M · $0.02</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f5" data-dur="800">
+<text x="8.0" y="19.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  None of these are TypeScript. All five are high-entropy binary data with no </text>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="8.0" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  recognizable header (not gzip </text>
+<text x="276.8" y="37.7" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">1f8b</text>
+<text x="310.4" y="37.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not zip </text>
+<text x="394.4" y="37.7" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">504b</text>
+<text x="428.0" y="37.7" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not any common archive    </text>
+<text x="671.6" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="37.7" textLength="260.4" lengthAdjust="spacing" fill="#fab387" xml:space="preserve">● thinking                  26s</text>
+<text x="8.0" y="56.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  magic). There is no code here to split.                                     </text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="8.0" y="93.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I have to walk back the framing in my previous message. I ranked the files  </text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="8.0" y="111.7" textLength="319.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  by size and then editorialized that </text>
+<text x="327.2" y="111.7" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="402.8" y="111.7" textLength="260.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> was "a reasonable candidate   </text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="130.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  for splitting" as if I'd seen an oversized module. I hadn't looked inside   </text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="8.0" y="148.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  it. The size ranking was correct, but the implication that these are source </text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="8.0" y="167.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  files was mine, not the data's.                                             </text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.02</text>
+<text x="8.0" y="204.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  So the answer to "which should I split first" is: none of them, and the     </text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  real question is why your </text>
+<text x="243.2" y="222.7" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="268.4" y="222.7" textLength="394.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> files contain random bytes. Some              </text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="8.0" y="241.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  possibilities worth checking:                                               </text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">128M  0.9%</text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">481M  7.6%</text>
+<text x="8.0" y="278.2" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Encrypted or corrupted checkout.</text>
+<text x="310.4" y="278.2" textLength="352.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> A failed transfer, or a filter/smudge    </text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="546.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    driver that mangled the working tree. If this is a git repo, </text>
+<text x="554.0" y="296.7" textLength="84.0" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git status</text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    and </text>
+<text x="75.2" y="315.2" textLength="117.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git stash list</text>
+<text x="192.8" y="315.2" textLength="470.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> would show it, but this directory isn't one.           </text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="8.0" y="333.7" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="333.7" textLength="218.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Placeholder/scaffold data.</text>
+<text x="260.0" y="333.7" textLength="403.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> Something generated fixtures with              </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="41.6" y="352.2" textLength="100.8" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">/dev/urandom</text>
+<text x="142.4" y="352.2" textLength="75.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> and the </text>
+<text x="218.0" y="352.2" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="243.2" y="352.2" textLength="420.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> extension is incidental.                         </text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="8.0" y="370.7" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Wrong directory.</text>
+<text x="176.0" y="370.7" textLength="100.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> The actual </text>
+<text x="276.8" y="370.7" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">api</text>
+<text x="302.0" y="370.7" textLength="361.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> source may live elsewhere.                </text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  The sizes are also suspiciously round: exactly 40000, 12000, 3000, 800, and </text>
+<text x="8.0" y="426.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  250 bytes. Real source files essentially never land on such numbers, which  </text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  points to deliberate generation rather than corruption of real code.        </text>
+<text x="8.0" y="481.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Worth telling me: is this directory supposed to contain real source, and    </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  where did it come from? If there's a backup or upstream remote, comparing   </text>
+<text x="8.0" y="518.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  against it will settle whether this is corruption or generated filler.      </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">21.8k/1.0M · $0.11</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f6" data-dur="800">
+<text x="8.0" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  recognizable header (not gzip </text>
+<text x="276.8" y="19.2" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">1f8b</text>
+<text x="310.4" y="19.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not zip </text>
+<text x="394.4" y="19.2" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">504b</text>
+<text x="428.0" y="19.2" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not any common archive    </text>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="8.0" y="37.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  magic). There is no code here to split.                                     </text>
+<text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                       0s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="74.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  I have to walk back the framing in my previous message. I ranked the files  </text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="8.0" y="93.2" textLength="319.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  by size and then editorialized that </text>
+<text x="327.2" y="93.2" textLength="75.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">server.ts</text>
+<text x="402.8" y="93.2" textLength="260.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> was "a reasonable candidate   </text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">in one sentence, what does … </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="8.0" y="111.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  for splitting" as if I'd seen an oversized module. I hadn't looked inside   </text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="130.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  it. The size ranking was correct, but the implication that these are source </text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="8.0" y="148.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  files was mine, not the data's.                                             </text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">22K/1.0M                     2%</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="8.0" y="185.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  So the answer to "which should I split first" is: none of them, and the     </text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.11</text>
+<text x="8.0" y="204.2" textLength="235.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  real question is why your </text>
+<text x="243.2" y="204.2" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="268.4" y="204.2" textLength="394.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> files contain random bytes. Some              </text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="222.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  possibilities worth checking:                                               </text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">128M  0.8%</text>
+<text x="8.0" y="259.7" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="259.7" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Encrypted or corrupted checkout.</text>
+<text x="310.4" y="259.7" textLength="352.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> A failed transfer, or a filter/smudge    </text>
+<text x="671.6" y="259.7" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                </text>
+<text x="856.4" y="259.7" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">485M  4.4%</text>
+<text x="8.0" y="278.2" textLength="546.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    driver that mangled the working tree. If this is a git repo, </text>
+<text x="554.0" y="278.2" textLength="84.0" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git status</text>
+<text x="671.6" y="278.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="8.0" y="296.7" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">    and </text>
+<text x="75.2" y="296.7" textLength="117.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">git stash list</text>
+<text x="192.8" y="296.7" textLength="470.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> would show it, but this directory isn't one.           </text>
+<text x="671.6" y="296.7" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="8.0" y="315.2" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="315.2" textLength="218.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Placeholder/scaffold data.</text>
+<text x="260.0" y="315.2" textLength="403.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> Something generated fixtures with              </text>
+<text x="671.6" y="315.2" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="315.2" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="41.6" y="333.7" textLength="100.8" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">/dev/urandom</text>
+<text x="142.4" y="333.7" textLength="75.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> and the </text>
+<text x="218.0" y="333.7" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">.ts</text>
+<text x="243.2" y="333.7" textLength="420.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> extension is incidental.                         </text>
+<text x="671.6" y="333.7" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="333.7" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="8.0" y="352.2" textLength="33.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  • </text>
+<text x="41.6" y="352.2" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">Wrong directory.</text>
+<text x="176.0" y="352.2" textLength="100.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> The actual </text>
+<text x="276.8" y="352.2" textLength="25.2" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">api</text>
+<text x="302.0" y="352.2" textLength="361.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> source may live elsewhere.                </text>
+<text x="671.6" y="352.2" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="352.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="671.6" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="370.7" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Eb9f4XbUkTe32KiN</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  The sizes are also suspiciously round: exactly 40000, 12000, 3000, 800, and </text>
+<text x="671.6" y="389.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="407.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  250 bytes. Real source files essentially never land on such numbers, which  </text>
+<text x="8.0" y="426.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  points to deliberate generation rather than corruption of real code.        </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Worth telling me: is this directory supposed to contain real source, and    </text>
+<text x="8.0" y="481.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  where did it come from? If there's a backup or upstream remote, comparing   </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  against it will settle whether this is corruption or generated filler.      </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · Eb9f4XbUkTe32KiN </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">21.8k/1.0M · $0.11</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
+<text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
+</g>
+<g id="f7" data-dur="800">
+<rect x="8.0" y="100.5" width="932.4" height="18.5" fill="#89b4fa"/>
+<text x="8.0" y="19.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╭─ Create new session in /tmp/demo-proj/api ──────────────────────────────────────────────────────── opencode ╮</text>
+<text x="8.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="932.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="8.0" y="56.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="8.0" y="93.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  SESSION           STATE  AGE  CWD                 TITLE                                        AGENT     COST</text>
+<text x="8.0" y="111.7" textLength="932.4" lengthAdjust="spacing" fill="#1e1e2e" xml:space="preserve">  Eb9f4XbUkTe32KiN  WARM   &lt;1m  /tmp/demo-proj/api  rank the files here by size                  opencode  $0  </text>
+<text x="8.0" y="130.2" textLength="932.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  aWCx1wVhdwP6TzR5  WARM    3m  /tmp/demo-proj/api  in one sentence, what does a WeakMap give …  opencode  $0  </text>
+<text x="8.0" y="148.7" textLength="898.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  host: local                                                                                 Esc · Go Back</text>
+</g>
+<g id="f8" data-dur="800">
+<rect x="8.0" y="119.0" width="932.4" height="18.5" fill="#89b4fa"/>
+<text x="8.0" y="19.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╭─ Create new session in /tmp/demo-proj/api ──────────────────────────────────────────────────────── opencode ╮</text>
+<text x="8.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="932.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="8.0" y="56.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="8.0" y="93.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  SESSION           STATE  AGE  CWD                 TITLE                                        AGENT     COST</text>
+<text x="8.0" y="111.7" textLength="932.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  Eb9f4XbUkTe32KiN  WARM   &lt;1m  /tmp/demo-proj/api  rank the files here by size                  opencode  $0  </text>
+<text x="8.0" y="130.2" textLength="932.4" lengthAdjust="spacing" fill="#1e1e2e" xml:space="preserve">  aWCx1wVhdwP6TzR5  WARM    3m  /tmp/demo-proj/api  in one sentence, what does a WeakMap give …  opencode  $0  </text>
+<text x="8.0" y="148.7" textLength="898.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  host: local                                                                                 Esc · Go Back</text>
+</g>
+<g id="f9" data-dur="800">
+<rect x="8.0" y="378.0" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ ready</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="671.6" y="111.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="111.7" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="671.6" y="130.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.10</text>
+<text x="671.6" y="148.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="167.2" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="671.6" y="185.7" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="185.7" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="671.6" y="204.2" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="204.2" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="671.6" y="222.7" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="222.7" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="671.6" y="241.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="241.2" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">aWCx1wVhdwP6TzR5</text>
+<text x="671.6" y="259.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ in one sentence, what does a WeakMap give you that a Map does not?          </text>
+<text x="8.0" y="407.7" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="407.7" textLength="100.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">thought · 3s</text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  A WeakMap holds its keys weakly, so an entry disappears once nothing else   </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  references that key object, letting you attach data to objects without      </text>
+<text x="8.0" y="481.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  preventing garbage collection (the tradeoff: keys must be objects, and it   </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  isn't enumerable or sizeable).                                              </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · aWCx1wVhdwP6TzR5 </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">18.7k/1.0M · $0.10</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="554.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">in one sentence, what does a WeakMap give you that a Map does not?</text>
+<text x="738.8" y="592.7" textLength="201.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  opencode•claude-opus-5</text>
+</g>
+<g id="f10" data-dur="800">
+<rect x="8.0" y="378.0" width="655.2" height="18.5" fill="#444452"/>
+<text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
+<text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                   3m 15s</text>
+<text x="671.6" y="56.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="74.7" textLength="75.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│sessions</text>
+<text x="671.6" y="93.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="93.2" textLength="243.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">rank the files here by size  </text>
+<text x="923.6" y="93.2" textLength="16.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ○</text>
+<text x="671.6" y="111.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="130.2" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│context</text>
+<text x="671.6" y="148.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="148.7" textLength="260.4" lengthAdjust="spacing" fill="#94e2d5" xml:space="preserve">19K/1.0M                     2%</text>
+<text x="671.6" y="167.2" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
+<text x="680.0" y="167.2" textLength="260.4" lengthAdjust="spacing" fill="#a6e3a1" xml:space="preserve">▋······························</text>
+<text x="671.6" y="185.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│cost                      $0.10</text>
+<text x="671.6" y="204.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="222.7" textLength="84.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│resources</text>
+<text x="671.6" y="241.2" textLength="184.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│hydra                </text>
+<text x="856.4" y="241.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">129M     –</text>
+<text x="671.6" y="259.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">├───────────────────────────────</text>
+<text x="671.6" y="278.2" textLength="42.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│info</text>
+<text x="671.6" y="296.7" textLength="201.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│agent                  </text>
+<text x="873.2" y="296.7" textLength="67.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">opencode</text>
+<text x="671.6" y="315.2" textLength="159.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│model             </text>
+<text x="831.2" y="315.2" textLength="109.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">claude-opus-5</text>
+<text x="671.6" y="333.7" textLength="226.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│mode                      </text>
+<text x="898.4" y="333.7" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">build</text>
+<text x="671.6" y="352.2" textLength="134.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│id             </text>
+<text x="806.0" y="352.2" textLength="134.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">aWCx1wVhdwP6TzR5</text>
+<text x="671.6" y="370.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">└───────────────────────────────</text>
+<text x="8.0" y="389.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">▎ in one sentence, what does a WeakMap give you that a Map does not?          </text>
+<text x="8.0" y="407.7" textLength="16.8" lengthAdjust="spacing" fill="#b4befe" xml:space="preserve">⚙ </text>
+<text x="24.8" y="407.7" textLength="100.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">thought · 3s</text>
+<text x="8.0" y="444.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  A WeakMap holds its keys weakly, so an entry disappears once nothing else   </text>
+<text x="8.0" y="463.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  references that key object, letting you attach data to objects without      </text>
+<text x="8.0" y="481.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  preventing garbage collection (the tradeoff: keys must be objects, and it   </text>
+<text x="8.0" y="500.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  isn't enumerable or sizeable).                                              </text>
+<text x="8.0" y="537.2" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──</text>
+<text x="33.2" y="537.2" textLength="42.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">Ready</text>
+<text x="75.2" y="537.2" textLength="168.0" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> · aWCx1wVhdwP6TzR5 </text>
+<text x="243.2" y="537.2" textLength="520.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">──────────────────────────────────────────────────────────────</text>
+<text x="772.4" y="537.2" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">18.7k/1.0M · $0.10</text>
+<text x="932.0" y="537.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="555.7" textLength="16.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">&gt; </text>
+<text x="8.0" y="574.2" textLength="512.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─────────────────────────────────────────────────────────────</text>
+<text x="520.4" y="574.2" textLength="411.6" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve"> ⇧⇥ mode: build · ⌃P pick · ⌃G guide · ⌃D detach </text>
+<text x="932.0" y="574.2" textLength="8.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">─</text>
+<text x="8.0" y="592.7" textLength="151.2" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">/tmp/demo-proj/api</text>
+<text x="159.2" y="592.7" textLength="25.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve"> · </text>
+<text x="184.4" y="592.7" textLength="554.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">in one sentence, what does a WeakMap give you that a Map does not?</text>
+<text x="738.8" y="592.7" textLength="201.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  opencode•claude-opus-5</text>
+</g>
+</svg>

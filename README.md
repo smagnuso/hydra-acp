@@ -25,6 +25,8 @@
 
 > **Status: experimental.** One daemon owns your coding agents, so a session isn't tied to the window that started it. Built on the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/).
 
+![Starting a session in the hydra-acp TUI, then switching between two live sessions from the picker](assets/demo.svg)
+
 ## What it is
 
 `hydra-acp` is a **session manager, multiplexer, and TUI** for AI coding agents. Many clients — a terminal TUI, your editor, a browser, Slack — attach to the same live session at once and see it update in real time. Start a session at your desk, follow it from your phone, hand it off to a teammate.

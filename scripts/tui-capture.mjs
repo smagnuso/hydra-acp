@@ -50,6 +50,20 @@
  *   --fps N         record sample rate (default 6)
  *   --duration S    record length in seconds. Omitted or 0 records until ^C,
  *                   which stops cleanly and writes the frames collected.
+ *   --concat A B... join animated SVGs this script wrote into one timeline,
+ *                   e.g. a "create session" clip followed by a "switch" clip.
+ *                   Each may carry an inclusive frame range: clip.svg:2-11,
+ *                   clip.svg:4- , clip.svg:-9 . Indices are the frames in that
+ *                   file, before this run squashes anything.
+ *   --gap MS        hold each segment's last frame before the next (default 800)
+ *   --max-hold MS   cap how long any single frame stays on screen. Real
+ *                   durations are wall clock, so idle time reads as a freeze;
+ *                   1200-1500 keeps a demo moving. 0 (default) leaves timing
+ *                   untouched.
+ *   --squash N      fold runs of frames differing by at most N lines into
+ *                   their end state. 1 catches a ticking elapsed counter or
+ *                   spinner, which exact dedupe cannot see because every frame
+ *                   really is different. 0 (default) is off.
  *   --list-panes    print every live pane with its id, size, and command
  *   --scrollback N  include N lines above the visible screen. Only meaningful
  *                   for normal-screen programs; a full-screen TUI keeps no
@@ -254,9 +268,19 @@ function renderBody(ansi, opt) {
       const text = cells.slice(i, j).map((c) => c.ch).join("");
       const s = cells[i].style;
       if (text.trim() !== "") {
+        // Pin the run to exactly the width of the cells it covers. Without
+        // this the browser advances by its own font metric, which is close to
+        // but not exactly `cw`, and the error compounds across the run — on a
+        // 150-column row that walks the last glyph several pixels off, so a
+        // border drawn at the right edge no longer lines up with the rows
+        // above it. `spacing` distributes the correction between glyphs and
+        // leaves their shapes alone.
+        const span = cells[j - 1].col + cells[j - 1].w - cells[i].col;
         const attrs = [
           `x="${(pad + cells[i].col * cw).toFixed(1)}"`,
           `y="${baseline.toFixed(1)}"`,
+          `textLength="${(span * cw).toFixed(1)}"`,
+          'lengthAdjust="spacing"',
           `fill="${fgOf(s)}"`,
           s.bold ? 'font-weight="bold"' : "",
           s.italic ? 'font-style="italic"' : "",
@@ -296,12 +320,90 @@ function toSvg(ansi, opt) {
 // Frames are stacked as sibling <g>s, all hidden except during their slice of
 // one shared CSS animation. This animates in an <img> context, which is how
 // GitHub renders an SVG referenced from markdown; scripting would not.
-function toAnimatedSvg(frames, opt) {
-  const rendered = frames.map((f) => ({ ...f, ...renderBody(f.ansi, opt) }));
-  const cols = rendered.reduce((m, f) => Math.max(m, f.cols), 0);
-  const rowCount = rendered.reduce((m, f) => Math.max(m, f.rowCount), 0);
-  const total = rendered.reduce((t, f) => t + f.dur, 0) / 1000;
+// How many lines differ between two frames. Each line is one <text>/<rect>,
+// so a ticking clock or spinner is 1 regardless of how full the screen is.
+// A count rather than a fraction on purpose: the fraction moves with screen
+// occupancy, so the same threshold that catches a timer on a nearly-empty
+// screen would swallow real edits on a busy one.
+function changedLines(a, b) {
+  if (a === b) {
+    return 0;
+  }
+  const counts = new Map();
+  for (const l of a.split("\n")) {
+    counts.set(l, (counts.get(l) ?? 0) + 1);
+  }
+  const lb = b.split("\n");
+  let common = 0;
+  for (const l of lb) {
+    const n = counts.get(l) ?? 0;
+    if (n > 0) {
+      counts.set(l, n - 1);
+      common++;
+    }
+  }
+  return Math.max(a.split("\n").length, lb.length) - common;
+}
 
+function assembleAnimated(rendered, openTag, opt) {
+  // Recording already drops repeats within a clip, but stitching two clips
+  // butts the tail of one against the head of the next — and if both were
+  // sitting on the same screen those are the same frame, so the join reads as
+  // a stall of twice the length. Merge them before anything else looks at
+  // durations.
+  const merged = [];
+  for (const f of rendered) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.body === f.body) {
+      prev.dur += f.dur;
+      continue;
+    }
+    merged.push({ ...f });
+  }
+  if (merged.length !== rendered.length) {
+    process.stderr.write(`merged ${rendered.length - merged.length} duplicate frame(s)\n`);
+  }
+  rendered = merged;
+
+  // Exact-duplicate merging misses the case that actually drags: a spinner or
+  // an elapsed counter ticking while the agent thinks. Every frame differs, by
+  // one line, so nothing collapses and you watch a timer for several seconds.
+  // Fold runs of near-identical frames into their final state, which keeps the
+  // last timer value rather than the first.
+  if (opt.squash > 0) {
+    const before = rendered.length;
+    const squashed = [];
+    for (const f of rendered) {
+      const prev = squashed[squashed.length - 1];
+      if (prev && changedLines(prev.body, f.body) <= opt.squash) {
+        squashed[squashed.length - 1] = { ...f, dur: prev.dur + f.dur };
+        continue;
+      }
+      squashed.push({ ...f });
+    }
+    if (squashed.length !== before) {
+      process.stderr.write(
+        `squashed ${before - squashed.length} frame(s) differing by <=${opt.squash} line(s)\n`,
+      );
+    }
+    rendered = squashed;
+  }
+  // Frame durations are real wall clock, so any stretch where you stopped
+  // typing becomes a stretch where the animation looks frozen. The tail frame
+  // is the usual offender: it holds for however long the pane sat idle before
+  // the recording stopped. Clamping keeps the sequence intact and only removes
+  // dead air.
+  if (opt.maxHold > 0) {
+    const over = rendered.filter((f) => f.dur > opt.maxHold);
+    if (over.length > 0) {
+      const saved = over.reduce((t, f) => t + f.dur - opt.maxHold, 0);
+      process.stderr.write(
+        `clamped ${over.length} frame(s) to ${opt.maxHold}ms, cutting ${(saved / 1000).toFixed(1)}s of dead air\n`,
+      );
+    }
+    rendered = rendered.map((f) => (f.dur > opt.maxHold ? { ...f, dur: opt.maxHold } : f));
+  }
+  const total = rendered.reduce((t, f) => t + f.dur, 0) / 1000;
   const css = [];
   const groups = [];
   let at = 0;
@@ -318,16 +420,113 @@ function toAnimatedSvg(frames, opt) {
         : `0%,${p(from)}%{opacity:0}${p(from + 0.0001)}%,${p(to)}%{opacity:1}${p(to + 0.0001)}%,100%{opacity:0}`;
     css.push(`@keyframes k${i}{${stops}}`);
     css.push(`#f${i}{opacity:0;animation:k${i} ${total.toFixed(3)}s infinite}`);
-    groups.push(`<g id="f${i}">\n${f.body}\n</g>`);
+    // Frame duration is recorded so `--concat` can rebuild the timeline
+    // without having to parse percentages back out of the keyframes.
+    groups.push(`<g id="f${i}" data-dur="${Math.round(f.dur)}">\n${f.body}\n</g>`);
   });
 
-  return [
-    svgOpen(cols, rowCount, opt),
-    `<style>${css.join("")}</style>`,
-    groups.join("\n"),
-    "</svg>",
-    "",
-  ].join("\n");
+  return [openTag, `<style>${css.join("")}</style>`, groups.join("\n"), "</svg>", ""].join("\n");
+}
+
+function toAnimatedSvg(frames, opt) {
+  const rendered = frames.map((f) => ({ ...f, ...renderBody(f.ansi, opt) }));
+  const cols = rendered.reduce((m, f) => Math.max(m, f.cols), 0);
+  const rowCount = rendered.reduce((m, f) => Math.max(m, f.rowCount), 0);
+  return assembleAnimated(rendered, svgOpen(cols, rowCount, opt), opt);
+}
+
+// Reads back an SVG this script wrote. Prefers the data-dur attribute; falls
+// back to recovering each slice from the keyframes percentages so files
+// written before data-dur existed still stitch.
+function parseAnimatedSvg(file) {
+  const s = readFileSync(file, "utf8");
+  const open = s.slice(0, s.indexOf("\n"));
+  const dims = /width="(\d+)" height="(\d+)"/.exec(open);
+  if (!dims) {
+    throw new Error(`${file}: no <svg width/height> on the first line`);
+  }
+  const total = Number(/animation:k\d+ ([\d.]+)s/.exec(s)?.[1] ?? 0) * 1000;
+  const groups = [...s.matchAll(/<g id="f(\d+)"(?: data-dur="(\d+)")?>\n([\s\S]*?)\n<\/g>/g)];
+  if (groups.length === 0) {
+    // A still. One frame, duration decided by the caller.
+    const body = s.slice(s.indexOf("\n") + 1, s.lastIndexOf("</svg>")).trim();
+    return { w: +dims[1], h: +dims[2], frames: [{ body, dur: 0 }] };
+  }
+  // Each rule has exactly one `A%,B%{opacity:1}` window — the span the frame
+  // is on screen. Read that directly rather than counting percentages
+  // positionally, which differs between frame 0 and the rest.
+  const chunks = new Map();
+  for (const chunk of s.slice(s.indexOf("<style>"), s.indexOf("</style>")).split("@keyframes ")) {
+    const id = /^k(\d+)\{/.exec(chunk);
+    if (id) {
+      chunks.set(id[1], chunk);
+    }
+  }
+  const frames = groups.map(([, idx, dur, body]) => {
+    if (dur !== undefined) {
+      return { body, dur: Number(dur) };
+    }
+    const win = /([\d.]+)%,([\d.]+)%\{opacity:1\}/.exec(chunks.get(idx) ?? "");
+    const span = win ? Number(win[2]) - Number(win[1]) : 0;
+    return { body, dur: Math.max(1, (span / 100) * total) };
+  });
+  return { w: +dims[1], h: +dims[2], frames };
+}
+
+// "clip.svg" | "clip.svg:4-12" | "clip.svg:4-" | "clip.svg:-12". Ranges are
+// inclusive and index the frames as they exist in that file, before any
+// squashing this run does.
+function parseClipSpec(spec) {
+  const m = /^(.*?):(\d*)-(\d*)$/.exec(spec);
+  if (!m) {
+    return { file: spec, from: 0, to: Infinity };
+  }
+  return {
+    file: m[1],
+    from: m[2] === "" ? 0 : Number(m[2]),
+    to: m[3] === "" ? Infinity : Number(m[3]),
+  };
+}
+
+function concatAnimated(specs, opt) {
+  const clips = specs.map(parseClipSpec);
+  const files = clips.map((c) => c.file);
+  const parts = clips.map((c) => {
+    const p = parseAnimatedSvg(c.file);
+    const kept = p.frames.slice(c.from, c.to === Infinity ? undefined : c.to + 1);
+    if (kept.length === 0) {
+      throw new Error(`${c.file}: range ${c.from}-${c.to} selected no frames`);
+    }
+    if (kept.length !== p.frames.length) {
+      process.stderr.write(
+        `  ${c.file}: trimmed to frames ${c.from}-${c.from + kept.length - 1} of ${p.frames.length}\n`,
+      );
+    }
+    return { ...p, frames: kept };
+  });
+  const w = Math.max(...parts.map((p) => p.w));
+  const h = Math.max(...parts.map((p) => p.h));
+  if (parts.some((p) => p.w !== w || p.h !== h)) {
+    process.stderr.write(
+      `warning: inputs differ in size; using ${w}x${h}. Capture at one grid for a clean stitch.\n`,
+    );
+  }
+  const frames = [];
+  parts.forEach((p, i) => {
+    p.frames.forEach((f, j) => {
+      // Hold the closing frame of each segment so the end state registers
+      // before the next one cuts in.
+      const last = j === p.frames.length - 1;
+      frames.push({ body: f.body, dur: (f.dur || 1000) + (last ? opt.gap : 0) });
+    });
+    process.stderr.write(`  ${files[i]}: ${p.frames.length} frames\n`);
+  });
+  const open =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ` +
+    `font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" ` +
+    `font-size="${opt.fontSize}">` +
+    (opt.bg === "none" ? "" : `\n<rect width="100%" height="100%" fill="${opt.bg}"${opt.radius ? ' rx="6"' : ""}/>`);
+  return assembleAnimated(frames, open, opt);
 }
 
 // ---- tmux ----------------------------------------------------------------
@@ -490,7 +689,7 @@ async function main(argv) {
   const opt = {
     cols: 100, rows: 30, wait: 1500, keyWait: 400, keys: [],
     from: null, ansiOut: null, out: null, pane: null, tty: null, scrollback: 0,
-    record: false, fps: 6, duration: 0, delay: 0,
+    record: false, fps: 6, duration: 0, delay: 0, concat: [], gap: 800, maxHold: 0, squash: 0,
     fontSize: 14, bg: "#1d1f21", fg: "#d3d7cf", radius: true,
   };
   const rest = [];
@@ -513,6 +712,16 @@ async function main(argv) {
       opt.pane = argv[++i];
     } else if (a === "--tty") {
       opt.tty = argv[++i];
+    } else if (a === "--concat") {
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+        opt.concat.push(argv[++i]);
+      }
+    } else if (a === "--squash") {
+      opt.squash = Number(argv[++i]);
+    } else if (a === "--max-hold") {
+      opt.maxHold = Number(argv[++i]);
+    } else if (a === "--gap") {
+      opt.gap = Number(argv[++i]);
     } else if (a === "--delay") {
       opt.delay = Number(argv[++i]);
     } else if (a === "--record") {
@@ -552,6 +761,18 @@ async function main(argv) {
     } else {
       throw new Error(`unknown option: ${a}`);
     }
+  }
+
+  if (opt.concat.length > 0) {
+    process.stderr.write(`stitching ${opt.concat.length} files:\n`);
+    const svg = concatAnimated(opt.concat, opt);
+    if (opt.out) {
+      writeFileSync(opt.out, svg);
+      process.stderr.write(`wrote ${opt.out} (${svg.length} bytes)\n`);
+    } else {
+      process.stdout.write(svg);
+    }
+    return 0;
   }
 
   if (opt.record) {
