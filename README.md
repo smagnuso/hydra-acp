@@ -192,18 +192,13 @@ compaction` prints them.
 
 ## CLI
 
-Nine of these carry most of the daily traffic:
+Four of these carry most of the daily traffic:
 
 ```sh
 hydra-acp                     # open the TUI (picker if you have sessions, else a new one)
-hydra-acp session             # list sessions
 hydra-acp --reattach          # back into this terminal's last session
-hydra-acp agent list          # what agents are available
-hydra-acp agent set claude    # change the default agent
-hydra-acp cat -p "..."        # one-shot / piped, no TUI
+hydra-acp session             # list sessions
 hydra-acp session info <id>   # what happened in a session
-hydra-acp daemon log -f       # follow the daemon log
-hydra-acp config set <k> <v>  # change a setting
 ```
 
 The full surface:
