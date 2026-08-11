@@ -4643,11 +4643,10 @@ async function runSession(
         return;
       }
       case "close":
-        // Esc applies on the index (it is the dialog's commit) and merely
-        // closes a value list, where picking is what applies.
-        if (target.kind === "index") {
-          applyPendingConfig();
-        }
+        // Esc abandons the pending picks. Enter is the only thing that
+        // applies them, so leaving by any other door changes nothing --
+        // which is what Esc means in every other dialog here.
+        pendingConfig = new Map();
         closeForm("chooser");
         return;
       case "cancel":

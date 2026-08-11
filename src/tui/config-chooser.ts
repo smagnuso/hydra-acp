@@ -77,18 +77,26 @@ export function buildConfigIndexForm(
       value: valueLabel(o, pending.get(o.id) ?? o.currentValue),
     })),
     cursor: 0,
-    // ⏎/Esc apply rather than close, and ^C discards: same contract as the
-    // ^Q questions modal, which is the other multi-row form where each row
-    // is a pending decision. Cycling here does NOT apply as it does in ^O,
-    // because every one of these is a round trip and one of them (agent) is
-    // a process swap; arrowing past three agents to reach the fourth must
-    // not swap three times.
+    // Enter is the ONLY thing that applies. Esc (and ^C) discard, matching
+    // every other dialog here, since ←/→ already does the choosing and a
+    // door that silently commits is a trap.
+    //
+    // Cycling does NOT apply as it does in ^O: every one of these is a
+    // round trip and one of them (agent) is a process swap, so arrowing
+    // past three agents to reach the fourth must not swap three times.
+    //
+    // This is deliberately unlike ^Q, where Esc saves: there every row
+    // starts holding an answer the agent proposed, so leaving without
+    // committing them is the surprise. Here the rows start on the live
+    // values and only the ones you changed matter.
     hints: [
       { label: "↑/↓ row" },
       { label: "←/→ choose" },
       { label: "s save default", action: "save" },
-      { label: "⏎/Esc apply", action: "commit" },
-      { label: "^C discard", action: "cancel" },
+      { label: "⏎ apply", action: "commit" },
+      // Esc discards, which is what Esc means everywhere else in the TUI.
+      // ^C does the same and is left off the row for space.
+      { label: "Esc cancel", action: "cancel" },
     ],
     maxRows: CHOOSER_MAX_ROWS,
   };

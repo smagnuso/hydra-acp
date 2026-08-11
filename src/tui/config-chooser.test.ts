@@ -84,14 +84,17 @@ describe("buildConfigIndexForm", () => {
     expect(f.rows[1]).toMatchObject({ value: "high" });
   });
 
-  it("says Enter and Esc apply, and ^C discards", () => {
-    expect(buildConfigIndexForm([model]).hints.map((h) => h.action)).toEqual([
+  it("offers Enter as the only thing that applies", () => {
+    const hints = buildConfigIndexForm([model]).hints;
+    expect(hints.map((h) => h.action)).toEqual([
       undefined,
       undefined,
       "save",
       "commit",
       "cancel",
     ]);
+    expect(hints.find((h) => h.action === "commit")?.label).toBe("⏎ apply");
+    expect(hints.find((h) => h.action === "cancel")?.label).toBe("Esc cancel");
   });
 
   it("reports an unlisted current value verbatim", () => {
