@@ -60,6 +60,10 @@
  *                   durations are wall clock, so idle time reads as a freeze;
  *                   1200-1500 keeps a demo moving. 0 (default) leaves timing
  *                   untouched.
+ *   --min-hold MS   floor on how long any frame stays on screen. Without it a
+ *                   frame the recorder caught just before a repaint flashes
+ *                   past at its real 250ms. This is the knob that sets how
+ *                   fast the loop feels. 0 (default) is off.
  *   --squash N      fold runs of frames differing by at most N lines into
  *                   their end state. 1 catches a ticking elapsed counter or
  *                   spinner, which exact dedupe cannot see because every frame
@@ -403,6 +407,24 @@ function assembleAnimated(rendered, openTag, opt) {
     }
     rendered = rendered.map((f) => (f.dur > opt.maxHold ? { ...f, dur: opt.maxHold } : f));
   }
+
+  // A ceiling alone still leaves frames that flash past: a screen the recorder
+  // happened to catch just before the next repaint gets its real 250ms and is
+  // gone before you can read it. The floor sets a minimum dwell so every frame
+  // is legible, which is what actually controls how fast the loop feels.
+  if (opt.minHold > 0) {
+    if (opt.maxHold > 0 && opt.minHold > opt.maxHold) {
+      throw new Error(`--min-hold ${opt.minHold} exceeds --max-hold ${opt.maxHold}`);
+    }
+    const under = rendered.filter((f) => f.dur < opt.minHold);
+    if (under.length > 0) {
+      const added = under.reduce((t, f) => t + opt.minHold - f.dur, 0);
+      process.stderr.write(
+        `raised ${under.length} frame(s) to ${opt.minHold}ms, adding ${(added / 1000).toFixed(1)}s\n`,
+      );
+    }
+    rendered = rendered.map((f) => (f.dur < opt.minHold ? { ...f, dur: opt.minHold } : f));
+  }
   const total = rendered.reduce((t, f) => t + f.dur, 0) / 1000;
   const css = [];
   const groups = [];
@@ -689,7 +711,7 @@ async function main(argv) {
   const opt = {
     cols: 100, rows: 30, wait: 1500, keyWait: 400, keys: [],
     from: null, ansiOut: null, out: null, pane: null, tty: null, scrollback: 0,
-    record: false, fps: 6, duration: 0, delay: 0, concat: [], gap: 800, maxHold: 0, squash: 0,
+    record: false, fps: 6, duration: 0, delay: 0, concat: [], gap: 800, maxHold: 0, minHold: 0, squash: 0,
     fontSize: 14, bg: "#1d1f21", fg: "#d3d7cf", radius: true,
   };
   const rest = [];
@@ -718,6 +740,8 @@ async function main(argv) {
       }
     } else if (a === "--squash") {
       opt.squash = Number(argv[++i]);
+    } else if (a === "--min-hold") {
+      opt.minHold = Number(argv[++i]);
     } else if (a === "--max-hold") {
       opt.maxHold = Number(argv[++i]);
     } else if (a === "--gap") {

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="949" height="608" viewBox="0 0 949 608" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14">
 <rect width="100%" height="100%" fill="#1d1f21" rx="6"/>
-<style>@keyframes k0{0%,10.2210%{opacity:1}10.2211%,100%{opacity:0}}#f0{opacity:0;animation:k0 7.827s infinite}@keyframes k1{0%,10.2210%{opacity:0}10.2211%,15.0249%{opacity:1}15.0250%,100%{opacity:0}}#f1{opacity:0;animation:k1 7.827s infinite}@keyframes k2{0%,15.0249%{opacity:0}15.0250%,25.2459%{opacity:1}25.2460%,100%{opacity:0}}#f2{opacity:0;animation:k2 7.827s infinite}@keyframes k3{0%,25.2459%{opacity:0}25.2460%,35.4670%{opacity:1}35.4671%,100%{opacity:0}}#f3{opacity:0;animation:k3 7.827s infinite}@keyframes k4{0%,35.4670%{opacity:0}35.4671%,38.6738%{opacity:1}38.6739%,100%{opacity:0}}#f4{opacity:0;animation:k4 7.827s infinite}@keyframes k5{0%,38.6738%{opacity:0}38.6739%,48.8949%{opacity:1}48.8950%,100%{opacity:0}}#f5{opacity:0;animation:k5 7.827s infinite}@keyframes k6{0%,48.8949%{opacity:0}48.8950%,59.1159%{opacity:1}59.1160%,100%{opacity:0}}#f6{opacity:0;animation:k6 7.827s infinite}@keyframes k7{0%,59.1159%{opacity:0}59.1160%,69.3369%{opacity:1}69.3370%,100%{opacity:0}}#f7{opacity:0;animation:k7 7.827s infinite}@keyframes k8{0%,69.3369%{opacity:0}69.3370%,79.5579%{opacity:1}79.5580%,100%{opacity:0}}#f8{opacity:0;animation:k8 7.827s infinite}@keyframes k9{0%,79.5579%{opacity:0}79.5580%,89.7790%{opacity:1}89.7791%,100%{opacity:0}}#f9{opacity:0;animation:k9 7.827s infinite}@keyframes k10{0%,89.7790%{opacity:0}89.7791%,100.0000%{opacity:1}100.0000%,100%{opacity:0}}#f10{opacity:0;animation:k10 7.827s infinite}</style>
-<g id="f0" data-dur="800">
+<style>@keyframes k0{0%,12.7529%{opacity:1}12.7530%,100%{opacity:0}}#f0{opacity:0;animation:k0 17.251s infinite}@keyframes k1{0%,12.7529%{opacity:0}12.7530%,19.7090%{opacity:1}19.7091%,100%{opacity:0}}#f1{opacity:0;animation:k1 17.251s infinite}@keyframes k2{0%,19.7090%{opacity:0}19.7091%,26.6651%{opacity:1}26.6652%,100%{opacity:0}}#f2{opacity:0;animation:k2 17.251s infinite}@keyframes k3{0%,26.6651%{opacity:0}26.6652%,33.9169%{opacity:1}33.9170%,100%{opacity:0}}#f3{opacity:0;animation:k3 17.251s infinite}@keyframes k4{0%,33.9169%{opacity:0}33.9170%,40.8730%{opacity:1}40.8731%,100%{opacity:0}}#f4{opacity:0;animation:k4 17.251s infinite}@keyframes k5{0%,40.8730%{opacity:0}40.8731%,47.8291%{opacity:1}47.8292%,100%{opacity:0}}#f5{opacity:0;animation:k5 17.251s infinite}@keyframes k6{0%,47.8291%{opacity:0}47.8292%,60.5820%{opacity:1}60.5821%,100%{opacity:0}}#f6{opacity:0;animation:k6 17.251s infinite}@keyframes k7{0%,60.5820%{opacity:0}60.5821%,73.3349%{opacity:1}73.3350%,100%{opacity:0}}#f7{opacity:0;animation:k7 17.251s infinite}@keyframes k8{0%,73.3349%{opacity:0}73.3350%,80.2910%{opacity:1}80.2911%,100%{opacity:0}}#f8{opacity:0;animation:k8 17.251s infinite}@keyframes k9{0%,80.2910%{opacity:0}80.2911%,87.2471%{opacity:1}87.2472%,100%{opacity:0}}#f9{opacity:0;animation:k9 17.251s infinite}@keyframes k10{0%,87.2471%{opacity:0}87.2472%,100.0000%{opacity:1}100.0000%,100%{opacity:0}}#f10{opacity:0;animation:k10 17.251s infinite}</style>
+<g id="f0" data-dur="2200">
 <rect x="8.0" y="174.5" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                      40s</text>
@@ -63,7 +63,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f1" data-dur="376">
+<g id="f1" data-dur="1200">
 <rect x="8.0" y="174.5" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                      40s</text>
@@ -127,7 +127,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f2" data-dur="800">
+<g id="f2" data-dur="1200">
 <rect x="8.0" y="137.5" width="655.2" height="18.5" fill="#444452"/>
 <rect x="8.0" y="489.0" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
@@ -195,7 +195,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f3" data-dur="800">
+<g id="f3" data-dur="1251">
 <rect x="8.0" y="137.5" width="655.2" height="18.5" fill="#444452"/>
 <rect x="8.0" y="489.0" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
@@ -264,7 +264,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f4" data-dur="251">
+<g id="f4" data-dur="1200">
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="8.0" y="37.7" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  None of these are TypeScript. All five are high-entropy binary data with no </text>
 <text x="671.6" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
@@ -357,7 +357,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f5" data-dur="800">
+<g id="f5" data-dur="1200">
 <text x="8.0" y="19.2" textLength="655.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  None of these are TypeScript. All five are high-entropy binary data with no </text>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="8.0" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  recognizable header (not gzip </text>
@@ -450,7 +450,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f6" data-dur="800">
+<g id="f6" data-dur="2200">
 <text x="8.0" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  recognizable header (not gzip </text>
 <text x="276.8" y="19.2" textLength="33.6" lengthAdjust="spacing" fill="#89dceb" xml:space="preserve">1f8b</text>
 <text x="310.4" y="19.2" textLength="84.0" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">, not zip </text>
@@ -541,7 +541,7 @@
 <text x="184.4" y="592.7" textLength="226.8" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">rank the files here by size</text>
 <text x="411.2" y="592.7" textLength="529.2" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">                                         opencode•claude-opus-5</text>
 </g>
-<g id="f7" data-dur="800">
+<g id="f7" data-dur="2200">
 <rect x="8.0" y="100.5" width="932.4" height="18.5" fill="#89b4fa"/>
 <text x="8.0" y="19.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╭─ Create new session in /tmp/demo-proj/api ──────────────────────────────────────────────────────── opencode ╮</text>
 <text x="8.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
@@ -552,7 +552,7 @@
 <text x="8.0" y="130.2" textLength="932.4" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  aWCx1wVhdwP6TzR5  WARM    3m  /tmp/demo-proj/api  in one sentence, what does a WeakMap give …  opencode  $0  </text>
 <text x="8.0" y="148.7" textLength="898.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  host: local                                                                                 Esc · Go Back</text>
 </g>
-<g id="f8" data-dur="800">
+<g id="f8" data-dur="1200">
 <rect x="8.0" y="119.0" width="932.4" height="18.5" fill="#89b4fa"/>
 <text x="8.0" y="19.2" textLength="932.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">╭─ Create new session in /tmp/demo-proj/api ──────────────────────────────────────────────────────── opencode ╮</text>
 <text x="8.0" y="37.7" textLength="8.4" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│</text>
@@ -563,7 +563,7 @@
 <text x="8.0" y="130.2" textLength="932.4" lengthAdjust="spacing" fill="#1e1e2e" xml:space="preserve">  aWCx1wVhdwP6TzR5  WARM    3m  /tmp/demo-proj/api  in one sentence, what does a WeakMap give …  opencode  $0  </text>
 <text x="8.0" y="148.7" textLength="898.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">  host: local                                                                                 Esc · Go Back</text>
 </g>
-<g id="f9" data-dur="800">
+<g id="f9" data-dur="1200">
 <rect x="8.0" y="378.0" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="671.6" y="37.7" textLength="67.2" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ ready</text>
@@ -607,7 +607,7 @@
 <text x="184.4" y="592.7" textLength="554.4" lengthAdjust="spacing" fill="#cdd6f4" font-weight="bold" xml:space="preserve">in one sentence, what does a WeakMap give you that a Map does not?</text>
 <text x="738.8" y="592.7" textLength="201.6" lengthAdjust="spacing" fill="#cdd6f4" xml:space="preserve">  opencode•claude-opus-5</text>
 </g>
-<g id="f10" data-dur="800">
+<g id="f10" data-dur="2200">
 <rect x="8.0" y="378.0" width="655.2" height="18.5" fill="#444452"/>
 <text x="671.6" y="19.2" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">┌───────────────────────────────</text>
 <text x="671.6" y="37.7" textLength="268.8" lengthAdjust="spacing" fill="#6c7086" fill-opacity="0.6" xml:space="preserve">│○ idle                   3m 15s</text>
