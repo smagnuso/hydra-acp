@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import type { AuthMethod } from "../acp/types-capabilities.js";
 import { JsonRpcErrorCodes } from "../acp/types-jsonrpc.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import {
@@ -7,6 +8,7 @@ import {
   handleAuthMethodSelection,
   isAuthRequiredError,
   mapAuthBannerKey,
+  promptAuthRequiredBanner,
   readAgentIdFromAuthError,
   readAuthMethodsFromAuthError,
   runAuthRetryLoop,
@@ -507,5 +509,136 @@ describe("runTerminalAuthSpawn", () => {
       { spawn },
     );
     expect(out).toEqual({ exitCode: -1 });
+  });
+});
+
+// Mouse on the method list. The banner drives its mouse through
+// runModalPrompt's "mouse" listener, so the terminal double captures the
+// listener and the test emits events into it.
+describe("auth banner mouse", () => {
+  type Listener = (...args: unknown[]) => void;
+
+  function openBanner(methods: AuthMethod[]): {
+    result: Promise<AuthBannerResult>;
+    mouse: (name: string, data?: { x?: number; y?: number }) => void;
+    rowOf: (needle: string) => number;
+    hoveredLabel: () => string | undefined;
+    authenticated: string[];
+    box: { x: number; y: number; w: number; h: number };
+  } {
+    const painted: { row: number; text: string }[] = [];
+    const listeners = new Map<string, Set<Listener>>();
+    let row = 0;
+    const term = {
+      width: 100,
+      height: 30,
+      moveTo(_x: number, y: number) {
+        row = y;
+        return term;
+      },
+      noFormat(text: string) {
+        painted.push({ row, text });
+        return term;
+      },
+      hideCursor: () => term,
+      eraseDisplayBelow: () => term,
+      grabInput: () => term,
+      on(event: string, fn: Listener) {
+        let set = listeners.get(event);
+        if (!set) {
+          set = new Set();
+          listeners.set(event, set);
+        }
+        set.add(fn);
+        return term;
+      },
+      off(event: string, fn: Listener) {
+        listeners.get(event)?.delete(fn);
+        return term;
+      },
+    } as unknown as Parameters<typeof promptAuthRequiredBanner>[0];
+    const authenticated: string[] = [];
+    const result = promptAuthRequiredBanner(term, "claude-acp", undefined, methods, {
+      authenticate: async (id) => {
+        authenticated.push(id);
+      },
+    });
+    // contentWidth 80 → w 82; rows = 4 + 1 + methods.length → h = rows + 2.
+    const w = 82;
+    const h = 4 + 1 + methods.length + 2;
+    return {
+      result,
+      authenticated,
+      mouse: (name, data) => {
+        for (const fn of [...(listeners.get("mouse") ?? [])]) {
+          fn(name, data);
+        }
+      },
+      rowOf: (needle) => {
+        const hit = painted.find((p) => p.text.includes(needle));
+        if (!hit) {
+          throw new Error(`no painted row containing ${needle}`);
+        }
+        return hit.row;
+      },
+      hoveredLabel: () => {
+        // A hovered row is painted as one highlight bar (indent + label
+        // in a single call); an unhovered one paints the indent and the
+        // label separately.
+        for (let i = painted.length - 1; i >= 0; i--) {
+          const entry = painted[i];
+          if (entry && entry.text.includes("   [")) {
+            return entry.text.trim();
+          }
+        }
+        return undefined;
+      },
+      box: {
+        x: Math.floor((100 - w) / 2) + 1,
+        y: Math.floor((30 - h) / 2) + 1,
+        w,
+        h,
+      },
+    };
+  }
+
+  const METHODS: AuthMethod[] = [
+    { id: "oauth", name: "Log in with Claude", description: "browser flow" },
+    { id: "api-key", name: "Use an API key", description: "paste a key" },
+  ];
+
+  it("hovering a method row highlights it without running it", async () => {
+    const b = openBanner(METHODS);
+    b.mouse("MOUSE_MOTION", { x: 20, y: b.rowOf("[2]") });
+    expect(b.hoveredLabel()).toContain("[2]");
+    expect(b.authenticated).toEqual([]);
+    b.mouse("MOUSE_LEFT_BUTTON_PRESSED", { x: 2, y: b.box.y - 2 });
+    b.mouse("MOUSE_LEFT_BUTTON_RELEASED", { x: 2, y: b.box.y - 2 });
+    await expect(b.result).resolves.toBe("back");
+  });
+
+  it("clicking a method row authenticates with it", async () => {
+    const b = openBanner(METHODS);
+    const y = b.rowOf("[2]");
+    b.mouse("MOUSE_LEFT_BUTTON_PRESSED", { x: 20, y });
+    b.mouse("MOUSE_LEFT_BUTTON_RELEASED", { x: 20, y });
+    await expect(b.result).resolves.toBe("retry");
+    expect(b.authenticated).toEqual(["api-key"]);
+  });
+
+  it("a drag across rows does not authenticate", async () => {
+    const b = openBanner(METHODS);
+    b.mouse("MOUSE_LEFT_BUTTON_PRESSED", { x: 20, y: b.rowOf("[1]") });
+    b.mouse("MOUSE_LEFT_BUTTON_RELEASED", { x: 20, y: b.rowOf("[2]") });
+    expect(b.authenticated).toEqual([]);
+  });
+
+  it("clicking outside the box backs out", async () => {
+    const b = openBanner(METHODS);
+    const outside = { x: 2, y: b.box.y - 2 };
+    b.mouse("MOUSE_LEFT_BUTTON_PRESSED", outside);
+    b.mouse("MOUSE_LEFT_BUTTON_RELEASED", outside);
+    await expect(b.result).resolves.toBe("back");
+    expect(b.authenticated).toEqual([]);
   });
 });

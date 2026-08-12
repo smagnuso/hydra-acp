@@ -2905,6 +2905,10 @@ export async function pickSession(
     };
     const openHelpLayer = (): void => {
       renderHelp();
+      // A click dismisses too — the sheet says "press any key", and a
+      // mouse is the other way a user says "done reading". Release-only
+      // so the press that opened something else can't close it instantly.
+      let pressed = false;
       pushLayer({
         onKey: (name) => {
           if (name === "CTRL_C") {
@@ -2913,6 +2917,17 @@ export async function pickSession(
             return;
           }
           popLayer(); // restores picker layer → calls renderFromScratch
+        },
+        onMouse: (name) => {
+          if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+            pressed = true;
+            return;
+          }
+          if (name !== "MOUSE_LEFT_BUTTON_RELEASED" || !pressed) {
+            return;
+          }
+          pressed = false;
+          popLayer();
         },
         onResize: () => renderHelp(),
       });

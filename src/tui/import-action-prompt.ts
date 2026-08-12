@@ -152,6 +152,10 @@ export async function promptForImportAction(
     selected = 0;
   }
 
+  // Screen coords from the last paint, for the mouse handler.
+  let boxBounds: BoxLayout | null = null;
+  let firstChoiceRow: number | null = null;
+
   const render = (): BoxLayout => {
     const choiceRows = ACTION_CHOICES.length * 2;
     const contentHeight = 7 + choiceRows + 2;
@@ -173,14 +177,59 @@ export async function promptForImportAction(
       row++;
     }
     row++;
-    paintActionBody(term, layout, row, {
+    const body = paintActionBody(term, layout, row, {
       intro: "What do you want to do?",
       choices: ACTION_CHOICES,
       selected,
       footer: "↑/↓ navigate · Enter select · f/v jump · Esc back",
     });
+    boxBounds = layout;
+    firstChoiceRow = body.firstChoiceRow;
     return layout;
   };
+
+  // Repaint just the label rows — a full drawBox per hover event flickers.
+  const repaintChoices = (): void => {
+    const layout = boxBounds;
+    const first = firstChoiceRow;
+    if (layout === null || first === null) {
+      return;
+    }
+    for (let i = 0; i < ACTION_CHOICES.length; i++) {
+      const choice = ACTION_CHOICES[i];
+      if (!choice) {
+        continue;
+      }
+      paintChoiceLabel(term, layout, first + i * 2, choice.label, i === selected);
+    }
+  };
+
+  const moveSelection = (idx: number): void => {
+    if (idx < 0 || idx >= ACTION_CHOICES.length || idx === selected) {
+      return;
+    }
+    selected = idx;
+    repaintChoices();
+  };
+
+  // runModalPrompt hands `finish` to each event; the mouse handler is
+  // built once (it carries the press-cell across two events), so it
+  // resolves through whichever finish the current event supplied.
+  let finishNow: ((value: ActionResult) => void) | null = null;
+  const onMouse = createChoiceMouse({
+    choiceCount: ACTION_CHOICES.length,
+    layout: () => boxBounds,
+    firstChoiceRow: () => firstChoiceRow,
+    selected: () => selected,
+    select: moveSelection,
+    commit: (idx) => {
+      const choice = ACTION_CHOICES[idx];
+      if (choice) {
+        finishNow?.(choice.key);
+      }
+    },
+    back: () => finishNow?.("back"),
+  });
 
   return runModalPrompt<ActionResult>({
     term,
@@ -203,10 +252,11 @@ export async function promptForImportAction(
         finish(step.action);
         return;
       }
-      if (step.selected !== selected) {
-        selected = step.selected;
-        render();
-      }
+      moveSelection(step.selected);
+    },
+    onMouse: (name, data, finish) => {
+      finishNow = finish;
+      onMouse(name, data);
     },
   });
 }
@@ -215,6 +265,10 @@ export async function promptForImportAction(
 // promptForImportAction and promptForLaunchOrView. Layout above the
 // startRow (header rows + blank) is the caller's responsibility because
 // the two modals have different header shapes.
+//
+// Returns the absolute screen row of the first choice's label line so
+// mouse-driven callers can hit-test hover / clicks against the list.
+// Each choice occupies two rows: label then description.
 function paintActionBody(
   term: Terminal,
   layout: BoxLayout,
@@ -225,25 +279,24 @@ function paintActionBody(
     selected: number;
     footer: string;
   },
-): void {
-  const innerW = layout.contentW;
+): { firstChoiceRow: number } {
   let row = startRow;
   term.moveTo(layout.contentX, layout.contentY + row);
   paint(term, "content", ` ${opts.intro}`);
   row += 2;
+  const firstChoiceRow = layout.contentY + row;
   for (let i = 0; i < opts.choices.length; i++) {
     const choice = opts.choices[i];
     if (!choice) {
       continue;
     }
-    const pointer = i === opts.selected ? "❯" : " ";
-    const label = ` ${pointer} ${choice.label}`;
-    term.moveTo(layout.contentX, layout.contentY + row);
-    if (i === opts.selected) {
-      paint(term, "list-selected", padRight(label, innerW));
-    } else {
-      paint(term, "content", label);
-    }
+    paintChoiceLabel(
+      term,
+      layout,
+      layout.contentY + row,
+      choice.label,
+      i === opts.selected,
+    );
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
     paint(term, "list-description", `     ${choice.description}`);
@@ -252,6 +305,107 @@ function paintActionBody(
   row++;
   term.moveTo(layout.contentX, layout.contentY + row);
   paint(term, "modal-hint", ` ${opts.footer}`);
+  return { firstChoiceRow };
+}
+
+// Hover / click / wheel behaviour shared by the two choice-list modals
+// (the imported-session dialog and the launch-vs-view dialog). Both are
+// a bordered box with N two-row choices, so both want the same rules:
+// hover highlights, a click commits, the wheel nudges, and a click
+// outside the box backs out. Matches promptForAgent's list semantics.
+//
+// The getters are read on every event rather than captured once because
+// a resize re-renders the box somewhere else.
+function createChoiceMouse(opts: {
+  choiceCount: number;
+  layout: () => BoxLayout | null;
+  firstChoiceRow: () => number | null;
+  selected: () => number;
+  select: (idx: number) => void;
+  commit: (idx: number) => void;
+  back: () => void;
+}): (name: string, data?: { x?: number; y?: number }) => void {
+  let pressCell: { x: number; y: number } | null = null;
+  // Both rows of a choice (label + description) are part of its hit box.
+  const choiceAtRow = (y: number): number | null => {
+    const first = opts.firstChoiceRow();
+    if (first === null) {
+      return null;
+    }
+    const rel = y - first;
+    if (rel < 0) {
+      return null;
+    }
+    const idx = Math.floor(rel / 2);
+    return idx < opts.choiceCount ? idx : null;
+  };
+  return (name, data) => {
+    if (name === "MOUSE_WHEEL_UP") {
+      opts.select(opts.selected() - 1);
+      return;
+    }
+    if (name === "MOUSE_WHEEL_DOWN") {
+      opts.select(opts.selected() + 1);
+      return;
+    }
+    if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+      pressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
+      return;
+    }
+    const y = data?.y;
+    if (typeof y !== "number") {
+      return;
+    }
+    if (name === "MOUSE_MOTION") {
+      const idx = choiceAtRow(y);
+      if (idx !== null) {
+        opts.select(idx);
+      }
+      return;
+    }
+    if (name !== "MOUSE_LEFT_BUTTON_RELEASED") {
+      return;
+    }
+    const x = data?.x;
+    // A click is a release on the press cell; a drag isn't a click.
+    const sameCell =
+      pressCell !== null && x === pressCell.x && y === pressCell.y;
+    pressCell = null;
+    if (!sameCell) {
+      return;
+    }
+    const box = opts.layout();
+    if (
+      box !== null &&
+      typeof x === "number" &&
+      (x < box.x || x >= box.x + box.w || y < box.y || y >= box.y + box.h)
+    ) {
+      opts.back();
+      return;
+    }
+    const idx = choiceAtRow(y);
+    if (idx !== null) {
+      opts.commit(idx);
+    }
+  };
+}
+
+// One choice's label line. Split out of paintActionBody so a selection
+// change (hover or arrow key) can repaint just the label rows instead
+// of redrawing the whole box, which flickers over the picker beneath.
+// Unselected rows are padded too so residue from the highlight bar is
+// overwritten.
+function paintChoiceLabel(
+  term: Terminal,
+  layout: BoxLayout,
+  rowOnScreen: number,
+  label: string,
+  isSelected: boolean,
+): void {
+  const pointer = isSelected ? "❯" : " ";
+  const text = padRight(` ${pointer} ${label}`, layout.contentW);
+  term.moveTo(layout.contentX, rowOnScreen);
+  paint(term, isSelected ? "list-selected" : "content", text);
 }
 
 function mapKey(
@@ -285,7 +439,11 @@ export async function promptForLaunchOrView(
   term: Terminal,
   session: { sessionId: string; title?: string; cwd: string },
   focus: {
-    push: (layer: { onKey: (name: string, _m: unknown, data?: { isCharacter?: boolean }) => void; onResize: () => void }) => void;
+    push: (layer: {
+      onKey: (name: string, _m: unknown, data?: { isCharacter?: boolean }) => void;
+      onMouse?: (name: string, data?: { x?: number; y?: number }) => void;
+      onResize: () => void;
+    }) => void;
     pop: () => void;
   },
 ): Promise<LaunchOrViewResult> {
@@ -295,10 +453,21 @@ export async function promptForLaunchOrView(
   // Default to "View transcript" — the non-destructive option.
   let selected = 1;
 
-  const CHOICES: ReadonlyArray<{ label: string; hotkey: string; description: string }> = [
-    { label: "Launch", hotkey: "l", description: "start a new agent session" },
-    { label: "View transcript", hotkey: "v", description: "open read-only, no agent spawn" },
+  const CHOICES: ReadonlyArray<{
+    key: "launch" | "view";
+    label: string;
+    hotkey: string;
+    description: string;
+  }> = [
+    { key: "launch", label: "Launch", hotkey: "l", description: "start a new agent session" },
+    { key: "view", label: "View transcript", hotkey: "v", description: "open read-only, no agent spawn" },
   ];
+
+  // Screen-coord bookkeeping for the mouse handler, refreshed by every
+  // full render: the box bounds (click outside → back) and the row of
+  // the first choice label (hit-test for hover / click).
+  let boxBounds: BoxLayout | null = null;
+  let firstChoiceRow: number | null = null;
 
   const render = (): void => {
     // overlay: the only caller is the picker's ^F results list, and
@@ -319,12 +488,39 @@ export async function promptForLaunchOrView(
     paint(term, "content", " " + truncate(titleOrCwd, innerW - 2));
     row++;
     row++;
-    paintActionBody(term, layout, row, {
+    const body = paintActionBody(term, layout, row, {
       intro: "What do you want to do?",
       choices: CHOICES,
       selected,
       footer: "↑/↓ navigate · Enter select · l/v jump · Esc back",
     });
+    boxBounds = layout;
+    firstChoiceRow = body.firstChoiceRow;
+  };
+
+  // Repaint only the label rows — descriptions and chrome don't change
+  // with the selection, and a full drawBox on every hover flickers.
+  const repaintChoices = (): void => {
+    const layout = boxBounds;
+    const first = firstChoiceRow;
+    if (layout === null || first === null) {
+      return;
+    }
+    for (let i = 0; i < CHOICES.length; i++) {
+      const choice = CHOICES[i];
+      if (!choice) {
+        continue;
+      }
+      paintChoiceLabel(term, layout, first + i * 2, choice.label, i === selected);
+    }
+  };
+
+  const moveSelection = (idx: number): void => {
+    if (idx < 0 || idx >= CHOICES.length || idx === selected) {
+      return;
+    }
+    selected = idx;
+    repaintChoices();
   };
 
   render();
@@ -354,21 +550,15 @@ export async function promptForLaunchOrView(
         return;
       }
       if (name === "ENTER" || name === "KP_ENTER") {
-        finish(selected === 0 ? "launch" : "view");
+        finish(CHOICES[selected]?.key ?? "view");
         return;
       }
       if (name === "UP" || name === "SHIFT_TAB") {
-        if (selected > 0) {
-          selected--;
-          render();
-        }
+        moveSelection(selected - 1);
         return;
       }
       if (name === "DOWN" || name === "TAB") {
-        if (selected < CHOICES.length - 1) {
-          selected++;
-          render();
-        }
+        moveSelection(selected + 1);
         return;
       }
       if (data?.isCharacter) {
@@ -382,23 +572,34 @@ export async function promptForLaunchOrView(
           return;
         }
         if (lower === "n") {
-          if (selected < CHOICES.length - 1) {
-            selected++;
-            render();
-          }
+          moveSelection(selected + 1);
           return;
         }
         if (lower === "p") {
-          if (selected > 0) {
-            selected--;
-            render();
-          }
+          moveSelection(selected - 1);
           return;
         }
       }
     };
+
+    const onMouse = createChoiceMouse({
+      choiceCount: CHOICES.length,
+      layout: () => boxBounds,
+      firstChoiceRow: () => firstChoiceRow,
+      selected: () => selected,
+      select: moveSelection,
+      commit: (idx) => {
+        const choice = CHOICES[idx];
+        if (choice) {
+          finish(choice.key);
+        }
+      },
+      back: () => finish("back"),
+    });
+
     focus.push({
       onKey: (name, _m, data) => { if (!resolved) onKey(name, _m, data); },
+      onMouse: (name, data) => { if (!resolved) onMouse(name, data); },
       onResize: () => { if (!resolved) render(); },
     });
   });

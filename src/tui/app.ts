@@ -132,6 +132,7 @@ import {
   Screen,
   resolveAmbiguousWide,
   setAmbiguousWide,
+  type CompactionClickTarget,
   type FormClickTarget,
   type PermissionClickTarget,
 } from "./screen.js";
@@ -3051,6 +3052,8 @@ async function runSession(
     },
     onFormClick: (target) => onFormClick(target),
     onPermissionClick: (target) => onPermissionClick(target),
+    onCompactionClick: (target) => onCompactionClick(target),
+    onHelpClick: () => screen.setHelpPrompt(null),
     onMouse: (ev) => {
       if (ev.kind !== "press" || ev.button !== "middle") {
         return;
@@ -3785,6 +3788,46 @@ async function runSession(
       return;
     }
     screen.setCompactionPrompt({ ...current, selectedIndex: next });
+  };
+  // Mouse counterpart to tryHandleCompactionPromptKey. `select` is a
+  // hover (move the highlight); anything else commits, through the same
+  // accept/decline the keys use.
+  const onCompactionClick = (target: CompactionClickTarget): void => {
+    if (!compactionPromptActive) {
+      return;
+    }
+    const current = screen.compactionPromptSpec();
+    if (!current) {
+      return;
+    }
+    if (target.kind === "hint") {
+      if (target.action === "cancel") {
+        declineCompaction();
+        return;
+      }
+      const selected = current.options[current.selectedIndex];
+      if (selected?.key === "y") {
+        acceptCompaction();
+      } else {
+        declineCompaction();
+      }
+      return;
+    }
+    const opt = current.options[target.index];
+    if (!opt) {
+      return;
+    }
+    if (target.select === true) {
+      if (target.index !== current.selectedIndex) {
+        screen.setCompactionPrompt({ ...current, selectedIndex: target.index });
+      }
+      return;
+    }
+    if (opt.key === "y") {
+      acceptCompaction();
+    } else {
+      declineCompaction();
+    }
   };
   const tryHandleCompactionPromptKey = (ev: KeyEvent): boolean => {
     if (!compactionPromptActive) {

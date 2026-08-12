@@ -21,6 +21,7 @@ import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import type { AuthMethod } from "../acp/types-capabilities.js";
 import {
   drawBox,
+  padRight,
   resetTerminalModes,
   runModalPrompt,
   truncate,
@@ -425,6 +426,34 @@ export async function promptAuthRequiredBanner(
   let busy = false;
   let statusNote: string | undefined;
   let errorMessage: string | undefined;
+  // Mouse state: the box and the screen row the method list starts on,
+  // both refreshed by every render, plus which method row the pointer is
+  // over. The keyboard picks methods by number and carries no cursor, so
+  // the hover highlight is the only thing that says a row is clickable.
+  let boxBounds: BoxLayout | null = null;
+  let methodRowsStart: number | null = null;
+  let hovered: number | null = null;
+  let pressCell: { x: number; y: number } | null = null;
+
+  const paintMethodRow = (
+    layout: BoxLayout,
+    rowOnScreen: number,
+    label: string,
+    isHovered: boolean,
+  ): void => {
+    const text = truncate(label, layout.contentW - 3);
+    term.moveTo(layout.contentX, rowOnScreen);
+    if (isHovered) {
+      paint(term, "list-selected", padRight(`   ${text}`, layout.contentW));
+      return;
+    }
+    paint(term, "modal-label", "   ");
+    paint(term, "content", text);
+    // Pad so a previous hover bar's cells are overwritten.
+    if (3 + text.length < layout.contentW) {
+      term.noFormat(" ".repeat(layout.contentW - 3 - text.length));
+    }
+  };
 
   const render = (): BoxLayout => {
     let rows = 4;
@@ -482,17 +511,42 @@ export async function promptAuthRequiredBanner(
       term.moveTo(layout.contentX, layout.contentY + row);
       paint(term, "modal-label", " Methods reported by the agent:");
       row++;
+      methodRowsStart = layout.contentY + row;
       for (const ml of lines.methodLines) {
-        term.moveTo(layout.contentX, layout.contentY + row);
-        paint(term, "modal-label", "   ");
-        paint(term, "content", truncate(ml.label, innerW - 3));
+        paintMethodRow(layout, layout.contentY + row, ml.label, ml.index === hovered);
         row++;
       }
+    } else {
+      methodRowsStart = null;
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
     paint(term, "modal-hint", ` ${lines.footer}`);
+    boxBounds = layout;
     return layout;
+  };
+
+  // Hover changes two rows at most; a full render() per motion event
+  // repaints the whole box and flickers.
+  const repaintMethodRows = (): void => {
+    const layout = boxBounds;
+    const start = methodRowsStart;
+    if (layout === null || start === null || !lines.methodLines) {
+      return;
+    }
+    for (const ml of lines.methodLines) {
+      paintMethodRow(layout, start + ml.index, ml.label, ml.index === hovered);
+    }
+  };
+
+  const methodAtRow = (y: number): number | null => {
+    const start = methodRowsStart;
+    const count = lines.methodLines?.length ?? 0;
+    if (start === null || count === 0) {
+      return null;
+    }
+    const idx = y - start;
+    return idx >= 0 && idx < count ? idx : null;
   };
 
   const methodCount = lines.methodLines?.length ?? 0;
@@ -515,44 +569,104 @@ export async function promptAuthRequiredBanner(
         return;
       }
       if (input.kind === "selectMethod") {
-        const method = lines.methodLines?.[input.index]?.method;
-        if (!method || !deps?.authenticate) {
-          return;
+        selectMethod(input.index, finish);
+      }
+    },
+    // Hover highlights the method row under the pointer, a click on it
+    // runs that method, and a click outside the box backs out. The
+    // keyboard picks by number, so hover is what makes the rows read as
+    // targets at all.
+    onMouse: (name, data, finish) => {
+      if (busy) {
+        return;
+      }
+      if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+        pressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
+        return;
+      }
+      const y = data?.y;
+      if (typeof y !== "number") {
+        return;
+      }
+      if (name === "MOUSE_MOTION") {
+        const idx = methodAtRow(y);
+        if (idx !== hovered) {
+          hovered = idx;
+          repaintMethodRows();
         }
-        busy = true;
-        errorMessage = undefined;
-        statusNote = `Authenticating with ${methodFriendlyLabel(method)}…`;
-        render();
-        const runTA =
-          deps.runTerminalAuth ?? ((plan: TerminalAuthPlan) =>
-            runTerminalAuthSpawn(term, plan));
-        void (async () => {
-          const outcome = await handleAuthMethodSelection(method, {
-            authenticate: deps.authenticate!,
-            runTerminalAuth: runTA,
-          });
-          if (outcome.kind === "terminal-completed") {
-            finish("terminal-completed");
-            return;
-          }
-          if (outcome.kind === "retry") {
-            finish("retry");
-            return;
-          }
-          if (outcome.kind === "error") {
-            errorMessage = outcome.message;
-            statusNote = undefined;
-            busy = false;
-            render();
-            return;
-          }
-          // exit-nonzero
-          statusNote = undefined;
-          errorMessage = `auth process exited with code ${outcome.exitCode ?? "(signal)"}`;
-          busy = false;
-          render();
-        })();
+        return;
+      }
+      if (name !== "MOUSE_LEFT_BUTTON_RELEASED") {
+        return;
+      }
+      const x = data?.x;
+      const sameCell =
+        pressCell !== null && x === pressCell.x && y === pressCell.y;
+      pressCell = null;
+      if (!sameCell) {
+        return;
+      }
+      if (
+        boxBounds !== null &&
+        typeof x === "number" &&
+        (x < boxBounds.x ||
+          x >= boxBounds.x + boxBounds.w ||
+          y < boxBounds.y ||
+          y >= boxBounds.y + boxBounds.h)
+      ) {
+        finish("back");
+        return;
+      }
+      const idx = methodAtRow(y);
+      if (idx !== null) {
+        selectMethod(idx, finish);
       }
     },
   });
+
+  // Run one auth method. Shared by the number keys and by a click on the
+  // row: both mean "authenticate with this one".
+  function selectMethod(
+    index: number,
+    finish: (value: AuthBannerResult) => void,
+  ): void {
+    const method = lines.methodLines?.[index]?.method;
+    if (!method || !deps?.authenticate) {
+      return;
+    }
+    busy = true;
+    hovered = null;
+    errorMessage = undefined;
+    statusNote = `Authenticating with ${methodFriendlyLabel(method)}…`;
+    render();
+    const runTA =
+      deps.runTerminalAuth ?? ((plan: TerminalAuthPlan) =>
+        runTerminalAuthSpawn(term, plan));
+    void (async () => {
+      const outcome = await handleAuthMethodSelection(method, {
+        authenticate: deps.authenticate!,
+        runTerminalAuth: runTA,
+      });
+      if (outcome.kind === "terminal-completed") {
+        finish("terminal-completed");
+        return;
+      }
+      if (outcome.kind === "retry") {
+        finish("retry");
+        return;
+      }
+      if (outcome.kind === "error") {
+        errorMessage = outcome.message;
+        statusNote = undefined;
+        busy = false;
+        render();
+        return;
+      }
+      // exit-nonzero
+      statusNote = undefined;
+      errorMessage = `auth process exited with code ${outcome.exitCode ?? "(signal)"}`;
+      busy = false;
+      render();
+    })();
+  }
 }

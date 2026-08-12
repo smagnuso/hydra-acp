@@ -290,6 +290,11 @@ export interface ScreenOptions {
   // reports the gesture and the app applies it through the very path the
   // equivalent keypress uses.
   onPermissionClick?: (target: PermissionClickTarget) => void;
+  // Same contract for the attach-time compaction prompt.
+  onCompactionClick?: (target: CompactionClickTarget) => void;
+  // Fired when the help cheatsheet is clicked. It dismisses on any key,
+  // so a click on it is the same gesture by another input device.
+  onHelpClick?: () => void;
 }
 
 interface BannerState {
@@ -371,6 +376,12 @@ export type FormClickTarget =
 //           `select` this SUBMITS that option.
 //   hint    a hint word: submit the selection, or cancel.
 export type PermissionClickTarget =
+  | { kind: "option"; index: number; select?: boolean }
+  | { kind: "hint"; action: "commit" | "cancel" };
+
+// A resolved click inside the compaction modal. Same vocabulary as the
+// permission modal's — the two share a layout and a decision shape.
+export type CompactionClickTarget =
   | { kind: "option"; index: number; select?: boolean }
   | { kind: "hint"; action: "commit" | "cancel" };
 
@@ -509,6 +520,14 @@ const PERMISSION_HINTS: readonly FormHintSpec[] = [
   { label: "⏎ submit", action: "commit" },
   { label: "Esc cancel", action: "cancel" },
   { label: "1-9 quick-pick" },
+];
+
+// Same, for the compaction modal.
+const COMPACTION_HINTS: readonly FormHintSpec[] = [
+  { label: "↑/↓ choose" },
+  { label: "⏎ submit", action: "commit" },
+  { label: "Esc cancel", action: "cancel" },
+  { label: "y/n quick-pick" },
 ];
 
 // Never window a form down to a single row: below this the modal can't
@@ -771,6 +790,23 @@ export class Screen {
   private permissionArmedAt = 0;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private compactionPrompt: CompactionPromptSpec | null = null;
+  // Compaction modal click targets. Same shape as the permission modal's:
+  // it borrows that modal's layout, so it borrows its mouse rules too.
+  private compactionRowHits = new Map<number, number>();
+  private compactionHintHits: Array<{
+    row: number;
+    start: number;
+    end: number;
+    action: "commit" | "cancel";
+  }> = [];
+  private compactionRegion: { top: number; bottom: number } | null = null;
+  private compactionPressHit: CompactionClickTarget | null = null;
+  // Like permissionArmedAt: this prompt appears unbidden right after
+  // attach, so a click already on its way to the transcript must not
+  // land on "Compact now".
+  private compactionArmedAt = 0;
+  private helpRegion: { top: number; bottom: number } | null = null;
+  private helpPressed = false;
   private helpPrompt: HelpPromptSpec | null = null;
   private completions: CompletionItem[] = [];
   // Scrollback offset: 0 = pinned to bottom (live), N = N wrapped lines
@@ -895,6 +931,8 @@ export class Screen {
   private onBarAction: ScreenOptions["onBarAction"];
   private onFormClick: ScreenOptions["onFormClick"];
   private onPermissionClick: ScreenOptions["onPermissionClick"];
+  private onCompactionClick: ScreenOptions["onCompactionClick"];
+  private onHelpClick: ScreenOptions["onHelpClick"];
   private hoveredBlockKey: string | null = null;
   private hoveredSubKey: string | null = null;
   // Expanded set of block keys that should all paint hovered when the
@@ -1087,6 +1125,8 @@ export class Screen {
     this.onBarAction = opts.onBarAction;
     this.onFormClick = opts.onFormClick;
     this.onPermissionClick = opts.onPermissionClick;
+    this.onCompactionClick = opts.onCompactionClick;
+    this.onHelpClick = opts.onHelpClick;
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
@@ -3278,8 +3318,18 @@ export class Screen {
   setCompactionPrompt(spec: CompactionPromptSpec | null): void {
     if (spec !== null && this.compactionPrompt === null) {
       this.clearSelection();
+      // Arm on APPEARANCE only — the app re-pushes a spec on every arrow
+      // key, and restarting the timer there would keep the modal
+      // unclickable for as long as you kept navigating.
+      this.compactionArmedAt = Date.now();
     }
     this.compactionPrompt = spec ? { ...spec } : null;
+    if (spec === null) {
+      this.compactionRowHits.clear();
+      this.compactionHintHits = [];
+      this.compactionRegion = null;
+      this.compactionPressHit = null;
+    }
     this.repaint();
   }
 
@@ -3293,6 +3343,10 @@ export class Screen {
     this.helpPrompt = spec
       ? { ...spec, entries: [...spec.entries] }
       : null;
+    if (spec === null) {
+      this.helpRegion = null;
+      this.helpPressed = false;
+    }
     this.repaint();
   }
 
@@ -3586,6 +3640,10 @@ export class Screen {
         this.stepFormCursor(name === "MOUSE_WHEEL_UP" ? -3 : 3);
         return;
       }
+      if (wheelCell !== null && this.isCompactionCell(wheelCell.y)) {
+        this.stepCompactionCursor(name === "MOUSE_WHEEL_UP" ? -1 : 1);
+        return;
+      }
       if (
         wheelCell !== null &&
         this.isSidebarCell(wheelCell.x, wheelCell.y) &&
@@ -3660,6 +3718,24 @@ export class Screen {
           hit.index !== this.permissionPrompt.selectedIndex
         ) {
           this.onPermissionClick?.({
+            kind: "option",
+            index: hit.index,
+            select: true,
+          });
+        }
+      }
+      // Compaction modal: same rule as the permission modal it borrows
+      // its layout from.
+      if (cell !== null && this.isCompactionCell(cell.y)) {
+        const hit = this.compactionHitAt(cell.x, cell.y);
+        this.setPointerShape(hit !== null ? "pointer" : "default");
+        if (
+          hit !== null &&
+          hit.kind === "option" &&
+          this.compactionPrompt !== null &&
+          hit.index !== this.compactionPrompt.selectedIndex
+        ) {
+          this.onCompactionClick?.({
             kind: "option",
             index: hit.index,
             select: true,
@@ -3810,6 +3886,14 @@ export class Screen {
         this.pressCell = null;
         return;
       }
+      if (cell !== null && this.handleCompactionPress(cell)) {
+        this.pressCell = null;
+        return;
+      }
+      if (cell !== null && this.handleHelpPress(cell)) {
+        this.pressCell = null;
+        return;
+      }
       if (cell !== null && this.handleFormPress(cell)) {
         this.pressCell = null;
         return;
@@ -3858,6 +3942,14 @@ export class Screen {
         return;
       }
       if (this.handlePermissionRelease(cell)) {
+        this.pressCell = null;
+        return;
+      }
+      if (this.handleCompactionRelease(cell)) {
+        this.pressCell = null;
+        return;
+      }
+      if (this.handleHelpRelease(cell)) {
         this.pressCell = null;
         return;
       }
@@ -6974,6 +7066,19 @@ export class Screen {
   }
 
   private drawPrompt(): void {
+    // A modal's click region is only live while it is the modal actually
+    // on screen; a higher-precedence one stales it.
+    if (this.permissionPrompt || this.formPrompt || this.confirmPrompt) {
+      this.compactionRegion = null;
+    }
+    if (
+      this.permissionPrompt ||
+      this.formPrompt ||
+      this.confirmPrompt ||
+      this.compactionPrompt
+    ) {
+      this.helpRegion = null;
+    }
     if (this.permissionPrompt) {
       this.drawPermissionPrompt();
       return;
@@ -7101,6 +7206,11 @@ export class Screen {
       SESSIONBAR_ROWS +
       1;
     let row = top;
+    // Rebuilt every frame, like the permission modal's: the option rows
+    // move as the modal is redrawn.
+    this.compactionRowHits.clear();
+    this.compactionHintHits = [];
+    this.compactionRegion = { top, bottom: top + rows - 1 };
     const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
         return;
@@ -7131,6 +7241,7 @@ export class Screen {
       const isSel = i === spec.selectedIndex;
       const marker = isSel ? "\u276f" : " ";
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
+      this.compactionRowHits.set(row, i);
       writeRow(`cpct|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
           paint(this.term, "modal-option-selected", body);
@@ -7139,9 +7250,102 @@ export class Screen {
         }
       });
     }
-    writeRow(`cpct|hint|${w}`, () => {
-      paint(this.term, "modal-hint", " \u2191/\u2193 choose \u00b7 Enter submit \u00b7 Esc cancel \u00b7 y/n quick-pick");
+    const hints = layoutFormHints(COMPACTION_HINTS, w);
+    const hintRow = row;
+    for (const span of hints.spans) {
+      if (span.action === "commit" || span.action === "cancel") {
+        this.compactionHintHits.push({
+          row: hintRow,
+          start: span.start,
+          end: span.end,
+          action: span.action,
+        });
+      }
+    }
+    writeRow(`cpct|hint|${w}|${hints.text}`, () => {
+      paint(this.term, "modal-hint", ` ${hints.text}`);
     });
+  }
+
+  isCompactionCell(y: number): boolean {
+    const region = this.compactionRegion;
+    return (
+      this.compactionPrompt !== null &&
+      region !== null &&
+      y >= region.top &&
+      y <= region.bottom
+    );
+  }
+
+  compactionHitAt(x: number, y: number): CompactionClickTarget | null {
+    if (!this.isCompactionCell(y)) {
+      return null;
+    }
+    for (const hint of this.compactionHintHits) {
+      if (hint.row === y && x >= hint.start && x <= hint.end) {
+        return { kind: "hint", action: hint.action };
+      }
+    }
+    const index = this.compactionRowHits.get(y);
+    return index === undefined ? null : { kind: "option", index };
+  }
+
+  // Wheel over the modal walks its options, the way it does over the form.
+  private stepCompactionCursor(delta: number): void {
+    const spec = this.compactionPrompt;
+    if (spec === null || spec.options.length === 0) {
+      return;
+    }
+    const next = Math.max(
+      0,
+      Math.min(spec.options.length - 1, spec.selectedIndex + delta),
+    );
+    if (next === spec.selectedIndex) {
+      return;
+    }
+    this.onCompactionClick?.({ kind: "option", index: next, select: true });
+  }
+
+  private handleCompactionPress(cell: { x: number; y: number }): boolean {
+    if (!this.isCompactionCell(cell.y)) {
+      this.compactionPressHit = null;
+      return false;
+    }
+    this.compactionPressHit = this.compactionHitAt(cell.x, cell.y);
+    // Claim the whole modal: nothing behind it is the user's target.
+    return true;
+  }
+
+  private handleCompactionRelease(cell: { x: number; y: number } | null): boolean {
+    const pressed = this.compactionPressHit;
+    this.compactionPressHit = null;
+    if (pressed === null || cell === null || !this.isCompactionCell(cell.y)) {
+      return pressed !== null;
+    }
+    const hit = this.compactionHitAt(cell.x, cell.y);
+    if (hit === null || hit.kind !== pressed.kind) {
+      return true;
+    }
+    if (
+      hit.kind === "option" &&
+      pressed.kind === "option" &&
+      hit.index !== pressed.index
+    ) {
+      return true;
+    }
+    if (
+      hit.kind === "hint" &&
+      pressed.kind === "hint" &&
+      hit.action !== pressed.action
+    ) {
+      return true;
+    }
+    if (Date.now() - this.compactionArmedAt < PERMISSION_CLICK_ARM_MS) {
+      this.notify("compaction prompt just appeared, click again to confirm");
+      return true;
+    }
+    this.onCompactionClick?.(hit);
+    return true;
   }
 
   private compactionRows(): number {
@@ -7167,6 +7371,7 @@ export class Screen {
       SESSIONBAR_ROWS +
       1;
     let row = top;
+    this.helpRegion = { top, bottom: top + rows - 1 };
     const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
         return;
@@ -7211,6 +7416,40 @@ export class Screen {
     }
     // title + N entries (including separators) + hint
     return Math.min(MAX_HELP_ROWS, 2 + this.helpPrompt.entries.length);
+  }
+
+  // The cheatsheet says "any key dismisses"; a click on it should do the
+  // same. Only clicks on the sheet itself count — the transcript above is
+  // still selectable text while it's up.
+  isHelpCell(y: number): boolean {
+    const region = this.helpRegion;
+    return (
+      this.helpPrompt !== null &&
+      region !== null &&
+      y >= region.top &&
+      y <= region.bottom
+    );
+  }
+
+  private handleHelpPress(cell: { x: number; y: number }): boolean {
+    if (!this.isHelpCell(cell.y)) {
+      this.helpPressed = false;
+      return false;
+    }
+    this.helpPressed = true;
+    return true;
+  }
+
+  private handleHelpRelease(cell: { x: number; y: number } | null): boolean {
+    const pressed = this.helpPressed;
+    this.helpPressed = false;
+    if (!pressed) {
+      return false;
+    }
+    if (cell !== null && this.isHelpCell(cell.y)) {
+      this.onHelpClick?.();
+    }
+    return true;
   }
 
   private drawPermissionPrompt(): void {
