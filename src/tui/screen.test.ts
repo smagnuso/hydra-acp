@@ -3951,18 +3951,29 @@ describe("Screen scroll by turn", () => {
     expect(turnTops(screen)).toContain(getScrollOffset(screen));
   });
 
-  it("never moves more than one page per press", () => {
-    // Turns far taller than the viewport are the case that used to
-    // teleport: prompt-to-prompt was a single jump of the whole turn.
+  it("lands the prompt on the top row going forward too", () => {
+    const screen = makeTurns(8, { bodyRows: 3 });
+    screen.scrollToPrevTurn();
+    screen.scrollToPrevTurn();
+    screen.scrollToPrevTurn();
+    screen.scrollToNextTurn();
+    expect(getScrollOffset(screen)).toBeGreaterThan(0);
+    expect(topRow(screen)?.bodyStyle).toBe("user");
+    expect(turnTops(screen)).toContain(getScrollOffset(screen));
+  });
+
+  it("covers a whole turn in one press, however tall the turn", () => {
     const screen = makeTurns(6, { bodyRows: 40 });
-    const tall = turnTops(screen);
-    expect(tall[1]! - tall[0]!).toBeGreaterThan(pageSize(screen) * 3);
-    let prev = getScrollOffset(screen);
-    for (const at of walkUp(screen)) {
-      expect(at - prev).toBeLessThanOrEqual(pageSize(screen));
-      expect(at).toBeGreaterThan(prev);
-      prev = at;
+    const tops = turnTops(screen);
+    // Turns several screens tall — the case where a page-sized step would
+    // need many presses to clear a single turn.
+    expect(tops[1]! - tops[0]!).toBeGreaterThan(pageSize(screen) * 3);
+    const seen = walkUp(screen);
+    const allowed = new Set([...tops, maxScrollOffset(screen)]);
+    for (const at of seen) {
+      expect(allowed.has(at)).toBe(true);
     }
+    expect(seen.length).toBeLessThanOrEqual(tops.length + 1);
   });
 
   it("stops on every turn top on the way up, skipping none", () => {
@@ -3999,11 +4010,16 @@ describe("Screen scroll by turn", () => {
     expect(getScrollOffset(screen)).toBe(0);
   });
 
-  it("keeps every turn top in the stop list", () => {
+  it("stops at prompts and the buffer ends, and nowhere else", () => {
     const screen = makeTurns(6, { bodyRows: 40 });
+    const tops = turnTops(screen);
     const stops = turnStops(screen);
-    for (const top of turnTops(screen)) {
+    for (const top of tops) {
       expect(stops).toContain(top);
+    }
+    const allowed = new Set([0, ...tops, maxScrollOffset(screen)]);
+    for (const stop of stops) {
+      expect(allowed.has(stop)).toBe(true);
     }
     // Ascending and duplicate-free — both directions rely on the ordering.
     expect([...stops].sort((a, b) => a - b)).toEqual(stops);
@@ -4236,6 +4252,35 @@ describe("Screen turn-jump slide", () => {
     const at = getScrollOffset(screen);
     frames(screen, 40);
     expect(getScrollOffset(screen)).toBe(at);
+  });
+
+  it("comes to rest with the prompt on the top row", () => {
+    const screen = makeScreen({ turnSlide: true });
+    for (let t = 0; t < 6; t++) {
+      screen.appendLines([
+        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+      ]);
+      for (let i = 0; i < 40; i++) {
+        screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);
+      }
+    }
+    screen.scrollToPrevTurn();
+    screen.scrollToPrevTurn();
+    frames(screen, 60);
+    const s = screen as unknown as {
+      contentWidth: () => number;
+      scrollOffset: number;
+      scrollbackVisibleRows: () => number;
+      wrapTail: (w: number, needed: number) => { rows: FormattedLine[] };
+      turnScrollOffsets: () => number[];
+    };
+    const rowCount = s.scrollbackVisibleRows();
+    const { rows } = s.wrapTail(s.contentWidth(), rowCount + s.scrollOffset);
+    const end = rows.length - s.scrollOffset;
+    expect(rows.slice(Math.max(0, end - rowCount), end)[0]?.bodyStyle).toBe(
+      "user",
+    );
+    expect(s.turnScrollOffsets()).toContain(s.scrollOffset);
   });
 
   it("slides when a turn key has somewhere far to go", () => {

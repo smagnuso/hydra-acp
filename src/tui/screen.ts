@@ -5350,21 +5350,27 @@ export class Screen {
     this.repaint();
   }
 
-  // Step one stop older. Stops are the turn boundaries plus page-sized
-  // waypoints through any turn too tall to fit on screen — see turnStops.
-  // Past the oldest stop this runs to the top of the buffer rather than
-  // doing nothing, so the key always moves.
+  // Jump to the previous (older) prompt, parking it flush with the top
+  // row. Past the oldest prompt this runs to the top of the buffer rather
+  // than doing nothing, so the key always moves.
   scrollToPrevTurn(): void {
+    if (this.pageWhenNoTurns(1)) {
+      return;
+    }
     const stops = this.turnStops();
     const from = this.settledScrollOffset();
     // Stops ascend with age, so the first one above where we are now is the
-    // nearest older stop.
+    // nearest older prompt.
     const target = stops.find((o) => o > from);
     this.stepToTurnStop(target ?? this.maxScrollOffset());
   }
 
-  // Step one stop newer. Past the newest, fall through to the live tail.
+  // Jump to the next (newer) prompt. Past the newest, fall through to the
+  // live tail.
   scrollToNextTurn(): void {
+    if (this.pageWhenNoTurns(-1)) {
+      return;
+    }
     const stops = this.turnStops();
     const from = this.settledScrollOffset();
     let target = 0;
@@ -5375,6 +5381,19 @@ export class Screen {
       target = o;
     }
     this.stepToTurnStop(target);
+  }
+
+  // A transcript with no user prompts at all (an agent-only replay) has
+  // nothing to step between, and teleporting to the end of a 10k-line
+  // buffer would be a worse answer than doing the ordinary thing. Fall
+  // back to a plain page in that case. Returns true when it handled the
+  // press.
+  private pageWhenNoTurns(dir: 1 | -1): boolean {
+    if (this.turnScrollOffsets().length > 0) {
+      return false;
+    }
+    this.scrollBy(dir * this.scrollPageSize());
+    return true;
   }
 
   // Where the viewport is headed: the live offset normally, the slide's
@@ -5397,24 +5416,17 @@ export class Screen {
     this.notifyTurnPosition(target);
   }
 
-  // Every offset the turn keys stop at, ascending (newest → oldest).
+  // Every offset the turn keys stop at, ascending (newest → oldest): one
+  // per prompt, and nothing in between. A press is a prompt, however far
+  // away that is.
   //
-  // The turn tops are the point of the feature, but on their own they make
-  // a bad stop list. A turn taller than the viewport gets its middle
-  // skipped entirely, and one press can move the transcript hundreds of
-  // rows with no overlap between the before and after screens — which
-  // reads as teleporting, not scrolling, and leaves no way to tell which
-  // direction you just went. So every gap wider than a page is subdivided
-  // into page-sized waypoints: no press moves more than one screen,
-  // nothing is skipped, and the turn tops stay in the list so a turn still
-  // starts flush with the top row.
-  //
-  // Waypoints are aligned from the top of each gap downward, so paging
-  // forward through a long turn from its prompt gives even, full-page
-  // steps and the last step lands exactly on the next turn's top.
+  // Reading *within* a long turn is what plain PgUp / PgDn is for. Mixing
+  // page-sized waypoints in here was tried and dropped — it made the keys
+  // move by a distance that depended on how tall the turn happened to be,
+  // which is exactly the unpredictability the feature is meant to remove.
+  // The slide is what keeps a long jump legible instead.
   private turnStops(): number[] {
     const max = this.maxScrollOffset();
-    const page = this.scrollPageSize();
     // The buffer ends are stops too: the live tail is where scrollToNextTurn
     // has to be able to land, and there can be content above the oldest
     // prompt (replay banners, a resurrection notice) that would otherwise be
@@ -5422,24 +5434,7 @@ export class Screen {
     const bounds = [0, ...this.turnScrollOffsets(), max]
       .filter((o) => o >= 0 && o <= max)
       .sort((a, b) => a - b);
-    const stops: number[] = [];
-    for (let i = 0; i < bounds.length; i++) {
-      const lo = bounds[i]!;
-      if (stops.at(-1) !== lo) {
-        stops.push(lo);
-      }
-      const hi = bounds[i + 1];
-      if (hi === undefined || page <= 0) {
-        continue;
-      }
-      const between: number[] = [];
-      for (let s = hi - page; s > lo; s -= page) {
-        between.push(s);
-      }
-      between.reverse();
-      stops.push(...between);
-    }
-    return stops;
+    return bounds.filter((o, i) => i === 0 || o !== bounds[i - 1]);
   }
 
   // Transient "where am I" cue on the banner. A turn jump can replace the
