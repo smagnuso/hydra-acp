@@ -484,20 +484,31 @@ function statusGlyph(status: string): string {
   }
 }
 
-// Escape the inline characters that would break a markdown line: backticks,
-// stray HTML, and runaway whitespace. Body text from agents is already
-// markdown so we DON'T touch ** / _ / # — those are intentional. This is
-// only used on fields that aren't supposed to be markdown (titles, mode
-// names, user prompts in blockquotes) where we want a literal rendering.
+// A tag-shaped run like `<int>` or `<nrdp>` is valid CommonMark raw HTML,
+// so a renderer passes it through and the browser drops it as an unknown
+// element — pasted C++ and stack traces lose text. `<== CRASH` is safe: a
+// tag name has to start with a letter, so it survives as-is.
+const HTML_TAGISH_SOURCE = String.raw`<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?\/?>`;
+const HTML_TAGISH = new RegExp(HTML_TAGISH_SOURCE);
+
 // Wrap each paragraph of `text` in `marker` (e.g. "**" bold, "*"
 // italic). CommonMark emphasis doesn't span blank lines, so we split
 // on paragraph breaks and wrap independently. Internal soft line
 // breaks inside a paragraph stay put — the emphasis still spans them.
+//
+// Text carrying tag-shaped runs is fenced instead of emphasized. A fence
+// is the only construct where `<int>` reads literally both to a markdown
+// viewer and to someone reading the raw file in a terminal; entity-escaping
+// would fix the viewer at the cost of `&lt;` noise in every plain-text read.
 function emitStyledParagraphs(
   out: string[],
   text: string,
   marker: string,
 ): void {
+  if (HTML_TAGISH.test(text)) {
+    emitFenced(out, text);
+    return;
+  }
   const paragraphs = text.split(/\n\s*\n/);
   for (let p = 0; p < paragraphs.length; p++) {
     const para = paragraphs[p]!;
@@ -507,15 +518,14 @@ function emitStyledParagraphs(
     const lines = para.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i]!;
-      const escaped = escapeInline(raw);
       out.push(
         i === 0 && i === lines.length - 1
-          ? `${marker}${escaped}${marker}`
+          ? `${marker}${raw}${marker}`
           : i === 0
-            ? `${marker}${escaped}`
+            ? `${marker}${raw}`
             : i === lines.length - 1
-              ? `${escaped}${marker}`
-              : escaped,
+              ? `${raw}${marker}`
+              : raw,
       );
     }
     if (p < paragraphs.length - 1) {
@@ -524,8 +534,32 @@ function emitStyledParagraphs(
   }
 }
 
+function emitFenced(out: string[], text: string): void {
+  const body = text.replace(/\s+$/, "");
+  if (body.length === 0) {
+    return;
+  }
+  // An embedded ``` run would close our fence early, so outrun the longest one.
+  let longest = 0;
+  for (const run of body.match(/`+/g) ?? []) {
+    longest = Math.max(longest, run.length);
+  }
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  out.push(fence);
+  for (const line of body.split("\n")) {
+    out.push(line);
+  }
+  out.push(fence);
+}
+
+// Inline contexts (headings, list items, `_italic_` metadata) have no fence
+// available, so tag-shaped runs are entity-escaped there and everything else
+// — `<==`, bare `<`, `&` — is left alone.
 function escapeInline(text: string): string {
-  return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text.replace(
+    new RegExp(HTML_TAGISH_SOURCE, "g"),
+    (tag) => tag.replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+  );
 }
 
 function formatNumber(n: number): string {

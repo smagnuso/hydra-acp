@@ -398,4 +398,45 @@ describe("bundleToMarkdown", () => {
       expect(md).toContain("_No conversation history recorded._");
     });
   });
+
+  describe("angle brackets", () => {
+    function withPrompt(text: string): string {
+      return bundleToMarkdown(
+        makeBundle([
+          update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text }] }),
+        ]),
+      );
+    }
+
+    it("fences a prompt with tag-shaped runs and leaves the brackets literal", () => {
+      const md = withPrompt("netflix::Atomic<int>::modify(int)\n  <nrdp>/include/Atomic.h:86");
+      expect(md).not.toContain("&lt;");
+      expect(md).not.toContain("&gt;");
+      expect(md).toContain("netflix::Atomic<int>::modify(int)");
+      expect(md).toContain("<nrdp>/include/Atomic.h:86");
+      expect(md).toContain("```\nnetflix::Atomic<int>");
+    });
+
+    it("keeps bold for a prompt with no tag-shaped runs", () => {
+      const md = withPrompt("why is this slow?");
+      expect(md).toContain("**why is this slow?**");
+    });
+
+    it("does not fence on `<=`, which no renderer reads as a tag", () => {
+      const md = withPrompt("assert x <= y and y >= z");
+      expect(md).toContain("**assert x <= y and y >= z**");
+    });
+
+    it("outruns an embedded fence so the block cannot close early", () => {
+      const md = withPrompt("look:\n```\nvector<int> v;\n```\nwhy?");
+      expect(md).toContain("````\nlook:");
+      expect(md).toContain("vector<int> v;");
+      expect(md).toContain("\n````");
+    });
+
+    it("escapes only the tag-shaped run in an inline context like a title", () => {
+      const md = bundleToMarkdown(makeBundle([], { title: "crash in Atomic<int> <== here" }));
+      expect(md).toContain("# crash in Atomic&lt;int&gt; <== here");
+    });
+  });
 });
