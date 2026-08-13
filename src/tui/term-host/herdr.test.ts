@@ -44,7 +44,8 @@ import {
   reportSessionbar,
   setReportSuspended,
 } from "./report.js";
-import type { OpenTabSpec } from "./types.js";
+import { nearestPane } from "./herdr.js";
+import type { OpenTabSpec, TerminalHost } from "./types.js";
 
 // Captured frames, in wire order across all connections.
 interface Frame {
@@ -1025,5 +1026,192 @@ describe("capabilities", () => {
 
   it("never advertises split, since herdr cannot split a live tab", () => {
     expect(terminalHost()!.caps.split).toBe(false);
+  });
+});
+
+describe("nearestPane", () => {
+  const pane = (
+    pane_id: string,
+    workspace_id?: string,
+  ): { pane_id: string; workspace_id?: string } =>
+    workspace_id ? { pane_id, workspace_id } : { pane_id };
+
+  it("returns null for no candidates", () => {
+    expect(nearestPane([], "w1:pA", "w1")).toBeNull();
+  });
+
+  // "Already looking at it" is a successful reveal. Excluding self would
+  // make the caller open a duplicate on the session it is already showing.
+  it("prefers this pane over any other", () => {
+    const out = nearestPane(
+      [pane("w1:pA", "w1"), pane("w9:pZ", "w9")],
+      "w9:pZ",
+      "w1",
+    );
+    expect(out?.pane_id).toBe("w9:pZ");
+  });
+
+  it("prefers a pane in our own workspace", () => {
+    const out = nearestPane(
+      [pane("w9:pA", "w9"), pane("w1:pB", "w1")],
+      "w1:pSelf",
+      "w1",
+    );
+    expect(out?.pane_id).toBe("w1:pB");
+  });
+
+  // Determinism is the point: the same key pressed twice must land in the
+  // same pane, and pane.list ordering is not something to rely on.
+  it("breaks ties on pane id, independent of input order", () => {
+    const panes = [pane("w1:pC", "w1"), pane("w1:pA", "w1"), pane("w1:pB", "w1")];
+    expect(nearestPane(panes, "w1:pSelf", "w1")?.pane_id).toBe("w1:pA");
+    expect(nearestPane([...panes].reverse(), "w1:pSelf", "w1")?.pane_id).toBe(
+      "w1:pA",
+    );
+  });
+
+  it("still picks something when no pane is in our workspace", () => {
+    const out = nearestPane([pane("w7:pB", "w7"), pane("w7:pA", "w7")], "w1:pSelf", "w1");
+    expect(out?.pane_id).toBe("w7:pA");
+  });
+
+  // A scrubbed env has no HERDR_WORKSPACE_ID; the rule degrades to the
+  // stable tiebreak rather than failing.
+  it("tolerates an unknown workspace", () => {
+    const out = nearestPane([pane("w7:pB"), pane("w2:pA")], "w1:pSelf", undefined);
+    expect(out?.pane_id).toBe("w2:pA");
+  });
+});
+
+describe("herdr revealSession", () => {
+  // A socket that answers per method, so one spec can serve the pane.list
+  // scan and then the focus calls it provokes.
+  function routedSocket(reply: (frame: Frame) => unknown): unknown {
+    let onData: ((d: string) => void) | undefined;
+    const sock = {
+      on(event: string, cb: (...a: unknown[]) => void) {
+        if (event === "connect") {
+          queueMicrotask(() => cb());
+        } else if (event === "data") {
+          onData = cb as (d: string) => void;
+        }
+        return sock;
+      },
+      write(payload: string) {
+        const frame = JSON.parse(payload.trim()) as Frame;
+        frames.push(frame);
+        queueMicrotask(() => onData?.(JSON.stringify(reply(frame))));
+      },
+      setTimeout() {
+        return sock;
+      },
+      destroy() {},
+      unref() {
+        return sock;
+      },
+    };
+    return sock;
+  }
+
+  function serve(panes: unknown[]): void {
+    connectImpl = () =>
+      routedSocket((frame) =>
+        frame.method === "pane.list"
+          ? { result: { panes } }
+          : { result: { type: "ok" } },
+      );
+  }
+
+  const sent = (method: string): Frame[] =>
+    frames.filter((f) => f.method === method);
+
+  function host(): TerminalHost {
+    const h = terminalHost();
+    if (!h) {
+      throw new Error("no host resolved");
+    }
+    return h;
+  }
+
+  it("advertises the capability", () => {
+    expect(host().caps.reveal).toBe(true);
+  });
+
+  it("focuses the tab and then the pane holding the session", async () => {
+    serve([
+      { pane_id: "w1:pB", tab_id: "w1:tB", workspace_id: "w1", tokens: { session: "s1" } },
+    ]);
+    await expect(host().revealSession?.("s1")).resolves.toBe(true);
+    expect(sent("tab.focus")[0]?.params).toMatchObject({ tab_id: "w1:tB" });
+    expect(sent("pane.focus")[0]?.params).toMatchObject({ pane_id: "w1:pB" });
+    // Order matters: tab.focus alone leaves focus wherever it was inside a
+    // split, so the pane.focus has to come after it rather than be undone.
+    const methods = frames.map((f) => f.method);
+    expect(methods.indexOf("tab.focus")).toBeLessThan(
+      methods.indexOf("pane.focus"),
+    );
+  });
+
+  it("is false, and focuses nothing, when no pane holds the session", async () => {
+    serve([
+      { pane_id: "w1:pB", tab_id: "w1:tB", workspace_id: "w1", tokens: { session: "other" } },
+      { pane_id: "w1:pC", tab_id: "w1:tC", workspace_id: "w1" },
+    ]);
+    await expect(host().revealSession?.("s1")).resolves.toBe(false);
+    expect(sent("tab.focus")).toHaveLength(0);
+    expect(sent("pane.focus")).toHaveLength(0);
+  });
+
+  // A pane with the picker up has released its tokens, so it must not match
+  // the session it was showing a moment ago.
+  it("ignores panes with no session token", async () => {
+    serve([
+      { pane_id: "w1:pB", tab_id: "w1:tB", tokens: { session: null } },
+      { pane_id: "w1:pC", tab_id: "w1:tC", tokens: {} },
+    ]);
+    await expect(host().revealSession?.("s1")).resolves.toBe(false);
+  });
+
+  it("never treats an empty session id as a match", async () => {
+    serve([{ pane_id: "w1:pB", tab_id: "w1:tB", tokens: { session: null } }]);
+    await expect(host().revealSession?.("")).resolves.toBe(false);
+    expect(sent("pane.list")).toHaveLength(0);
+  });
+
+  it("still focuses a pane herdr reported without a tab", async () => {
+    serve([{ pane_id: "w1:pB", workspace_id: "w1", tokens: { session: "s1" } }]);
+    await expect(host().revealSession?.("s1")).resolves.toBe(true);
+    expect(sent("tab.focus")).toHaveLength(0);
+    expect(sent("pane.focus")[0]?.params).toMatchObject({ pane_id: "w1:pB" });
+  });
+
+  it("is false rather than throwing when pane.list errors", async () => {
+    connectImpl = () =>
+      routedSocket(() => ({ error: { code: "nope", message: "no" } }));
+    await expect(host().revealSession?.("s1")).resolves.toBe(false);
+  });
+
+  it("is false rather than throwing on a malformed reply", async () => {
+    connectImpl = () => routedSocket(() => ({ result: { panes: "not a list" } }));
+    await expect(host().revealSession?.("s1")).resolves.toBe(false);
+  });
+
+  // The focus calls are best-effort: having found the pane, a failure to
+  // land on it is still a reveal from the caller's point of view, and
+  // reporting false would make it open a duplicate tab.
+  it("reports true even when the focus calls fail", async () => {
+    connectImpl = () =>
+      routedSocket((frame) =>
+        frame.method === "pane.list"
+          ? {
+              result: {
+                panes: [
+                  { pane_id: "w1:pB", tab_id: "w1:tB", tokens: { session: "s1" } },
+                ],
+              },
+            }
+          : { error: { code: "gone" } },
+      );
+    await expect(host().revealSession?.("s1")).resolves.toBe(true);
   });
 });

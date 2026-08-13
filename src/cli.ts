@@ -828,6 +828,7 @@ async function dispatchTui(
   const resume = flags.reattach === true;
   const forceNew = flags.new === true;
   const readonly = flags.readonly === true;
+  const terminalHostLauncher = flags["terminal-host-launcher"] === true;
   if (readonly && base.sessionId === undefined) {
     process.stderr.write(
       "hydra-acp: --readonly requires a session id. Pass --session <id-or-url> --readonly, or open the picker and press `v` on a session.\n",
@@ -861,8 +862,27 @@ async function dispatchTui(
     );
     process.exit(2);
   }
+  // Launcher mode is meaningless with nowhere to launch, and failing here
+  // is deliberate rather than degrading to a normal TUI. The flag is a
+  // statement of intent — a pane that silently ignored it would behave
+  // exactly like the confusion the mode exists to remove, and would do so
+  // invisibly. Checked before the TUI takes the terminal so the message is
+  // readable.
+  if (terminalHostLauncher) {
+    const { launcherModeUnavailable } = await import(
+      "./tui/term-host/open.js"
+    );
+    const why = launcherModeUnavailable(process.env);
+    if (why) {
+      process.stderr.write(`hydra-acp: --terminal-host-launcher ${why}\n`);
+      process.exit(2);
+    }
+  }
   const { runTui } = await import("./tui/index.js");
   const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew, readonly };
+  if (terminalHostLauncher) {
+    tuiOpts.terminalHostLauncher = true;
+  }
   if (base.sessionId !== undefined) {
     tuiOpts.sessionId = base.sessionId;
   }
@@ -1083,6 +1103,9 @@ function printHelp(subcommand?: string): void {
         [ENTRY, "  --reattach                         Pick the most-recent session for the current cwd."],
         [ENTRY, "  --new                              Force a fresh session."],
         [ENTRY, "  --readonly                         Open a session as a transcript viewer (requires --session)."],
+        [ENTRY, "  --terminal-host-launcher           TUI: picking a session shows it in ITS OWN herdr/tmux tab (revealing an"],
+        [ENTRY, "                                     existing one, else opening a tab) instead of re-pointing this pane. For"],
+        [ENTRY, "                                     layouts where each tab IS a session. Inherited by tabs this pane opens."],
         [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
         [ENTRY, "  HYDRA_ACP_TARGET_SESSION           Env var equivalent of --session (flag wins)."],
         [ENTRY, "  HYDRA_ACP_SESSION                  Set by the daemon inside each agent to that agent's own"],

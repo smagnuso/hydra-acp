@@ -15,12 +15,30 @@ interface OpenCall {
 }
 const openCalls: OpenCall[] = [];
 let openOk = true;
+// Session ids the fake host is already showing somewhere, so a reveal
+// short-circuits the open. Empty by default: the specs below are about what
+// the picker asks for, and a host that reveals nothing keeps them reading as
+// "opened a tab".
+let revealable: string[] = [];
+const revealCalls: string[] = [];
 vi.mock("./term-host/open.js", () => ({
   canOpenTab: () => hostAvailable,
+  canReveal: () => hostAvailable,
   labelForPrompt: (t?: string) => t ?? "new session",
   openInNewTab: async (spec: OpenCall) => {
     openCalls.push(spec);
     return openOk ? { ok: true } : { ok: false, error: "no workspace" };
+  },
+  // Mirrors the real policy in open.ts: reveal when we can, else open.
+  revealOrOpen: async (spec: OpenCall) => {
+    revealCalls.push(spec.sessionId as string);
+    if (revealable.includes(spec.sessionId as string)) {
+      return { outcome: "revealed" as const };
+    }
+    openCalls.push(spec);
+    return openOk
+      ? { outcome: "opened" as const }
+      : { outcome: "failed" as const, error: "no workspace" };
   },
 }));
 vi.mock("./term-host/index.js", () => ({
@@ -1397,6 +1415,8 @@ describe("^t opens the selected session in a new terminal-host tab", () => {
 
   afterEach(() => {
     openCalls.length = 0;
+    revealCalls.length = 0;
+    revealable = [];
     hostAvailable = true;
     openOk = true;
   });
@@ -1419,6 +1439,52 @@ describe("^t opens the selected session in a new terminal-host tab", () => {
         cwd: "/home/me/dev/proj",
       },
     ]);
+  });
+
+  // The reason ^t routes through revealOrOpen rather than openInNewTab: the
+  // natural way to use this key is pick, come back, pick again, and each
+  // repeat would otherwise mint another tab on the same session.
+  it("jumps to the existing tab instead of opening a second one", async () => {
+    revealable = ["hydra_session_abc"];
+    const drv = makePicker({
+      sessions: [session({ sessionId: "hydra_session_abc", title: "refactor auth" })],
+    });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(revealCalls).toEqual(["hydra_session_abc"]);
+    expect(openCalls).toEqual([]);
+  });
+
+  it("still opens a tab for a session that is not showing anywhere", async () => {
+    revealable = ["hydra_session_elsewhere"];
+    const drv = makePicker({
+      sessions: [session({ sessionId: "hydra_session_abc" })],
+    });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(openCalls.map((c) => c.sessionId)).toEqual(["hydra_session_abc"]);
+  });
+
+  // Fanning out is still the point; revealing must not close the picker any
+  // more than opening did.
+  it("leaves the picker open after a reveal", async () => {
+    revealable = ["hydra_session_abc"];
+    const drv = makePicker({
+      sessions: [
+        session({ sessionId: "hydra_session_abc" }),
+        session({ sessionId: "hydra_session_def" }),
+      ],
+    });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(revealCalls).toEqual(["hydra_session_abc", "hydra_session_def"]);
+    expect(openCalls.map((c) => c.sessionId)).toEqual(["hydra_session_def"]);
   });
 
   it("starts a NEW session in a host tab while focus is in the composer", async () => {

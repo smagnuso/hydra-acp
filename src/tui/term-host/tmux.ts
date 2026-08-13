@@ -133,6 +133,9 @@ class TmuxHost implements TerminalHost {
     split: true,
     label: true,
     report: true,
+    // `list-panes -a` can format an arbitrary pane option, so the
+    // @hydra_session we already publish is readable back in one spawn.
+    reveal: true,
   };
 
   private readonly socket: string;
@@ -235,6 +238,82 @@ class TmuxHost implements TerminalHost {
       args.push("set-option", "-p", "-t", this.pane, "-u", name);
     }
     await this.tmux(...args);
+  }
+
+  /**
+   * Find the pane whose @hydra_session is `sessionId` and go there.
+   *
+   * `-a` is what makes this whole-server rather than current-window, so a
+   * session parked in another tmux session is still found — which is the
+   * case that matters, since not finding it means opening a duplicate.
+   *
+   * Tab-separated because every field here is either a tmux id or a hydra
+   * session id, none of which can contain a tab, while a space-separated
+   * format would be ambiguous the day one of them can.
+   *
+   * A tmux too old to interpolate a user option in a format string yields
+   * empty values rather than an error, so this degrades to "no match" and
+   * the caller opens a tab — today's behaviour, which is the right thing to
+   * fall back to.
+   */
+  async revealSession(sessionId: string): Promise<boolean> {
+    if (!sessionId) {
+      return false;
+    }
+    let out: string;
+    try {
+      out = await this.tmux(
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{session_id}\t#{window_id}\t#{@hydra_session}",
+      );
+    } catch {
+      return false;
+    }
+    const matches = out
+      .split("\n")
+      .map((line) => line.split("\t"))
+      .filter((f) => f.length >= 4 && f[3] === sessionId);
+    if (matches.length === 0) {
+      return false;
+    }
+    // Prefer this pane, then anything in our own tmux session, then a
+    // stable pick — same nearest-first rule as the herdr adapter.
+    let ourSession: string | null = null;
+    try {
+      ourSession = await this.sessionId();
+    } catch {
+      ourSession = null;
+    }
+    const rank = (f: string[]): number => {
+      if (f[0] === this.pane) {
+        return 0;
+      }
+      if (ourSession && f[1] === ourSession) {
+        return 1;
+      }
+      return 2;
+    };
+    const target = [...matches].sort(
+      (a, b) => rank(a) - rank(b) || (a[0] as string).localeCompare(b[0] as string),
+    )[0] as string[];
+    const [paneId, sessId, windowId] = target as [string, string, string];
+    // switch-client only when we'd otherwise be selecting a window the
+    // client isn't looking at. Chained in one invocation; select-window
+    // targets the window id directly so it doesn't depend on the client
+    // having switched yet.
+    const args: string[] = [];
+    if (ourSession && sessId !== ourSession) {
+      args.push("switch-client", "-t", sessId, ";");
+    }
+    args.push("select-window", "-t", windowId, ";", "select-pane", "-t", paneId);
+    try {
+      await this.tmux(...args);
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   async openTab(spec: OpenTabSpec): Promise<OpenTabResult> {

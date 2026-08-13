@@ -11,7 +11,7 @@
 // in another pane" is what hydra is for. The host just supplies the window
 // management.
 
-import { terminalHost } from "./index.js";
+import { CANDIDATES, terminalHost } from "./index.js";
 import { tabLabelFor, tabLabelOwnershipEnv } from "./label-sync.js";
 import type { OpenTabResult } from "./types.js";
 
@@ -19,6 +19,90 @@ import type { OpenTabResult } from "./types.js";
 export function canOpenTab(): boolean {
   const host = terminalHost();
   return !!host && host.caps.openTab && !!host.openTab;
+}
+
+/**
+ * Why `--terminal-host-launcher` can't work here, or null if it can.
+ *
+ * Runs at CLI time, BEFORE initTerminalHost(), so it probes the candidates'
+ * detect() against the given env rather than reading the active host.
+ *
+ * DETECTION ONLY, not capabilities. Asking a candidate for its caps means
+ * calling create(), and an adapter reads process.env in its constructor
+ * rather than the env passed to detect() — so a caps probe would answer for
+ * the ambient environment instead of the one being validated, which is both
+ * wrong and untestable. The split is the right layering anyway: this catches
+ * the mistake people actually make (passing the flag in a bare terminal),
+ * and a detected host that turns out not to be able to open a tab surfaces
+ * at the first pick through revealOrOpen's error, which the user sees.
+ *
+ * Returns a sentence fragment, so the caller supplies the prefix and the
+ * whole message reads as one line.
+ */
+export function launcherModeUnavailable(
+  env: NodeJS.ProcessEnv,
+): string | null {
+  for (const candidate of CANDIDATES) {
+    try {
+      if (candidate.detect(env)) {
+        return null;
+      }
+    } catch {
+      // A candidate that throws while probing is simply not a match, and
+      // must not stop the others being tried. Same rule as initTerminalHost.
+    }
+  }
+  return "needs a supported terminal host (herdr or tmux); this pane is in neither";
+}
+
+/** Whether the active host can jump to a pane already showing a session. */
+export function canReveal(): boolean {
+  const host = terminalHost();
+  return !!host && host.caps.reveal && !!host.revealSession;
+}
+
+/** How a request to show a session somewhere was satisfied. */
+export type RevealOrOpenOutcome = "revealed" | "opened" | "failed";
+
+export interface RevealOrOpenResult {
+  outcome: RevealOrOpenOutcome;
+  /** Present when outcome is "failed"; shown to the user. */
+  error?: string;
+}
+
+/**
+ * Show a session in the host, reusing the pane that already has it.
+ *
+ * The policy, in one place, because both halves are wrong alone. Opening
+ * unconditionally is how a session ends up in four tabs after four visits
+ * to the picker; revealing unconditionally does nothing the first time.
+ *
+ * Reveal-then-open rather than the reverse: the check is one round trip and
+ * the fallback is idempotent, whereas the opposite order would have to close
+ * a tab it had just opened.
+ *
+ * A host that can't reveal goes straight to opening — the old behaviour,
+ * unchanged, rather than a refusal.
+ */
+export async function revealOrOpen(
+  spec: OpenExistingSpec,
+): Promise<RevealOrOpenResult> {
+  const host = terminalHost();
+  if (host && host.caps.reveal && host.revealSession) {
+    try {
+      if (await host.revealSession(spec.sessionId)) {
+        return { outcome: "revealed" };
+      }
+    } catch {
+      // A reveal that throws is not a reason to refuse to open. Falling
+      // through gets the user their session; reporting the failure would
+      // surface a distinction they never asked about.
+    }
+  }
+  const result = await openInNewTab(spec);
+  return result.ok
+    ? { outcome: "opened" }
+    : { outcome: "failed", ...(result.error ? { error: result.error } : {}) };
 }
 
 // Entry-point basenames we're willing to relaunch. hydra ships `hydra` and
@@ -65,6 +149,30 @@ function hydraArgv(args: string[]): string[] {
   const entry = hydraEntryPoint();
   const base = entry ? [process.execPath, entry] : ["hydra"];
   return [...base, "tui", ...args];
+}
+
+/**
+ * Whether tabs we open should inherit launcher mode.
+ *
+ * Set once by runTuiApp from TuiOptions. Module state rather than a
+ * parameter on every OpenSpec because it is a property of the PROCESS, not
+ * of any one request: every caller would otherwise have to thread it
+ * through, and the one that forgot would silently mint a tab that breaks
+ * the layout's invariant — the failure this mode exists to prevent, and
+ * invisible until someone pressed ^p in the wrong tab.
+ */
+let launcherMode = false;
+
+export function setLauncherMode(on: boolean): void {
+  launcherMode = on;
+}
+
+export function launcherModeActive(): boolean {
+  return launcherMode;
+}
+
+export function __resetLauncherModeForTests(): void {
+  launcherMode = false;
 }
 
 /**
@@ -143,6 +251,12 @@ export async function openInNewTab(spec: OpenSpec): Promise<OpenTabResult> {
     return { ok: false, error: "no terminal host available" };
   }
   const { label, args } = buildArgs(spec);
+  // Propagate the mode, so an index-shaped workspace stays index-shaped no
+  // matter which tab spawned which. Opting in at the root is the only place
+  // a human should have to think about it.
+  if (launcherMode) {
+    args.push("--terminal-host-launcher");
+  }
   try {
     return await host.openTab({
       label,

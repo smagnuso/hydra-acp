@@ -27,7 +27,7 @@ import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import { terminalHost } from "./term-host/index.js";
-import { canOpenTab, openInNewTab } from "./term-host/open.js";
+import { canOpenTab, canReveal, openInNewTab, revealOrOpen } from "./term-host/open.js";
 import {
   deleteSession,
   fetchWithTimeout,
@@ -344,7 +344,12 @@ function helpEntries(): ReadonlyArray<HelpEntry> {
   for (const entry of HELP_ENTRIES) {
     out.push(entry);
     if (entry?.[0] === "*") {
-      out.push(["^t", "new tab: selected session, or send the composer to a new one"]);
+      out.push([
+        "^t",
+        canReveal()
+          ? "go to selected session's tab (opening one if needed), or send the composer to a new one"
+          : "new tab: selected session, or send the composer to a new one",
+      ]);
     }
   }
   return out;
@@ -2725,10 +2730,15 @@ export async function pickSession(
         syncInFlight = false;
       }
     };
-    // Hand the selected session to the terminal host as a new tab, rather than
-    // switching this pane to it. The daemon owns the session and
-    // multi-client attach is the normal path, so both panes are first-class
-    // views of the same session — nothing is "moved".
+    // Hand the selected session to the terminal host, rather than switching
+    // this pane to it. The daemon owns the session and multi-client attach
+    // is the normal path, so both panes are first-class views of the same
+    // session — nothing is "moved".
+    //
+    // Jumps to the pane already showing it when there is one. Without that,
+    // the natural way to use this key — pick a session, come back, pick it
+    // again — silently accumulates duplicate tabs on one session, and the
+    // duplicates are indistinguishable from each other in the tab bar.
     //
     // Deliberately leaves the picker open so several sessions can be fanned
     // out in a row.
@@ -2741,18 +2751,23 @@ export async function pickSession(
       }
       openTabInFlight = true;
       const label = session.title?.trim() || stripHydraSessionPrefix(session.sessionId);
-      transientStatus = `opening ${label} in a new ${hostName()} tab…`;
+      transientStatus = canReveal()
+        ? `showing ${label} in ${hostName()}…`
+        : `opening ${label} in a new ${hostName()} tab…`;
       paintIndicator();
       try {
-        const result = await openInNewTab({
+        const result = await revealOrOpen({
           kind: "attach",
           sessionId: session.sessionId,
           title: session.title,
           cwd: session.cwd,
         });
-        transientStatus = result.ok
-          ? `opened ${label} in a new ${hostName()} tab`
-          : `new tab failed: ${result.error ?? "unknown error"}`;
+        transientStatus =
+          result.outcome === "revealed"
+            ? `jumped to ${label} — already open in ${hostName()}`
+            : result.outcome === "opened"
+              ? `opened ${label} in a new ${hostName()} tab`
+              : `new tab failed: ${result.error ?? "unknown error"}`;
       } catch (err) {
         transientStatus = `new tab failed: ${(err as Error).message}`;
       } finally {

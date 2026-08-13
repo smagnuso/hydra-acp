@@ -285,6 +285,48 @@ function cwdToken(cwd: string | null): string | null {
 // set by an older build is removed rather than inherited — the same "always
 // send the whole set" discipline the token map uses.
 
+/** The subset of a `pane.list` entry the reverse lookup needs. */
+export interface HerdrPane {
+  pane_id: string;
+  tab_id?: string | undefined;
+  workspace_id?: string | undefined;
+  tokens?: { session?: string | null } | undefined;
+}
+
+/**
+ * Which of several panes showing the same session to jump to.
+ *
+ * Nearest first — self, then this workspace, then anywhere — with pane id as
+ * the final tiebreak so the answer is stable across calls. Stability is the
+ * point rather than a nicety: pressing the same key twice landing in two
+ * different panes would read as the feature being broken, and multi-client
+ * attach makes duplicates ordinary rather than exceptional.
+ *
+ * Exported for tests; `pane.list` ordering is herdr's business and not
+ * something to assert against a live daemon.
+ */
+export function nearestPane(
+  panes: readonly HerdrPane[],
+  selfPaneId: string,
+  workspaceId: string | undefined,
+): HerdrPane | null {
+  if (panes.length === 0) {
+    return null;
+  }
+  const rank = (p: HerdrPane): number => {
+    if (p.pane_id === selfPaneId) {
+      return 0;
+    }
+    if (workspaceId && p.workspace_id === workspaceId) {
+      return 1;
+    }
+    return 2;
+  };
+  return [...panes].sort(
+    (a, b) => rank(a) - rank(b) || a.pane_id.localeCompare(b.pane_id),
+  )[0] as HerdrPane;
+}
+
 class HerdrHost implements TerminalHost {
   readonly id = "herdr";
 
@@ -300,6 +342,10 @@ class HerdrHost implements TerminalHost {
     // the sort of thing that goes missing in a scrubbed environment.
     label: !!process.env.HERDR_TAB_ID,
     report: true,
+    // `pane.list` returns every pane's token map alongside its tab and
+    // workspace, so the reverse lookup is one request rather than a fan-out,
+    // and `tab.focus` crosses workspaces on its own (`switch_workspace_tab`).
+    reveal: true,
   };
 
   private readonly socketPath: string;
@@ -533,6 +579,59 @@ class HerdrHost implements TerminalHost {
       };
     }
     return { ok: true };
+  }
+
+  /**
+   * Find the pane whose `session` token is `sessionId` and go there.
+   *
+   * The token is the whole index. herdr keeps no notion of a hydra session
+   * itself — every pane in the list is showing one only because the hydra
+   * inside it said so via report(), and stopped saying so on release(). That
+   * makes this lookup self-maintaining in a way a registry could not be: a
+   * pane that crashed hard leaves a stale token, but a pane that merely
+   * switched sessions or opened the picker is accurate immediately.
+   *
+   * tab.focus then pane.focus, in that order and both best-effort. tab.focus
+   * alone lands on the right tab but leaves focus wherever it was inside a
+   * split; pane.focus alone is not documented to pull the tab or workspace
+   * along with it. Doing both is one extra round trip on a keystroke-rate
+   * path, which is cheap, and makes the split case land on the hydra rather
+   * than next to it.
+   */
+  async revealSession(sessionId: string): Promise<boolean> {
+    if (!sessionId) {
+      return false;
+    }
+    let reply: unknown;
+    try {
+      reply = await request(this.socketPath, "pane.list", {});
+    } catch {
+      return false;
+    }
+    const panes = (reply as { result?: { panes?: unknown } })?.result?.panes;
+    if (!Array.isArray(panes)) {
+      return false;
+    }
+    const matches = panes.filter(
+      (p): p is HerdrPane =>
+        !!p &&
+        typeof p === "object" &&
+        typeof (p as HerdrPane).pane_id === "string" &&
+        ((p as HerdrPane).tokens?.session ?? null) === sessionId,
+    );
+    const target = nearestPane(matches, this.paneId, process.env.HERDR_WORKSPACE_ID);
+    if (!target) {
+      return false;
+    }
+    if (target.tab_id) {
+      await request(this.socketPath, "tab.focus", {
+        tab_id: target.tab_id,
+      }).catch(() => undefined);
+    }
+    await request(this.socketPath, "pane.focus", {
+      pane_id: target.pane_id,
+    }).catch(() => undefined);
+    return true;
   }
 
   async readLabel(): Promise<TabLabelView | null> {

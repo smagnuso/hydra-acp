@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setTerminalHost, __resetTerminalHostForTests } from "./index.js";
-import { canOpenTab, labelForPrompt, openInNewTab } from "./open.js";
+import {
+  __resetLauncherModeForTests,
+  canOpenTab,
+  canReveal,
+  labelForPrompt,
+  launcherModeUnavailable,
+  openInNewTab,
+  revealOrOpen,
+  setLauncherMode,
+} from "./open.js";
 import type { OpenTabResult, OpenTabSpec, TerminalHost } from "./types.js";
 
 // A fake host, not a fake socket. Everything in open.ts is
@@ -13,6 +22,11 @@ let result: OpenTabResult;
 let openThrows: Error | null;
 let caps: TerminalHost["caps"];
 let hasOpenTab: boolean;
+let hasReveal: boolean;
+// Session ids the fake host claims to already be showing somewhere.
+let revealable: Set<string>;
+let revealed: string[];
+let revealThrows: Error | null;
 
 function fakeHost(): TerminalHost {
   const host: TerminalHost = {
@@ -27,6 +41,15 @@ function fakeHost(): TerminalHost {
     host.openTab = (spec) => {
       specs.push(spec);
       return openThrows ? Promise.reject(openThrows) : Promise.resolve(result);
+    };
+  }
+  if (hasReveal) {
+    host.revealSession = (sessionId) => {
+      revealed.push(sessionId);
+      if (revealThrows) {
+        return Promise.reject(revealThrows);
+      }
+      return Promise.resolve(revealable.has(sessionId));
     };
   }
   return host;
@@ -51,14 +74,19 @@ beforeEach(() => {
   specs = [];
   result = { ok: true };
   openThrows = null;
-  caps = { openTab: true, split: false, label: true, report: true };
+  caps = { openTab: true, split: false, label: true, report: true, reveal: false };
   hasOpenTab = true;
+  hasReveal = false;
+  revealable = new Set();
+  revealed = [];
+  revealThrows = null;
   __resetTerminalHostForTests();
   install();
 });
 
 afterEach(() => {
   __resetTerminalHostForTests();
+  __resetLauncherModeForTests();
 });
 
 describe("canOpenTab", () => {
@@ -307,5 +335,178 @@ describe("labelForPrompt", () => {
   it("falls back for empty input", () => {
     expect(labelForPrompt(undefined)).toBe("new session");
     expect(labelForPrompt("  ")).toBe("new session");
+  });
+});
+
+describe("canReveal", () => {
+  it("is false when the host neither advertises nor implements it", () => {
+    expect(canReveal()).toBe(false);
+  });
+
+  it("is true when the host advertises and implements revealSession", () => {
+    caps = { ...caps, reveal: true };
+    hasReveal = true;
+    install();
+    expect(canReveal()).toBe(true);
+  });
+
+  // The capability flag is the authority, not the method's presence: a host
+  // can have the code and still be unable to use it here (see the doc on
+  // TerminalHostCapabilities).
+  it("is false when the method exists but the capability is off", () => {
+    hasReveal = true;
+    install();
+    expect(canReveal()).toBe(false);
+  });
+
+  it("is false when the capability is on but the method is missing", () => {
+    caps = { ...caps, reveal: true };
+    install();
+    expect(canReveal()).toBe(false);
+  });
+});
+
+describe("revealOrOpen", () => {
+  function withReveal(showing: string[]): void {
+    caps = { ...caps, reveal: true };
+    hasReveal = true;
+    revealable = new Set(showing);
+    install();
+  }
+
+  it("jumps to an existing pane and opens nothing", async () => {
+    withReveal(["hydra_session_a"]);
+    const out = await revealOrOpen({
+      kind: "attach",
+      sessionId: "hydra_session_a",
+    });
+    expect(out.outcome).toBe("revealed");
+    expect(revealed).toEqual(["hydra_session_a"]);
+    expect(specs).toHaveLength(0);
+  });
+
+  it("opens a tab when no pane is showing the session", async () => {
+    withReveal(["hydra_session_other"]);
+    const out = await revealOrOpen({
+      kind: "attach",
+      sessionId: "hydra_session_a",
+      title: "a title",
+    });
+    expect(out.outcome).toBe("opened");
+    expect(revealed).toEqual(["hydra_session_a"]);
+    expect(only().argv).toContain("hydra_session_a");
+  });
+
+  // Repeating the request is the shape this feature exists for: pick a
+  // session, come back to the picker, pick it again. The second press must
+  // land on the first tab rather than minting a second one.
+  it("opens once and reveals thereafter", async () => {
+    withReveal([]);
+    expect((await revealOrOpen({ kind: "attach", sessionId: "s" })).outcome).toBe(
+      "opened",
+    );
+    revealable.add("s");
+    expect((await revealOrOpen({ kind: "attach", sessionId: "s" })).outcome).toBe(
+      "revealed",
+    );
+    expect(specs).toHaveLength(1);
+  });
+
+  it("falls back to opening when the host cannot reveal at all", async () => {
+    const out = await revealOrOpen({ kind: "attach", sessionId: "s" });
+    expect(out.outcome).toBe("opened");
+    expect(revealed).toEqual([]);
+    expect(specs).toHaveLength(1);
+  });
+
+  // A broken reveal must not cost the user their session. The fallback is
+  // what they asked for; the reveal was only an optimisation.
+  it("opens a tab when revealSession throws", async () => {
+    withReveal([]);
+    revealThrows = new Error("socket gone");
+    const out = await revealOrOpen({ kind: "attach", sessionId: "s" });
+    expect(out.outcome).toBe("opened");
+    expect(specs).toHaveLength(1);
+  });
+
+  it("reports the open failure when the fallback also fails", async () => {
+    withReveal([]);
+    result = { ok: false, error: "herdr said no" };
+    const out = await revealOrOpen({ kind: "attach", sessionId: "s" });
+    expect(out.outcome).toBe("failed");
+    expect(out.error).toBe("herdr said no");
+  });
+});
+
+describe("launcher mode propagation", () => {
+  // The mode has to reach every tab this pane opens, or the workspace stops
+  // being index-shaped the moment a tab is opened from a tab.
+  it("passes the flag to tabs it opens", async () => {
+    setLauncherMode(true);
+    await openInNewTab({ kind: "attach", sessionId: "s" });
+    expect(tuiArgs()).toContain("--terminal-host-launcher");
+  });
+
+  it("passes it to new-session tabs too", async () => {
+    setLauncherMode(true);
+    await openInNewTab({ kind: "new", cwd: "/tmp", prompt: "hi" });
+    expect(tuiArgs()).toContain("--terminal-host-launcher");
+  });
+
+  it("adds nothing when the mode is off", async () => {
+    await openInNewTab({ kind: "attach", sessionId: "s" });
+    expect(tuiArgs()).not.toContain("--terminal-host-launcher");
+  });
+
+  // The flag goes last-ish, but never between a value flag and its value —
+  // an argv that splits `--cwd /tmp` would silently launch in the wrong
+  // directory rather than fail.
+  it("never separates a value flag from its value", async () => {
+    setLauncherMode(true);
+    await openInNewTab({
+      kind: "new",
+      cwd: "/tmp",
+      agentId: "claude-code",
+      model: "opus",
+      prompt: "do a thing",
+    });
+    const args = tuiArgs();
+    for (const flag of ["--cwd", "--agent", "--model", "--prompt"]) {
+      const at = args.indexOf(flag);
+      expect(at).toBeGreaterThan(-1);
+      expect(args[at + 1]).not.toBe("--terminal-host-launcher");
+    }
+  });
+});
+
+describe("launcherModeUnavailable", () => {
+  // Probes the environment directly, because it runs at CLI time before
+  // any host has been resolved. The installed fake host is irrelevant here.
+  it("refuses a bare terminal", () => {
+    expect(launcherModeUnavailable({})).toMatch(/supported terminal host/);
+  });
+
+  it("accepts a herdr pane", () => {
+    expect(
+      launcherModeUnavailable({
+        HERDR_ENV: "1",
+        HERDR_SOCKET_PATH: "/tmp/h.sock",
+        HERDR_PANE_ID: "w1:p1",
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts a tmux pane", () => {
+    expect(
+      launcherModeUnavailable({ TMUX: "/tmp/t.sock,1,0", TMUX_PANE: "%3" }),
+    ).toBeNull();
+  });
+
+  // A half-set environment is not a host. Accepting it would defer the
+  // failure to the first pick, long after the user could connect it to the
+  // flag they passed.
+  it("refuses a partially-set host environment", () => {
+    expect(launcherModeUnavailable({ HERDR_ENV: "1" })).not.toBeNull();
+    expect(launcherModeUnavailable({ TMUX_PANE: "%3" })).not.toBeNull();
   });
 });

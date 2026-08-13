@@ -34,6 +34,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "readonly",
   "replace",
   "rotate-token",
+  "terminal-host-launcher",
   "verbose",
   "version",
 ]);

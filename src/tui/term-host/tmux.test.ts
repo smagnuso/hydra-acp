@@ -359,3 +359,99 @@ describe("label", () => {
     expect(host().isAutoLabel!("1")).toBe(false);
   });
 });
+
+describe("revealSession", () => {
+  const LIST = ["list-panes", "-a", "-F"];
+  const isList = (args: string[]): boolean =>
+    LIST.every((a) => args.includes(a));
+
+  // The adapter resolves (and caches) our own tmux session id lazily, so
+  // the navigation call is not at a fixed index. Assert on the last one.
+  const navArgv = (): string[] => (calls.at(-1)?.args ?? []).slice(2);
+
+  function panes(rows: string[][]): void {
+    stdoutFor = (args) => {
+      if (args.includes("#{session_id}")) {
+        return "$0\n";
+      }
+      if (isList(args)) {
+        return `${rows.map((r) => r.join("\t")).join("\n")}\n`;
+      }
+      return "zsh\t1\t1\n";
+    };
+  }
+
+  it("scans the whole server, not just our window", async () => {
+    panes([]);
+    await host().revealSession?.("hydra_session_a");
+    expect(argv(0)).toEqual([
+      "list-panes",
+      "-a",
+      "-F",
+      "#{pane_id}\t#{session_id}\t#{window_id}\t#{@hydra_session}",
+    ]);
+  });
+
+  it("selects the window and pane holding the session", async () => {
+    panes([["%7", "$0", "@2", "hydra_session_a"]]);
+    await expect(host().revealSession?.("hydra_session_a")).resolves.toBe(true);
+    expect(navArgv()).toEqual([
+      "select-window",
+      "-t",
+      "@2",
+      ";",
+      "select-pane",
+      "-t",
+      "%7",
+    ]);
+  });
+
+  it("switches client first when the pane is in another tmux session", async () => {
+    panes([["%7", "$4", "@2", "hydra_session_a"]]);
+    await expect(host().revealSession?.("hydra_session_a")).resolves.toBe(true);
+    expect(navArgv().slice(0, 3)).toEqual(["switch-client", "-t", "$4"]);
+  });
+
+  it("does not switch client for a pane in our own session", async () => {
+    panes([["%7", "$0", "@2", "hydra_session_a"]]);
+    await host().revealSession?.("hydra_session_a");
+    expect(calls.flatMap((c) => c.args)).not.toContain("switch-client");
+  });
+
+  it("is false, with no navigation, when nothing holds the session", async () => {
+    panes([["%7", "$0", "@2", "hydra_session_other"]]);
+    await expect(host().revealSession?.("hydra_session_a")).resolves.toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  // A tmux too old to interpolate a user option renders it empty. That must
+  // read as "no match" so the caller opens a tab, not as a match on "".
+  it("ignores panes with no @hydra_session", async () => {
+    panes([["%7", "$0", "@2", ""], ["%8", "$0", "@3", ""]]);
+    await expect(host().revealSession?.("")).resolves.toBe(false);
+    await expect(host().revealSession?.("hydra_session_a")).resolves.toBe(false);
+  });
+
+  it("prefers our own pane, then our own session, then the lowest id", async () => {
+    panes([
+      ["%9", "$4", "@5", "hydra_session_a"],
+      ["%3", "$0", "@2", "hydra_session_a"],
+    ]);
+    await host().revealSession?.("hydra_session_a");
+    expect(navArgv()).toContain("%3");
+
+    calls = [];
+    panes([
+      ["%9", "$4", "@5", "hydra_session_a"],
+      ["%5", "$0", "@2", "hydra_session_a"],
+    ]);
+    await host().revealSession?.("hydra_session_a");
+    expect(navArgv()).toContain("%5");
+  });
+
+  it("is false rather than throwing when tmux fails", async () => {
+    panes([]);
+    failWith = new Error("no server running");
+    await expect(host().revealSession?.("hydra_session_a")).resolves.toBe(false);
+  });
+});

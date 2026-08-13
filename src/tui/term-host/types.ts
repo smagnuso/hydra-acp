@@ -105,6 +105,21 @@ export interface TerminalHostCapabilities {
   label: boolean;
   /** Can report session status (state/title/tokens/…) at all. */
   report: boolean;
+  /**
+   * Can find the pane already showing a given session and jump to it.
+   *
+   * Distinct from openTab rather than folded into it, because the two
+   * differ in what they promise about the result: openTab always produces
+   * a NEW view, reveal produces the EXISTING one or nothing. A host that
+   * could only do the former would, asked to reveal, quietly hand back a
+   * second pane on the same session — the exact duplicate this exists to
+   * prevent.
+   *
+   * Requires the host to answer a reverse lookup over what hydra has
+   * already published to it, so it is only true where reporting a session
+   * id round-trips: herdr's `session` token, tmux's `@hydra_session`.
+   */
+  reveal: boolean;
 }
 
 /** A command to launch, fully assembled by core. */
@@ -204,6 +219,37 @@ export interface TerminalHost {
 
   /** Launch argv beside this pane. Required when caps.split. */
   splitTab?(spec: OpenTabSpec): Promise<OpenTabResult>;
+
+  /**
+   * Focus the pane already showing `sessionId`. Required when caps.reveal.
+   *
+   * Returns whether it found one, so the caller can fall back to opening a
+   * tab. Resolving false is an ordinary answer, not a failure.
+   *
+   * ONE METHOD RATHER THAN find + focus. Splitting it would leak a
+   * host-shaped pane reference into this interface, and would open a window
+   * between the two calls in which the pane can close or switch sessions —
+   * both hosts can decide and act within a single operation, so neither cost
+   * buys anything.
+   *
+   * A pane counts only while it is CURRENTLY attached to that session. The
+   * lookup runs against live published state (herdr's token map, tmux's pane
+   * options), which the TUI withdraws on switch and on exit, so a pane whose
+   * hydra has moved on or died is correctly invisible here. Anything cached
+   * or written once at launch would send the user to the wrong pane, which
+   * is worse than opening a redundant one.
+   *
+   * May match THIS pane, in which case the host should still report true:
+   * "already looking at it" is a successful reveal, and the alternative —
+   * excluding self — would make the caller open a duplicate tab on the
+   * session it is already showing.
+   *
+   * When several panes show the same session (multi-client attach is
+   * normal), pick deterministically and prefer the nearest: same tab, then
+   * same workspace/window, then a stable tiebreak. An arbitrary choice would
+   * send the user somewhere different each press.
+   */
+  revealSession?(sessionId: string): Promise<boolean>;
 
   /** Read this pane's tab label. Required when caps.label. */
   readLabel?(): Promise<TabLabelView | null>;

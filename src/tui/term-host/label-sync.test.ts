@@ -33,7 +33,7 @@ function fakeHost(): TerminalHost {
   return {
     id: "fake",
     get caps() {
-      return { openTab: true, split: false, label: canLabel, report: true };
+      return { openTab: true, split: false, label: canLabel, report: true, reveal: false };
     },
     report: () => Promise.resolve(),
     release: () => Promise.resolve(),

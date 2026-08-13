@@ -158,6 +158,11 @@ import {
   restoreReportedCwd,
 } from "./terminal-user-var.js";
 import { initTerminalHost } from "./term-host/index.js";
+import {
+  openInNewTab,
+  revealOrOpen,
+  setLauncherMode,
+} from "./term-host/open.js";
 import { releaseTerminalHost } from "./term-host/report.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -663,6 +668,35 @@ export interface TuiOptions {
     cwd: string;
     upstreamSessionId: string;
   };
+  // Preselect this session's row when the startup picker opens.
+  //
+  // Only set by launcher mode's loop, which re-enters resolveSession after
+  // every pick. Without it the cursor resets to row 0 — "New session" — so
+  // a second Enter silently CREATES a session instead of repeating the
+  // last action. Found by driving the real thing: two Enters in a row
+  // produced one attach and one unintended new session.
+  pickerSelect?: string;
+  // Launcher mode: this pane hands picked sessions to the terminal host
+  // instead of attaching to them itself.
+  //
+  // The mode exists because a herdr/tmux layout where each tab IS a
+  // session has an invariant the in-place switcher silently breaks. Pick a
+  // session from a tab showing something else and that tab is now lying
+  // about its contents. Under this flag the picker never re-points this
+  // pane: an attach reveals the tab already showing that session, or opens
+  // one, and this pane goes back to whatever it was doing.
+  //
+  // A PROCESS MODE, NOT A PICKER MODE. It has to cover both the pane that
+  // starts on the picker (no --session, so it stays a launcher forever) and
+  // a pane already showing a session that reaches the picker via ^p. Those
+  // are the same rule, and scoping the flag to one of them would leave the
+  // other behaving the old way.
+  //
+  // PROPAGATED to every tab this pane opens (see term-host/open.ts), so
+  // the layout is opted into once at the root rather than per pane. The
+  // mode is really a property of the workspace being index-shaped, and
+  // anything else drifts the moment a tab is opened from a tab.
+  terminalHostLauncher?: boolean;
   // Auto-approve every session/request_permission instead of showing
   // the modal. Wire bypass for the user; the CLI prints a stderr
   // warning at startup so it's never silent. Useful for unattended
@@ -988,6 +1022,59 @@ function installCrashLogging(): void {
   }
 }
 
+/**
+ * Launcher mode's hand-off: give a picker result to the terminal host
+ * instead of becoming it. Returns a line to show the user.
+ *
+ * Shared by both places the picker resolves — the startup path
+ * (resolveSession) and the mid-session ^p path (switchSession) — because
+ * "what Enter means in launcher mode" must not be able to differ between a
+ * pane that has a session and a pane that doesn't. That difference is
+ * exactly the inconsistency the mode was introduced to remove.
+ *
+ * Attachments are dropped for a new session, and said so rather than
+ * silently: they're in-memory image bytes with no argv to ride on. Same
+ * limitation, and same wording, as the picker's own ^t.
+ */
+async function dispatchToTerminalHost(
+  choice: Extract<PickerResult, { kind: "attach" } | { kind: "new" }>,
+  sessions: readonly DiscoveredSession[],
+  fallbackCwd: string | undefined,
+): Promise<string> {
+  if (choice.kind === "new") {
+    const dropped = choice.attachments?.length ?? 0;
+    const result = await openInNewTab({
+      kind: "new",
+      cwd: choice.cwd ?? fallbackCwd,
+      agentId: choice.agentId,
+      model: choice.model,
+      prompt: choice.prompt,
+    });
+    if (!result.ok) {
+      return `could not open a tab: ${result.error ?? "unknown error"}`;
+    }
+    return dropped > 0
+      ? `new session opened in a new tab — ${dropped} attachment${dropped === 1 ? "" : "s"} could not come along`
+      : "new session opened in a new tab";
+  }
+  const source = sessions.find((s) => s.sessionId === choice.sessionId);
+  const label = source?.title?.trim() || choice.sessionId;
+  const result = await revealOrOpen({
+    kind: "attach",
+    sessionId: choice.sessionId,
+    title: source?.title,
+    cwd: source?.cwd ?? fallbackCwd,
+  });
+  switch (result.outcome) {
+    case "revealed":
+      return `jumped to ${label}`;
+    case "opened":
+      return `opened ${label} in a new tab`;
+    default:
+      return `could not show ${label}: ${result.error ?? "unknown error"}`;
+  }
+}
+
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   installCrashLogging();
   // Opt in to terminal-host reporting for the real TUI only. The taps live
@@ -995,6 +1082,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // notably the test suite — would report to the developer's own pane.
   // Paired with releaseTerminalHost() in the finally below.
   initTerminalHost();
+  // Tabs this process opens inherit the mode, so an index-shaped workspace
+  // stays index-shaped however deep the tab tree goes.
+  setLauncherMode(opts.terminalHostLauncher === true);
   // undici (Node's global fetch) records a PerformanceResourceTiming
   // entry for every HTTP request and retains them in the global
   // performance buffer forever. In a long-lived TUI that polls the
@@ -1469,6 +1559,77 @@ async function runSession(
   viewPrefs: ViewPrefs,
   pickerPrefs: PickerPrefs,
 ): Promise<TuiOptions | null> {
+  // LAUNCHER MODE, startup path: this pane has no session of its own, so
+  // it stays on the picker forever and every pick goes to the host.
+  //
+  // Intercepted AFTER resolveSession rather than inside it, which is what
+  // keeps the mode from changing what a pick means. resolveSession runs
+  // the fork flow, the imported-first-launch dialog and the dead-cwd
+  // repair before it settles on a context; short-circuiting inside the
+  // picker loop would skip all of them, and the tab we then opened would
+  // attach with --session and fail — those repairs only run on the picker
+  // path, so nothing downstream would catch it. Here they have already
+  // happened, and we simply redirect the last step.
+  //
+  // GATED ON THIS PANE HAVING NO SESSION OF ITS OWN, and that gate is
+  // load-bearing rather than tidy. resolveSession short-circuits on
+  // --session / --reattach / --new without ever showing a picker, so in
+  // launcher mode the loop below would dispatch that same session, open a
+  // tab for it, come back, and dispatch it again — unbounded tab spawning,
+  // the failure mode term-host/open.ts already documents at the cost of ~97
+  // tabs. The conditions here mirror resolveSession's own short-circuits.
+  //
+  // It is also the right semantics independently: a launcher-mode pane
+  // WITH a session is an ordinary session tab, and the mode should only
+  // change what ^p does there (see switchSession).
+  if (
+    opts.terminalHostLauncher &&
+    opts.sessionId === undefined &&
+    opts.forceNew !== true &&
+    opts.resume !== true
+  ) {
+    while (true) {
+      const picked = await resolveSession(
+        term,
+        config,
+        target,
+        opts,
+        pickerPrefs,
+        viewPrefs,
+      );
+      if (!picked) {
+        term.grabInput(false);
+        return null;
+      }
+      picked.installStatus?.finalize();
+      const notice = await dispatchToTerminalHost(
+        picked.sessionId === "__new__"
+          ? {
+              kind: "new",
+              ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+              ...(picked.agentId ? { agentId: picked.agentId } : {}),
+              ...(opts.model !== undefined ? { model: opts.model } : {}),
+              ...(opts.initialPrompt !== undefined
+                ? { prompt: opts.initialPrompt }
+                : {}),
+            }
+          : { kind: "attach", sessionId: picked.sessionId },
+        [],
+        picked.cwd,
+      );
+      paint(term, "content", `${notice}\n`);
+      // Keep the cursor where the user left it. Re-entering resolveSession
+      // otherwise re-opens the picker on "New session", turning an
+      // absent-minded second Enter into a created session.
+      if (picked.sessionId !== "__new__") {
+        opts.pickerSelect = picked.sessionId;
+      }
+      // A seeded prompt belongs to the tab that just took it; leaving it
+      // set would re-fire it into every subsequent pick.
+      delete opts.initialPrompt;
+      delete opts.initialAttachments;
+    }
+  }
   const ctx = await resolveSession(term, config, target, opts, pickerPrefs, viewPrefs);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). Belt-and-suspenders grab
@@ -5008,6 +5169,10 @@ async function runSession(
     // the resume-warm-session branches (abort / cancel / back-out / any
     // exception bubbling from listSessions / pickSession / sub-prompts).
     let handedOff = false;
+    // Set by the launcher-mode branch below and delivered by the finally,
+    // once the screen this pane was already showing is back up. Notifying
+    // from the branch itself would paint into a stopped screen.
+    let launcherNotice: string | null = null;
     try {
       // Loop: the imported-first-launch action dialog's Esc returns
       // "back" to re-show the picker, same as the initial-picker flow.
@@ -5174,6 +5339,34 @@ async function runSession(
         }
       }
       const { choice } = resolvedChoice;
+      // LAUNCHER MODE: hand the pick to the terminal host and stay put.
+      //
+      // Intercepted here, after every interactive repair above has already
+      // run (fork flow, imported first launch, dead-cwd prompt) and settled
+      // on one choice. Those dialogs belong in the pane the user is looking
+      // at, so they stay local; only the final "become this session" step
+      // is redirected. Placing the interception earlier would have to
+      // reimplement each of them.
+      //
+      // Deliberately BEFORE the teardown below: we are not handing off, and
+      // the finally restores this pane to the session it was already
+      // showing. One press, one jump — ^t remains the key that leaves the
+      // picker up for fanning several sessions out.
+      if (
+        opts.terminalHostLauncher &&
+        (choice.kind === "attach" || choice.kind === "new")
+      ) {
+        // Nothing downstream will consume the handle now, and the picker
+        // frame it paints into is gone.
+        choice.installStatus?.finalize();
+        delete choice.installStatus;
+        launcherNotice = await dispatchToTerminalHost(
+          choice,
+          resolvedChoice.sessions,
+          attachOverrides?.cwd ?? resolvedCwd,
+        );
+        return;
+      }
       // The user is actually switching: finish the teardown and let the
       // outer loop attach the chosen session. From here on, every code
       // path hands off to a new runSession via resume() — set handedOff
@@ -5279,6 +5472,9 @@ async function runSession(
       if (!handedOff && finishSession) {
         screen.start({ skipFullscreen: true });
         screen.resumeRepaint();
+        if (launcherNotice) {
+          screen.notify(launcherNotice);
+        }
       }
     }
   };
@@ -9220,6 +9416,9 @@ async function resolveSession(
       config,
       target,
       prefs: pickerPrefs,
+      ...(opts.pickerSelect !== undefined
+        ? { currentSessionId: opts.pickerSelect }
+        : {}),
       ...(composerAgentId ? { composerAgentId } : {}),
       ...(composerModel ? { composerModel } : {}),
       ...(availableAgents.length > 0 ? { availableAgents } : {}),

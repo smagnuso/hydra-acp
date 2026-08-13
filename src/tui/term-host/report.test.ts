@@ -35,7 +35,7 @@ function fakeHost(): TerminalHost {
   return {
     id: "fake",
     get caps() {
-      return { openTab: true, split: false, label: true, report: canReport };
+      return { openTab: true, split: false, label: true, report: canReport, reveal: false };
     },
     report: (snap) => {
       snaps.push(snap);

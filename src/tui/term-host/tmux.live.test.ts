@@ -175,6 +175,65 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
     expect(after).toBe(before + 1);
   });
 
+  // The load-bearing assumption in revealSession, and the one a unit spec
+  // cannot check: that a pane user option interpolates inside a
+  // `list-panes -F` format. If it does not, every reveal silently misses and
+  // the picker quietly goes back to minting duplicate tabs.
+  it("finds a pane by the @hydra_session it published, server-wide", async () => {
+    await host.report({
+      state: "idle",
+      sessionId: "hydra_session_LIVEREVEAL",
+      title: "Reveal me",
+      cwd: "/tmp",
+      agent: null,
+      model: null,
+      cost: null,
+      queued: null,
+    });
+    const listed = (
+      await tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@hydra_session}")
+    ).trim();
+    expect(listed).toContain("hydra_session_LIVEREVEAL");
+
+    await expect(host.revealSession!("hydra_session_LIVEREVEAL")).resolves.toBe(
+      true,
+    );
+    // We are that pane, so the reveal should have left focus on it.
+    const active = (
+      await tmux("display-message", "-p", "-F", "#{pane_id}")
+    ).trim();
+    expect(active).toBe(pane);
+  });
+
+  it("does not claim to find a session nobody published", async () => {
+    await expect(host.revealSession!("hydra_session_NOSUCH")).resolves.toBe(
+      false,
+    );
+  });
+
+  // release() unsets the option, so a pane that has exited or switched away
+  // must stop being findable. A stale hit sends the user to the wrong pane,
+  // which is worse than opening a redundant one.
+  it("stops finding a pane once its tokens are released", async () => {
+    await host.report({
+      state: "idle",
+      sessionId: "hydra_session_LIVEGONE",
+      title: "Transient",
+      cwd: "/tmp",
+      agent: null,
+      model: null,
+      cost: null,
+      queued: null,
+    });
+    await expect(host.revealSession!("hydra_session_LIVEGONE")).resolves.toBe(
+      true,
+    );
+    await host.release();
+    await expect(host.revealSession!("hydra_session_LIVEGONE")).resolves.toBe(
+      false,
+    );
+  });
+
   it("surfaces a real tmux error message", async () => {
     const bad = await host.openTab!({ label: "x", argv: [], cwd: "/tmp" });
     // An empty argv is not a valid command; whatever tmux says about it

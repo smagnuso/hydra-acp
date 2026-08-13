@@ -11,7 +11,7 @@ import type { TerminalHost, TerminalHostCandidate } from "./types.js";
 function stubHost(id: string): TerminalHost {
   return {
     id,
-    caps: { openTab: false, split: false, label: false, report: false },
+    caps: { openTab: false, split: false, label: false, report: false, reveal: false },
     report: () => Promise.resolve(),
     release: () => Promise.resolve(),
   };
