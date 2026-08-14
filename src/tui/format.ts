@@ -277,6 +277,24 @@ export function formatEvent(
       // Boundary is rendered as a blank separator only — see the
       // ensureSeparator() call in app.ts after a turn-complete event.
       return [];
+    case "turn-started":
+      // Header for a turn the agent started by itself after a background
+      // task finished. Without it the work reads as an unexplained second
+      // block under the previous prompt.
+      if (!event.unsolicited)
+        return [];
+      return [
+        {
+          prefix: "  ",
+          body: event.cause
+            ? `agent resumed · ${event.cause}`
+            : "agent resumed",
+          bodyStyle: "muted",
+        },
+      ];
+    case "turn-ended":
+      // Boundary only — the app freezes the tools-block header on it.
+      return [];
     case "usage-update":
       // Usage is rendered in the header by the app, not in scrollback.
       return [];

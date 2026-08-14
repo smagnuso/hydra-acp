@@ -8620,6 +8620,40 @@ async function runSession(
       renderPlanBlock(event);
       return;
     }
+    // The agent restarted itself after a background task finished, so this
+    // turn has no prompt above it. Without a header the work just appears
+    // under the previous prompt as a second, unexplained block. See
+    // PROTOCOL.md "Agent-initiated turns".
+    //
+    // Deliberately does not touch pendingTurns or anchor a tools block: the
+    // daemon emits no turn_complete for these, so there is nothing to
+    // balance, and the "tool call with no prompt in front of it" fallback in
+    // recordToolCall already opens the block.
+    if (event.kind === "turn-started") {
+      if (!event.unsolicited) {
+        return;
+      }
+      closeAgentText();
+      closeThought();
+      screen.ensureSeparator();
+      screen.appendLines(formatEvent(event));
+      return;
+    }
+    if (event.kind === "turn-ended") {
+      if (!event.unsolicited) {
+        return;
+      }
+      closeAgentText();
+      closeThought();
+      // Freeze the header. Nothing else will: the turn-complete handler is
+      // the only other place that stops the elapsed ticker, and it never
+      // runs for these turns.
+      if (toolsBlockStartedAt !== null && toolsBlockEndedAt === null) {
+        toolsBlockEndedAt = recordedAt ?? Date.now();
+        renderToolsBlock();
+      }
+      return;
+    }
     if (event.kind === "tool-call-update") {
       closeAgentText();
       closeThought();

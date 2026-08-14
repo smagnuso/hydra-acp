@@ -398,6 +398,23 @@ interface TransformerClaim {
 // targets a turn from minutes ago.
 const RECENTLY_TERMINAL_LIMIT = 64;
 
+// How long the agent may go silent inside an unsolicited turn before we
+// declare it over. See noteAgentActivity for what an unsolicited turn is.
+//
+// There is no correct value: the agent gives us no end signal, and a tool
+// can legitimately run for half an hour without emitting anything. Measured
+// inter-event gaps inside real turns are p50 0.7s / p95 11s / p99 30s (the
+// p99 is claude-acp's heartbeat for long-running tools) with a 28-minute
+// outlier. 90s clears the heartbeat and the p99 comfortably; the outliers
+// just close the turn early, and later activity opens a fresh one. Guessing
+// short is deliberate — a spurious extra turn boundary costs one separator
+// in the transcript, while guessing long leaves the session pinned BUSY.
+const UNSOLICITED_TURN_IDLE_MS = 90_000;
+
+// Cap on the agent-authored label naming what woke an unsolicited turn.
+// Renders as a single header line, so anything longer is already unreadable.
+const BACKGROUND_TASK_LABEL_MAX = 120;
+
 // Two flavors of queue entry share the same FIFO. User-prompt entries
 // are wire-visible (every transition fires a hydra-acp/prompt_queue_*
 // broadcast); internal entries (title regen, agent switch, import seed)
@@ -606,8 +623,32 @@ export class Session {
   }
   // Wall-clock when the active prompt started, undefined when idle.
   // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
+  // Also bumped/cleared by open/closeUnsolicitedTurn, so a session the
+  // agent restarted by itself reads BUSY rather than idle.
   // Drives the mid-turn elapsed counter delivered to fresh attachers.
   private promptStartedAt: number | undefined;
+  // Set while the agent is taking a turn nobody asked for. See
+  // noteAgentActivity. `timer` is the silence deadline; `cause` is the
+  // background task we believe woke it, for client labelling.
+  private unsolicitedTurn:
+    | {
+      messageId: string;
+      startedAt: number;
+      timer: ReturnType<typeof setTimeout> | undefined;
+      cause: { toolCallId: string; label: string } | undefined;
+    }
+    | undefined;
+  // Most recent background task the agent armed, harvested from the tool
+  // call that armed it. Only used to label an unsolicited turn with what
+  // woke it up; nothing depends on it being accurate or present.
+  private lastBackgroundTask: { toolCallId: string; label: string } | undefined;
+  // Whether a turn has ever ended on this session in this process. Gates
+  // unsolicited-turn detection: the failure mode is an agent *resuming*
+  // after a turn ended, so before the first turn_complete there is nothing
+  // to resume from and stray agent chatter is something else (a chatty
+  // agent, a seed replay). Resets across a daemon restart, which only
+  // costs detection until the session's next turn ends.
+  private sawTurnComplete = false;
   // Counts appends since the last compaction. When it hits compactEvery
   // we ask the history store to trim the file to the most recent
   // historyMaxEntries. Keeps file growth bounded without per-append
@@ -1265,6 +1306,11 @@ export class Session {
     if (method !== "session/update") {
       return;
     }
+    // Before anything is broadcast: decide whether this update belongs to a
+    // turn hydra asked for. If not, open a synthetic turn so the session
+    // stops reporting itself idle while the agent works. Runs ahead of the
+    // broadcast so clients receive turn_started before its first content.
+    this.noteAgentActivity(envelope);
     // Snapshot interceptors and broadcast run on the post-chain envelope.
     const agentCmds = extractAdvertisedCommands(envelope);
     if (agentCmds !== null) {
@@ -1356,9 +1402,16 @@ export class Session {
   // Wall-clock when the in-flight agent turn began, or undefined when
   // idle. Tracked in-memory by broadcastPromptReceived/broadcastTurnComplete
   // so the daemon can hand a fresh attacher mid-turn the right elapsed
-  // time without scanning history.
+  // time without scanning history. Also covers unsolicited turns, so a
+  // session the agent restarted by itself reads BUSY and not WARM.
   get turnStartedAt(): number | undefined {
     return this.promptStartedAt;
+  }
+
+  // True while the agent is taking a turn hydra never requested. See
+  // noteAgentActivity.
+  get inUnsolicitedTurn(): boolean {
+    return this.unsolicitedTurn !== undefined;
   }
 
   // OS pid of the live agent child, for diagnostics only (a local client
@@ -1385,8 +1438,9 @@ export class Session {
   // - no tool-call chain is open (every tool_call has a corresponding
   //   tool_call_update with status="completed"|"failed")
   // - no mode_change or model_change transition is in progress.
+  // - the agent isn't mid-way through a turn it started by itself.
   async isQuiescedForSwap(): Promise<boolean> {
-    if (this.promptInFlight) {
+    if (this.promptInFlight || this.unsolicitedTurn !== undefined) {
       return false;
     }
     if (this.modeChangeInFlight || this.modelChangeInFlight) {
@@ -1407,7 +1461,7 @@ export class Session {
   // open-tool-call guarantee (e.g. compaction swap) re-verify via
   // isQuiescedForSwap before acting.
   isQuiescedSync(): boolean {
-    if (this.promptInFlight) {
+    if (this.promptInFlight || this.unsolicitedTurn !== undefined) {
       return false;
     }
     if (this.modeChangeInFlight || this.modelChangeInFlight) {
@@ -2447,6 +2501,11 @@ export class Session {
   // agent-shell) consume it. The accept-time signal that peers can use
   // for queue chip rendering is hydra-acp/prompt_queue/added instead.
   private broadcastPromptReceived(entry: UserPromptQueueEntry): void {
+    // A requested turn takes over from any unsolicited one still open, so
+    // only one turn is ever live and promptStartedAt below isn't clobbering
+    // a start time the unsolicited turn owns. Must run before this method
+    // sets promptStartedAt.
+    this.closeUnsolicitedTurn("superseded");
     const sentBy: Record<string, unknown> = { clientId: entry.originator.clientId };
     if (entry.originator.name) {
       sentBy.name = entry.originator.name;
@@ -2645,6 +2704,9 @@ export class Session {
       };
     }
     this.promptStartedAt = undefined;
+    // From here on, agent output with no prompt in flight means the agent
+    // resumed a turn on its own. See noteAgentActivity.
+    this.sawTurnComplete = true;
     // Snapshot the workspace at the turn boundary. A turn is the natural
     // unit: it is where the agent has stopped writing, so the tree is
     // momentarily coherent. Fire-and-forget by contract, because the
@@ -2675,6 +2737,191 @@ export class Session {
     ) {
       this.broadcastPromptAmended(amend);
     }
+  }
+
+  // Called for every agent→client session/update before it is broadcast.
+  //
+  // ACP models a turn as a request and a response: hydra sends
+  // session/prompt, the response means the turn is over. Claude Code does
+  // not honour that. When a background task it started (Monitor, Bash with
+  // run_in_background) completes after the model already ended its turn,
+  // the harness pokes itself with a synthetic <task-notification> message
+  // and runs a *new* turn with nobody asking. There is no ACP message for
+  // "I am starting a turn you did not request", so claude-acp sends none:
+  // it just starts emitting content, and emits no turn_complete when that
+  // turn ends either.
+  //
+  // The consequence is that a session reports itself idle while the agent
+  // is working, so the next prompt gets dispatched on top of a running
+  // agent and the two responses interleave. Detecting it needs no marker
+  // from the agent: turn content arriving with no prompt in flight is
+  // already a protocol violation, which makes the condition below sound —
+  // a well-behaved agent can never trip it.
+  //
+  // Deliberately keyed on promptInFlight, not currentEntry.kind === "user",
+  // so internal queue entries (title regen, agent swap, import seed) are
+  // covered too. Prompts sent outside the queue are fenced by
+  // internalPromptCapture and never reach this path, and session/load runs
+  // before the Session exists, so neither can produce a false positive.
+  private noteAgentActivity(envelope: unknown): void {
+    if (this.closing || this.closed) {
+      return;
+    }
+    // State-shaped updates (model, mode, usage, advertised commands) say
+    // nothing about whether a turn is running — the agent emits them
+    // outside turns routinely.
+    if (isStateUpdate("session/update", envelope)) {
+      return;
+    }
+    this.noteBackgroundTaskArming(envelope);
+    if (this.promptInFlight || !this.sawTurnComplete) {
+      return;
+    }
+    if (this.unsolicitedTurn === undefined) {
+      this.openUnsolicitedTurn();
+      return;
+    }
+    // Still going: push the silence deadline out.
+    this.armUnsolicitedTurnTimer();
+  }
+
+  // Harvest the background task an agent update announces, so an
+  // unsolicited turn can tell clients what woke it. Two shapes, both
+  // claude-acp `_meta` extensions rather than ACP: Monitor reports a
+  // taskId on its tool_call_update, and Bash reports run_in_background
+  // in its rawInput. Best-effort labelling only — a missing or stale
+  // value costs nothing but a less specific header.
+  private noteBackgroundTaskArming(envelope: unknown): void {
+    const update = (envelope as { update?: Record<string, unknown> } | undefined)
+      ?.update;
+    if (!update || typeof update !== "object") {
+      return;
+    }
+    const toolCallId = typeof update.toolCallId === "string"
+      ? update.toolCallId
+      : undefined;
+    if (toolCallId === undefined) {
+      return;
+    }
+    const rawInput = update.rawInput as Record<string, unknown> | undefined;
+    const claudeMeta = extractClaudeCodeMeta(update._meta);
+    const taskId = typeof claudeMeta?.toolResponse?.taskId === "string"
+      ? claudeMeta.toolResponse.taskId
+      : undefined;
+    const isBackground = taskId !== undefined ||
+      (rawInput !== undefined && rawInput.run_in_background === true);
+    if (!isBackground) {
+      return;
+    }
+    // Prefer the agent's own description, fall back to the tool title.
+    // Truncated because this is agent-authored text we re-broadcast as a
+    // one-line header; a pathological description shouldn't ride along on
+    // every client's turn marker.
+    const described = rawInput !== undefined &&
+        typeof rawInput.description === "string" && rawInput.description
+      ? rawInput.description
+      : typeof update.title === "string"
+      ? update.title
+      : "background task";
+    this.lastBackgroundTask = {
+      toolCallId,
+      label: described.slice(0, BACKGROUND_TASK_LABEL_MAX),
+    };
+  }
+
+  // Open a synthetic turn for agent work nobody requested.
+  //
+  // promptStartedAt is what every "is this session busy" consumer reads
+  // (turnStartedAt, the session list's BUSY column, isQuiescedSync), so
+  // setting it here is the whole point — the wire event below is additive
+  // detail for clients that want to label the resumption.
+  //
+  // turn_started / turn_ended are hydra-specific kinds carrying
+  // _meta["hydra-acp"].unsolicited. We deliberately do NOT reuse
+  // turn_complete: clients pair turn_complete against a prompt they saw
+  // start, and handing them an unmatched one would corrupt their pending
+  // turn accounting. An unknown sessionUpdate degrades to a no-op in
+  // render-update's default branch, so unaware clients are unaffected.
+  private openUnsolicitedTurn(): void {
+    const startedAt = Date.now();
+    const cause = this.lastBackgroundTask;
+    this.unsolicitedTurn = {
+      messageId: generateMessageId(),
+      startedAt,
+      timer: undefined,
+      cause,
+    };
+    this.promptStartedAt = startedAt;
+    this.logger?.info(
+      `session ${this.sessionId} agent resumed with no prompt in flight` +
+        (cause ? ` (after ${cause.label})` : ""),
+    );
+    const meta: Record<string, unknown> = { unsolicited: true };
+    if (cause) {
+      meta.cause = cause;
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "turn_started",
+        messageId: this.unsolicitedTurn.messageId,
+        _meta: { "hydra-acp": meta },
+      },
+    });
+    this.armUnsolicitedTurnTimer();
+  }
+
+  private armUnsolicitedTurnTimer(): void {
+    const turn = this.unsolicitedTurn;
+    if (turn === undefined) {
+      return;
+    }
+    if (turn.timer !== undefined) {
+      clearTimeout(turn.timer);
+    }
+    turn.timer = setTimeout(() => {
+      this.closeUnsolicitedTurn("idle");
+    }, UNSOLICITED_TURN_IDLE_MS);
+    // Never hold the process open on a speculative deadline.
+    if (typeof turn.timer.unref === "function") {
+      turn.timer.unref();
+    }
+  }
+
+  // Close an open unsolicited turn. Called on the silence deadline, when a
+  // real prompt takes over, and from markClosed so history is never left
+  // with a dangling turn_started.
+  //
+  // `reason` distinguishes the silence deadline (our guess that the agent
+  // finished) from a takeover; clients that care can tell "we think it
+  // stopped" from "something else started".
+  private closeUnsolicitedTurn(reason: "idle" | "superseded" | "closed"): void {
+    const turn = this.unsolicitedTurn;
+    if (turn === undefined) {
+      return;
+    }
+    if (turn.timer !== undefined) {
+      clearTimeout(turn.timer);
+    }
+    this.unsolicitedTurn = undefined;
+    this.promptStartedAt = undefined;
+    // Analytics consumers diff successive usage_update rows for per-turn
+    // cost. Without a row here an unsolicited turn's tokens silently fold
+    // into whichever turn happens to close next.
+    this.recordCurrentUsageSnapshot();
+    if (this.closed) {
+      return;
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "turn_ended",
+        messageId: generateMessageId(),
+        startedMessageId: turn.messageId,
+        durationMs: Date.now() - turn.startedAt,
+        _meta: { "hydra-acp": { unsolicited: true, reason } },
+      },
+    });
   }
 
   // Record that a prompt's turn has ended, with its terminal stopReason.
@@ -6227,6 +6474,10 @@ export class Session {
     if (this.closed) {
       return;
     }
+    // Close an open unsolicited turn while we can still broadcast, so
+    // history never ends on a turn_started with no turn_ended after it.
+    // Must precede the closing/closed flags for the broadcast to go out.
+    this.closeUnsolicitedTurn("closed");
     const deleteRecord = opts.deleteRecord || this.deleteRecordIntent;
     opts = { deleteRecord };
     this.closing = true;
@@ -7273,6 +7524,10 @@ export class Session {
   // drainQueue) → prompt_received → upstream session/prompt.
   private async runQueueEntry(entry: QueueEntry): Promise<unknown> {
     if (entry.kind === "internal") {
+      // Housekeeping drives the agent too, so it likewise takes over from
+      // any open unsolicited turn. The user-entry path does this from
+      // broadcastPromptReceived, which internal entries deliberately skip.
+      this.closeUnsolicitedTurn("superseded");
       return entry.task();
     }
     this.broadcastPromptReceived(entry);
@@ -7464,6 +7719,27 @@ const STATE_UPDATE_KINDS = new Set([
   // Ephemeral compaction-phase signals — never conversation history.
   "hydra_compaction",
 ]);
+
+// Read the `claudeCode` block out of an update's _meta. A vendor namespace,
+// not ACP: it is the only place claude-acp reports the taskId of a
+// background watch it just armed. Used for labelling an unsolicited turn,
+// so every field is optional and a shape mismatch degrades to undefined.
+function extractClaudeCodeMeta(
+  meta: unknown,
+): { toolResponse?: { taskId?: unknown } } | undefined {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return undefined;
+  }
+  const block = (meta as Record<string, unknown>).claudeCode;
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return undefined;
+  }
+  const toolResponse = (block as Record<string, unknown>).toolResponse;
+  if (!toolResponse || typeof toolResponse !== "object") {
+    return {};
+  }
+  return { toolResponse: toolResponse as { taskId?: unknown } };
+}
 
 function isStateUpdate(method: string, params: unknown): boolean {
   if (method !== "session/update") {

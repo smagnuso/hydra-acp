@@ -603,6 +603,22 @@ describe("formatEvent — user-text with attachments", () => {
     expect(lines[0]?.body).toBe("plain");
     expect(lines[0]?.iterm2Image).toBeUndefined();
   });
+
+  it("heads an agent-initiated turn, naming the task that woke it", () => {
+    expect(
+      formatEvent({
+        kind: "turn-started",
+        unsolicited: true,
+        cause: "gibbon rebuild",
+      })[0]?.body,
+    ).toBe("agent resumed · gibbon rebuild");
+    expect(
+      formatEvent({ kind: "turn-started", unsolicited: true })[0]?.body,
+    ).toBe("agent resumed");
+    // Not ours to head, and the close is a boundary with nothing to draw.
+    expect(formatEvent({ kind: "turn-started", unsolicited: false })).toEqual([]);
+    expect(formatEvent({ kind: "turn-ended", unsolicited: true })).toEqual([]);
+  });
 });
 
 describe("formatToolLine", () => {

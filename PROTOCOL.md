@@ -25,6 +25,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
 - [MCP endpoints](#mcp-endpoints)
 - [ACP wire protocol](#acp-wire-protocol)
   - [The `hydra-acp` meta namespace](#the-hydra-acp-meta-namespace)
+  - [Agent-initiated turns](#agent-initiated-turns)
   - [Prompt-queue surface](#prompt-queue-surface)
   - [Stdin streaming](#stdin-streaming)
   - [Authentication](#authentication)
@@ -1617,6 +1618,92 @@ Broadcast to clients attached to a session whenever its [attention flag](#attent
   "flags": [ /* same shape as GET /v1/sessions/:id/attention */ ]
 }
 ```
+
+### Agent-initiated turns
+
+ACP models a turn as a request and a response: the client sends
+`session/prompt`, and the response means the turn is over. Some agents do not
+honour that.
+
+Claude Code (via `claude-acp`) restarts itself when a background task
+finishes. If the model ends its turn while a `Monitor` or a
+`Bash`-with-`run_in_background` is still outstanding, the harness later
+injects a synthetic `<task-notification>` user message and runs **a whole new
+turn that no `session/prompt` asked for**. There is no ACP notification for
+"I am starting a turn you did not request", so the adapter sends none: it
+streams `session/update` notifications with no request behind them, and emits
+no `turn_complete` when that turn ends either.
+
+Left alone this makes a session report itself idle while the agent works, so
+the next prompt gets dispatched on top of a running agent and the two
+responses interleave. Hydra therefore infers the turn. Turn content arriving
+with no prompt in flight is already a protocol violation, which makes the
+inference sound: a conforming agent can never trigger it.
+
+**`turn_started`** — hydra opens a synthetic turn:
+
+```jsonc
+{
+  "sessionId": "hydra_session_…",
+  "update": {
+    "sessionUpdate": "turn_started",
+    "messageId": "m_…",
+    "_meta": { "hydra-acp": {
+      "unsolicited": true,
+      // Best-effort: the background task we believe woke the agent, if one
+      // was seen being armed. Absent when unknown.
+      "cause": { "toolCallId": "toolu_…", "label": "gibbon rebuild" }
+    } }
+  }
+}
+```
+
+**`turn_ended`** — hydra closes it:
+
+```jsonc
+{
+  "sessionId": "hydra_session_…",
+  "update": {
+    "sessionUpdate": "turn_ended",
+    "messageId": "m_…",
+    "startedMessageId": "m_…",   // the turn_started this closes
+    "durationMs": 94000,
+    "_meta": { "hydra-acp": {
+      "unsolicited": true,
+      // idle       — the agent went quiet and we called it over
+      // superseded — a real prompt took over
+      // closed     — the session shut down
+      "reason": "idle"
+    } }
+  }
+}
+```
+
+**These are not `turn_complete`.** Clients pair `turn_complete` against a
+prompt they saw start; handing them an unmatched one would corrupt their
+pending-turn accounting. Both kinds are additive, so a client that does not
+know them ignores them (`render-update` maps unknown `sessionUpdate` values to
+a no-op) and is unaffected. Aware clients should treat the pair as a turn
+boundary and may label it with `cause`.
+
+**The close is a guess.** The agent gives no end signal, so hydra closes the
+turn after a fixed silence window (90s). That is deliberately shorter than the
+longest legitimate mid-turn silence — a tool can run for half an hour emitting
+nothing — because a wrong close is cheap: later activity simply opens a fresh
+`turn_started`. Consumers must tolerate a single logical stretch of agent work
+arriving as several `turn_started`/`turn_ended` pairs.
+
+**Gating.** Detection is armed only after the session's first `turn_complete`,
+since the failure mode is the agent *resuming* after a turn ended. While an
+unsolicited turn is open the session reports `busy` in the REST session list,
+`turnStartedAt` is set, and `isQuiescedForSwap` returns false so a compaction
+swap cannot pull the upstream out from under working agent.
+
+**Vendor coupling.** The `cause` label is derived from
+`_meta.claudeCode.toolResponse.taskId` and `rawInput.run_in_background`, which
+are `claude-acp` extensions rather than ACP. This is the only place hydra keys
+behaviour off a vendor `_meta` namespace; detection itself does not depend on
+it, and an agent that reports neither simply gets an unlabelled turn.
 
 ### session/update — compaction lifecycle
 

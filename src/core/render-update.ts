@@ -148,6 +148,10 @@ export type RenderEvent =
       pendingAgentSwap?: string | null;
     }
   | { kind: "config-options"; options: ConfigOption[] }
+  // Hydra opened or closed a turn the agent started by itself. See
+  // PROTOCOL.md "Agent-initiated turns".
+  | { kind: "turn-started"; unsolicited: boolean; cause?: string }
+  | { kind: "turn-ended"; unsolicited: boolean; reason?: string }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
 export interface AvailableCommand {
@@ -226,6 +230,10 @@ export function mapUpdate(
       return mapModel(u);
     case "turn_complete":
       return mapTurnComplete(u);
+    case "turn_started":
+      return mapTurnBoundary(u, "turn-started");
+    case "turn_ended":
+      return mapTurnBoundary(u, "turn-ended");
     case "usage_update":
       return mapUsage(u);
     case "available_commands_update":
@@ -1161,6 +1169,40 @@ function mapTurnComplete(u: UpdateLike): RenderEvent {
   }
   if (amended) {
     out.amended = true;
+  }
+  return out;
+}
+
+// turn_started / turn_ended — hydra's markers for a turn the agent began
+// without being asked. See PROTOCOL.md "Agent-initiated turns". Both carry
+// _meta["hydra-acp"].unsolicited; turn_started may name the background task
+// that woke the agent, turn_ended says why we closed it.
+function mapTurnBoundary(
+  u: UpdateLike,
+  kind: "turn-started" | "turn-ended",
+): RenderEvent {
+  const meta = u._meta as
+    | {
+      "hydra-acp"?: {
+        unsolicited?: unknown;
+        reason?: unknown;
+        cause?: { label?: unknown };
+      };
+    }
+    | undefined;
+  const hydra = meta?.["hydra-acp"];
+  const unsolicited = hydra?.unsolicited === true;
+  if (kind === "turn-started") {
+    const label = hydra?.cause?.label;
+    const out: RenderEvent = { kind, unsolicited };
+    if (typeof label === "string" && label.length > 0) {
+      out.cause = label;
+    }
+    return out;
+  }
+  const out: RenderEvent = { kind, unsolicited };
+  if (typeof hydra?.reason === "string") {
+    out.reason = hydra.reason;
   }
   return out;
 }

@@ -754,6 +754,39 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("maps turn_started/turn_ended, carrying the unsolicited marker", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "turn_started",
+        _meta: {
+          "hydra-acp": {
+            unsolicited: true,
+            cause: { toolCallId: "toolu_1", label: "gibbon rebuild" },
+          },
+        },
+      }),
+    ).toEqual({ kind: "turn-started", unsolicited: true, cause: "gibbon rebuild" });
+    expect(
+      mapUpdate({
+        sessionUpdate: "turn_ended",
+        _meta: { "hydra-acp": { unsolicited: true, reason: "idle" } },
+      }),
+    ).toEqual({ kind: "turn-ended", unsolicited: true, reason: "idle" });
+  });
+
+  it("tolerates turn_started with no cause and no _meta at all", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "turn_started",
+        _meta: { "hydra-acp": { unsolicited: true } },
+      }),
+    ).toEqual({ kind: "turn-started", unsolicited: true });
+    expect(mapUpdate({ sessionUpdate: "turn_started" })).toEqual({
+      kind: "turn-started",
+      unsolicited: false,
+    });
+  });
+
   it("reads the hydra-acp amended marker from turn_complete _meta and surfaces it as amended: true", () => {
     expect(
       mapUpdate({
