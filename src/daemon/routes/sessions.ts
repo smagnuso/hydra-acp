@@ -11,7 +11,7 @@ import {
   estimateTokens,
   estimateContextChars,
 } from "../../core/compaction-heuristic.js";
-import type { SessionManager } from "../../core/session-manager.js";
+import type { SessionManager, WorkspaceRequest } from "../../core/session-manager.js";
 import type { HistoryEntry as HistoryStoreEntry } from "../../core/history-store.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
 import { aggregateFileEdits, foldHunks } from "../../core/history-edits.js";
@@ -169,6 +169,10 @@ export function registerSessionRoutes(
       cwd?: string;
       agentId?: string;
       mcpServers?: unknown[];
+      // REST takes the isolation request at the top level rather than
+      // under _meta: the _meta nesting exists because ACP's session/new
+      // forbids non-spec top-level fields, and this is not that method.
+      workspace?: WorkspaceRequest;
     };
     const cwd = expandHome(body.cwd ?? defaults.cwd);
     const agentId = body.agentId ?? defaults.agentId;
@@ -187,6 +191,7 @@ export function registerSessionRoutes(
         cwd,
         agentId,
         mcpServers,
+        ...(body.workspace !== undefined ? { workspace: body.workspace } : {}),
       });
       if (extMcpMint !== undefined) {
         extMcpMint.bindToSession(session);
@@ -194,7 +199,11 @@ export function registerSessionRoutes(
       reply.code(201).send({
         sessionId: session.sessionId,
         agentId: session.agentId,
+        // Effective cwd: the workspace when isolated. Callers that need
+        // the originating tree read it off `workspace.sourceCwd`, since
+        // it cannot be derived from this path.
         cwd: session.cwd,
+        ...(session.workspace !== undefined ? { workspace: session.workspace } : {}),
       });
     } catch (err) {
       if (extMcpMint !== undefined) {

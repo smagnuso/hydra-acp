@@ -91,6 +91,48 @@ export interface HydraAgentCapabilities {
   installProgress?: boolean;
 }
 
+/** `_meta["hydra-acp"].workspace` on a session/new REQUEST. */
+export interface WorkspaceRequestMeta {
+  /** Human-meaningful name; a filesystem-safe form appears in the path. */
+  label?: string;
+  /**
+   * Opaque provider-issued snapshot to derive from. Omit for "current
+   * state of cwd". Never construct one by hand: it is only ever a token
+   * a provider handed out earlier, and its format is provider-specific.
+   */
+  from?: string;
+  /**
+   * Fail session creation rather than falling back to the source tree.
+   *
+   * Default (false) is fail-open, which suits an interactive session. A
+   * caller running N agents against one tree wants the opposite: a
+   * silent fallback puts them all back in one directory, which is the
+   * failure isolation exists to prevent, reached quietly.
+   */
+  required?: boolean;
+  /** Provider kind. Defaults to git. */
+  provider?: string;
+}
+
+/** `_meta["hydra-acp"].workspaceInfo` on session-describing RESPONSES. */
+export interface WorkspaceInfoMeta {
+  /** Absolute path; equals the session's effective top-level `cwd`. */
+  path: string;
+  /** Absolute path of the tree this was derived from. */
+  sourceCwd: string;
+  label: string;
+  provider: string;
+  /** Opaque. Never parse. */
+  snapshot?: string;
+  /**
+   * Provider-specific display detail (git puts branch/base here).
+   * Readers MUST tolerate absence: a copy-provider workspace has no
+   * branch, and a client that depends on this breaks on the second
+   * provider.
+   */
+  vcs?: Record<string, string>;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
@@ -128,6 +170,24 @@ export interface HydraMeta {
   // forgets it — meta.json carries `currentModel` (response-shaped) instead.
   // Resurrect ignores this field by design.
   model?: string;
+  // REQUEST: ask session/new to run this session in an isolated
+  // workspace rather than directly in `cwd`. Rides under _meta because
+  // the ACP spec's NewSessionRequest carries only cwd and mcpServers, and
+  // hydra emits no non-spec fields at the top level.
+  //
+  // Client-side mode (e.g. `hydra tui --workspace`) expresses itself by
+  // setting this on every session/new it issues; the daemon holds no
+  // notion of "workspace mode" itself.
+  workspace?: WorkspaceRequestMeta;
+  // RESPONSE: the workspace a session ended up in, or absent when it is
+  // running directly in its cwd. `sourceCwd` is the load-bearing field:
+  // a workspace lives OUTSIDE its source tree and shares no path prefix
+  // with it, so this recorded edge is the only way to map back.
+  workspaceInfo?: WorkspaceInfoMeta;
+  // RESPONSE: why isolation was requested but did not happen. Present
+  // only on the fail-open path, so a client can say "you asked for a
+  // workspace and did not get one" instead of silently pretending.
+  workspaceError?: string;
   // Snapshot state delivered on the attach/new response so clients
   // don't need to wait for history replay to know the current model,
   // mode, or command palette.
@@ -251,6 +311,28 @@ export function extractHydraMeta(
   }
   if (typeof obj.cwd === "string") {
     out.cwd = obj.cwd;
+  }
+  // Parse field-by-field rather than casting the object through. A
+  // malformed workspace block must degrade to "no isolation requested"
+  // (fail-open) rather than reaching the provider as junk, and
+  // `required` in particular must never be truthy-by-accident: it
+  // controls whether session/new fails.
+  if (obj.workspace !== null && typeof obj.workspace === "object" && !Array.isArray(obj.workspace)) {
+    const w = obj.workspace as Record<string, unknown>;
+    const req: WorkspaceRequestMeta = {};
+    if (typeof w.label === "string") {
+      req.label = w.label;
+    }
+    if (typeof w.from === "string") {
+      req.from = w.from;
+    }
+    if (w.required === true) {
+      req.required = true;
+    }
+    if (typeof w.provider === "string") {
+      req.provider = w.provider;
+    }
+    out.workspace = req;
   }
   if (typeof obj.clientId === "string") {
     out.clientId = obj.clientId;

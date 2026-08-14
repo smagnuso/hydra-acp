@@ -15,6 +15,8 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { SessionManager } from "../core/session-manager.js";
 import { Registry, type RegistryAgent } from "../core/registry.js";
+import { extractHydraMeta } from "../acp/types-hydra-meta.js";
+import { buildHydraSessionMeta } from "../acp/types-session-list.js";
 import { makeMockAgent } from "./test-utils.js";
 
 const exec = promisify(execFile);
@@ -225,6 +227,47 @@ describe("session isolation end-to-end", () => {
     expect(revived.cwd).not.toBe(os.homedir());
     expect(revived.cwd).not.toBe(session.cwd);
     expect(await fs.readFile(path.join(revived.cwd, "note.txt"), "utf8")).toBe("hello\n");
+  });
+
+  it("parses an isolation request off the wire shape and projects it back", async () => {
+    // The wire contract, end to end: a client sends
+    // _meta["hydra-acp"].workspace on session/new, and reads the result
+    // back as _meta["hydra-acp"].workspaceInfo. Without extractHydraMeta
+    // knowing the field, everything below it is unreachable.
+    const repo = await makeGitRepo();
+    const hydraMeta = extractHydraMeta({
+      "hydra-acp": { workspace: { label: "fromWire" } },
+    });
+    expect(hydraMeta.workspace).toEqual({ label: "fromWire" });
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      ...(hydraMeta.workspace !== undefined ? { workspace: hydraMeta.workspace } : {}),
+    });
+
+    const meta = buildHydraSessionMeta(manager.liveListEntry(session));
+    const info = meta.workspaceInfo as { sourceCwd?: string; path?: string } | undefined;
+    expect(info?.sourceCwd).toBe(repo);
+    expect(info?.path).toBe(session.cwd);
+  });
+
+  it("ignores a malformed isolation request rather than passing junk down", async () => {
+    // `required` in particular must never be truthy-by-accident: it is
+    // what turns a fail-open into a hard session/new failure.
+    expect(extractHydraMeta({ "hydra-acp": { workspace: "nope" } }).workspace).toBeUndefined();
+    expect(extractHydraMeta({ "hydra-acp": { workspace: [] } }).workspace).toBeUndefined();
+    expect(
+      extractHydraMeta({ "hydra-acp": { workspace: { required: "yes", label: 7 } } }).workspace,
+    ).toEqual({});
+  });
+
+  it("omits workspaceInfo entirely for a non-isolated session", async () => {
+    const plain = await makeTempDir("hydra-iso-nometa-");
+    const session = await manager.create({ agentId: "claude-code", cwd: plain });
+    const meta = buildHydraSessionMeta(manager.liveListEntry(session));
+    expect(meta.workspaceInfo).toBeUndefined();
+    expect(meta.cwd).toBe(plain);
   });
 
   it("falls open to the source tree when the directory is not a repository", async () => {

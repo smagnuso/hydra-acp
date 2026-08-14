@@ -37,7 +37,31 @@ export type SessionListUsage = z.infer<typeof SessionListUsage>;
 export const SessionListEntry = z.object({
   sessionId: z.string(),
   upstreamSessionId: z.string().optional(),
+  // For an ISOLATED session this is the workspace path, not the directory
+  // the caller named: it is the session's real working directory, which
+  // is what the ACP field means and where the agent is actually running.
+  // See `workspace` below for the tree it derives from.
   cwd: z.string(),
+  // Present only when the session runs in an isolated workspace.
+  //
+  // `sourceCwd` is the load-bearing field: a workspace lives OUTSIDE its
+  // source tree and shares no path prefix with it, so this recorded edge
+  // is the only way a consumer can map the session back to the project
+  // it belongs to. Display code should group and label on
+  // `workspace.sourceCwd ?? cwd`; anything relating the two by string
+  // prefix is wrong.
+  workspace: z
+    .object({
+      path: z.string(),
+      sourceCwd: z.string(),
+      label: z.string(),
+      provider: z.string(),
+      // Opaque provider token. Never parse.
+      snapshot: z.string().optional(),
+      // Provider-specific display detail; absent for providers with none.
+      vcs: z.record(z.string(), z.string()).optional(),
+    })
+    .optional(),
   title: z.string().optional(),
   agentId: z.string().optional(),
   // Last-known model id, so list views can render `<agent>(<model>)`
@@ -178,6 +202,13 @@ export function buildHydraSessionMeta(
   };
   if (entry.cwd !== undefined) {
     meta.cwd = entry.cwd;
+  }
+  // Emitted as `workspaceInfo` rather than `workspace` so the response
+  // field is never confused with the session/new REQUEST field of that
+  // name, which has a different shape (a request for isolation, not a
+  // description of one).
+  if (entry.workspace !== undefined) {
+    meta.workspaceInfo = entry.workspace;
   }
   if (entry.title !== undefined) {
     meta.title = entry.title;

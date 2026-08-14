@@ -294,6 +294,60 @@ describe("git provider specifics", () => {
     expect(restored.ok).toBe(false);
   });
 
+  it("captures uncommitted AND untracked work without touching the user's index or tree", async () => {
+    const provider = new GitProvider();
+    const source = await makeGitSource();
+
+    await fs.writeFile(path.join(source, "tracked.txt"), "modified\n");
+    await fs.writeFile(path.join(source, "brand-new.ts"), "export {};\n");
+    // Something deliberately staged, to prove the real index survives.
+    await exec("git", ["add", "tracked.txt"], { cwd: source });
+    const indexBefore = await exec("git", ["diff", "--cached", "--name-only"], { cwd: source });
+
+    const snap = await provider.captureWorkingState(source, "snapshot");
+    expect(snap).toMatch(/^[0-9a-f]{7,}$/);
+
+    // The user's staged set is unchanged...
+    const indexAfter = await exec("git", ["diff", "--cached", "--name-only"], { cwd: source });
+    expect(indexAfter.stdout).toBe(indexBefore.stdout);
+    // ...and so are their files.
+    expect(await fs.readFile(path.join(source, "tracked.txt"), "utf8")).toBe("modified\n");
+    expect(await fs.readFile(path.join(source, "brand-new.ts"), "utf8")).toBe("export {};\n");
+
+    // The snapshot holds both the modification and the UNTRACKED file,
+    // which is the case `git stash create` silently drops and the whole
+    // reason for the temp-index approach.
+    const listed = await exec("git", ["ls-tree", "-r", "--name-only", snap], { cwd: source });
+    expect(listed.stdout).toContain("brand-new.ts");
+    const blob = await exec("git", ["show", `${snap}:tracked.txt`], { cwd: source });
+    expect(blob.stdout).toBe("modified\n");
+  });
+
+  it("retains a snapshot under refs/hydra without creating a branch", async () => {
+    const provider = new GitProvider();
+    const source = await makeGitSource();
+    const res = await provider.createWorkspace({ sourceCwd: source, label: "snapref" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) {
+      return;
+    }
+    await fs.writeFile(path.join(res.workspace.path, "wip.txt"), "in progress\n");
+    const snap = await provider.captureWorkingState(res.workspace.path, "autosave");
+    const ref = "refs/hydra/snapshots/test-session";
+    await provider.retainSnapshot(res.workspace, ref, snap);
+
+    // Durable: the ref resolves and is a GC root.
+    const resolved = await exec("git", ["rev-parse", ref], { cwd: source });
+    expect(resolved.stdout.trim()).toBe(snap);
+
+    // Invisible: autosaving must not litter the user's branch list.
+    const branches = await exec("git", ["branch", "--list"], { cwd: source });
+    expect(branches.stdout).not.toContain("snapshots");
+
+    await provider.dropSnapshotRef(res.workspace, ref);
+    await expect(exec("git", ["rev-parse", "--verify", ref], { cwd: source })).rejects.toThrow();
+  });
+
   it("locks a live workspace so a concurrent prune cannot remove it", async () => {
     const provider = new GitProvider();
     const source = await makeGitSource();

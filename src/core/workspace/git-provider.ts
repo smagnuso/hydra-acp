@@ -20,7 +20,9 @@
 //     prefix.
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   WorkspaceUnsupportedError,
@@ -64,12 +66,22 @@ function pathExists(p: string): Promise<boolean> {
     .catch(() => false);
 }
 
-function runGit(args: string[], cwd: string, timeout: number): Promise<GitResult> {
+function runGit(
+  args: string[],
+  cwd: string,
+  timeout: number,
+  extraEnv?: Record<string, string>,
+): Promise<GitResult> {
   return new Promise((resolve) => {
     execFile(
       "git",
       args,
-      { cwd, timeout, maxBuffer: 8 * 1024 * 1024 },
+      {
+        cwd,
+        timeout,
+        maxBuffer: 8 * 1024 * 1024,
+        ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+      },
       (err, stdout, stderr) => {
         resolve({ ok: !err, stdout: stdout ?? "", stderr: stderr ?? "" });
       },
@@ -119,7 +131,7 @@ export class GitProvider implements IsolationProvider {
       supports: {
         record: false,
         integrate: false,
-        captureWorkingState: false,
+        captureWorkingState: true,
         changedPaths: false,
         environmentNotes: true,
         // Removing a worktree leaves its branch (and every commit on it)
@@ -396,14 +408,80 @@ export class GitProvider implements IsolationProvider {
     return notes;
   }
 
+  /**
+   * Snapshot a working tree into a commit object WITHOUT touching the
+   * user's index or working tree.
+   *
+   * The obvious implementations are both wrong. `git stash push` yanks
+   * the changes out of the tree the user is looking at, which is an
+   * unacceptable surprise. `git stash create` mutates nothing but omits
+   * untracked files, and untracked files are exactly where fresh agent
+   * work lives (the new source file it just wrote).
+   *
+   * So: point GIT_INDEX_FILE at a throwaway index, stage everything
+   * against THAT, write a tree from it, and build a commit object. The
+   * real index never sees any of it. The resulting commit is not on any
+   * branch; the caller decides where (if anywhere) to point a ref at it.
+   */
+  async captureWorkingState(sourceCwd: string, message: string): Promise<SnapshotId> {
+    const tmpIndex = path.join(
+      os.tmpdir(),
+      `hydra-index-${process.pid}-${randomBytes(6).toString("hex")}`,
+    );
+    const env = { GIT_INDEX_FILE: tmpIndex };
+    try {
+      const staged = await runGit(["add", "-A"], sourceCwd, MUTATE_TIMEOUT_MS, env);
+      if (!staged.ok) {
+        throw new Error(`could not stage working state: ${staged.stderr.trim()}`);
+      }
+      const tree = await runGit(["write-tree"], sourceCwd, MUTATE_TIMEOUT_MS, env);
+      if (!tree.ok || tree.stdout.trim().length === 0) {
+        throw new Error(`could not write tree: ${tree.stderr.trim()}`);
+      }
+
+      // Parent the snapshot on HEAD when there is one so the object is
+      // reachable in a sensible chain. An unborn HEAD yields a root
+      // commit, which is still a perfectly good snapshot.
+      const head = await runGit(["rev-parse", "HEAD"], sourceCwd, QUERY_TIMEOUT_MS);
+      const args = ["commit-tree", tree.stdout.trim(), "-m", message];
+      if (head.ok && head.stdout.trim().length > 0) {
+        args.push("-p", head.stdout.trim());
+      }
+      const commit = await runGit(args, sourceCwd, MUTATE_TIMEOUT_MS, env);
+      if (!commit.ok || commit.stdout.trim().length === 0) {
+        throw new Error(`could not create snapshot commit: ${commit.stderr.trim()}`);
+      }
+      return asSnapshotId(commit.stdout.trim());
+    } finally {
+      await fs.rm(tmpIndex, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Point a ref at a snapshot so its objects survive garbage collection.
+   *
+   * Deliberately OUTSIDE refs/heads/: a ref under refs/hydra/ is a GC
+   * root (so the snapshot is durable) but does not appear in
+   * `git branch`, default `git log`, or most UIs, so continuous
+   * autosaving costs the user no history noise. The tradeoff is that
+   * these refs pin objects forever, so whoever creates them owns
+   * deleting them (see dropSnapshotRef).
+   */
+  async retainSnapshot(ws: Workspace, ref: string, snapshot: SnapshotId): Promise<void> {
+    const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
+    await runGit(["update-ref", ref, snapshot], repoRoot, QUERY_TIMEOUT_MS);
+  }
+
+  async dropSnapshotRef(ws: Workspace, ref: string): Promise<void> {
+    const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
+    await runGit(["update-ref", "-d", ref], repoRoot, QUERY_TIMEOUT_MS);
+  }
+
   // `async` is deliberate on every stub below. A method declared
   // Promise-returning that throws SYNCHRONOUSLY cannot be caught with
   // .catch() on its return value, so a caller doing
   // `provider.record(...).catch(fallback)` gets an uncaught exception
   // instead of its fallback. Rejecting keeps the contract honest.
-  async captureWorkingState(): Promise<SnapshotId> {
-    throw new WorkspaceUnsupportedError(this.kind, "captureWorkingState");
-  }
 
   async record(): Promise<SnapshotId> {
     throw new WorkspaceUnsupportedError(this.kind, "record");

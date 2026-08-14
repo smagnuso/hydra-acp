@@ -1388,6 +1388,12 @@ export function registerAcpWsEndpoint(
           ...(hydraMeta.env !== undefined
             ? { forwardedEnv: hydraMeta.env }
             : {}),
+          // Isolation request. When honored, the session's effective cwd
+          // becomes the workspace and `params.cwd` above is treated as
+          // the source tree it derives from.
+          ...(hydraMeta.workspace !== undefined
+            ? { workspace: hydraMeta.workspace }
+            : {}),
           ...(mintForSwap ? { mintMcpServersForSwap: mintForSwap } : {}),
         });
       } catch (err) {
