@@ -32,6 +32,13 @@ import {
   runSessionsTranscript,
   parseSinceToEpochMs,
 } from "./cli/commands/sessions.js";
+import {
+  runWorkspaceApply,
+  runWorkspaceList,
+  runWorkspaceMerge,
+  runWorkspacePrune,
+  runWorkspaceRemove,
+} from "./cli/commands/workspaces.js";
 import { runSessionsInfo } from "./cli/commands/sessions-info.js";
 import { parseColumns } from "./cli/session-row.js";
 import { runSessionsDiff } from "./cli/commands/sessions-diff.js";
@@ -414,6 +421,68 @@ async function main(): Promise<void> {
         return;
       }
       process.stderr.write(`Unknown daemon subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
+    case "workspace":
+    case "workspaces": {
+      const sub = positional[1];
+      if (sub === undefined || sub === "list") {
+        await runWorkspaceList({ json: flags.json === true });
+        return;
+      }
+      if (sub === "prune") {
+        await runWorkspacePrune({ force: flags.force === true });
+        return;
+      }
+      // merge / apply both land work in the workspace's RECORDED source
+      // tree, never in the directory you happen to be standing in. cwd
+      // only helps pick which workspace you meant.
+      if (sub === "remove" || sub === "rm") {
+        try {
+          await runWorkspaceRemove({
+            ...(positional[2] !== undefined ? { target: positional[2] } : {}),
+            force: flags.force === true,
+          });
+        } catch (err) {
+          process.stderr.write(`${(err as Error).message}\n`);
+          process.exit(1);
+        }
+        return;
+      }
+      if (sub === "merge" || sub === "apply") {
+        const target = positional[2];
+        try {
+          if (sub === "merge") {
+            await runWorkspaceMerge({
+              ...(target !== undefined ? { target } : {}),
+              ...(resolveOption(flags, "message") !== undefined
+                ? { message: resolveOption(flags, "message") }
+                : {}),
+              ...(resolveOption(flags, "into") !== undefined
+                ? { into: resolveOption(flags, "into") }
+                : {}),
+              remove: flags.remove === true,
+            });
+          } else {
+            await runWorkspaceApply({
+              ...(target !== undefined ? { target } : {}),
+              ...(resolveOption(flags, "into") !== undefined
+                ? { into: resolveOption(flags, "into") }
+                : {}),
+            });
+          }
+        } catch (err) {
+          process.stderr.write(`${(err as Error).message}\n`);
+          process.exit(1);
+        }
+        return;
+      }
+      process.stderr.write(
+        `Unknown workspace subcommand: ${sub}\n` +
+          `Usage: hydra workspace [list|prune|merge|apply|remove] [<session>] ` +
+          `[--json] [--force] [-m <msg>] [--into <path>] [--remove]\n`,
+      );
       process.exit(2);
       return;
     }

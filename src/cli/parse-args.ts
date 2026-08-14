@@ -32,6 +32,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "raw",
   "reattach",
   "readonly",
+  "remove",
   "replace",
   "rotate-token",
   "terminal-host-launcher",
@@ -61,6 +62,12 @@ const KNOWN_VALUE_FLAGS = new Set([
   "from-session",
   "host",
   "last",
+  // `hydra workspace merge -m/--message` (commit subject) and
+  // `--into <path>` (explicit destination override, so landing work
+  // somewhere other than the recorded source tree is always something
+  // you typed rather than something inferred).
+  "message",
+  "into",
   "model",
   "name",
   "out",
