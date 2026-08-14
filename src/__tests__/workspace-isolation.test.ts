@@ -421,6 +421,163 @@ describe("session isolation end-to-end", () => {
     ).rejects.toThrow();
   });
 
+  it("carries gitignored files and runs postCreate so the workspace is usable", async () => {
+    // The gap that made isolation impractical on real repos: a fresh
+    // checkout has no .env and no installed dependencies, so an agent
+    // can read the code and do nothing else.
+    const repo = await makeGitRepo();
+    await fs.writeFile(path.join(repo, ".gitignore"), ".env\nnode_modules/\n");
+    await fs.writeFile(path.join(repo, ".env"), "API_KEY=secret\n");
+    await fs.mkdir(path.join(repo, ".hydra"), { recursive: true });
+    await fs.writeFile(
+      path.join(repo, ".hydra/worktree.json"),
+      JSON.stringify({ carry: [".env"], postCreate: "mkdir -p node_modules && touch node_modules/.installed" }),
+    );
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-q", "-m", "config"], { cwd: repo });
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "usable" },
+    });
+
+    // Gitignored file carried in (a plain worktree would not have it).
+    expect(await fs.readFile(path.join(session.cwd, ".env"), "utf8")).toBe("API_KEY=secret\n");
+    // postCreate ran, in the workspace.
+    await fs.access(path.join(session.cwd, "node_modules/.installed"));
+    // ...and left the source tree alone.
+    await expect(fs.access(path.join(repo, "node_modules"))).rejects.toThrow();
+    expect(session.workspaceError).toBeUndefined();
+  });
+
+  it("keeps the session when postCreate fails, and says what broke", async () => {
+    // Isolation succeeded; only setup failed. Failing the session would
+    // be worse than handing back an isolated-but-incomplete one, so long
+    // as the gap is visible.
+    const repo = await makeGitRepo();
+    await fs.mkdir(path.join(repo, ".hydra"), { recursive: true });
+    await fs.writeFile(
+      path.join(repo, ".hydra/worktree.json"),
+      JSON.stringify({ postCreate: "echo 'install blew up' >&2; exit 1" }),
+    );
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-q", "-m", "bad config"], { cwd: repo });
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "brokensetup" },
+    });
+
+    expect(session.workspace).toBeDefined();
+    expect(session.workspaceError).toMatch(/postCreate failed/);
+    expect(session.workspaceError).toContain("install blew up");
+  });
+
+  it("runs preRemove before tearing a workspace down", async () => {
+    // Setup may have created state OUTSIDE the directory (a database, a
+    // container); deleting the directory does not undo any of it.
+    const repo = await makeGitRepo();
+    const marker = path.join(repo, "teardown-ran");
+    await fs.mkdir(path.join(repo, ".hydra"), { recursive: true });
+    await fs.writeFile(
+      path.join(repo, ".hydra/worktree.json"),
+      JSON.stringify({ preRemove: `touch ${marker}` }),
+    );
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-q", "-m", "teardown config"], { cwd: repo });
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "teardown" },
+    });
+    await manager.deleteRecord(session.sessionId);
+    await fs.access(marker);
+  });
+
+  it("orients the agent on its first prompt and rewrites source-tree paths", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "oriented" },
+    });
+    expect(session.workspaceNotes.length).toBeGreaterThan(0);
+
+    const rewrite = (
+      session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
+    ).applyWorkspacePromptRewrite.bind(session);
+
+    const first = rewrite([{ type: "text", text: `look at ${repo}/tracked.txt` }]) as {
+      text: string;
+    }[];
+    // Oriented once, up front...
+    expect(first[0]?.text).toContain("[workspace]");
+    expect(first[0]?.text).toContain(session.cwd);
+    // ...and the path now points at the file the agent should touch.
+    expect(first[0]?.text).toContain(`${session.cwd}/tracked.txt`);
+    expect(first[0]?.text).not.toContain(`${repo}/tracked.txt`);
+
+    // An ordinary follow-up does not re-pay for the preamble.
+    const second = rewrite([{ type: "text", text: "now run the tests" }]) as { text: string }[];
+    expect(second[0]?.text).toBe("now run the tests");
+
+    // But naming the source tree re-asserts, because that is the moment
+    // a forgotten mapping does damage, and the preamble is exactly what
+    // compaction drops on a long session.
+    const third = rewrite([{ type: "text", text: `also ${repo}/other.txt` }]) as {
+      text: string;
+    }[];
+    expect(third[0]?.text).toMatch(/reminder/i);
+    expect(third[0]?.text).toContain(`${session.cwd}/other.txt`);
+  });
+
+  it("reports a write that lands in the source tree", async () => {
+    // Detection, not prevention: the daemon sees file edits as
+    // notifications, after the write. The point is that a breach of the
+    // one promise isolation makes is never silent.
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "breach" },
+    });
+
+    const events: { kind: string; payload: unknown }[] = [];
+    (session as unknown as { notifyChain(k: string, p: unknown): void }).notifyChain = (
+      kind,
+      payload,
+    ) => {
+      events.push({ kind, payload });
+    };
+    const report = (
+      session as unknown as { reportIsolationBreach(p: string, t: unknown): void }
+    ).reportIsolationBreach.bind(session);
+
+    report(`${repo}/tracked.txt`, "tool-1");
+    expect(events.map((e) => e.kind)).toContain("workspace.breach");
+    expect((events[0]?.payload as { path?: string }).path).toBe(`${repo}/tracked.txt`);
+
+    // Writes inside the workspace, and unrelated paths, are silent.
+    events.length = 0;
+    report(`${session.cwd}/tracked.txt`, "tool-2");
+    report("/tmp/scratch.txt", "tool-3");
+    expect(events).toEqual([]);
+  });
+
+  it("leaves a non-isolated session's prompts untouched", async () => {
+    const plain = await makeTempDir("hydra-iso-noprompt-");
+    const session = await manager.create({ agentId: "claude-code", cwd: plain });
+    const out = (
+      session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
+    ).applyWorkspacePromptRewrite([{ type: "text", text: `look at ${plain}/x.ts` }]) as {
+      text: string;
+    }[];
+    expect(out[0]?.text).toBe(`look at ${plain}/x.ts`);
+  });
+
   it("falls open to the source tree when the directory is not a repository", async () => {
     const plain = await makeTempDir("hydra-iso-plain-");
     const session = await manager.create({

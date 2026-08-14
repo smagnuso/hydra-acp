@@ -68,6 +68,12 @@ import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import type { PersistedWorkspace, RollbackBreadcrumb } from "./session-store.js";
+import {
+  buildWorkspacePreamble,
+  isSourceTreeBreach,
+  mentionsSourceTree,
+  rewriteSourcePaths,
+} from "./workspace/path-identity.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import { AttentionFlag, AttentionFlagSchema } from "../acp/types-attention.js";
 import {
@@ -701,6 +707,15 @@ export class Session {
   // attempt, and a later resurrect may well succeed (or fail differently)
   // once the tree it complained about has changed.
   readonly workspaceError: string | undefined;
+  // Provider-supplied caveats about this workspace (empty submodules,
+  // `.git` being a file, and so on). Populated by SessionManager after
+  // the workspace exists; folded into the orientation preamble so an
+  // agent does not try to "repair" an artifact of isolation.
+  workspaceNotes: readonly string[] = [];
+  // Whether the orientation preamble has ridden a prompt yet. Drives
+  // introduce-once, then re-assert only when a prompt names the source
+  // tree.
+  private workspacePreambleSent = false;
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
@@ -2256,6 +2271,94 @@ export class Session {
   // (see daemon/sent-by.ts). It rides on the queue entry's originator so
   // it reaches prompt_queue_added, prompt_received, and the persisted
   // queue alike, rather than being re-derived at each broadcast.
+  /**
+   * Prepare an isolated session's prompt before it reaches the agent.
+   *
+   * Two jobs, both only for workspace-isolated sessions:
+   *
+   *   - rewrite absolute source-tree paths to their workspace
+   *     equivalents, so "look at ~/dev/proj/foo.cpp" resolves to the file
+   *     the agent should actually touch
+   *   - prepend the orientation preamble on the FIRST prompt, and again
+   *     on any prompt that named the source tree
+   *
+   * The re-assertion is the part that earns its keep. ACP has no
+   * system-prompt field, so the preamble rides the prompt and is exactly
+   * the sort of one-time note compaction discards; without it an agent
+   * two hundred turns deep has no memory of the mapping. Re-asserting
+   * when a prompt mentions the source tree targets the moment it
+   * matters instead of paying on every turn.
+   *
+   * Rewriting on the way OUT (rather than mutating the stored prompt)
+   * keeps the user's transcript showing the words they typed.
+   */
+  /**
+   * Report a write that landed in the source tree instead of the
+   * workspace.
+   *
+   * Detection, not prevention: the daemon learns about the agent's file
+   * I/O from tool-call notifications, which arrive AFTER the write. By
+   * the time this runs the user's checkout has already been modified.
+   *
+   * It is still worth doing, because the alternative is a silent breach.
+   * The whole promise of an isolated session is that the user's tree is
+   * untouched, so the one outcome we must never produce is that promise
+   * being broken and nobody finding out. Actual prevention has to come
+   * from the agent's own permission layer, which is per-agent and cannot
+   * be assumed.
+   *
+   * Edge-triggered for free: the caller has already deduplicated by path
+   * via filesEditedSeen, so a repeatedly-edited file reports once.
+   */
+  private reportIsolationBreach(editedPath: string, toolCallId: unknown): void {
+    const ws = this.workspace;
+    if (ws === undefined) {
+      return;
+    }
+    if (!isSourceTreeBreach(editedPath, ws.sourceCwd, ws.path)) {
+      return;
+    }
+    this.logger?.warn?.(
+      `ISOLATION BREACH on session ${this.sessionId}: the agent wrote ${editedPath}, ` +
+        `which is in the source tree ${ws.sourceCwd}, not its workspace ${ws.path}. ` +
+        `The user's checkout has been modified.`,
+    );
+    this.notifyChain("workspace.breach", {
+      path: editedPath,
+      sourceCwd: ws.sourceCwd,
+      workspacePath: ws.path,
+      toolCallId,
+    });
+  }
+
+  private applyWorkspacePromptRewrite(prompt: unknown[]): unknown[] {
+    const ws = this.workspace;
+    if (ws === undefined) {
+      return prompt;
+    }
+    let sawSourceMention = false;
+    let out = mapPromptText(prompt, (text) => {
+      if (!mentionsSourceTree(text, ws.sourceCwd)) {
+        return text;
+      }
+      sawSourceMention = true;
+      return rewriteSourcePaths(text, ws.sourceCwd, ws.path).text;
+    });
+
+    const needsPreamble = !this.workspacePreambleSent || sawSourceMention;
+    if (needsPreamble) {
+      const preamble = buildWorkspacePreamble({
+        workspacePath: ws.path,
+        sourceCwd: ws.sourceCwd,
+        notes: this.workspaceNotes,
+        ...(this.workspacePreambleSent ? { reassert: true } : {}),
+      });
+      out = prefixPromptText(out, `${preamble}\n\n`);
+      this.workspacePreambleSent = true;
+    }
+    return out;
+  }
+
   async prompt(
     clientId: string,
     params: unknown,
@@ -6611,6 +6714,7 @@ export class Session {
           filePayload.line = line;
         }
         this.notifyChain("file.edited", filePayload);
+        this.reportIsolationBreach(path, toolCallId);
       }
     }
     // tool.completed: only fires on tool_call_update with terminal status.
@@ -7265,6 +7369,11 @@ export class Session {
     }
     let response: unknown;
     try {
+      // Workspace-isolated sessions: fix up paths and, where needed,
+      // remind the agent which tree it is in. Applied here, on the way
+      // to the agent, so the user's transcript keeps the words they
+      // actually typed.
+      outboundPrompt = this.applyWorkspacePromptRewrite(outboundPrompt);
       // Route through the transformer chain so transformers that register
       // a request:session/prompt intercept (e.g. the clarifier's deviation
       // injection) get to see and potentially rewrite the prompt before it
@@ -7764,6 +7873,26 @@ export const SLASH_ESCAPE_PREFIX = "\u200B";
 // block. Non-text blocks (resource links, images) and the rest of the
 // blocks are left untouched. Returns the input unchanged when there is no
 // text block to prefix.
+/**
+ * Apply a text transform to every text block of a prompt.
+ *
+ * Every block, not just the first: a path can appear in any of them, and
+ * missing one would hand the agent an absolute source-tree path that
+ * survives the rewrite.
+ */
+export function mapPromptText(
+  prompt: unknown[],
+  fn: (text: string) => string,
+): unknown[] {
+  return prompt.map((b) => {
+    if (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string") {
+      const block = b as { text: string };
+      return { ...block, text: fn(block.text) };
+    }
+    return b;
+  });
+}
+
 export function prefixPromptText(prompt: unknown[], prefix: string): unknown[] {
   const idx = prompt.findIndex(
     (b) => b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string",

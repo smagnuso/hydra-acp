@@ -41,6 +41,12 @@ import {
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
 import { asSnapshotId, type SnapshotId } from "./workspace/provider.js";
 import {
+  applyCarry,
+  readWorkspaceRepoConfig,
+  runWorkspaceHook,
+  type WorkspaceRepoConfig,
+} from "./workspace/setup.js";
+import {
   TombstoneStore,
   shouldResurrectFromUpstream,
 } from "./tombstone-store.js";
@@ -744,6 +750,39 @@ export class SessionManager {
       await provider.lock(ws, `session ${params.title ?? "live"}`).catch(() => undefined);
     }
 
+    // Make the workspace usable: carry gitignored-but-required files in,
+    // then run the repo's setup command. A failure here is reported but
+    // does NOT fail the session even under `required: true` — that flag
+    // is about isolation, and isolation succeeded. A session in a
+    // half-set-up workspace is still isolated and still more useful than
+    // no session; the reason is surfaced so the gap is visible.
+    const repoConfig = await readWorkspaceRepoConfig(ws.sourceCwd).catch((): WorkspaceRepoConfig => ({}));
+    let setupError: string | undefined;
+    if (repoConfig.carry !== undefined && repoConfig.carry.length > 0) {
+      const carried = await applyCarry(ws.sourceCwd, ws.path, repoConfig.carry).catch(
+        () => undefined,
+      );
+      if (carried !== undefined && carried.copied.length > 0) {
+        this.logger?.info?.(
+          `session workspace: carried ${carried.copied.length} file(s) into ${ws.path}`,
+        );
+      }
+    }
+    if (repoConfig.postCreate !== undefined) {
+      const hook = await runWorkspaceHook(repoConfig.postCreate, {
+        workspacePath: ws.path,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        ...(repoConfig.hookTimeoutSeconds !== undefined
+          ? { timeoutSeconds: repoConfig.hookTimeoutSeconds }
+          : {}),
+      });
+      if (!hook.ok) {
+        setupError = `postCreate failed: ${hook.reason ?? "unknown"}`;
+        this.logger?.warn?.(`session workspace: ${setupError} (${ws.path})`);
+      }
+    }
+
     return {
       cwd: ws.path,
       workspace: {
@@ -754,6 +793,10 @@ export class SessionManager {
         ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
         ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
       },
+      // Isolation succeeded; setup did not. Reported through the same
+      // channel so a client sees "you are isolated but the environment
+      // is incomplete" rather than nothing at all.
+      ...(setupError !== undefined ? { isolationError: setupError } : {}),
     };
   }
 
@@ -881,6 +924,29 @@ export class SessionManager {
       clearRollbackBreadcrumbHook: () =>
         void this.mutateRecord(session.sessionId, {}, ["rollbackBreadcrumb"]).catch(() => undefined),
     });
+    // Ask the provider what is odd about this particular workspace and
+    // hand it to the session for the orientation preamble. Conditional
+    // by construction (the provider inspects before it speaks), so a
+    // repo without submodules is never told about submodules: this text
+    // is paid on the first prompt of every isolated session and again
+    // whenever one names the source tree.
+    if (resolved.workspace !== undefined) {
+      const notesProvider = getWorkspaceProvider(resolved.workspace.provider);
+      if (notesProvider !== undefined && notesProvider.capabilities().supports.environmentNotes) {
+        session.workspaceNotes = await notesProvider
+          .environmentNotes({
+            path: resolved.workspace.path,
+            sourceCwd: resolved.workspace.sourceCwd,
+            label: resolved.workspace.label,
+            provider: resolved.workspace.provider,
+            ...(resolved.workspace.snapshot !== undefined
+              ? { snapshot: asSnapshotId(resolved.workspace.snapshot) }
+              : {}),
+            ...(resolved.workspace.vcs !== undefined ? { vcs: resolved.workspace.vcs } : {}),
+          })
+          .catch((): readonly string[] => []);
+      }
+    }
     await this.attachManagerHooks(session);
     return session;
   }
@@ -1482,6 +1548,31 @@ export class SessionManager {
         : {}),
       ...(workspace.vcs !== undefined ? { vcs: workspace.vcs } : {}),
     };
+
+    // Run the repo's teardown BEFORE touching the directory: setup may
+    // have created state outside it (a database, a container, a volume)
+    // and deleting a directory does not undo any of that. Runs even when
+    // the directory is ultimately kept, since the session owning that
+    // state is going away either way.
+    const repoConfig = await readWorkspaceRepoConfig(workspace.sourceCwd).catch(
+      (): WorkspaceRepoConfig => ({}),
+    );
+    if (repoConfig.preRemove !== undefined) {
+      const hook = await runWorkspaceHook(repoConfig.preRemove, {
+        workspacePath: workspace.path,
+        sourceCwd: workspace.sourceCwd,
+        label: workspace.label,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(repoConfig.hookTimeoutSeconds !== undefined
+          ? { timeoutSeconds: repoConfig.hookTimeoutSeconds }
+          : {}),
+      });
+      if (!hook.ok) {
+        this.logger?.warn?.(
+          `session workspace: preRemove failed for ${workspace.path}: ${hook.reason ?? "unknown"}`,
+        );
+      }
+    }
 
     // Drop the autosave ref regardless of what happens to the directory.
     // A snapshot ref is a GC root, so leaving one behind pins its objects
