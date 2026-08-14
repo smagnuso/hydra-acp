@@ -221,6 +221,7 @@ export async function startDaemon(
     npmRegistry: config.npmRegistry,
     extensionCommands,
     defaultCwd: config.defaultCwd,
+    disableWorkspaceSnapshots: config.disableWorkspaceSnapshots,
   });
 
   const extensions = new ExtensionManager(extensionList(config), undefined, {

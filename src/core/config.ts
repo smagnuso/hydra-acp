@@ -695,6 +695,19 @@ export const HydraConfig = z.object({
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.
   defaultCwd: z.string().default("~"),
+  // Turn off per-turn workspace snapshots for isolated sessions.
+  //
+  // Each snapshot walks the workspace tree against a temporary index. On
+  // a normal repository that is cheap; on a very large one it is not,
+  // and it runs after every turn that changed a file. This is the escape
+  // hatch for that case. The cost of disabling it: an isolated session
+  // whose workspace is deleted can only be recovered as far as its last
+  // COMMIT, since nothing else was retained.
+  // Optional rather than `.default(false)` on purpose: a defaulted field
+  // becomes REQUIRED in the inferred config type, which would force every
+  // literal config fixture in the tree to be updated for a setting they
+  // do not exercise. Absent means off.
+  disableWorkspaceSnapshots: z.boolean().optional(),
   // Gzip externalized tool-content blobs at rest (tools/<sha256>.gz).
   // Default true — text diffs/output compress ~3.5x and decompression is
   // lazy (only on diff expand in references mode). Set false to write plain

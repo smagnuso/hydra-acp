@@ -879,7 +879,14 @@ async function dispatchTui(
     }
   }
   const { runTui } = await import("./tui/index.js");
-  const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew, readonly };
+  const tuiOpts: Parameters<typeof runTui>[0] = {
+    resume,
+    forceNew,
+    readonly,
+    // Applies to sessions this TUI creates. Attaching to an existing
+    // session never changes that session's isolation.
+    workspace: flags.workspace === true,
+  };
   if (terminalHostLauncher) {
     tuiOpts.terminalHostLauncher = true;
   }

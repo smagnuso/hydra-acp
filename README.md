@@ -114,7 +114,14 @@ hydra-acp tui                               # explicit form
 hydra-acp session                           # list sessions
 hydra-acp --reattach                        # reattach to this terminal's last session
 hydra-acp --session hydra_session_abc123    # attach to a specific session
+hydra-acp --workspace                       # new sessions get their own isolated checkout
 ```
+
+`--workspace` is a mode, not a name: every session you *create* in that TUI runs
+in its own workspace, so two sessions in one repo can't edit each other's files.
+It applies to creation only — attaching to an existing session never changes
+that session's isolation. If the directory can't be isolated (not a repository,
+no commits yet), the session still starts in the source tree and says why.
 
 In the TUI, `^G` opens the key-binding help — that's the one binding worth
 memorizing. The others you'll reach for early: `^P` switches sessions, `^R`

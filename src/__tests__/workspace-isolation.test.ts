@@ -270,6 +270,157 @@ describe("session isolation end-to-end", () => {
     expect(meta.cwd).toBe(plain);
   });
 
+  it("removes a clean workspace on deletion but keeps its branch", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "tidy" },
+    });
+    const wsPath = session.cwd;
+    const branch = session.workspace?.vcs?.branch;
+    expect(branch).toBeDefined();
+
+    await fs.writeFile(path.join(wsPath, "done.txt"), "finished\n");
+    await exec("git", ["add", "-A"], { cwd: wsPath });
+    await exec("git", ["commit", "-q", "-m", "work"], { cwd: wsPath });
+
+    await manager.deleteRecord(session.sessionId);
+
+    await expect(fs.access(wsPath)).rejects.toThrow();
+    // The branch is the durable artifact: keeping it is what makes the
+    // committed work recoverable after the checkout is gone.
+    const branches = await exec("git", ["branch", "--list", branch!], { cwd: repo });
+    expect(branches.stdout).toContain(branch!);
+  });
+
+  it("keeps a workspace holding uncommitted work rather than destroying it", async () => {
+    // Deleting a session must not silently delete files the user may
+    // still want. A discoverable leaked directory is recoverable; work
+    // deleted on someone's behalf is not.
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "messy" },
+    });
+    const wsPath = session.cwd;
+    await fs.writeFile(path.join(wsPath, "unsaved.txt"), "not committed\n");
+
+    await manager.deleteRecord(session.sessionId);
+
+    expect(await fs.readFile(path.join(wsPath, "unsaved.txt"), "utf8")).toBe("not committed\n");
+  });
+
+  it("forks an isolated session into its OWN workspace, carrying in-progress work", async () => {
+    const repo = await makeGitRepo();
+    const parent = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "parent" },
+    });
+    // Uncommitted and untracked: what "fork this session" should carry.
+    await fs.writeFile(path.join(parent.cwd, "tracked.txt"), "parent edit\n");
+    await fs.writeFile(path.join(parent.cwd, "wip.ts"), "export {};\n");
+
+    const forked = await manager.forkSession(parent.sessionId, {});
+    const record = await manager.loadFromDisk(forked.sessionId);
+
+    // The property that matters most: never the parent's workspace.
+    expect(record?.cwd).not.toBe(parent.cwd);
+    expect(record?.workspace?.path).not.toBe(parent.workspace?.path);
+    // Still isolated, and still attributed to the original project
+    // rather than to the parent workspace (which is itself temporary).
+    expect(record?.workspace?.sourceCwd).toBe(repo);
+
+    expect(await fs.readFile(path.join(record!.cwd, "tracked.txt"), "utf8")).toBe("parent edit\n");
+    expect(await fs.readFile(path.join(record!.cwd, "wip.ts"), "utf8")).toBe("export {};\n");
+
+    // And the fork is independent of the parent from here on.
+    await fs.writeFile(path.join(record!.cwd, "wip.ts"), "changed in fork\n");
+    expect(await fs.readFile(path.join(parent.cwd, "wip.ts"), "utf8")).toBe("export {};\n");
+  });
+
+  it("forks a copy-provider session by copying the parent workspace", async () => {
+    const plain = await makeTempDir("hydra-iso-forkcopy-");
+    await fs.writeFile(path.join(plain, "note.txt"), "original\n");
+    const parent = await manager.create({
+      agentId: "claude-code",
+      cwd: plain,
+      workspace: { label: "cparent", provider: "copy" },
+    });
+    await fs.writeFile(path.join(parent.cwd, "note.txt"), "parent edit\n");
+
+    const forked = await manager.forkSession(parent.sessionId, {});
+    const record = await manager.loadFromDisk(forked.sessionId);
+
+    expect(record?.cwd).not.toBe(parent.cwd);
+    // contentFrom carried the parent's edit...
+    expect(await fs.readFile(path.join(record!.cwd, "note.txt"), "utf8")).toBe("parent edit\n");
+    // ...while origin stayed the project, not the parent workspace.
+    expect(record?.workspace?.sourceCwd).toBe(plain);
+  });
+
+  it("leaves a non-isolated fork alone", async () => {
+    const plain = await makeTempDir("hydra-iso-forkplain-");
+    const parent = await manager.create({ agentId: "claude-code", cwd: plain });
+    const forked = await manager.forkSession(parent.sessionId, {});
+    const record = await manager.loadFromDisk(forked.sessionId);
+    expect(record?.workspace).toBeUndefined();
+    expect(record?.cwd).toBe(plain);
+  });
+
+  it("autosaves uncommitted work to a hidden ref and drops it on deletion", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "autosave" },
+    });
+    const ref = `refs/hydra/snapshots/${session.sessionId}`;
+
+    await fs.writeFile(path.join(session.cwd, "unsaved.ts"), "export const x = 1;\n");
+    // Drive the same hook a completed turn fires.
+    await (
+      manager as unknown as { runWorkspaceSnapshot(s: typeof session): Promise<void> }
+    ).runWorkspaceSnapshot(session);
+
+    const resolved = await exec("git", ["rev-parse", ref], { cwd: repo });
+    expect(resolved.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+    // The uncommitted file is recoverable from the snapshot...
+    const shown = await exec("git", ["show", `${resolved.stdout.trim()}:unsaved.ts`], {
+      cwd: repo,
+    });
+    expect(shown.stdout).toBe("export const x = 1;\n");
+    // ...without appearing as a branch.
+    const branches = await exec("git", ["branch", "--list"], { cwd: repo });
+    expect(branches.stdout).not.toContain("snapshots");
+
+    await manager.deleteRecord(session.sessionId);
+    // The ref must go, or it pins its objects forever and gc can never
+    // reclaim them.
+    await expect(exec("git", ["rev-parse", "--verify", ref], { cwd: repo })).rejects.toThrow();
+  });
+
+  it("skips snapshotting when the turn changed nothing", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "quiet" },
+    });
+    await (
+      manager as unknown as { runWorkspaceSnapshot(s: typeof session): Promise<void> }
+    ).runWorkspaceSnapshot(session);
+    // No ref at all: a read-only turn should not pay for a tree walk's
+    // worth of objects, and most turns are read-only.
+    await expect(
+      exec("git", ["rev-parse", "--verify", `refs/hydra/snapshots/${session.sessionId}`], {
+        cwd: repo,
+      }),
+    ).rejects.toThrow();
+  });
+
   it("falls open to the source tree when the directory is not a repository", async () => {
     const plain = await makeTempDir("hydra-iso-plain-");
     const session = await manager.create({
@@ -281,6 +432,37 @@ describe("session isolation end-to-end", () => {
     expect(session.workspace).toBeUndefined();
     expect(session.cwd).toBe(plain);
     expect(spawnedCwd).toBe(plain);
+  });
+
+  it("tells the client WHY it fell open instead of failing silently", async () => {
+    // Falling back without saying so is the dangerous shape: the caller
+    // asked for isolation, did not get it, and has no way to know. The
+    // pair (no workspaceInfo, workspaceError present) is the signal.
+    const plain = await makeTempDir("hydra-iso-why-");
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: plain,
+      workspace: { label: "explain" },
+    });
+
+    expect(session.workspaceError).toMatch(/not a git repository/i);
+
+    const meta = buildHydraSessionMeta(manager.liveListEntry(session));
+    expect(meta.workspaceInfo).toBeUndefined();
+    expect(meta.workspaceError).toMatch(/not a git repository/i);
+  });
+
+  it("reports no error when isolation succeeded", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "fine" },
+    });
+    expect(session.workspaceError).toBeUndefined();
+    const meta = buildHydraSessionMeta(manager.liveListEntry(session));
+    expect(meta.workspaceError).toBeUndefined();
+    expect(meta.workspaceInfo).toBeDefined();
   });
 
   it("fails session creation when isolation is required and unavailable", async () => {

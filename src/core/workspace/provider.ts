@@ -110,10 +110,29 @@ export interface PathChange {
 }
 
 export interface CreateWorkspaceOptions {
+  /**
+   * The tree this workspace belongs to. Recorded as its origin and used
+   * to choose its root, so it stays the PROJECT even when the initial
+   * content is taken from somewhere else (see contentFrom).
+   */
   readonly sourceCwd: string;
   readonly label: string;
   /** Omit for "current state of sourceCwd". */
   readonly from?: SnapshotId;
+  /**
+   * Materialize initial content from this directory instead of
+   * sourceCwd, without changing which tree the workspace belongs to.
+   *
+   * Exists for forking an isolated session: the new workspace must start
+   * from the PARENT WORKSPACE's contents (so in-progress work carries
+   * over) while still recording the original project as its origin, or
+   * cost attribution and session-list filtering would both point at a
+   * sibling workspace that is itself temporary.
+   *
+   * Providers that can express this through `from` (git snapshots the
+   * parent and branches from it) may ignore this field.
+   */
+  readonly contentFrom?: string;
 }
 
 export type CreateWorkspaceResult =
@@ -160,6 +179,23 @@ export interface IsolationProvider {
   status(ws: Workspace): Promise<WorkspaceStatus>;
 
   captureWorkingState(sourceCwd: string, message: string): Promise<SnapshotId>;
+  /**
+   * Keep a snapshot alive under a named handle so it survives garbage
+   * collection, without it showing up as a branch.
+   *
+   * Autosave depends on both halves: durable enough that a deleted
+   * workspace is recoverable, invisible enough that saving on every turn
+   * does not fill the user's history with noise. Providers with no
+   * concept of retention implement this as a no-op and report
+   * captureWorkingState: false so callers do not rely on it.
+   */
+  retainSnapshot(ws: Workspace, ref: string, snapshot: SnapshotId): Promise<void>;
+  /**
+   * Release a retained snapshot. MUST be idempotent: it is called on
+   * teardown regardless of whether anything was ever retained. Skipping
+   * it leaks a GC root, which pins objects permanently.
+   */
+  dropSnapshotRef(ws: Workspace, ref: string): Promise<void>;
   record(ws: Workspace, message: string): Promise<SnapshotId>;
   changedPaths(ws: Workspace, since: SnapshotId): Promise<readonly PathChange[]>;
   integrate(opts: { from: SnapshotId; into: Workspace }): Promise<IntegrateResult>;

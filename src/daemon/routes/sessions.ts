@@ -204,6 +204,11 @@ export function registerSessionRoutes(
         // it cannot be derived from this path.
         cwd: session.cwd,
         ...(session.workspace !== undefined ? { workspace: session.workspace } : {}),
+        // Present when isolation was asked for and did not happen, so a
+        // caller is never silently unisolated.
+        ...(session.workspaceError !== undefined
+          ? { workspaceError: session.workspaceError }
+          : {}),
       });
     } catch (err) {
       if (extMcpMint !== undefined) {

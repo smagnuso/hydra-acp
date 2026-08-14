@@ -207,7 +207,7 @@ List sessions known to the daemon.
 
 **Query**
 
-- `cwd=<path>` — filter to sessions opened against this working directory.
+- `cwd=<path>` — filter to sessions opened against this working directory. Matches a session's effective `cwd` **or**, for a session running in an isolated workspace, its `workspace.sourceCwd`. So filtering by a repository returns both the plain sessions in it and every workspace derived from it, while filtering by a workspace path returns only that one. This is a match on the recorded derivation edge, **not** a path-prefix test: a workspace lives outside its source tree and shares no prefix with it. See [Workspace isolation](#workspace-isolation).
 - `includeNonInteractive=1` — include piped `hydra cat` sessions that are normally hidden.
 - `status=warm` | `status=cold` — return only one side of the warm/cold split, filtering on the entry's own `status` field. `warm` is answered from the daemon's in-memory session map without reading the session store, so it stays cheap on an install with a large history: a client watching live state (busy / awaiting-input) should poll this rather than the full list, which has to stat and serialize every cold record for a caller that will discard them. An unrecognised value is ignored and the full list returned, which is also how a daemon predating this parameter behaves — so a client that needs the guarantee should still check `status` on each row.
 
@@ -314,9 +314,16 @@ Create a new session. Equivalent to ACP `session/new` over REST. Omitted `cwd`/`
 {
   "cwd":        "/work",                     // optional
   "agentId":    "claude-acp",                // optional
-  "mcpServers": [ /* MCP descriptors */ ]    // optional
+  "mcpServers": [ /* MCP descriptors */ ],   // optional
+  "workspace":  { "label": "feature-x" }     // optional; see Workspace isolation
 }
 ```
+
+`workspace` takes the same shape as the ACP `_meta["hydra-acp"].workspace`
+request documented under [Workspace isolation](#workspace-isolation). It sits at
+the top level here because the `_meta` nesting exists to satisfy ACP's rule that
+`session/new` carries no non-spec top-level fields, and this is not that method.
+The `201` response echoes the resulting `workspace` object when one was created.
 
 **Response — `201 Created`**
 
@@ -1209,6 +1216,83 @@ The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything
 | `mcpStdin` | `boolean` | Allocate a `SessionStreamBuffer` and inject a `hydra-acp-stdin` HTTP MCP descriptor into the agent's `mcpServers`. Used by `hydra cat --stream`. |
 | `interactive` | `boolean` | Initial value for the session's interactivity tristate. `cat` sets `false`; everything else leaves it undefined so the first user prompt promotes it to `true`. |
 | `resume` | `SessionResumeHints` | `{ upstreamSessionId, agentId, cwd, title?, agentArgs? }` — populated by the shim's reconnect path so the daemon can resurrect the session against the right agent. |
+| `workspace` | `WorkspaceRequest` | Run this session in an isolated workspace instead of directly in `cwd`. See [Workspace isolation](#workspace-isolation). |
+
+### Workspace isolation
+
+Two sessions opened against the same directory edit the same files. A session
+can instead be given its own **workspace**: a separate materialization of the
+project, so concurrent sessions cannot collide.
+
+Request it on `session/new` under `_meta["hydra-acp"].workspace` (it cannot be a
+top-level field, per the no-non-spec-fields rule above):
+
+```jsonc
+{
+  "label":    "feature-x",  // optional; generated when omitted
+  "from":     "<snapshot>", // optional; OPAQUE provider token, never constructed by hand
+  "required": false,        // optional; see below
+  "provider": "git"         // optional; defaults to git
+}
+```
+
+**The session's effective `cwd` becomes the workspace path.** `cwd` in the
+request names the tree to derive *from*; `cwd` in every response and in
+`session/list` is where the agent actually runs. Relative paths therefore
+resolve inside the workspace, and so do the working directories of any commands
+the agent spawns.
+
+Responses carry `_meta["hydra-acp"].workspaceInfo` (named differently from the
+request field, which has a different shape):
+
+```jsonc
+{
+  "path":      "/home/u/.hydra-acp/workspaces/ab12cd34/feature-x",
+  "sourceCwd": "/home/u/proj",
+  "label":     "feature-x",
+  "provider":  "git",
+  "snapshot":  "<opaque>",
+  "vcs":       { "kind": "git", "branch": "hydra/feature-x" }
+}
+```
+
+`sourceCwd` is the load-bearing field. A workspace lives **outside** its source
+tree and shares no path prefix with it, so this recorded edge is the only way to
+map a session back to the project it belongs to. Consumers that group, label, or
+attribute per directory should use `workspaceInfo.sourceCwd ?? cwd`; anything
+relating the two by string prefix is wrong. `vcs` is provider-specific and may
+be absent entirely (a non-VCS provider has no branch), so readers must tolerate
+that rather than depend on it. `snapshot` is opaque: never parse it, and never
+assume it is a hash.
+
+**Failure is open by default.** A directory that is not a repository, a
+repository with no commits, or a missing provider all fall back to running in
+the source tree. The reason comes back as `_meta["hydra-acp"].workspaceError`,
+so **`workspaceInfo` absent together with `workspaceError` present** is the case
+a client must surface: isolation was requested and did not happen. That field is
+live-only (it describes a creation attempt, not durable state) and never appears
+on cold entries. Set `required: true` to make session creation fail instead. That matters for a
+caller running several agents against one tree: a silent fallback puts them all
+back in the same directory, which is the failure isolation exists to prevent,
+reached quietly.
+
+**Isolation belongs to the session, not the client.** A client-side mode (e.g.
+`hydra tui --workspace`) sets this field on every `session/new` it issues; the
+daemon holds no notion of "workspace mode". Attaching does not change an
+existing session's isolation, and cannot: several clients may share a session,
+and a live agent's working directory was fixed when its process started.
+A **fork** of an isolated session is always isolated, deriving its own workspace
+from the parent's, because a fork otherwise inherits its parent's `cwd` and
+would land in the parent's workspace.
+
+**Lifecycle.** Workspaces are removed when their session's record is deleted,
+but only when nothing would be lost: a workspace holding uncommitted changes is
+kept and reported instead. Branches are never deleted, which is what lets a
+workspace whose directory has since vanished be rebuilt with its committed work
+intact when the session is resurrected. If it cannot be rebuilt, the session
+resurrects in a fresh workspace from the same source tree rather than in the
+user's checkout. Providers that retain nothing outside the directory report
+this through their capabilities rather than pretending to recover.
 
 #### On `session/new` and `session/attach` responses (`_meta.hydra-acp`)
 
@@ -1225,7 +1309,9 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 | `upstreamSessionId` | `string` | The agent's own session id (distinct from the daemon's id). |
 | `agentId` | `string` | Resolved agent id (after registry id lookup / npx-basename fallback). |
 | `agentPid` | `number` | Present only while an agent process is live for the session; absent on cold sessions. OS pid of the agent child. **Diagnostic only.** It exists so a *local* client can sample the agent's resource usage (memory/CPU of its process tree) — the agent is a child of the daemon, so a client has no other way to locate it. Two caveats: it is meaningless to a client on another host, since it indexes the daemon machine's process table and may collide with an unrelated local pid there; and clients must not signal it — the daemon owns process lifecycle and signals the whole process group (`Session.kill`). It changes across an agent swap or crash-restart, so callers that care should re-read rather than cache it for the session's lifetime. |
-| `cwd` | `string` | Effective working directory. |
+| `cwd` | `string` | Effective working directory. For an isolated session this is the **workspace** path, not the tree it was derived from; see `workspaceInfo`. |
+| `workspaceInfo` | `object?` | Present only for a session running in an isolated workspace: `{ path, sourceCwd, label, provider, snapshot?, vcs? }`. Group and attribute on `workspaceInfo.sourceCwd ?? cwd`. See [Workspace isolation](#workspace-isolation). |
+| `workspaceError` | `string?` | Present when isolation was requested and fell back to the source tree. Live-only. Absent `workspaceInfo` **plus** this field is "you asked and did not get it". |
 | `title` | `string?` | Session label (`Session.title`). Matches the top-level `title` on `session/list`. |
 | `currentModel` | `string?` | Last-known model id; lets attach paint header state before any new updates land. |
 | `currentUsage` | `{used?, size?, costAmount?, costCurrency?}` | Last-known token/cost snapshot. |

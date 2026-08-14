@@ -37,6 +37,10 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "terminal-host-launcher",
   "verbose",
   "version",
+  // Mode switch: sessions this client CREATES run in isolated
+  // workspaces. Boolean rather than taking a name, because it governs
+  // every session the client creates rather than naming one of them.
+  "workspace",
 ]);
 
 // Flags that take a value. Together with KNOWN_BOOLEAN_FLAGS this is the

@@ -126,6 +126,18 @@ export class CopyProvider implements IsolationProvider {
     };
   }
 
+  // No retention concept, so nothing to keep and nothing to release.
+  // Deliberately no-ops rather than throws: teardown calls
+  // dropSnapshotRef unconditionally, and making that a special case at
+  // every call site would be worse than one honest no-op here.
+  async retainSnapshot(): Promise<void> {
+    return;
+  }
+
+  async dropSnapshotRef(): Promise<void> {
+    return;
+  }
+
   async rematerialize(ws: Workspace): Promise<CreateWorkspaceResult> {
     return {
       ok: false,
@@ -141,13 +153,19 @@ export class CopyProvider implements IsolationProvider {
       };
     }
     const source = path.resolve(opts.sourceCwd);
+    // Content may come from elsewhere (forking an isolated session copies
+    // the parent workspace) while the workspace still BELONGS to
+    // `source`: its root and its recorded origin both follow the
+    // project, not wherever the bytes came from.
+    const contentSource =
+      opts.contentFrom !== undefined ? path.resolve(opts.contentFrom) : source;
     try {
-      const st = await fs.stat(source);
+      const st = await fs.stat(contentSource);
       if (!st.isDirectory()) {
-        return { ok: false, reason: `${source} is not a directory` };
+        return { ok: false, reason: `${contentSource} is not a directory` };
       }
     } catch {
-      return { ok: false, reason: `${source} does not exist` };
+      return { ok: false, reason: `${contentSource} does not exist` };
     }
 
     const root = workspaceRootFor(source);
@@ -171,12 +189,12 @@ export class CopyProvider implements IsolationProvider {
     }
 
     try {
-      await fs.cp(source, target, {
+      await fs.cp(contentSource, target, {
         recursive: true,
         errorOnExist: false,
         force: true,
         filter: (src) => {
-          const rel = path.relative(source, src);
+          const rel = path.relative(contentSource, src);
           if (rel.length === 0) {
             return true;
           }

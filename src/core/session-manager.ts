@@ -39,7 +39,7 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
-import { asSnapshotId } from "./workspace/provider.js";
+import { asSnapshotId, type SnapshotId } from "./workspace/provider.js";
 import {
   TombstoneStore,
   shouldResurrectFromUpstream,
@@ -312,6 +312,11 @@ export interface SessionManagerOptions {
   // registry across all sessions so an extension only has to register
   // once at connect time and every warm session can dispatch to it.
   extensionCommands?: ExtensionCommandRegistry;
+  // Turn off per-turn workspace snapshots. They are cheap on a normal
+  // repository and expensive on a very large one (each is a tree walk),
+  // so this exists as the escape hatch rather than making everyone pay.
+  // Recovery of an isolated session degrades to committed work only.
+  disableWorkspaceSnapshots?: boolean;
   // Fallback cwd used when a resurrected session's recorded cwd no longer
   // exists on disk (e.g. a `cat` session whose /tmp sandbox was cleaned
   // up, or a bundle imported from another machine). May be "~"/"$HOME";
@@ -332,6 +337,12 @@ export interface SessionManagerOptions {
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private resurrectionInflight = new Map<string, Promise<Session>>();
+  // Workspace autosave. Coalescing (in-flight + one pending bit) rather
+  // than a queue: turns can outpace snapshots on a large tree, and the
+  // latest state taken once beats replaying a backlog of stale ones.
+  private snapshotInFlight = new Set<string>();
+  private snapshotPending = new Set<string>();
+  private workspaceSnapshotsDisabled = false;
   // Standalone agents spawned by the `authenticate` RPC, keyed by
   // agentId. Kept alive past the RPC so an immediately-following
   // session/new can reuse the now-authenticated channel; auto-pruned
@@ -413,6 +424,7 @@ export class SessionManager {
       archiveMaxBytes: options.sessionHistoryArchiveMaxBytes,
       archiveTiers: options.sessionHistoryArchiveTiers,
     });
+    this.workspaceSnapshotsDisabled = options.disableWorkspaceSnapshots === true;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};
@@ -812,6 +824,9 @@ export class SessionManager {
       sessionId,
       cwd: effectiveCwd,
       ...(resolved.workspace !== undefined ? { workspace: resolved.workspace } : {}),
+      ...(resolved.isolationError !== undefined
+        ? { workspaceError: resolved.isolationError }
+        : {}),
       agentId: params.agentId,
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
@@ -854,6 +869,7 @@ export class SessionManager {
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
@@ -1156,6 +1172,7 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
@@ -1279,6 +1296,7 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
@@ -1421,6 +1439,227 @@ export class SessionManager {
    * Returns undefined if neither works, leaving the caller's defaultCwd
    * fallback as the last resort.
    */
+  /**
+   * Release a session's workspace when the session goes away.
+   *
+   * Policy: remove the directory only when nothing would be LOST by
+   * removing it, and keep it otherwise.
+   *
+   * "Lost" means uncommitted changes specifically, not "has work". A
+   * workspace whose work is committed is safe to remove because the
+   * branch outlives the checkout and rematerialize can rebuild it: the
+   * directory is a cache, the branch is the artifact. So this checks
+   * changedPaths directly rather than status().clean, which is
+   * deliberately stricter (it also counts unintegrated commits) and
+   * would leave recoverable workspaces lying around forever.
+   *
+   * When there ARE uncommitted changes, the directory stays and we say
+   * so. A leaked workspace is discoverable (deterministic root, provider
+   * can enumerate it) and reclaimable later; work deleted because
+   * somebody removed a session is not. Preferring the discoverable leak
+   * is the whole trade.
+   *
+   * Never deletes the branch, for the same reason.
+   */
+  private async releaseWorkspace(
+    workspace: PersistedWorkspace,
+    sessionId?: string,
+  ): Promise<void> {
+    const provider = getWorkspaceProvider(workspace.provider);
+    if (provider === undefined) {
+      this.logger?.warn?.(
+        `session workspace: no provider "${workspace.provider}" to release ${workspace.path}; leaving it in place`,
+      );
+      return;
+    }
+    const asWorkspace = {
+      path: workspace.path,
+      sourceCwd: workspace.sourceCwd,
+      label: workspace.label,
+      provider: workspace.provider,
+      ...(workspace.snapshot !== undefined
+        ? { snapshot: asSnapshotId(workspace.snapshot) }
+        : {}),
+      ...(workspace.vcs !== undefined ? { vcs: workspace.vcs } : {}),
+    };
+
+    // Drop the autosave ref regardless of what happens to the directory.
+    // A snapshot ref is a GC root, so leaving one behind pins its objects
+    // forever and `git gc` can never reclaim them: the repository would
+    // grow without bound across sessions.
+    if (sessionId !== undefined) {
+      await provider
+        .dropSnapshotRef(asWorkspace, this.snapshotRefFor(sessionId))
+        .catch(() => undefined);
+    }
+
+    const status = await provider
+      .status(asWorkspace)
+      .catch(() => ({ clean: false, changedPaths: ["<unknown>"], hasRecordedWork: false }));
+    if (status.changedPaths.length > 0) {
+      this.logger?.warn?.(
+        `session workspace: keeping ${workspace.path} — it has ${status.changedPaths.length} ` +
+          `uncommitted change(s) that removal would destroy. Remove it by hand once you have ` +
+          `salvaged or discarded them.`,
+      );
+      return;
+    }
+
+    // Force here is safe and necessary: we just established there is
+    // nothing uncommitted, and the provider's own non-forced guard is
+    // stricter than this policy (it also refuses on committed work,
+    // which the branch preserves).
+    await provider
+      .removeWorkspace(asWorkspace, { force: true })
+      .catch((err: unknown) =>
+        this.logger?.warn?.(
+          `session workspace: could not remove ${workspace.path}: ${String(err)}`,
+        ),
+      );
+  }
+
+  /**
+   * Build the workspace a fork of an isolated session should run in.
+   *
+   * A fork MUST NOT inherit its parent's cwd when that cwd is a
+   * workspace: two sessions would then be editing one checkout, which is
+   * the failure isolation exists to prevent, reached by inheritance
+   * rather than by anyone choosing it. That makes this a property of the
+   * PARENT session, not of whichever client issued the fork, so it can't
+   * be left to callers to remember.
+   *
+   * Content comes from the parent's workspace so in-progress work carries
+   * into the fork, which is what "fork this session" means. How that is
+   * achieved is a provider capability: git snapshots the parent's working
+   * state (including untracked files) and branches from it; a provider
+   * without snapshots copies the parent's directory instead. Either way
+   * the fork records the original PROJECT as its origin, never the
+   * parent workspace, which is itself temporary.
+   *
+   * Returns undefined if no isolated workspace could be made. Callers
+   * must then fall back to the parent's SOURCE tree, never its workspace.
+   */
+  /**
+   * Ref a session's workspace snapshots live under.
+   *
+   * Deliberately outside refs/heads/: a ref here is a GC root, so the
+   * snapshot is durable, but it does NOT appear in `git branch`, default
+   * `git log`, or most UIs. That is what lets us autosave on every turn
+   * without filling the user's history with noise. The cost is that
+   * these refs pin objects forever, so whoever writes one owns deleting
+   * it (releaseWorkspace does).
+   */
+  private snapshotRefFor(sessionId: string): string {
+    return `refs/hydra/snapshots/${sessionId}`;
+  }
+
+  /**
+   * Snapshot an isolated session's workspace, at most one at a time and
+   * never on the turn's critical path.
+   *
+   * Skips when nothing changed, because the common turn edits no files
+   * (a question, a read-only exploration) and a no-op snapshot would
+   * still cost a full tree walk. On a large repository that walk is not
+   * free, which is also why this coalesces rather than queues: if turns
+   * arrive faster than snapshots complete, taking the latest state once
+   * is both cheaper and more useful than replaying a backlog.
+   */
+  private scheduleWorkspaceSnapshot(session: Session): void {
+    if (session.workspace === undefined || this.workspaceSnapshotsDisabled) {
+      return;
+    }
+    if (this.snapshotInFlight.has(session.sessionId)) {
+      this.snapshotPending.add(session.sessionId);
+      return;
+    }
+    this.snapshotInFlight.add(session.sessionId);
+    void this.runWorkspaceSnapshot(session)
+      .catch(() => undefined)
+      .finally(() => {
+        this.snapshotInFlight.delete(session.sessionId);
+        if (this.snapshotPending.delete(session.sessionId)) {
+          this.scheduleWorkspaceSnapshot(session);
+        }
+      });
+  }
+
+  private async runWorkspaceSnapshot(session: Session): Promise<void> {
+    const workspace = session.workspace;
+    if (workspace === undefined) {
+      return;
+    }
+    const provider = getWorkspaceProvider(workspace.provider);
+    if (provider === undefined || !provider.capabilities().supports.captureWorkingState) {
+      return;
+    }
+    const asWorkspace = {
+      path: workspace.path,
+      sourceCwd: workspace.sourceCwd,
+      label: workspace.label,
+      provider: workspace.provider,
+      ...(workspace.snapshot !== undefined
+        ? { snapshot: asSnapshotId(workspace.snapshot) }
+        : {}),
+      ...(workspace.vcs !== undefined ? { vcs: workspace.vcs } : {}),
+    };
+
+    const status = await provider.status(asWorkspace).catch(() => undefined);
+    if (status !== undefined && status.changedPaths.length === 0) {
+      return;
+    }
+
+    const snapshot = await provider.captureWorkingState(
+      workspace.path,
+      `hydra: autosave ${session.sessionId}`,
+    );
+    await provider.retainSnapshot(
+      asWorkspace,
+      this.snapshotRefFor(session.sessionId),
+      snapshot,
+    );
+  }
+
+  private async deriveForkWorkspace(
+    parent: PersistedWorkspace,
+    label: string,
+  ): Promise<PersistedWorkspace | undefined> {
+    const provider = getWorkspaceProvider(parent.provider);
+    if (provider === undefined) {
+      return undefined;
+    }
+    const caps = provider.capabilities();
+
+    let from: SnapshotId | undefined;
+    if (caps.supports.captureWorkingState) {
+      from = await provider
+        .captureWorkingState(parent.path, `hydra: fork of ${parent.label}`)
+        .catch(() => undefined);
+    }
+
+    const created = await provider
+      .createWorkspace({
+        sourceCwd: parent.sourceCwd,
+        label,
+        ...(from !== undefined ? { from } : { contentFrom: parent.path }),
+      })
+      .catch((err: unknown) => ({ ok: false as const, reason: String(err) }));
+    if (!created.ok) {
+      this.logger?.warn?.(
+        `fork workspace: could not derive from ${parent.path}: ${created.reason}`,
+      );
+      return undefined;
+    }
+    const ws = created.workspace;
+    return {
+      path: ws.path,
+      sourceCwd: ws.sourceCwd,
+      label: ws.label,
+      provider: ws.provider,
+      ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+      ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+    };
+  }
+
   private async recoverWorkspace(
     workspace: PersistedWorkspace,
   ): Promise<PersistedWorkspace | undefined> {
@@ -2153,6 +2392,13 @@ export class SessionManager {
     session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
       this.invalidateListCache();
+      // Release the workspace only when the record is going away too.
+      // A close WITHOUT deleteRecord is a cold-down, not a deletion: the
+      // session can be resurrected later and must find its workspace
+      // still there.
+      if (deleteRecord && session.workspace !== undefined) {
+        void this.releaseWorkspace(session.workspace, session.sessionId).catch(() => undefined);
+      }
       if (deleteRecord) {
         // Tombstone before unlink so the next agent sync doesn't
         // reimport this upstream session. Snapshot updatedAt/cwd/title
@@ -2534,6 +2780,7 @@ export class SessionManager {
       upstreamSessionId: session.upstreamSessionId,
       cwd: session.cwd,
       workspace: session.workspace,
+      workspaceError: session.workspaceError,
       title: session.title,
       agentId: session.agentId,
       currentModel: session.currentModel,
@@ -3152,10 +3399,40 @@ export class SessionManager {
     });
 
     const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
+
+    // Isolation is inherited from the PARENT SESSION, not from whoever
+    // asked for the fork. Without this the fork inherits the parent's
+    // cwd, which for an isolated session is its workspace, putting two
+    // sessions in one checkout.
+    //
+    // An explicit opts.cwd is respected as a deliberate override. When
+    // derivation fails we fall back to the parent's SOURCE tree
+    // (unisolated but safe) and never to its workspace: landing there is
+    // the exact bug this guards against.
+    let forkCwd = opts.cwd;
+    let forkWorkspace: PersistedWorkspace | undefined;
+    if (opts.cwd === undefined && sourceRecord.workspace !== undefined) {
+      const derived = await this.deriveForkWorkspace(
+        sourceRecord.workspace,
+        `${sourceRecord.workspace.label}-fork-${newId.slice(-6)}`,
+      );
+      if (derived !== undefined) {
+        forkWorkspace = derived;
+        forkCwd = derived.path;
+      } else {
+        forkCwd = sourceRecord.workspace.sourceCwd;
+        this.logger?.warn?.(
+          `fork ${newId}: could not derive an isolated workspace from ` +
+            `${sourceRecord.workspace.path}; running unisolated in ${forkCwd}`,
+        );
+      }
+    }
+
     await this.writeImportedRecord({
       sessionId: newId,
       bundle,
-      cwd: opts.cwd,
+      cwd: forkCwd,
+      ...(forkWorkspace !== undefined ? { workspace: forkWorkspace } : {}),
       forkedFromSessionId: sourceSessionId,
       forkedFromMessageId: forkedAt,
       ...(forkSynthesisState !== undefined ? { forkSynthesisState } : {}),
@@ -3243,6 +3520,10 @@ export class SessionManager {
     // exist locally — the caller (CLI / HTTP route) validates the
     // override before passing it in.
     cwd?: string;
+    // Isolated-workspace binding for the new record. Set by the fork
+    // path when the source session was isolated; `cwd` above must then
+    // be this workspace's path.
+    workspace?: PersistedWorkspace;
     // Local-fork breadcrumbs. When both are set, the record is written
     // with forked* fields populated; the imported* family is left
     // unset so meta.json doesn't lie about the origin.
@@ -3309,6 +3590,11 @@ export class SessionManager {
             }),
         agentId: args.bundle.session.agentId,
         cwd: args.cwd ?? args.bundle.session.cwd,
+        // Deliberately NOT inherited from the bundle: a bundle records
+        // the SOURCE session's workspace, and reusing it would point two
+        // records at one directory. Only an explicit caller-supplied
+        // binding (the fork path, which derives a fresh workspace) counts.
+        workspace: args.workspace,
         title: args.bundle.session.title,
         synopsis: args.bundle.session.synopsis,
         summarizedThroughEntry: args.bundle.session.summarizedThroughEntry,
@@ -3370,6 +3656,12 @@ export class SessionManager {
             : {}),
         })
         .catch(() => undefined);
+    }
+    // Release the workspace before dropping the record: the record is
+    // the only thing that knows a workspace exists, so unlinking it
+    // first would strand the directory with nothing pointing at it.
+    if (record.workspace !== undefined) {
+      await this.releaseWorkspace(record.workspace, sessionId).catch(() => undefined);
     }
     await this.store.delete(sessionId).catch(() => undefined);
     // Drop history.jsonl + externalized tool blobs alongside the meta

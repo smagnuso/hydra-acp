@@ -235,6 +235,12 @@ export interface SessionInit {
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
   scheduleSynopsis?: () => void;
+  // Fire-and-forget callback letting SessionManager snapshot an isolated
+  // session's workspace at a turn boundary. Session deliberately knows
+  // nothing about providers or git; it only knows when a turn ended.
+  // MUST return immediately: snapshotting a large tree can take a while
+  // and must never sit on the turn-completion path.
+  scheduleWorkspaceSnapshot?: () => void;
   // Fire-and-forget callback used by `/hydra compact` and `/hydra agent`
   // to schedule a compaction-style job on the SessionManager. Returns
   // immediately; the artifact lands later via persistSynopsis +
@@ -286,6 +292,8 @@ export interface SessionInit {
   // must already be workspace.path; SessionManager resolves that before
   // constructing the Session.
   workspace?: PersistedWorkspace;
+  /** Reason isolation was requested but fell back; see Session.workspaceError. */
+  workspaceError?: string;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -551,6 +559,7 @@ export class Session {
   // out-of-band synopsis without taking a direct dependency on
   // SessionManager.
   private scheduleSynopsisHook?: () => void;
+  private scheduleWorkspaceSnapshotHook?: () => void;
   // Fire-and-forget hook for `/hydra compact` and `/hydra agent` —
   // calls back to the manager's compaction scheduler so the slash
   // commands don't need a direct dependency on SynopsisCoordinator.
@@ -684,6 +693,14 @@ export class Session {
   // physically runs) and for the `_meta["hydra-acp"].workspace`
   // projection.
   readonly workspace: PersistedWorkspace | undefined;
+  // Why isolation was asked for and did not happen. Set only on the
+  // fail-open path, so `workspace === undefined && workspaceError !== undefined`
+  // is the "you asked and did not get it" case a client needs to surface.
+  //
+  // Live-only, deliberately not persisted: it describes THIS creation
+  // attempt, and a later resurrect may well succeed (or fail differently)
+  // once the tree it complained about has changed.
+  readonly workspaceError: string | undefined;
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
@@ -873,6 +890,7 @@ export class Session {
       init.sessionId ?? `${HYDRA_SESSION_PREFIX}${generateHydraId()}`;
     this.cwd = init.cwd;
     this.workspace = init.workspace;
+    this.workspaceError = init.workspaceError;
     this.agentId = init.agentId;
     this.agent = init.agent;
     this.upstreamSessionId = init.upstreamSessionId;
@@ -886,6 +904,7 @@ export class Session {
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
+    this.scheduleWorkspaceSnapshotHook = init.scheduleWorkspaceSnapshot;
     this.scheduleCompactionHook = init.scheduleCompaction;
     this.resolveAgentIdHook = init.resolveAgentId;
     this.getCompactionStateHook = init.getCompactionState;
@@ -2523,6 +2542,11 @@ export class Session {
       };
     }
     this.promptStartedAt = undefined;
+    // Snapshot the workspace at the turn boundary. A turn is the natural
+    // unit: it is where the agent has stopped writing, so the tree is
+    // momentarily coherent. Fire-and-forget by contract, because the
+    // alternative is making every turn wait on a tree walk.
+    this.scheduleWorkspaceSnapshotHook?.();
     if (promptMessageId !== undefined && stopReason !== undefined) {
       this.recordTerminal(promptMessageId, stopReason);
     }

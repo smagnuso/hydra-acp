@@ -627,6 +627,21 @@ export interface TuiOptions {
   // exists, model is managed through session/set_model and persisted
   // as currentModel in meta.json.
   model?: string;
+  // Workspace mode (`hydra tui --workspace`): every session this TUI
+  // CREATES runs in its own isolated workspace instead of directly in
+  // cwd.
+  //
+  // A client-side mode, expressed as `_meta["hydra-acp"].workspace` on
+  // each session/new. The daemon holds no notion of "workspace mode",
+  // which keeps two clients with different modes from disagreeing about
+  // a shared session.
+  //
+  // Applies to creation only, never to attach. Isolation is a property
+  // of the session; the mode is a property of this client. Re-homing a
+  // session on attach would move the working directory out from under
+  // whoever else is attached, and for a live agent it is not even
+  // possible: its cwd was fixed at exec.
+  workspace?: boolean;
   resume?: boolean;
   forceNew?: boolean;
   // First-prompt seed for a freshly-created session. The picker's
@@ -2752,6 +2767,17 @@ async function runSession(
     }
     if (opts.model) {
       hydraNewMeta.model = opts.model;
+    }
+    if (opts.workspace === true) {
+      // No label: one is generated per session. The flag is a mode
+      // ("work in workspaces"), not a name for a particular workspace.
+      //
+      // Fail-open deliberately (no `required`): if this tree cannot be
+      // isolated, an interactive session should still start, and the
+      // response's workspaceError says why. A caller that cannot
+      // tolerate a silent fallback (running N agents against one tree)
+      // sets required itself.
+      hydraNewMeta.workspace = {};
     }
     const sessionNewParams = {
       cwd: ctx.cwd,

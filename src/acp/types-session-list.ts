@@ -62,6 +62,13 @@ export const SessionListEntry = z.object({
       vcs: z.record(z.string(), z.string()).optional(),
     })
     .optional(),
+  // Set when isolation was requested and fell back to running in the
+  // source tree. Live-only: it describes a creation attempt, not durable
+  // session state, so cold entries never carry it.
+  //
+  // `workspace` absent AND this present is the case a client must not
+  // miss: the caller asked for isolation and is not isolated.
+  workspaceError: z.string().optional(),
   title: z.string().optional(),
   agentId: z.string().optional(),
   // Last-known model id, so list views can render `<agent>(<model>)`
@@ -209,6 +216,9 @@ export function buildHydraSessionMeta(
   // description of one).
   if (entry.workspace !== undefined) {
     meta.workspaceInfo = entry.workspace;
+  }
+  if (entry.workspaceError !== undefined) {
+    meta.workspaceError = entry.workspaceError;
   }
   if (entry.title !== undefined) {
     meta.title = entry.title;
