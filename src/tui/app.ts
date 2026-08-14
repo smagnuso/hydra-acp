@@ -2185,6 +2185,33 @@ async function runSession(
       }
     }
   });
+  // The daemon is holding this entry back because the agent restarted
+  // itself and is still working. The entry stays queued and cancellable;
+  // only the chip changes. See PROTOCOL.md "Agent-initiated turns".
+  const setQueueChipHeld = (messageId: string, held: boolean): void => {
+    const entry = queueCache.get(messageId);
+    if (entry === undefined) return;
+    if (held) {
+      entry.held = true;
+    } else {
+      delete entry.held;
+    }
+    if (screenRef && dispatcherRef) {
+      refreshQueueDisplay();
+    }
+  };
+  conn.onNotification("hydra-acp/prompt_queue/held", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { messageId?: unknown };
+    if (typeof p.messageId !== "string") return;
+    setQueueChipHeld(p.messageId, true);
+  });
+  conn.onNotification("hydra-acp/prompt_queue/released", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { messageId?: unknown };
+    if (typeof p.messageId !== "string") return;
+    setQueueChipHeld(p.messageId, false);
+  });
   conn.onNotification("hydra-acp/prompt_queue/updated", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as {
@@ -2192,8 +2219,16 @@ async function runSession(
       prompt?: unknown;
     };
     if (typeof p.messageId !== "string") return;
-    if (!queueCache.has(p.messageId)) return;
-    queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
+    const existing = queueCache.get(p.messageId);
+    if (existing === undefined) return;
+    const refreshed = chipFromPrompt(p.messageId, p.prompt);
+    // An update rebuilds the chip from the wire prompt, which carries no
+    // hold state, so carry it across; otherwise an amend mid-hold drops
+    // the marker.
+    if (existing.held) {
+      refreshed.held = true;
+    }
+    queueCache.set(p.messageId, refreshed);
     // If the underlying prompt of one of our own deferred echoes was
     // mutated (via hydra-acp/prompt/update), refresh the pending echo's
     // text/attachments too so the eventual scrollback flush reflects
@@ -5893,12 +5928,20 @@ async function runSession(
     messageId: string;
     text: string;
     attachmentCount: number;
+    // Set while the daemon is holding this entry back because the agent is
+    // mid-way through a turn it started by itself. Without the marker the
+    // chip just sits there looking stuck. The reason is already spelled out
+    // in scrollback by the "agent resumed" header, so the chip only needs
+    // to say that it's waiting on purpose.
+    held?: boolean;
   }
 
-  const formatQueueChipText = (entry: QueueChipEntry): string =>
-    entry.attachmentCount > 0
+  const formatQueueChipText = (entry: QueueChipEntry): string => {
+    const body = entry.attachmentCount > 0
       ? `${entry.text} · 📎×${entry.attachmentCount}`
       : entry.text;
+    return entry.held ? `⏸ ${body}` : body;
+  };
 
   // Convert a wire-shaped prompt array (the session/prompt prompt blocks)
   // into the chip-display shape. Mirrors the on-send projection so a chip

@@ -1584,6 +1584,54 @@ Fires when a queue entry leaves the queue.
 - `cancelled` — explicit `hydra-acp/prompt/cancel`.
 - `abandoned` — session tear-down with queued entries that never ran.
 
+#### Notifications: `hydra-acp/prompt_queue/held` and `.../released`
+
+Fire around a user entry that reached the head of the queue but was not
+promoted, because the agent is mid-way through an [agent-initiated
+turn](#agent-initiated-turns). Dispatching onto a running agent is what
+produces interleaved answers and prompts that never appear to finish, so the
+daemon waits for it to settle first.
+
+```jsonc
+// held
+{
+  "sessionId":  "<id>",
+  "messageId":  "<id>",
+  "reason":     "agent_resumed",
+  "cause":      { "toolCallId": "toolu_…", "label": "gibbon rebuild" },  // optional
+  "holdCapMs":  180000
+}
+
+// released
+{
+  "sessionId": "<id>",
+  "messageId": "<id>",
+  "reason":    "quiet" | "cap" | "turn_ended" | "cancelled" | "closing",
+  "heldMs":    3200
+}
+```
+
+- `quiet`: the agent stopped emitting for 45s. The normal exit. The window
+  has to clear a *thinking* pause, not just an idle one: `claude-acp`
+  forwards no thought chunks, so a model that stops to reason is
+  indistinguishable on the wire from one that has finished. Measured
+  inter-event gaps inside real agent-initiated turns run p95 12.7s / p99
+  38.8s.
+- `cap`: `holdCapMs` elapsed with the agent still going. The prompt is
+  dispatched anyway; responses may interleave. Logged as a warning. This is
+  a safety net against the daemon's turn tracking wedging open, not a
+  "taking too long" timeout.
+- `turn_ended`: the unsolicited turn closed while we waited.
+- `cancelled` / `closing`: the entry or the session went away.
+
+A `held` is always followed by exactly one `released`. `released` does **not**
+mean the entry started: `removed{started}` still follows separately, and a
+`cancelled` release means it never ran at all.
+
+The entry stays **in** the queue while held, so `hydra-acp/prompt/cancel` and
+amends work on it normally. Clients should render it as still-queued with the
+hold reason attached, not as an active turn.
+
 #### Notification: `hydra-acp/prompt/amended`
 
 Dedicated linkage event fired after a successful amend. Carries both messageIds so subscribers can render the M1 → M2 relationship without correlating `turn_complete` + `prompt_received` themselves.
@@ -1696,8 +1744,10 @@ arriving as several `turn_started`/`turn_ended` pairs.
 **Gating.** Detection is armed only after the session's first `turn_complete`,
 since the failure mode is the agent *resuming* after a turn ended. While an
 unsolicited turn is open the session reports `busy` in the REST session list,
-`turnStartedAt` is set, and `isQuiescedForSwap` returns false so a compaction
-swap cannot pull the upstream out from under working agent.
+`turnStartedAt` is set, `isQuiescedForSwap` returns false so a compaction swap
+cannot pull the upstream out from under a working agent, and a user prompt
+reaching the head of the queue is held rather than dispatched. See
+[`prompt_queue/held`](#notifications-hydra-acpprompt_queueheld-and-released).
 
 **Vendor coupling.** The `cause` label is derived from
 `_meta.claudeCode.toolResponse.taskId` and `rawInput.run_in_background`, which

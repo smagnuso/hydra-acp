@@ -238,14 +238,19 @@ describe("unsolicited turn lifecycle", () => {
 
   it("a requested prompt supersedes an open unsolicited turn", async () => {
     const { session, mock, client, sent } = await makeSessionAfterOneTurn();
+    vi.useFakeTimers();
 
     agentChunk(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
 
-    await session.prompt(client.clientId, {
+    // The prompt is held behind the running turn first (see the queue-hold
+    // suite); let the quiet window lapse so it gets dispatched.
+    const done = session.prompt(client.clientId, {
       sessionId: "sess_u",
       prompt: [{ type: "text", text: "hello" }],
     });
+    await vi.advanceTimersByTimeAsync(50_000);
+    await done;
 
     expect(session.inUnsolicitedTurn).toBe(false);
     const ended = updatesOfKind(sent, "turn_ended");
@@ -272,6 +277,149 @@ describe("unsolicited turn lifecycle", () => {
     const ended = updatesOfKind(sent, "turn_ended");
     expect(ended).toHaveLength(1);
     expect(hydraMeta(ended[0]!).reason).toBe("closed");
+  });
+});
+
+// Layer 2: while the agent is mid-way through a turn it started by itself,
+// promoting the next user prompt drops it onto a running agent. Hold it.
+describe("queue hold during an unsolicited turn", () => {
+  function queueEvents(
+    sent: JsonRpcMessage[],
+    method: string,
+  ): Array<Record<string, unknown>> {
+    return sent
+      .filter((m) => "method" in m && m.method === method)
+      .map((m) => (m as { params: Record<string, unknown> }).params);
+  }
+
+  // Queue notifications bypass recordAndBroadcast, so onBroadcast doesn't
+  // see them; capture them off the attached client's stream instead.
+  async function setup(): Promise<{
+    session: Session;
+    mock: ReturnType<typeof makeMockAgent>;
+    client: AttachedClient;
+    wire: JsonRpcMessage[];
+  }> {
+    const { session, mock } = makeSession();
+    const stream = makeControlledStream();
+    const client: AttachedClient = {
+      clientId: `c_${Math.random().toString(36).slice(2, 8)}`,
+      connection: new JsonRpcConnection(stream),
+    };
+    await session.attach(client, "none");
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+      stopReason: "end_turn",
+    });
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "first turn" }],
+    });
+    await settleDrain();
+    return { session, mock, client, wire: stream.sent };
+  }
+
+  it("holds a prompt until the agent goes quiet, then dispatches it", async () => {
+    const { session, mock, client, wire } = await setup();
+    vi.useFakeTimers();
+    agentChunk(mock);
+
+    const done = session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "held one" }],
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const held = queueEvents(wire, "hydra-acp/prompt_queue/held");
+    expect(held).toHaveLength(1);
+    expect(held[0]!.reason).toBe("agent_resumed");
+    // Still waiting: the agent hasn't been quiet long enough.
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
+
+    // A long thinking pause must not release: claude-acp forwards no
+    // thought chunks, so silence here is indistinguishable from finishing.
+    await vi.advanceTimersByTimeAsync(40_000);
+    agentChunk(mock, "back from thinking");
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    await done;
+    const released = queueEvents(wire, "hydra-acp/prompt_queue/released");
+    expect(released).toHaveLength(1);
+    expect(released[0]!.reason).toBe("quiet");
+  });
+
+  it("gives up and dispatches at the cap when the agent never stops", async () => {
+    const { session, mock, client, wire } = await setup();
+    vi.useFakeTimers();
+    agentChunk(mock);
+
+    const done = session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "held one" }],
+    });
+    // A chatty agent: never quiet for 20s, so only the cap can end this.
+    for (let i = 0; i < 20; i++) {
+      await vi.advanceTimersByTimeAsync(10_000);
+      agentChunk(mock, `chunk ${i}`);
+    }
+    await done;
+    const released = queueEvents(wire, "hydra-acp/prompt_queue/released");
+    expect(released).toHaveLength(1);
+    expect(released[0]!.reason).toBe("cap");
+    expect(released[0]!.heldMs as number).toBeGreaterThanOrEqual(180_000);
+  });
+
+  it("releases early when the turn closes on its own", async () => {
+    const { session, mock, client, wire } = await setup();
+    vi.useFakeTimers();
+    agentChunk(mock);
+    // Silence closes the unsolicited turn at 90s, but the quiet window is
+    // shorter, so this releases on quiet well before that.
+    const done = session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "held one" }],
+    });
+    await vi.advanceTimersByTimeAsync(50_000);
+    await done;
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")[0]!.reason)
+      .toBe("quiet");
+    expect(session.inUnsolicitedTurn).toBe(false);
+  });
+
+  it("does not hold when no unsolicited turn is open", async () => {
+    const { session, client, wire } = await setup();
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "ordinary" }],
+    });
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/held")).toHaveLength(0);
+  });
+
+  it("leaves a held prompt cancellable", async () => {
+    const { session, mock, client, wire } = await setup();
+    vi.useFakeTimers();
+    agentChunk(mock);
+
+    const done = session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "never mind" }],
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const held = queueEvents(wire, "hydra-acp/prompt_queue/held");
+    expect(held).toHaveLength(1);
+
+    // The entry is still in the queue while held, so a bored user can pull
+    // it back rather than being stuck watching a chip they can't touch.
+    const messageId = held[0]!.messageId as string;
+    expect(session.cancelQueuedPrompt(messageId)).toMatchObject({
+      cancelled: true,
+    });
+    // The hold notices promptly rather than sitting out the whole quiet
+    // window; otherwise the queue stays shut behind a dead entry.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(done).resolves.toMatchObject({ stopReason: "cancelled" });
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")[0]!.reason)
+      .toBe("cancelled");
   });
 });
 

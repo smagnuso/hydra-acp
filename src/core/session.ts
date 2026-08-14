@@ -415,6 +415,40 @@ const UNSOLICITED_TURN_IDLE_MS = 90_000;
 // Renders as a single header line, so anything longer is already unreadable.
 const BACKGROUND_TASK_LABEL_MAX = 120;
 
+// Queue hold (see holdForUnsolicitedTurn). While the agent is mid-way
+// through a turn it started by itself, promoting the next user prompt
+// drops it onto a running agent, which is what produces interleaved
+// answers and a prompt that never appears to finish.
+//
+// Two bounds, because we cannot see when the agent is done.
+//
+// QUIET is the optimistic "probably finished" call, deliberately shorter
+// than the 90s the turn itself needs to lapse, because 90s is far too long
+// to sit on a prompt the user just typed.
+//
+// It must nonetheless clear a *thinking* pause. claude-acp forwards no
+// thought chunks, so a model that stops to reason looks identical to one
+// that has finished. Measured inter-event gaps inside real unsolicited
+// turns run p95 12.7s / p99 38.8s, and the trace that motivated this work
+// has a 25s thinking gap right where the user's prompt landed, and a 20s
+// window would have released 5s early and reproduced the very collision
+// this exists to prevent. 45s clears the p99.
+//
+// CAP is a safety net against our own turn tracking wedging open, not a
+// "the agent is taking too long" timeout: an agent still streaming at the
+// cap genuinely is busy, and dispatching into it is the bad outcome we're
+// avoiding. Generous, and the entry stays cancellable throughout.
+const UNSOLICITED_HOLD_QUIET_MS = 45_000;
+const UNSOLICITED_HOLD_CAP_MS = 180_000;
+
+// Longest the hold sleeps before re-examining its exit conditions. The
+// deadlines above are computed exactly, so this only bounds how long we
+// stay parked after something *else* changes: a cancel, an amend, or the
+// turn closing. Without it the drain loop would sit on a 45s timer holding
+// the queue shut for an entry that was cancelled a moment after it started
+// waiting.
+const UNSOLICITED_HOLD_POLL_MS = 1_000;
+
 // Two flavors of queue entry share the same FIFO. User-prompt entries
 // are wire-visible (every transition fires a hydra-acp/prompt_queue_*
 // broadcast); internal entries (title regen, agent switch, import seed)
@@ -649,6 +683,10 @@ export class Session {
   // agent, a seed replay). Resets across a daemon restart, which only
   // costs detection until the session's next turn ends.
   private sawTurnComplete = false;
+  // Wall-clock of the last turn-content update the agent sent, whether or
+  // not a prompt was in flight. Drives the queue hold's quiet check, which
+  // needs "is the agent still talking" independent of whose turn it is.
+  private lastAgentActivityAt = 0;
   // Counts appends since the last compaction. When it hits compactEvery
   // we ask the history store to trim the file to the most recent
   // historyMaxEntries. Keeps file growth bounded without per-append
@@ -2774,15 +2812,20 @@ export class Session {
       return;
     }
     this.noteBackgroundTaskArming(envelope);
+    this.lastAgentActivityAt = Date.now();
+    if (this.unsolicitedTurn !== undefined) {
+      // Still going: push the silence deadline out. Deliberately ahead of
+      // the promptInFlight check: during a queue hold promptInFlight is
+      // set while the unsolicited turn is still the thing producing this
+      // output, and letting it lapse there would flip the session to idle
+      // mid-work and release the hold early.
+      this.armUnsolicitedTurnTimer();
+      return;
+    }
     if (this.promptInFlight || !this.sawTurnComplete) {
       return;
     }
-    if (this.unsolicitedTurn === undefined) {
-      this.openUnsolicitedTurn();
-      return;
-    }
-    // Still going: push the silence deadline out.
-    this.armUnsolicitedTurnTimer();
+    this.openUnsolicitedTurn();
   }
 
   // Harvest the background task an agent update announces, so an
@@ -2869,6 +2912,89 @@ export class Session {
       },
     });
     this.armUnsolicitedTurnTimer();
+  }
+
+  // Hold a user prompt at the head of the queue while the agent is mid-way
+  // through a turn it started by itself. Without this the prompt is
+  // dispatched onto a running agent: the agent queues it internally, its
+  // answer interleaves with the work already in flight, and the
+  // session/prompt response pairing can be lost entirely (observed: a
+  // prompt that stayed open for 12 minutes after it had already been
+  // answered).
+  //
+  // Called with the entry still IN promptQueue, deliberately, so a user
+  // who gets bored can still cancel it, and so an amend can still reorder
+  // around it. The caller re-reads the head after we return.
+  //
+  // Returns when the agent has been quiet for QUIET, or the turn closed, or
+  // we hit CAP, or the entry/session went away. Never rejects: a hold that
+  // goes wrong must not strand the queue.
+  private async holdForUnsolicitedTurn(
+    entry: UserPromptQueueEntry,
+  ): Promise<void> {
+    if (this.unsolicitedTurn === undefined) {
+      return;
+    }
+    const holdStartedAt = Date.now();
+    const cause = this.unsolicitedTurn.cause;
+    this.broadcastQueueNotification("hydra-acp/prompt_queue/held", {
+      sessionId: this.sessionId,
+      messageId: entry.messageId,
+      reason: "agent_resumed",
+      ...(cause ? { cause } : {}),
+      holdCapMs: UNSOLICITED_HOLD_CAP_MS,
+    });
+    let released: "quiet" | "cap" | "turn_ended" | "cancelled" | "closing" =
+      "quiet";
+    for (;;) {
+      if (this.closing || this.closed) {
+        released = "closing";
+        break;
+      }
+      if (entry.cancelled) {
+        released = "cancelled";
+        break;
+      }
+      if (this.unsolicitedTurn === undefined) {
+        released = "turn_ended";
+        break;
+      }
+      const now = Date.now();
+      const capLeft = UNSOLICITED_HOLD_CAP_MS - (now - holdStartedAt);
+      if (capLeft <= 0) {
+        released = "cap";
+        break;
+      }
+      const quietLeft = UNSOLICITED_HOLD_QUIET_MS -
+        (now - this.lastAgentActivityAt);
+      if (quietLeft <= 0) {
+        released = "quiet";
+        break;
+      }
+      // Agent output arriving meanwhile pushes lastAgentActivityAt out and
+      // the next pass recomputes from it, so the deadlines need no waking.
+      // The poll bound is what lets a cancel or a closing turn be noticed
+      // promptly instead of at the next deadline.
+      const nap = Math.min(capLeft, quietLeft, UNSOLICITED_HOLD_POLL_MS);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, nap);
+        if (typeof timer.unref === "function") {
+          timer.unref();
+        }
+      });
+    }
+    this.broadcastQueueNotification("hydra-acp/prompt_queue/released", {
+      sessionId: this.sessionId,
+      messageId: entry.messageId,
+      reason: released,
+      heldMs: Date.now() - holdStartedAt,
+    });
+    if (released === "cap") {
+      this.logger?.warn(
+        `session ${this.sessionId} dispatching a prompt into a still-running ` +
+          `agent turn after ${UNSOLICITED_HOLD_CAP_MS}ms; responses may interleave`,
+      );
+    }
   }
 
   private armUnsolicitedTurnTimer(): void {
@@ -7458,6 +7584,19 @@ export class Session {
         // for one ms and dead the next on any replaying client.
         if (this.closing) {
           break;
+        }
+        // The agent may be mid-way through a turn it started by itself, in
+        // which case promptInFlight says nothing about whether it's busy.
+        // Wait for it to settle before handing it another prompt. Peeked
+        // rather than shifted so the entry stays cancellable and
+        // reorderable while we wait; the shift below re-reads the head,
+        // which may be a different entry by then.
+        const head = this.promptQueue[0];
+        if (head?.kind === "user") {
+          await this.holdForUnsolicitedTurn(head);
+          if (this.closing) {
+            break;
+          }
         }
         const next = this.promptQueue.shift();
         if (!next) {
