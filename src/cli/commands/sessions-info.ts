@@ -48,6 +48,14 @@ interface SessionInfoData {
   // recover it when needed.
   upstreamSessionId?: string;
   title?: string;
+  // For an isolated session this is the WORKSPACE, which is where the
+  // agent actually runs.
+  //
+  // Workspace details are deliberately NOT surfaced here: this view is
+  // built from an export bundle, and a bundle is portable. Baking a
+  // machine-local workspace path into one would describe a directory
+  // that cannot exist on the machine importing it. `hydra session list`
+  // reads live daemon state and is where workspace state is shown.
   cwd: string;
   agentId: string;
   currentModel?: string;

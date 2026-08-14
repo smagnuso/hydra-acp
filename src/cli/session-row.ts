@@ -17,6 +17,16 @@ export interface SessionSummary {
   sessionId: string;
   upstreamSessionId?: string;
   cwd: string;
+  // Present when the session runs in an isolated workspace. The CWD cell
+  // renders `sourceCwd` in that case, because the raw workspace path is
+  // a hash directory under ~/.hydra-acp that tells a reader nothing
+  // about which project the session belongs to.
+  workspace?: { sourceCwd: string; label: string };
+  // Set when isolation was requested and fell back to the source tree.
+  // Rendered as a marker because the silent version of this is the
+  // failure worth catching: a session that looks ordinary while editing
+  // the real checkout.
+  workspaceError?: string;
   agentId?: string;
   // Last-known model id. Rendered (provider-prefix stripped) in the
   // optional MODEL column; the AGENT cell deliberately omits it to stay
@@ -182,6 +192,30 @@ export function parseColumns(raw: string): ColumnKey[] {
   return out;
 }
 
+/**
+ * CWD cell, which has to answer "which project is this session working
+ * on" rather than "what is its literal working directory".
+ *
+ * For an isolated session those differ: the literal cwd is a hash
+ * directory under ~/.hydra-acp that says nothing about the project, so a
+ * column full of them would hide exactly the grouping the reader wants.
+ * Render the source tree plus a workspace marker instead.
+ *
+ * The `!` case matters most. Isolation fails open by default, so a
+ * caller can ask for a workspace, not get one, and be editing the real
+ * checkout while everything looks normal. That is the one state worth
+ * spending column width on.
+ */
+export function formatCwdCell(s: SessionSummary): string {
+  if (s.workspace !== undefined) {
+    return `${shortenHomePath(s.workspace.sourceCwd)} ⧉${s.workspace.label}`;
+  }
+  if (s.workspaceError !== undefined) {
+    return `${shortenHomePath(s.cwd)} !not-isolated`;
+  }
+  return shortenHomePath(s.cwd);
+}
+
 export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
@@ -198,7 +232,11 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     model: shortenModel(s.currentModel) ?? "-",
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
-    cwd: shortenHomePath(s.cwd),
+    // Isolated sessions show the PROJECT with a workspace marker, not
+    // the workspace path. Grouping by what the reader recognizes is the
+    // point: a column full of `~/.hydra-acp/workspaces/<hash>/...` rows
+    // hides which repo each session is actually working on.
+    cwd: formatCwdCell(s),
     cost: formatCostCell(s.currentUsage),
   };
 }

@@ -54,6 +54,11 @@ export async function runSessionsList(
       sessionId: string;
       upstreamSessionId?: string;
       cwd: string;
+      // Isolated sessions: `cwd` above is the workspace, so the CWD cell
+      // renders sourceCwd from here instead. workspaceError is live-only
+      // and marks the fail-open case.
+      workspace?: { sourceCwd: string; label: string };
+      workspaceError?: string;
       agentId?: string;
       currentModel?: string;
       currentUsage?: {
