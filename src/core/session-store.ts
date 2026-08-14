@@ -80,6 +80,25 @@ export type PersistedOriginatingClient = z.infer<
   typeof PersistedOriginatingClient
 >;
 
+// An isolated workspace bound to a session. Mirrors the Workspace shape
+// in core/workspace/provider.ts, kept as its own zod schema here so the
+// persistence layer does not depend on the provider module and so an
+// unknown provider's record still round-trips.
+export const PersistedWorkspace = z.object({
+  /** Absolute path. Equals the record's `cwd` while the binding is live. */
+  path: z.string(),
+  /** Absolute path of the tree this was derived from. */
+  sourceCwd: z.string(),
+  label: z.string(),
+  /** Provider kind ("git", "copy", ...). */
+  provider: z.string(),
+  /** Opaque provider-issued token. Never parse this. */
+  snapshot: z.string().optional(),
+  /** Provider-specific display detail; absent for providers without one. */
+  vcs: z.record(z.string(), z.string()).optional(),
+});
+export type PersistedWorkspace = z.infer<typeof PersistedWorkspace>;
+
 // Breadcrumb written to meta.json immediately after a compaction swap
 // completes. Allows rollback to the pre-swap upstream session while the
 // window is still safe (no new turns since the swap). Cleared on:
@@ -254,6 +273,25 @@ export const SessionRecord = z.object({
   // _meta["hydra-acp"].env map. Stored here so resurrect after a
   // daemon restart restores the same spawn-env.
   forwardedEnv: z.record(z.string(), z.string()).optional(),
+  // Set when this session runs in an isolated workspace rather than
+  // directly in the directory the caller named. `cwd` above is then the
+  // WORKSPACE path (the session's real working directory, which is what
+  // the ACP field means and what the agent is actually spawned in), and
+  // `workspace.sourceCwd` is the tree it was derived from.
+  //
+  // sourceCwd is not decoration. A workspace lives outside its source
+  // tree, so the two share no path prefix and NOTHING may relate them by
+  // prefix matching. This recorded edge is the only link, and both
+  // session-list cwd filtering and per-directory cost attribution depend
+  // on it. `snapshot` is provider-issued and OPAQUE: never parsed, never
+  // assumed to be a sha. `vcs` is provider-specific display detail that
+  // readers must tolerate being absent (a copy-provider workspace has no
+  // branch).
+  //
+  // Persisted so a cold resurrect after a daemon restart puts the agent
+  // back in the same workspace instead of silently falling back to the
+  // source tree, which would leak edits into the user's checkout.
+  workspace: PersistedWorkspace.optional(),
   // Per-session attention flags persisted to meta.json so cold-resurrected
   // sessions surface the correct awaitingInput state without depending on
   // history replay. Reconciled from disk on every load.
@@ -422,6 +460,7 @@ export function recordFromMemorySession(args: {
   interactive?: boolean;
   priority?: number;
   forwardedEnv?: Record<string, string>;
+  workspace?: PersistedWorkspace;
   compactionState?: CompactionState;
   rollbackBreadcrumb?: RollbackBreadcrumb;
   upstreamGenerations?: UpstreamGeneration[];
@@ -478,6 +517,7 @@ export function recordFromMemorySession(args: {
     interactive: args.interactive,
     priority: args.priority,
     forwardedEnv: args.forwardedEnv,
+    workspace: args.workspace,
       attentionFlags: args.attentionFlags ?? [],
     extensionState: args.extensionState ?? {},
     createdAt,

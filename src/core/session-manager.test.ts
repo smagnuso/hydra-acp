@@ -16,6 +16,7 @@ import {
   effectiveInteractive,
   mergeForPersistence,
   appendUpstreamGeneration,
+  matchesCwdFilter,
 } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import type { SessionRecord } from "./session-store.js";
@@ -4549,4 +4550,59 @@ describe("appendUpstreamGeneration", () => {
 afterAll(() => {
   rmSync(WORK_CWD, { recursive: true, force: true });
   rmSync(W_CWD, { recursive: true, force: true });
+});
+
+describe("matchesCwdFilter", () => {
+  const plain = { cwd: "/home/u/proj" };
+  const isolated = {
+    // An isolated session's cwd is its workspace, which lives OUTSIDE
+    // the source tree and shares no path prefix with it.
+    cwd: "/home/u/.hydra-acp/workspaces/ab12/feature",
+    workspace: { sourceCwd: "/home/u/proj" },
+  };
+
+  it("returns everything when no filter is given", () => {
+    expect(matchesCwdFilter(undefined, plain)).toBe(true);
+    expect(matchesCwdFilter(undefined, isolated)).toBe(true);
+    expect(matchesCwdFilter("", isolated)).toBe(true);
+  });
+
+  it("matches a plain session by its own cwd", () => {
+    expect(matchesCwdFilter("/home/u/proj", plain)).toBe(true);
+    expect(matchesCwdFilter("/home/u/other", plain)).toBe(false);
+  });
+
+  it("finds an isolated session by the tree it derives from", () => {
+    // The regression that matters. Without this, asking "what is running
+    // in /home/u/proj" reports nothing while N agents are editing it.
+    expect(matchesCwdFilter("/home/u/proj", isolated)).toBe(true);
+  });
+
+  it("matches an isolated session by its workspace path too", () => {
+    expect(matchesCwdFilter("/home/u/.hydra-acp/workspaces/ab12/feature", isolated)).toBe(true);
+  });
+
+  it("is asymmetric: a workspace query does not return the repo's other sessions", () => {
+    expect(matchesCwdFilter("/home/u/.hydra-acp/workspaces/ab12/feature", plain)).toBe(false);
+  });
+
+  it("does not match by path prefix", () => {
+    // Guards the design decision that workspaces live outside the repo.
+    // A prefix implementation would both miss real matches and invent
+    // false ones; assert the false-positive direction explicitly.
+    expect(matchesCwdFilter("/home/u", plain)).toBe(false);
+    expect(matchesCwdFilter("/home/u", isolated)).toBe(false);
+    expect(matchesCwdFilter("/home/u/pro", plain)).toBe(false);
+  });
+
+  it("tolerates a trailing separator on the query", () => {
+    // A near-miss returns an empty list, which reads exactly like
+    // "nothing is running here".
+    expect(matchesCwdFilter("/home/u/proj/", plain)).toBe(true);
+    expect(matchesCwdFilter("/home/u/proj/", isolated)).toBe(true);
+  });
+
+  it("does not treat a workspace-less session as derived from anywhere", () => {
+    expect(matchesCwdFilter("/anything", { cwd: "/x", workspace: undefined })).toBe(false);
+  });
 });

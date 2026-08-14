@@ -67,7 +67,7 @@ import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
-import type { RollbackBreadcrumb } from "./session-store.js";
+import type { PersistedWorkspace, RollbackBreadcrumb } from "./session-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import { AttentionFlag, AttentionFlagSchema } from "../acp/types-attention.js";
 import {
@@ -282,6 +282,10 @@ export interface SessionInit {
   // a fresh session/attach with _meta["hydra-acp"].env replace this
   // wholesale (including an explicit empty map to clear).
   forwardedEnv?: Record<string, string>;
+  // Isolated-workspace binding, when the session has one. `cwd` above
+  // must already be workspace.path; SessionManager resolves that before
+  // constructing the Session.
+  workspace?: PersistedWorkspace;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -432,6 +436,9 @@ type QueueEntry = UserPromptQueueEntry | InternalQueueEntry;
 
 export class Session {
   readonly sessionId: string;
+  // The session's REAL working directory, and what every spawn path uses.
+  // For an isolated session this is the workspace path, not the directory
+  // the caller named at session/new; see `workspace` below.
   readonly cwd: string;
   // agent / agentId / upstreamSessionId are mutable so /hydra agent can
   // replace the underlying agent process while keeping the same Session
@@ -665,6 +672,18 @@ export class Session {
   // spawn, and by SessionManager.mergeForPersistence to round-trip
   // through meta.json.
   forwardedEnv: Record<string, string> | undefined;
+  // Set when this session runs in an isolated workspace. Metadata only:
+  // deliberately NOT threaded into any spawn path, because `cwd` above is
+  // already the workspace path, so respawn, cold resurrect, and
+  // replacement spawns all land in the right place with no extra
+  // plumbing. Anyone tempted to pass this to the spawner should check
+  // that invariant first rather than adding a second source of truth.
+  //
+  // Read by SessionManager for the session-list cwd filter (a session
+  // must be findable by the tree it derives from, not only by where it
+  // physically runs) and for the `_meta["hydra-acp"].workspace`
+  // projection.
+  readonly workspace: PersistedWorkspace | undefined;
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
@@ -853,6 +872,7 @@ export class Session {
     this.sessionId =
       init.sessionId ?? `${HYDRA_SESSION_PREFIX}${generateHydraId()}`;
     this.cwd = init.cwd;
+    this.workspace = init.workspace;
     this.agentId = init.agentId;
     this.agent = init.agent;
     this.upstreamSessionId = init.upstreamSessionId;

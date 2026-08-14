@@ -33,10 +33,13 @@ import {
   type PersistedAgentMode,
   type PersistedAgentModel,
   type PersistedUsage,
+  type PersistedWorkspace,
   type RollbackBreadcrumb,
   type UpstreamGeneration,
   type SessionRecord,
 } from "./session-store.js";
+import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
+import { asSnapshotId } from "./workspace/provider.js";
 import {
   TombstoneStore,
   shouldResurrectFromUpstream,
@@ -126,6 +129,11 @@ export interface CreateSessionParams {
   // cold-resurrect. An explicit empty map `{}` clears any persisted
   // value (overwrite semantics, not merge).
   forwardedEnv?: Record<string, string>;
+  // Request an isolated workspace instead of running directly in `cwd`.
+  // Arrives from _meta["hydra-acp"].workspace on session/new. When it
+  // succeeds, `cwd` above is treated as the SOURCE tree and the session's
+  // effective cwd becomes the workspace path.
+  workspace?: WorkspaceRequest;
   // Caller-supplied callback to mint a FRESH per-session mcpServers
   // config for a new agent process spawned mid-life (compaction swap).
   // Wired by the daemon layer (acp-ws / REST routes) which owns the
@@ -138,12 +146,53 @@ export interface CreateSessionParams {
   mintMcpServersForSwap?: (session: import("./session.js").Session) => Promise<unknown[]>;
 }
 
+/**
+ * Caller's request for an isolated workspace, as it arrives on
+ * `_meta["hydra-acp"].workspace`.
+ */
+export interface WorkspaceRequest {
+  /** Human-meaningful name; a filesystem-safe form appears in the path. */
+  label?: string;
+  /**
+   * Opaque provider-issued snapshot to derive from. Omit for "current
+   * state of cwd". Never construct one: it is only ever a token a
+   * provider handed out earlier.
+   */
+  from?: string;
+  /**
+   * When true, a failure to isolate fails session creation instead of
+   * falling back to the source tree.
+   *
+   * The default (false) is fail-open, which is right for an interactive
+   * session: a broken setup should not stop you working. But a caller
+   * running N agents against one tree needs the opposite, because a
+   * silent fallback puts them all back in the same directory, which is
+   * the failure isolation exists to prevent, arrived at quietly.
+   */
+  required?: boolean;
+  /** Provider kind. Defaults to git; see workspace/registry.ts. */
+  provider?: string;
+}
+
+/** Outcome of resolving a WorkspaceRequest, before the agent is spawned. */
+interface ResolvedWorkspace {
+  /** Effective cwd for the agent: the workspace when isolated, else the source. */
+  cwd: string;
+  workspace?: PersistedWorkspace;
+  /** Set when isolation was requested but failed and we fell back. */
+  isolationError?: string;
+}
+
 export interface ResurrectParams {
   hydraSessionId: string;
   upstreamSessionId: string;
   agentId: string;
   cwd: string;
   title?: string;
+  // Isolated-workspace binding restored from the record. `cwd` above is
+  // already the workspace path; this carries the source-tree edge that
+  // cwd alone cannot express.
+  workspace?: PersistedWorkspace;
   // Persisted synopsis + offset, restored onto the live Session so
   // subsequent regens can no-op when history hasn't grown.
   synopsis?: SessionSynopsis;
@@ -619,6 +668,83 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Turn a WorkspaceRequest into the cwd the agent should actually run in.
+   *
+   * Must run BEFORE bootstrapAgent, because the agent process's working
+   * directory is fixed at exec: isolating after the spawn would leave the
+   * agent in the source tree with a workspace nobody is using.
+   *
+   * On failure this falls back to the source tree and records the reason,
+   * unless the caller marked isolation `required`. Non-repository
+   * directories, repositories with no commits, and a missing git binary
+   * are all expected fail-open cases rather than errors.
+   *
+   * Note on crash-window ordering: the design called for writing the
+   * session record before creating the workspace, so a crash could not
+   * strand an unfindable directory. That is unnecessary here because
+   * workspaces live under a deterministic per-source root and the
+   * provider can enumerate them (listWorkspaces), so an orphan is
+   * discoverable by reconciliation without a prior record. A record
+   * written first would only add the owning session id, which an
+   * ownerless orphan does not need.
+   */
+  private async resolveWorkspace(params: CreateSessionParams): Promise<ResolvedWorkspace> {
+    const request = params.workspace;
+    if (request === undefined) {
+      return { cwd: params.cwd };
+    }
+    const provider = getWorkspaceProvider(request.provider);
+    if (provider === undefined) {
+      const reason = `unknown workspace provider "${request.provider}"`;
+      if (request.required === true) {
+        throw new Error(`isolation required but unavailable: ${reason}`);
+      }
+      this.logger?.warn?.(`session workspace: ${reason}; running in ${params.cwd}`);
+      return { cwd: params.cwd, isolationError: reason };
+    }
+
+    const label = request.label ?? `s-${generateRawSessionId().slice(0, 8)}`;
+    const created = await provider
+      .createWorkspace({
+        sourceCwd: params.cwd,
+        label,
+        ...(request.from !== undefined ? { from: asSnapshotId(request.from) } : {}),
+      })
+      .catch((err: unknown) => ({ ok: false as const, reason: String(err) }));
+
+    if (!created.ok) {
+      if (request.required === true) {
+        throw new Error(`isolation required but unavailable: ${created.reason}`);
+      }
+      this.logger?.warn?.(
+        `session workspace: ${created.reason}; falling back to ${params.cwd} (unisolated)`,
+      );
+      return { cwd: params.cwd, isolationError: created.reason };
+    }
+
+    const ws = created.workspace;
+    // Lock while the session is live so a concurrent prune (ours,
+    // another client's, or a human's) cannot remove a checkout somebody
+    // is working in. Best-effort: a provider without locking still gets
+    // a usable workspace.
+    if (provider.capabilities().locking) {
+      await provider.lock(ws, `session ${params.title ?? "live"}`).catch(() => undefined);
+    }
+
+    return {
+      cwd: ws.path,
+      workspace: {
+        path: ws.path,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        provider: ws.provider,
+        ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+        ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+      },
+    };
+  }
+
   async create(params: CreateSessionParams): Promise<Session> {
     // Canonicalize the caller-supplied agentId to the registry's id
     // (e.g. "claude-agent-acp" from a shim → "claude-acp", "claude"
@@ -636,9 +762,16 @@ export class SessionManager {
     // "tell the agent which session it is" only works if we already
     // know. Session accepts the id and skips its own generation.
     const sessionId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
+    // Resolve isolation before the spawn: a process's working directory
+    // is fixed at exec. `effectiveCwd` is the workspace when isolated and
+    // the caller's cwd otherwise, and it is what BOTH the agent process
+    // and the Session must use, so that respawn and cold resurrect land
+    // in the same place with no extra plumbing.
+    const resolved = await this.resolveWorkspace(params);
+    const effectiveCwd = resolved.cwd;
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
-      cwd: params.cwd,
+      cwd: effectiveCwd,
       agentArgs: params.agentArgs,
       mcpServers: params.mcpServers,
       model: params.model,
@@ -677,7 +810,8 @@ export class SessionManager {
     }
     const session: Session = new Session({
       sessionId,
-      cwd: params.cwd,
+      cwd: effectiveCwd,
+      ...(resolved.workspace !== undefined ? { workspace: resolved.workspace } : {}),
       agentId: params.agentId,
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
@@ -957,6 +1091,7 @@ export class SessionManager {
     const session: Session = new Session({
       sessionId: params.hydraSessionId,
       cwd: params.cwd,
+      ...(params.workspace !== undefined ? { workspace: params.workspace } : {}),
       agentId: params.agentId,
       agent,
       upstreamSessionId: params.upstreamSessionId,
@@ -1048,7 +1183,8 @@ export class SessionManager {
     // this machine when pulling in a session from another user. Fall
     // back to defaultCwd so the spawn doesn't fail with ENOENT; the merge-
     // write in attachManagerHooks persists the resolved cwd.
-    const cwd = await this.resolveResurrectCwd(params.cwd);
+    const resolvedTarget = await this.resolveResurrectTarget(params.cwd, params.workspace);
+    const cwd = resolvedTarget.cwd;
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
       cwd,
@@ -1085,6 +1221,13 @@ export class SessionManager {
     const session: Session = new Session({
       sessionId: params.hydraSessionId,
       cwd,
+      // Carry the RESOLVED binding, not the recorded one: recovery may
+      // have rebuilt the workspace elsewhere, or given up entirely (in
+      // which case this is undefined and the session is honestly no
+      // longer isolated).
+      ...(resolvedTarget.workspace !== undefined
+        ? { workspace: resolvedTarget.workspace }
+        : {}),
       agentId: params.agentId,
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
@@ -1234,11 +1377,105 @@ export class SessionManager {
   // otherwise fall back to the configured defaultCwd. Covers both bundles
   // imported from another machine and local sessions (e.g. `cat`) whose
   // recorded dir was cleaned up, so the reseed spawn never ENOENTs.
-  private async resolveResurrectCwd(cwd: string): Promise<string> {
+  //
+  // For an ISOLATED session the recorded cwd is its workspace, which is a
+  // deletable directory, so this path is reached routinely rather than
+  // rarely. Falling straight through to defaultCwd (`~`) would resurrect
+  // an agent in the user's home directory carrying a history full of
+  // edits it believes it made to a project: useless, and pointed at a
+  // bad place to keep working. The ladder below is what makes such a
+  // session recoverable at all.
+  private async resolveResurrectTarget(
+    cwd: string,
+    workspace?: PersistedWorkspace,
+  ): Promise<{ cwd: string; workspace?: PersistedWorkspace }> {
     if (await this.dirExists(cwd)) {
-      return cwd;
+      return workspace !== undefined ? { cwd, workspace } : { cwd };
     }
-    return expandHome(this.defaultCwd);
+    if (workspace !== undefined) {
+      const recovered = await this.recoverWorkspace(workspace);
+      if (recovered !== undefined) {
+        return { cwd: recovered.path, workspace: recovered };
+      }
+    }
+    // Nothing recoverable. Drop the binding rather than carry a record
+    // pointing at a directory that no longer exists: a session sitting in
+    // defaultCwd is not isolated, and saying otherwise would make it
+    // filterable by a source tree it can no longer affect.
+    return { cwd: expandHome(this.defaultCwd) };
+  }
+
+  /**
+   * Recover a vanished workspace, preferring the option that keeps the
+   * session's work:
+   *
+   *   1. Rematerialize from provider-retained state. For git the branch
+   *      outlives `worktree remove`, so every COMMITTED change comes back
+   *      intact; only uncommitted edits were lost with the directory.
+   *   2. Otherwise a fresh workspace from the same source tree. The
+   *      conversation survives, the files do not, and isolation is still
+   *      honored (which matters: the session was isolated deliberately,
+   *      so silently reseeding it into the user's checkout would defeat
+   *      the choice at the worst possible moment).
+   *
+   * Returns undefined if neither works, leaving the caller's defaultCwd
+   * fallback as the last resort.
+   */
+  private async recoverWorkspace(
+    workspace: PersistedWorkspace,
+  ): Promise<PersistedWorkspace | undefined> {
+    const provider = getWorkspaceProvider(workspace.provider);
+    if (provider === undefined) {
+      return undefined;
+    }
+    const asWorkspace = {
+      path: workspace.path,
+      sourceCwd: workspace.sourceCwd,
+      label: workspace.label,
+      provider: workspace.provider,
+      ...(workspace.snapshot !== undefined
+        ? { snapshot: asSnapshotId(workspace.snapshot) }
+        : {}),
+      ...(workspace.vcs !== undefined ? { vcs: workspace.vcs } : {}),
+    };
+
+    if (provider.capabilities().supports.rematerialize) {
+      const restored = await provider
+        .rematerialize(asWorkspace)
+        .catch((err: unknown) => ({ ok: false as const, reason: String(err) }));
+      if (restored.ok) {
+        this.logger?.info?.(
+          `session workspace: restored ${restored.workspace.path} from retained state`,
+        );
+        return { ...workspace, path: restored.workspace.path };
+      }
+      this.logger?.warn?.(`session workspace: could not restore: ${restored.reason}`);
+    }
+
+    if (!(await this.dirExists(workspace.sourceCwd))) {
+      return undefined;
+    }
+    const fresh = await provider
+      .createWorkspace({ sourceCwd: workspace.sourceCwd, label: `${workspace.label}-r` })
+      .catch((err: unknown) => ({ ok: false as const, reason: String(err) }));
+    if (fresh.ok) {
+      this.logger?.warn?.(
+        `session workspace: ${workspace.path} is gone and could not be restored; ` +
+          `resurrecting in a fresh workspace ${fresh.workspace.path} from ${workspace.sourceCwd}. ` +
+          `Uncommitted work from the old workspace is not recoverable.`,
+      );
+      return {
+        path: fresh.workspace.path,
+        sourceCwd: fresh.workspace.sourceCwd,
+        label: fresh.workspace.label,
+        provider: fresh.workspace.provider,
+        ...(fresh.workspace.snapshot !== undefined
+          ? { snapshot: fresh.workspace.snapshot }
+          : {}),
+        ...(fresh.workspace.vcs !== undefined ? { vcs: { ...fresh.workspace.vcs } } : {}),
+      };
+    }
+    return undefined;
   }
 
   // Pull every session the agent itself remembers (across all cwds) and
@@ -2149,6 +2386,12 @@ export class SessionManager {
       forkedFromMessageId: record.forkedFromMessageId,
       forkSynthesisState: record.forkSynthesisState,
       forwardedEnv: record.forwardedEnv,
+      // `cwd` above is already the workspace path, so the agent respawns
+      // in the right directory without this. Restoring the binding is
+      // what keeps the resurrected session FINDABLE by its source tree:
+      // without it, session-list filtering by the repo silently stops
+      // matching this session the moment the daemon restarts.
+      workspace: record.workspace,
       compactionState: record.compactionState,
       attentionFlags: record.attentionFlags?.filter(
         (f: import("../acp/types-attention.js").AttentionFlag) =>
@@ -2449,7 +2692,7 @@ export class SessionManager {
     // historyStatus loop was the dominant cost when the picker opened
     // against a directory with hundreds of cold sessions.
     const liveSessions = [...this.sessions.values()].filter(
-      (s) => !filter.cwd || s.cwd === filter.cwd,
+      (s) => matchesCwdFilter(filter.cwd, s),
     );
     // status=cold still needs the live IDS — they're what excludes a live
     // session's record from the cold set — but none of the per-session
@@ -2517,7 +2760,7 @@ export class SessionManager {
       throw err;
     });
     const coldRecords = records.filter(
-      (r) => !liveIds.has(r.sessionId) && (!filter.cwd || r.cwd === filter.cwd),
+      (r) => !liveIds.has(r.sessionId) && matchesCwdFilter(filter.cwd, r),
     );
     const coldStats = await Promise.all(
       coldRecords.map((r) => historyStatus(r.sessionId)),
@@ -3825,6 +4068,50 @@ function isSynopsisSession(cwd: string, sandboxDir: string): boolean {
 // (from attachManagerHooks / resurrect / create) will clobber it.
 // Adding a new persisted field? Add it here AND to the regression
 // tests in session-manager.test.ts.
+/**
+ * Does a session belong to the tree the caller asked about?
+ *
+ * Matches the session's effective cwd OR, for an isolated session, the
+ * source tree it was derived from. Both arms are required, and the second
+ * one is the whole point: an isolated session's cwd is its WORKSPACE, so
+ * without the sourceCwd arm, filtering by a repository returns none of
+ * its isolated sessions. That inverts the query's purpose, since the
+ * sessions most worth knowing about (someone else is editing this tree
+ * right now) become exactly the ones it cannot see.
+ *
+ * The result is deliberately asymmetric:
+ *
+ *   cwd=<repo>       matches plain sessions there AND workspaces from it
+ *   cwd=<workspace>  matches only that workspace
+ *
+ * MUST NOT be implemented as a path-prefix test. Workspaces live outside
+ * their source tree and share no prefix with it, so `startsWith` finds
+ * nothing; the recorded derivation edge is the only link.
+ *
+ * Trailing separators are tolerated on the query because a near-miss here
+ * returns an empty list, which reads identically to "nothing is running"
+ * — the exact wrong conclusion. Symlink resolution is NOT done: it needs
+ * async IO on a hot path, and callers already pass resolved paths.
+ */
+export function matchesCwdFilter(
+  want: string | undefined,
+  session: { cwd: string; workspace?: { sourceCwd: string } | undefined },
+): boolean {
+  if (want === undefined || want.length === 0) {
+    return true;
+  }
+  const target = stripTrailingSep(want);
+  if (stripTrailingSep(session.cwd) === target) {
+    return true;
+  }
+  const source = session.workspace?.sourceCwd;
+  return source !== undefined && stripTrailingSep(source) === target;
+}
+
+function stripTrailingSep(p: string): string {
+  return p.length > 1 && p.endsWith("/") ? p.replace(/\/+$/, "") : p;
+}
+
 export function mergeForPersistence(
   session: Session,
   existing: SessionRecord | undefined,
@@ -3915,6 +4202,19 @@ export function mergeForPersistence(
     // matters if the Session somehow has no field at all — shouldn't
     // happen, but keeps round-trip safe for old records.
    forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
+    // The live Session is AUTHORITATIVE here, deliberately unlike
+    // forwardedEnv above: no `?? existing?.workspace` fallback.
+    //
+    // Every construction path sets this explicitly from the right source
+    // (create from the resolver, resurrect from the record, import-reseed
+    // from the recovery ladder). An absent value therefore means "this
+    // session is not isolated", which is a real outcome: when a workspace
+    // is deleted and cannot be rebuilt, recovery drops the binding and
+    // the session resurrects unisolated. Reading the old binding back
+    // from disk at that moment would re-attach a session to a directory
+    // that no longer exists, and keep it filterable by a source tree it
+    // can no longer affect.
+    workspace: session.workspace,
     attentionFlags: session.listAttentionFlags(),
     // Preserve extension_state from the on-disk record. The live Session
     // doesn't hold this — extensions read/write it via the daemon RPCs

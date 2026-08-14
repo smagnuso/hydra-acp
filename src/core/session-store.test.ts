@@ -190,4 +190,84 @@ describe("SessionStore", () => {
     const r = await store.read("hydra_session_empty_flag");
     expect(r?.attentionFlags).toEqual([]);
   });
+
+  it("round-trips an isolated session's workspace binding", async () => {
+    const store = new SessionStore();
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_ws",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        // cwd is the WORKSPACE, not the source tree: it is where the
+        // agent actually runs.
+        cwd: "/home/u/.hydra-acp/workspaces/ab12/feature",
+        workspace: {
+          path: "/home/u/.hydra-acp/workspaces/ab12/feature",
+          sourceCwd: "/home/u/proj",
+          label: "feature",
+          provider: "git",
+          snapshot: "0e78d0d",
+          vcs: { kind: "git", branch: "hydra/feature" },
+        },
+      }),
+    );
+    const r = await store.read("hydra_session_ws");
+    expect(r?.workspace?.sourceCwd).toBe("/home/u/proj");
+    expect(r?.workspace?.path).toBe(r?.cwd);
+    expect(r?.workspace?.provider).toBe("git");
+    // The recorded edge is the ONLY link between the two: a workspace
+    // lives outside its source, so they share no path prefix and nothing
+    // may relate them by prefix matching.
+    expect(r?.cwd.startsWith("/home/u/proj/")).toBe(false);
+  });
+
+  it("loads a pre-workspace record unchanged, so no migration is needed", async () => {
+    // The field is optional, which is the entire migration story. A
+    // meta.json written before workspaces existed must still parse, or
+    // every existing session on disk breaks on upgrade.
+    const store = new SessionStore();
+    const dir = path.join(tmpHome, "sessions", "hydra_session_legacy");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify({
+        version: 1,
+        sessionId: "hydra_session_legacy",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/work",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const r = await store.read("hydra_session_legacy");
+    expect(r?.sessionId).toBe("hydra_session_legacy");
+    expect(r?.workspace).toBeUndefined();
+  });
+
+  it("keeps an unknown provider's workspace record intact", async () => {
+    // Providers are pluggable, so the store must not assume it knows
+    // every kind. A perforce/svn/whatever record has to survive a
+    // read-modify-write by a daemon that has never heard of it.
+    const store = new SessionStore();
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_future",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/somewhere/else",
+        workspace: {
+          path: "/somewhere/else",
+          sourceCwd: "/depot/proj",
+          label: "cl-4471",
+          provider: "perforce",
+          snapshot: "4471",
+        },
+      }),
+    );
+    const r = await store.read("hydra_session_future");
+    expect(r?.workspace?.provider).toBe("perforce");
+    expect(r?.workspace?.snapshot).toBe("4471");
+    expect(r?.workspace?.vcs).toBeUndefined();
+  });
 });

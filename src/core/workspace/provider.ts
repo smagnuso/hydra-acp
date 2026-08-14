@@ -1,0 +1,203 @@
+// Isolation-provider contract: an abstract way to give a session its own
+// materialization of a project's files.
+//
+// Git is ONE implementation, not the design. The daemon must be able to
+// isolate sessions on a project that uses Perforce, SVN, or jj, and on a
+// directory that is not under version control at all, so nothing in this
+// file may name a git concept. Two implementations ship together
+// (git-provider.ts and copy-provider.ts) specifically so the abstraction
+// is exercised by something unlike git from the start: an interface with
+// a single implementation is a guess.
+//
+// Vocabulary, and what it maps to:
+//
+//   Workspace   git worktree   |  Perforce client  |  a copied directory
+//   Snapshot    commit sha     |  changelist       |  a stored copy id
+//   Integrate   merge          |  integrate        |  3-way file merge
+//
+// Snapshot ids are OPAQUE. They are branded strings so the type system
+// refuses code that builds one from a literal or picks it apart. Any
+// caller that parses a snapshot id, assumes hex, assumes a length, or
+// assumes ordering has broken the abstraction and will break the moment
+// a non-git provider is selected.
+//
+// Errors: expected, recoverable conditions ("not a repository", "git is
+// not installed") come back as { ok: false, reason } so the caller can
+// decide whether to fail open. Genuinely unexpected IO errors still
+// throw. This mirrors readJsonSafe/writeJsonAtomic in json-store.ts and
+// the CwdValidation shape in cwd.ts.
+
+import * as path from "node:path";
+import { createHash } from "node:crypto";
+import { hydraHome } from "../paths.js";
+
+declare const snapshotBrand: unique symbol;
+
+/**
+ * An opaque, provider-issued token naming a recorded state. Never
+ * construct one from a literal; never parse one. Cross the deserialization
+ * boundary with asSnapshotId().
+ */
+export type SnapshotId = string & { readonly [snapshotBrand]: true };
+
+/**
+ * Re-brand a string read back from persistence or the wire. This is the
+ * ONLY sanctioned way to mint a SnapshotId outside a provider, and it
+ * deliberately looks noisy at call sites so it stays rare.
+ */
+export function asSnapshotId(raw: string): SnapshotId {
+  return raw as SnapshotId;
+}
+
+export interface Workspace {
+  /** Absolute path. Becomes the session's effective cwd. */
+  readonly path: string;
+  /** Absolute path of the tree this was derived from. */
+  readonly sourceCwd: string;
+  readonly label: string;
+  /** Provider kind that owns this workspace ("git", "copy", ...). */
+  readonly provider: string;
+  /** State it was created from, when the provider records one. */
+  readonly snapshot?: SnapshotId;
+  /**
+   * Provider-specific display detail (git puts branch/base here). Readers
+   * MUST tolerate absence: a copy provider emits nothing, and a client
+   * that depends on this is a client that breaks on the second provider.
+   */
+  readonly vcs?: Readonly<Record<string, string>>;
+}
+
+/**
+ * What a provider can actually do, so callers negotiate up front instead
+ * of discovering a gap at the moment they need it. Without this the
+ * contract collapses to the lowest common denominator and every provider
+ * has to pretend it can do everything.
+ */
+export interface Capabilities {
+  /** False when each workspace costs a full fetch or sync rather than sharing a local store. */
+  readonly cheapWorkspaces: boolean;
+  /** True when a recording made in one workspace is visible to others locally. */
+  readonly sharedHistory: boolean;
+  /** True when a dirty tree can be captured without modifying the user's files. */
+  readonly nonMutatingCapture: boolean;
+  /** True when a failed integrate names the conflicting paths rather than just failing. */
+  readonly conflictReporting: boolean;
+  readonly locking: boolean;
+  readonly requiresServer: boolean;
+  /** Operations beyond the always-present create/remove/list/status. */
+  readonly supports: {
+    readonly record: boolean;
+    readonly integrate: boolean;
+    readonly captureWorkingState: boolean;
+    readonly changedPaths: boolean;
+    readonly environmentNotes: boolean;
+    /** Can a deleted workspace be rebuilt from retained state? */
+    readonly rematerialize: boolean;
+  };
+}
+
+export interface WorkspaceStatus {
+  readonly clean: boolean;
+  /** Repo-relative paths. Never absolute: see the path-identity design. */
+  readonly changedPaths: readonly string[];
+  readonly hasRecordedWork: boolean;
+}
+
+export interface PathChange {
+  /** Repo-relative. */
+  readonly path: string;
+  readonly kind: "added" | "modified" | "deleted" | "renamed";
+}
+
+export interface CreateWorkspaceOptions {
+  readonly sourceCwd: string;
+  readonly label: string;
+  /** Omit for "current state of sourceCwd". */
+  readonly from?: SnapshotId;
+}
+
+export type CreateWorkspaceResult =
+  | { ok: true; workspace: Workspace }
+  | { ok: false; reason: string };
+
+export type IntegrateResult =
+  | { ok: true; snapshot: SnapshotId }
+  | { ok: false; conflicts: readonly string[] };
+
+/** Thrown by operations a provider declares unsupported in capabilities(). */
+export class WorkspaceUnsupportedError extends Error {
+  constructor(providerKind: string, operation: string) {
+    super(
+      `provider "${providerKind}" does not support ${operation}; check capabilities().supports before calling`,
+    );
+    this.name = "WorkspaceUnsupportedError";
+  }
+}
+
+export interface IsolationProvider {
+  readonly kind: string;
+  capabilities(): Capabilities;
+
+  createWorkspace(opts: CreateWorkspaceOptions): Promise<CreateWorkspaceResult>;
+  removeWorkspace(ws: Workspace, opts: { force: boolean }): Promise<void>;
+  /**
+   * Rebuild a workspace directory that has gone missing, from whatever
+   * the provider retained.
+   *
+   * This is what makes an isolated session resurrectable after its
+   * directory is deleted. A session's recorded cwd IS its workspace, so
+   * without this a removed workspace leaves a session that cannot be
+   * brought back to anywhere meaningful.
+   *
+   * Retention is provider-specific and reported by
+   * capabilities().supports.rematerialize: git keeps the branch when the
+   * checkout is removed, so committed work returns intact, while a copy
+   * provider retains nothing and must decline.
+   */
+  rematerialize(ws: Workspace): Promise<CreateWorkspaceResult>;
+  /** What the provider itself believes exists, for reconciling against our records. */
+  listWorkspaces(sourceCwd: string): Promise<readonly Workspace[]>;
+  status(ws: Workspace): Promise<WorkspaceStatus>;
+
+  captureWorkingState(sourceCwd: string, message: string): Promise<SnapshotId>;
+  record(ws: Workspace, message: string): Promise<SnapshotId>;
+  changedPaths(ws: Workspace, since: SnapshotId): Promise<readonly PathChange[]>;
+  integrate(opts: { from: SnapshotId; into: Workspace }): Promise<IntegrateResult>;
+
+  lock(ws: Workspace, reason: string): Promise<void>;
+  unlock(ws: Workspace): Promise<void>;
+
+  /**
+   * Agent-facing caveats about this workspace, conditional on inspected
+   * state. Exists so an agent meeting an artifact of isolation does not
+   * try to repair it (the destructive case being a worktree's empty
+   * submodule directories re-committed as ordinary files).
+   */
+  environmentNotes(ws: Workspace): Promise<readonly string[]>;
+}
+
+/**
+ * Root for a source tree's workspaces, outside the repo.
+ *
+ * Outside rather than inside so agent scratch never lands in the user's
+ * tree and needs no .gitignore entry. The consequence is load-bearing: a
+ * workspace shares NO path prefix with its source, so nothing anywhere
+ * may relate the two by prefix matching. The derivation edge is recorded
+ * explicitly on the session record instead.
+ *
+ * hydraHome() honors HYDRA_ACP_HOME, which vitest.setup.ts clamps to a
+ * per-worker tmpdir, so workspaces are test-isolated with no fixture work.
+ */
+export function workspaceRootFor(sourceCwd: string): string {
+  const digest = createHash("sha256")
+    .update(path.resolve(sourceCwd))
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(hydraHome(), "workspaces", digest);
+}
+
+/** Filesystem-safe label. Keeps the caller's intent legible in the path. */
+export function sanitizeLabel(label: string): string {
+  const cleaned = label.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned.length > 0 ? cleaned.slice(0, 64) : "workspace";
+}
