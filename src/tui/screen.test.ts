@@ -1816,6 +1816,115 @@ describe("Screen btw overlay", () => {
     expect(getOverlayState(screen).btwOverlayMaxHeight).toBe(10);
   });
 
+  // The wheel hit-test reads the region drawBtwOverlay records, so the
+  // pane has to have been painted at least once before a notch can land
+  // on it — same as any other draw-time region in this file.
+  function paint(screen: Screen): void {
+    const s = screen as unknown as { started: boolean; repaintNow: () => void };
+    // repaint() no-ops before start(); flip the flag rather than starting
+    // for real so the test doesn't touch stdin.
+    s.started = true;
+    s.repaintNow();
+  }
+
+  function wheel(screen: Screen, dir: "UP" | "DOWN", y: number): void {
+    (
+      screen as unknown as {
+        handleMouse: (name: string, data?: unknown) => void;
+      }
+    ).handleMouse(`MOUSE_WHEEL_${dir}`, { x: 1, y });
+  }
+
+  function overlayRegion(
+    screen: Screen,
+  ): { top: number; bottom: number; contentRows: number } | null {
+    return (
+      screen as unknown as {
+        btwOverlayRegion: {
+          top: number;
+          bottom: number;
+          contentRows: number;
+        } | null;
+      }
+    ).btwOverlayRegion;
+  }
+
+  function scrolledOverlay(): { screen: Screen; region: { top: number; bottom: number; contentRows: number } } {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    screen.setBtwOverlayContent(
+      Array.from({ length: 20 }, (_, i) => plain(`row-${i}`)),
+    );
+    paint(screen);
+    const region = overlayRegion(screen);
+    expect(region).not.toBeNull();
+    return { screen, region: region! };
+  }
+
+  it("wheel over the overlay scrolls the pane, not the transcript", () => {
+    const { screen, region } = scrolledOverlay();
+    const transcriptOffset = (): number =>
+      (screen as unknown as { scrollOffset: number }).scrollOffset;
+    const before = transcriptOffset();
+    wheel(screen, "UP", region.top + 1);
+    expect(screen.btwOverlayScrollState().offset).toBe(3);
+    wheel(screen, "DOWN", region.bottom);
+    expect(screen.btwOverlayScrollState().offset).toBe(0);
+    // Transcript untouched throughout.
+    expect(transcriptOffset()).toBe(before);
+  });
+
+  it("wheel on the overlay header row is the pane's, not the transcript's", () => {
+    const { screen, region } = scrolledOverlay();
+    wheel(screen, "UP", region.top);
+    expect(screen.btwOverlayScrollState().offset).toBe(3);
+  });
+
+  it("overlay scroll pins at the top of its content", () => {
+    const { screen, region } = scrolledOverlay();
+    for (let i = 0; i < 20; i++) {
+      wheel(screen, "UP", region.top + 1);
+    }
+    const { offset, more } = screen.btwOverlayScrollState();
+    expect(offset).toBe(20 - region.contentRows);
+    expect(more).toBe(false);
+    // Still pinned, and still consumed rather than leaking to the
+    // transcript.
+    wheel(screen, "UP", region.top + 1);
+    expect(screen.btwOverlayScrollState().offset).toBe(offset);
+  });
+
+  it("wheel falls through to the transcript when the pane hides nothing", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 12 });
+    screen.setBtwOverlayContent(["a", "b", "c"].map(plain));
+    paint(screen);
+    const region = overlayRegion(screen);
+    expect(region).not.toBeNull();
+    wheel(screen, "UP", region!.top + 1);
+    expect(screen.btwOverlayScrollState().offset).toBe(0);
+  });
+
+  it("content appended while scrolled up keeps the window on the same rows", () => {
+    const { screen, region } = scrolledOverlay();
+    wheel(screen, "UP", region.top + 1);
+    expect(screen.btwOverlayScrollState().offset).toBe(3);
+    screen.setBtwOverlayContent([
+      ...Array.from({ length: 20 }, (_, i) => plain(`row-${i}`)),
+      plain("row-20"),
+      plain("row-21"),
+    ]);
+    expect(screen.btwOverlayScrollState().offset).toBe(5);
+  });
+
+  it("a fresh /btw resets the scroll to the tail", () => {
+    const { screen, region } = scrolledOverlay();
+    wheel(screen, "UP", region.top + 1);
+    expect(screen.btwOverlayScrollState().offset).toBe(3);
+    screen.openBtwOverlay({ height: 5 });
+    expect(screen.btwOverlayScrollState().offset).toBe(0);
+  });
+
   it("overlay shrinks scrollback by its dynamic row count", () => {
     const screen = makeOverlayScreen({ width: 40, height: 24 });
     const beforeRows = visibleRows(screen);

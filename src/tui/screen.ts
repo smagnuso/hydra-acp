@@ -890,6 +890,19 @@ export class Screen {
   // the btw label instead (see drawPromptSeparator).
   private btwOverlayMaxHeight = 12;
   private btwOverlayLines: FormattedLine[] = [];
+  // Rows the overlay's content window sits above the tail, same
+  // rows-from-bottom convention scrollOffset uses for the transcript. Zero
+  // means "follow the live tail". Clamped at draw time against whatever
+  // the buffer can actually supply.
+  private btwOverlayScroll = 0;
+  // Rows the overlay occupied on the last frame, recorded at draw time so
+  // the wheel hit-test can't drift from the geometry the painter used.
+  // Null whenever the pane reserved no rows.
+  private btwOverlayRegion: {
+    top: number;
+    bottom: number;
+    contentRows: number;
+  } | null = null;
   private btwOverlayLabel = "";
   private btwOverlayStatus: "busy" | "done" | "cancelled" | "errored" = "busy";
   // Session id of the forked btw fork and a running usage snapshot,
@@ -3366,6 +3379,7 @@ export class Screen {
     this.btwOverlayMaxHeight = maxHeight;
     this.focusedPane = "btw";
     this.btwOverlayLines = [];
+    this.btwOverlayScroll = 0;
     this.btwOverlaySessionId = null;
     this.btwOverlayUsage = undefined;
     this.scheduleRepaint();
@@ -3419,7 +3433,24 @@ export class Screen {
         return;
       }
     }
+    const prevLen = this.btwOverlayLines.length;
     this.btwOverlayLines = [...lines];
+    // Scrolled away from the tail: shift the window by the rows the append
+    // added so the user keeps looking at the same content while the fork
+    // streams, mirroring adjustScrollForRowChange on the transcript. Only
+    // the newly-appended lines are measured — an in-place rewrite of the
+    // last block (streaming re-parse, tool_call_update) can still nudge the
+    // view by a row or two, which is cheaper than re-wrapping the buffer on
+    // every chunk.
+    if (this.btwOverlayScroll > 0 && lines.length > prevLen) {
+      const w = this.term.width;
+      let grew = 0;
+      for (let i = prevLen; i < this.btwOverlayLines.length; i++) {
+        grew +=
+          w > 4 ? this.wrapOne(this.btwOverlayLines[i]!, w).length : 1;
+      }
+      this.btwOverlayScroll += grew;
+    }
     this.scheduleRepaint();
   }
 
@@ -3447,6 +3478,9 @@ export class Screen {
       return;
     }
     this.btwOverlayOpen = false;
+    // Stale until the next paint proves otherwise — a wheel notch landing
+    // in the gap before that repaint must not still find the pane here.
+    this.btwOverlayRegion = null;
     this.focusedPane = "main";
     this.scheduleRepaint();
   }
@@ -3648,6 +3682,16 @@ export class Screen {
         wheelCell !== null &&
         this.isSidebarCell(wheelCell.x, wheelCell.y) &&
         this.scrollSidebarBy(delta)
+      ) {
+        return;
+      }
+      // Wheel over the btw pane scrolls the fork's output, not the
+      // transcript behind it — same pointer-disambiguates rule as the
+      // sidebar, and same fall-through when the pane has nothing hidden.
+      if (
+        wheelCell !== null &&
+        this.isBtwOverlayCell(wheelCell.y) &&
+        this.scrollBtwOverlayBy(delta)
       ) {
         return;
       }
@@ -7949,33 +7993,53 @@ export class Screen {
     // drops the wrap continuations.
     const maxContent = Math.max(0, this.btwOverlayMaxHeight - 1);
     const w = this.term.width;
-    const wrappedCount = this.wrapBtwTail(w, maxContent).length;
+    // Sized off the tail (offset 0) deliberately: scrolling back through
+    // the overlay must not resize the pane under the pointer.
+    const wrappedCount = this.wrapBtwWindow(w, maxContent, 0).rows.length;
     return Math.min(this.btwOverlayMaxHeight, 1 + wrappedCount);
   }
 
-  // Walk btwOverlayLines from the tail, wrapping each via wrapOne, until
-  // we have at least `needed` wrapped rows (or run out of source lines).
-  // Returns the collected wrapped rows in original (top-down) order.
+  // Walk btwOverlayLines from the tail, wrapping each via wrapOne, until we
+  // have enough rows to fill a `needed`-row window sitting `offset` wrapped
+  // rows above the tail (or run out of source lines). Returns the window's
+  // rows in original (top-down) order, the offset actually used — clamped
+  // down when the buffer runs out, which is what pins the scroll at the top
+  // of the overlay's content — and whether anything is hidden above it.
   // Mirrors wrapTail's tail-walk pattern but over the overlay buffer and
   // without the thought-filter. wrapOne skips its cache for lines that
   // aren't in lineIds (overlay lines aren't), so this re-wraps every
   // repaint — fine, since the overlay is bounded by btwOverlayMaxHeight.
-  private wrapBtwTail(width: number, needed: number): FormattedLine[] {
+  private wrapBtwWindow(
+    width: number,
+    needed: number,
+    offset: number,
+  ): { rows: FormattedLine[]; offset: number; more: boolean } {
+    const len = this.btwOverlayLines.length;
+    if (needed <= 0 || len === 0) {
+      return { rows: [], offset: 0, more: false };
+    }
     if (width <= 4) {
-      const take = Math.min(needed, this.btwOverlayLines.length);
-      return this.btwOverlayLines.slice(this.btwOverlayLines.length - take);
+      const clamped = Math.min(Math.max(0, offset), Math.max(0, len - needed));
+      const end = len - clamped;
+      const start = Math.max(0, end - needed);
+      return {
+        rows: this.btwOverlayLines.slice(start, end),
+        offset: clamped,
+        more: start > 0,
+      };
     }
-    if (needed <= 0 || this.btwOverlayLines.length === 0) {
-      return [];
-    }
+    const want = Math.max(0, offset);
     const batches: FormattedLine[][] = [];
     let total = 0;
-    for (let i = this.btwOverlayLines.length - 1; i >= 0; i--) {
+    for (let i = len - 1; i >= 0; i--) {
       const line = this.btwOverlayLines[i]!;
       const wrapped = this.wrapOne(line, width);
       batches.push(wrapped);
       total += wrapped.length;
-      if (total >= needed) {
+      // Strictly greater, not >=: overshooting by a row is what tells the
+      // caller there's still content above the window rather than leaving
+      // "exactly full" ambiguous.
+      if (total > needed + want) {
         break;
       }
     }
@@ -7983,21 +8047,77 @@ export class Screen {
     for (let i = batches.length - 1; i >= 0; i--) {
       rows.push(...batches[i]!);
     }
-    // Trim from the head so we keep exactly the LAST `needed` rows.
-    if (rows.length > needed) {
-      return rows.slice(rows.length - needed);
+    // When the walk stopped early rows.length exceeds needed + want, so this
+    // is a no-op; it only bites once the buffer is exhausted.
+    const clamped = Math.min(want, Math.max(0, rows.length - needed));
+    const end = rows.length - clamped;
+    const start = Math.max(0, end - needed);
+    return {
+      rows: rows.slice(start, end),
+      offset: clamped,
+      more: start > 0,
+    };
+  }
+
+  // Scroll the overlay's content window by `delta` rows (positive scrolls
+  // toward older content, matching scrollBy's transcript convention).
+  // Returns false when the pane has nothing hidden, which tells the caller
+  // to let the transcript have the wheel event instead.
+  private scrollBtwOverlayBy(delta: number): boolean {
+    const region = this.btwOverlayRegion;
+    if (!this.btwOverlayOpen || region === null || region.contentRows <= 0) {
+      return false;
     }
-    return rows;
+    const want = Math.max(0, this.btwOverlayScroll + delta);
+    const win = this.wrapBtwWindow(
+      this.term.width,
+      region.contentRows,
+      want,
+    );
+    if (!win.more && win.offset === 0) {
+      // Whole fork fits in the pane — nothing to scroll, so don't swallow
+      // the event.
+      return false;
+    }
+    if (win.offset === this.btwOverlayScroll) {
+      // Pinned at one end. Still consume it: scrolling the transcript under
+      // a pointer that's over the overlay reads as a glitch.
+      return true;
+    }
+    this.btwOverlayScroll = win.offset;
+    this.repaintNow();
+    return true;
+  }
+
+  // True when the cell falls inside the overlay pane, header row included —
+  // the header is the pane's top separator, and a wheel notch that lands on
+  // it should scroll the pane rather than the transcript above.
+  private isBtwOverlayCell(y: number): boolean {
+    const region = this.btwOverlayRegion;
+    return region !== null && y >= region.top && y <= region.bottom;
+  }
+
+  // Test/introspection accessor for the overlay scroll window.
+  btwOverlayScrollState(): { offset: number; more: boolean } {
+    const region = this.btwOverlayRegion;
+    const contentRows = region?.contentRows ?? 0;
+    return {
+      offset: this.btwOverlayScroll,
+      more: this.wrapBtwWindow(this.term.width, contentRows, this.btwOverlayScroll)
+        .more,
+    };
   }
 
   private drawBtwOverlay(): void {
     if (!this.btwOverlayOpen) {
+      this.btwOverlayRegion = null;
       return;
     }
     const rows = this.btwOverlayRows();
     if (rows === 0) {
       // Empty + open → the prompt-above separator carries the label
       // instead; nothing to draw here. drawPromptSeparator handles it.
+      this.btwOverlayRegion = null;
       return;
     }
     const w = this.term.width;
@@ -8013,6 +8133,7 @@ export class Screen {
     // No bottom separator — the existing separator above prompt does it.
     const contentRows = rows - 1;
     const headerRow = overlayTop;
+    this.btwOverlayRegion = { top: headerRow, bottom: overlayBottom, contentRows };
     this.drawBar("btw", headerRow);
     // Paint the content rows below the header. Show the LAST `contentRows`
     // WRAPPED rows top-down, so long lines flow onto continuation rows
@@ -8020,7 +8141,12 @@ export class Screen {
     // its own FormattedLine fields (prefix/body/bodyStyle/fillRow) so
     // user-text bands, tool labels, etc. render with the same styling as
     // the main transcript.
-    const wrappedTail = this.wrapBtwTail(w, contentRows);
+    const win = this.wrapBtwWindow(w, contentRows, this.btwOverlayScroll);
+    // Re-seat the scroll on whatever the buffer could actually supply, so a
+    // window that shrank (resize, /btw reopened on a shorter fork) settles
+    // instead of staying parked past the top.
+    this.btwOverlayScroll = win.offset;
+    const wrappedTail = win.rows;
     for (let i = 0; i < contentRows; i++) {
       const row = headerRow + 1 + i;
       const lineIdx = wrappedTail.length - contentRows + i;
