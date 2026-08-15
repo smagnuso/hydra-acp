@@ -10,7 +10,6 @@
 
 import type { ChromeActionTarget } from "../chrome-action.js";
 import type { FormattedLine } from "../format.js";
-import { shortenHomePath } from "../../core/paths.js";
 import { RUNNING_TOOL_CAP } from "./running-tools.js";
 import type {
   Gadget,
@@ -652,19 +651,14 @@ export const sessionInfoGadget: Gadget = {
       field("id", s.sessionId, { action: "copy", value: s.sessionId });
     }
     if (s.workspace !== null) {
-      // Two lines, because they answer different questions: which
-      // workspace this is, and which project its edits belong to. The
-      // second is the one that is otherwise unrecoverable — a workspace
-      // path is a hash directory that names no project.
-      // openPath rather than a copy action: a directory you can see is a
-      // directory you will try to open, and routing through openPath puts
-      // both rows in the same resolution path as every other clickable
-      // path — including the check that refuses a workspace which no
-      // longer exists.
+      // Label only; the project it belongs to is already the sessionbar's
+      // cwd field. openPath rather than a copy action: a directory you can
+      // see is a directory you will try to open, and routing through
+      // openPath puts the row in the same resolution path as every other
+      // clickable path — including the check that refuses a workspace
+      // which no longer exists.
       const wsRow = fieldRow("workspace", s.workspace.label, ctx);
       lines.push({ ...wsRow, openPath: s.workspace.path });
-      const srcRow = fieldRow("source", shortenHomePath(s.workspace.sourceCwd), ctx);
-      lines.push({ ...srcRow, openPath: s.workspace.sourceCwd });
     }
     return lines;
   },

@@ -203,6 +203,57 @@ function identify(slot: string, group: FieldGroup): FieldGroup {
   return { ...group, chunks: group.chunks.map((c) => ({ ...c, id })) };
 }
 
+type Entry = ReturnType<typeof normalize>;
+
+/**
+ * The per-entry overrides that act on a chunk at a time. Null when
+ * `maxWidth` truncated every chunk away.
+ */
+function restyle(chunks: Chunk[], e: Entry): Chunk[] | null {
+  let out = chunks;
+  if (e.style !== undefined) {
+    const token = e.style as ThemeToken;
+    out = out.map((c) => ({ ...c, token }));
+  }
+  if (e.minWidth !== undefined) {
+    out = out.map((c) => ({ ...c, flex: true, minWidth: e.minWidth }));
+  }
+  if (e.maxWidth !== undefined) {
+    const max = e.maxWidth;
+    out = out
+      .map((c) => ({ ...c, text: truncateToWidth(c.text, max) }))
+      .filter((c) => c.text.length > 0);
+    if (out.length === 0) {
+      return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * Wrap the whole entry in its prefix/suffix — the outer edges of the
+ * first and last group, not of every group, so a bracketed multi-group
+ * field reads as "[a b]" rather than "[a] [b]".
+ */
+function bracket(groups: FieldGroup[], e: Entry): FieldGroup[] {
+  const out = groups.map((g) => ({ ...g, chunks: [...g.chunks] }));
+  const first = out[0];
+  if (e.prefix !== undefined && e.prefix.length > 0 && first !== undefined) {
+    const head = first.chunks[0];
+    if (head !== undefined) {
+      first.chunks.unshift({ text: e.prefix, token: head.token });
+    }
+  }
+  const last = out[out.length - 1];
+  if (e.suffix !== undefined && e.suffix.length > 0 && last !== undefined) {
+    const tail = last.chunks[last.chunks.length - 1];
+    if (tail !== undefined) {
+      last.chunks.push({ text: e.suffix, token: tail.token });
+    }
+  }
+  return out;
+}
+
 export function resolveSide(
   slot: SlotName,
   side: BarSideConfig,
@@ -211,98 +262,81 @@ export function resolveSide(
   const groups: FieldGroup[] = [];
   for (const raw of side) {
     const e = normalize(raw);
-    let chunks: Chunk[] | null;
-    let id: string;
-    let basePriority: number;
+    // Every entry becomes a list of groups, whether the field emits one
+    // unit or several, so the per-entry overrides below have a single
+    // shape to act on.
+    let produced: FieldGroup[];
     if (e.text !== undefined) {
-      id = `text:${e.text}`;
-      basePriority = 10;
-      chunks = e.text.length > 0 ? [{ text: e.text, token: "rule-meta" }] : null;
+      if (e.text.length === 0) {
+        continue;
+      }
+      produced = [
+        {
+          id: `text:${e.text}`,
+          priority: 10,
+          chunks: [{ text: e.text, token: "rule-meta" }],
+        },
+      ];
     } else {
-      id = e.field ?? "";
+      const id = e.field ?? "";
       const def = FIELDS[id];
       if (def === undefined) {
         // Unknown ids are ignored rather than fatal: a config written
         // against a newer build should degrade, not blank the bar.
         continue;
       }
-      basePriority = def.priority;
       if (def.resolveGroups !== undefined) {
-        // Multi-unit field: emit its groups as-is, only applying the
-        // per-entry priority override if one was given.
         const sub = def.resolveGroups(ctx);
         if (sub === null) {
           continue;
         }
-        const click = asAction(e.onClick);
-        const dbl = asAction(e.onDoubleClick);
-        for (const g of sub) {
-          const group: FieldGroup = {
-            ...g,
-            priority: e.priority ?? g.priority,
-            chunks: g.chunks.map((c) => ({
-              ...c,
-              ...(click !== undefined ? { action: click } : {}),
-              ...(dbl !== undefined ? { doubleAction: dbl } : {}),
-            })),
-          };
-          if (e.separator !== undefined && groups.length === 0) {
-            group.separator = e.separator;
-          }
-          groups.push(identify(slot, group));
+        produced = sub;
+      } else {
+        const chunks = def.resolve(ctx);
+        if (chunks === null || chunks.length === 0) {
+          continue;
         }
+        produced = [{ id, priority: def.priority, chunks }];
+      }
+    }
+
+    let out: FieldGroup[] = [];
+    for (const g of produced) {
+      const chunks = restyle(g.chunks, e);
+      if (chunks === null) {
         continue;
       }
-      chunks = def.resolve(ctx);
+      out.push({ ...g, priority: e.priority ?? g.priority, chunks });
     }
-    if (chunks === null || chunks.length === 0) {
+    if (out.length === 0) {
       continue;
     }
-    if (e.style !== undefined) {
-      const token = e.style as ThemeToken;
-      chunks = chunks.map((c) => ({ ...c, token }));
-    }
-    if (e.minWidth !== undefined) {
-      chunks = chunks.map((c) => ({ ...c, flex: true, minWidth: e.minWidth }));
-    }
-    if (e.maxWidth !== undefined) {
-      const max = e.maxWidth;
-      chunks = chunks.map((c) => ({ ...c, text: truncateToWidth(c.text, max) }));
-      chunks = chunks.filter((c) => c.text.length > 0);
-      if (chunks.length === 0) {
-        continue;
-      }
-    }
-    if (e.prefix !== undefined && e.prefix.length > 0) {
-      const first = chunks[0];
-      if (first !== undefined) {
-        chunks = [{ text: e.prefix, token: first.token }, ...chunks];
-      }
-    }
-    if (e.suffix !== undefined && e.suffix.length > 0) {
-      const last = chunks[chunks.length - 1];
-      if (last !== undefined) {
-        chunks = [...chunks, { text: e.suffix, token: last.token }];
-      }
-    }
+    out = bracket(out, e);
+
+    // Actions last, so a prefix/suffix chunk carries them too: the
+    // layout engine reads the action off the first chunk of a hit
+    // region, and an inert bracket there would make the field dead.
     const click = asAction(e.onClick);
     const dbl = asAction(e.onDoubleClick);
     if (click !== undefined || dbl !== undefined) {
-      chunks = chunks.map((c) => ({
-        ...c,
-        ...(click !== undefined ? { action: click } : {}),
-        ...(dbl !== undefined ? { doubleAction: dbl } : {}),
+      out = out.map((g) => ({
+        ...g,
+        chunks: g.chunks.map((c) => ({
+          ...c,
+          ...(click !== undefined ? { action: click } : {}),
+          ...(dbl !== undefined ? { doubleAction: dbl } : {}),
+        })),
       }));
     }
-    const group: FieldGroup = {
-      id,
-      chunks,
-      priority: e.priority ?? basePriority,
-    };
-    if (e.separator !== undefined) {
-      group.separator = e.separator;
+    // A separator sits *before* a group, so an override belongs on the
+    // entry's first one; the rest keep whatever the field asked for.
+    const head = out[0];
+    if (e.separator !== undefined && head !== undefined) {
+      head.separator = e.separator;
     }
-    groups.push(identify(slot, group));
+    for (const g of out) {
+      groups.push(identify(slot, g));
+    }
   }
   return groups;
 }

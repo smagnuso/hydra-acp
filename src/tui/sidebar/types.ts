@@ -126,7 +126,7 @@ export interface SidebarSnapshot {
   // am I actually editing" is the question isolation makes ambiguous, and
   // the answer should be readable at any moment, not just at the moment
   // it changed.
-  workspace: { label: string; path: string; sourceCwd: string } | null;
+  workspace: { label: string; path: string } | null;
 }
 
 export interface SidebarTextMetrics {

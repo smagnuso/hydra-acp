@@ -260,6 +260,103 @@ describe("generateSynopsis", () => {
     expect(setModelCalled).toBe(true);
   });
 
+  it("retries via session/set_config_option when set_model is MethodNotFound", async () => {
+    const verbsTried: string[] = [];
+    let configValue: unknown;
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method, params) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return { sessionId: "u_test" };
+      }
+      if (method === "session/set_model") {
+        verbsTried.push(method);
+        throw Object.assign(new Error("Method not found"), { code: -32601 });
+      }
+      if (method === "session/set_config_option") {
+        verbsTried.push(method);
+        configValue = (params as { value?: unknown }).value;
+        return {};
+      }
+      if (method === "session/prompt") {
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"negotiated"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    const result = await generateSynopsis({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+      modelId: "opus[1m]",
+    });
+
+    expect(verbsTried).toEqual([
+      "session/set_model",
+      "session/set_config_option",
+    ]);
+    expect(configValue).toBe("opus[1m]");
+    expect(result?.title).toBe("negotiated");
+  });
+
+  it("leads with set_config_option when session/new advertises via configOptions", async () => {
+    const verbsTried: string[] = [];
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return {
+          sessionId: "u_test",
+          configOptions: [{ id: "model", currentValue: "sonnet" }],
+        };
+      }
+      if (
+        method === "session/set_model" ||
+        method === "session/set_config_option"
+      ) {
+        verbsTried.push(method);
+        return {};
+      }
+      if (method === "session/prompt") {
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"inferred"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    await generateSynopsis({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+      modelId: "opus[1m]",
+    });
+
+    expect(verbsTried).toEqual(["session/set_config_option"]);
+  });
+
   it("falls through and continues when set_model is rejected", async () => {
     let promptSent = false;
     let notificationHandler: ((params: unknown) => void) | undefined;

@@ -184,15 +184,17 @@ export const FIELDS: Record<string, FieldDef> = {
       if (!sid) {
         return null;
       }
-      // Copies the *full* id, not the abbreviated form on screen —
-      // pasting "a1b2c3d4e5" into `hydra session info` would not
-      // resolve. On the btw frame the id names the fork, where a single
-      // click has always jumped to it.
+      // Copies what it shows. Every consumer of a pasted id — the daemon
+      // routes via resolveCanonicalId, `/session <id>`, the picker —
+      // re-attaches the hydra_session_ prefix, so the long form buys
+      // nothing and is a nuisance to paste. `sessionIdFull` is there for
+      // anyone who wants it. On the btw frame the id names the fork,
+      // where a single click has always jumped to it.
       const chunk: Chunk = {
         text: sid,
         token: "rule-meta",
         doubleAction: "copy",
-        value: ctx.session.sessionId,
+        value: sid,
       };
       if (ctx.scope === "btw") {
         chunk.action = "open-session";
@@ -266,47 +268,78 @@ export const FIELDS: Record<string, FieldDef> = {
   },
   cwd: {
     priority: 70,
-    resolve: (ctx) => {
+    resolve: () => null,
+    // Groups, not runs: every chunk a `resolve` returns carries the same
+    // field id and the layout engine merges same-id hit regions, so a
+    // second run with its own doubleAction would silently dispatch the
+    // first one's. The path and the workspace label open different
+    // directories, so they have to be separate groups.
+    resolveGroups: (ctx) => {
       const ws = ctx.session.workspace;
-      // Isolated: show the PROJECT plus the workspace label, because the
-      // literal cwd is a hash directory that names no project. Two spans
-      // rather than one, so each opens what its text actually names —
-      // collapsing them would force one of the two to lie about where a
-      // double-click goes.
-      if (ws !== undefined) {
-        const projectText = shortenHomePath(ws.sourceCwd);
+      if (ws === undefined) {
+        const text = shortenHomePath(ctx.session.cwd);
+        if (!text) {
+          return null;
+        }
         return [
           {
-            text: projectText,
-            token: "bar-text",
-            flex: true,
-            minWidth: 8,
-            doubleAction: "open" as const,
-            value: ws.sourceCwd,
-          },
-          {
-            text: ` [${ws.label}]`,
-            token: "bar-text",
-            doubleAction: "open" as const,
-            value: ws.path,
+            id: "cwd",
+            priority: 70,
+            chunks: [
+              {
+                text,
+                token: "bar-text",
+                flex: true,
+                minWidth: 8,
+                // Double-click hands the *absolute* path to
+                // tui.openFileCommand (the display form is
+                // ~-abbreviated and may be truncated).
+                doubleAction: "open",
+                value: ctx.session.cwd,
+              },
+            ],
           },
         ];
       }
-      const text = shortenHomePath(ctx.session.cwd);
-      // Double-click hands the *absolute* path to tui.openFileCommand
-      // (the display form is ~-abbreviated and may be truncated).
-      return text
-        ? [
+      // Isolated: show the PROJECT plus the workspace label, because the
+      // literal cwd is a hash directory that names no project.
+      const source = shortenHomePath(ws.sourceCwd);
+      if (!source) {
+        return null;
+      }
+      return [
+        {
+          id: "cwd",
+          priority: 70,
+          chunks: [
             {
-              text,
+              text: source,
               token: "bar-text",
               flex: true,
               minWidth: 8,
               doubleAction: "open",
-              value: ctx.session.cwd,
+              value: ws.sourceCwd,
             },
-          ]
-        : null;
+          ],
+        },
+        {
+          id: "cwdWorkspace",
+          // Below the project: on a narrow bar, losing which workspace
+          // you are in beats losing which project.
+          priority: 69,
+          // A plain space, not the slot's " · ": the label reads as part
+          // of the path field, not as a field of its own.
+          separator: " ",
+          chunks: [
+            {
+              text: `[${ws.label}]`,
+              token: "bar-text",
+              doubleAction: "open",
+              value: ws.path,
+            },
+          ],
+        },
+      ];
     },
   },
   cwdFull: {

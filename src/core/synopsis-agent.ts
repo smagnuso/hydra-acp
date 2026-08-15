@@ -28,6 +28,10 @@ import {
   type SnapshotParseResult,
 } from "./snapshot.js";
 import { renderTranscript } from "./history-transcript.js";
+import {
+  inferModelVerbFromResult,
+  requestModelChange,
+} from "./model-verb.js";
 
 export interface GenerateSynopsisOpts {
   agentId: string;
@@ -113,14 +117,23 @@ async function runEphemeralRegen(
       if (opts.modelId) {
         const advertised = collectAdvertisedModelIds(newResult);
         if (advertised.size === 0 || advertised.has(opts.modelId)) {
+          // Probe both model verbs: SDK 0.26+ agents answer MethodNotFound
+          // to session/set_model and only accept session/set_config_option.
+          // Falling through to the agent default here is not cosmetic — the
+          // requested model is usually the long-context one picked precisely
+          // because the transcript is large.
+          const conn = agent.connection;
           try {
-            await agent.connection.request("session/set_model", {
+            await requestModelChange({
+              request: (method, params) => conn.request(method, params),
               sessionId: upstreamSessionId,
               modelId: opts.modelId,
+              verb: inferModelVerbFromResult(newResult),
+              logger: opts.logger,
             });
           } catch (err) {
             opts.logger?.warn(
-              `synopsis: agent ${opts.agentId} rejected set_model ${JSON.stringify(opts.modelId)}: ${(err as Error).message}; continuing on default`,
+              `synopsis: agent ${opts.agentId} rejected model change to ${JSON.stringify(opts.modelId)}: ${(err as Error).message}; continuing on default`,
             );
           }
         } else {

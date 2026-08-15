@@ -464,9 +464,20 @@ describe("chrome bar mouse", () => {
     const r = render(120);
     const hit = r.screen.barHitAt(r.sessionbar.indexOf("~/dev") + 1, 24);
     expect(hit?.value).toBe(`${HOME}/dev/hydra-acp/cli`);
-    // sessionId paints the stripped form but must copy the full id.
     const sid = r.screen.barHitAt(r.top.indexOf("hydra-a1b2") + 1, 1);
     expect(sid?.value).toBe("hydra-a1b2c3d4e5");
+    expect(sid?.doubleAction).toBe("copy");
+  });
+
+  it("copies the session id it shows, prefix stripped", () => {
+    // Pasting hydra_session_… is a nuisance and buys nothing: every
+    // consumer (the daemon's resolveCanonicalId, /session <id>, the
+    // picker) re-attaches the prefix itself.
+    const r = render(120, {
+      session: { sessionId: "hydra_session_a1b2c3d4e5f6g7h8" },
+    });
+    const sid = r.screen.barHitAt(r.top.indexOf("a1b2c3d4") + 1, 1);
+    expect(sid?.value).toBe("a1b2c3d4e5f6g7h8");
     expect(sid?.doubleAction).toBe("copy");
   });
 

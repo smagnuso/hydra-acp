@@ -2556,9 +2556,7 @@ async function runSession(
     // seconds after it changed.
     screen.setSidebarSnapshot({
       workspace:
-        phase === "entered" && label !== undefined
-          ? { label, path: u.cwd, sourceCwd: source }
-          : null,
+        phase === "entered" && label !== undefined ? { label, path: u.cwd } : null,
     });
     screen.notify(
       phase === "entered" ? `isolated in ${label ?? "a workspace"}` : "returned to source tree",
@@ -4038,11 +4036,7 @@ async function runSession(
     workspace:
       initialWorkspace === undefined
         ? null
-        : {
-            label: initialWorkspace.label,
-            path: initialWorkspace.path,
-            sourceCwd: initialWorkspace.sourceCwd,
-          },
+        : { label: initialWorkspace.label, path: initialWorkspace.path },
   });
   screen.setSessionbar({
     agent: sessionbarAgent,
