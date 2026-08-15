@@ -2018,24 +2018,37 @@ export class Session {
     // well — which is wrong twice over: nothing was summarized away, and
     // it invites the user to worry about lost context at exactly the
     // moment they are trying to confirm a clean workspace transition.
+    //
+    // Workspace moves say nothing here at all. The swap is a step inside
+    // `workspace start` / `end`, not the outcome of one, and it is the
+    // caller that knows the outcome — which branch merged, where the
+    // work went, whether the directory survived. Announcing the step too
+    // meant three lines for one action, two of them saying "returned".
+    // Progress is already covered: the workspace phases drive a live
+    // indicator ("moving session into workspace...", "returning to
+    // source tree..."), so silence here is not silence on screen.
+    //
+    // It was also premature. This fires as soon as the new agent is up,
+    // which is before startWorkspace has written the cwd/binding record
+    // — so it claimed a move that nothing on disk yet justified.
     const completedText =
-      opts.reason === "workspace-enter"
-        ? "\nMoved into the workspace.\n"
-        : opts.reason === "workspace-leave"
-          ? "\nReturned to the source tree.\n"
-          : crossAgent
+      opts.reason === "workspace-enter" || opts.reason === "workspace-leave"
+        ? undefined
+        : crossAgent
           ? `\nSwitched to ${targetAgentId}.\n`
           : "\nCompaction completed.\n";
-    const completedParams = this.rewriteForClient({
-      sessionId: this.upstreamSessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: completedText },
-        _meta: { "hydra-acp": { synthetic: true } },
-      },
-    });
-    for (const client of this.clients.values()) {
-      void client.connection.notify("session/update", completedParams).catch(() => undefined);
+    if (completedText !== undefined) {
+      const completedParams = this.rewriteForClient({
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: completedText },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      for (const client of this.clients.values()) {
+        void client.connection.notify("session/update", completedParams).catch(() => undefined);
+      }
     }
 
     // agentChangeHandlers + onCompactionSwapHook moved above to fire
@@ -3226,12 +3239,31 @@ export class Session {
         claudeMeta.toolResponse.timeoutMs > 0
       ? claudeMeta.toolResponse.timeoutMs
       : ARMED_TASK_DEFAULT_TTL_MS;
-    const armedAt = Date.now();
+    // A background tool call arms once and then keeps reporting: the same
+    // toolCallId arrives again on every tool_call_update. So preserve the
+    // ORIGINAL armedAt across re-arms and move only the deadline.
+    //
+    // The two fields answer different questions. armedAt is when the job
+    // started, which is what clients clock their "running Xs" readout
+    // from (see armedSince). Overwriting it on every update reset that
+    // clock, so a task that had been running for minutes read as though
+    // it had just begun. expiresAt asks whether the job is still alive,
+    // and an update is precisely the evidence that renews it.
+    //
+    // It also made the armed-tasks broadcast fire per update rather than
+    // per change: the dedup key in onArmedTasksChanged includes
+    // armedSince, so whether two updates coalesced came down to whether
+    // they happened to land in the same millisecond.
+    const now = Date.now();
+    const existing = this.armedTasks.get(toolCallId);
+    // A later update may be the one that carries the task id, and an
+    // earlier one that had it must not be erased by a later one without.
+    const knownTaskId = taskId ?? existing?.taskId;
     this.armedTasks.set(toolCallId, {
       label,
-      ...(taskId !== undefined ? { taskId } : {}),
-      armedAt,
-      expiresAt: armedAt + timeoutMs,
+      ...(knownTaskId !== undefined ? { taskId: knownTaskId } : {}),
+      armedAt: existing?.armedAt ?? now,
+      expiresAt: now + timeoutMs,
     });
     this.onArmedTasksChanged();
   }

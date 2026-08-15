@@ -147,6 +147,20 @@ Before trusting a capture:
 - **`route: "queue"` chain skip is by transformer *name***. If you split
   one transformer into two names, the second one will still re-intercept
   the first's emits.
+- **The daemon owns session records; nothing else may write one.**
+  Mutating a session means `PATCH /v1/sessions/:id` (title, priority,
+  `workspace: null`, …) dispatched to a `SessionManager` method that
+  handles warm and cold uniformly — see `setPriority` /
+  `clearWorkspaceBinding`. A direct `meta.json` write is wrong even when
+  the daemon looks idle, for two independent reasons: a live session
+  holds the record in memory and rewrites it, so the edit is silently
+  reverted; and `mutateRecord` serializes through `enqueueMetaWrite`, a
+  queue an outside writer cannot join, so even a cold-session write can
+  interleave with a rotation. Probing "is it live first?" is not a fix,
+  because the answer can change between the probe and the write.
+  `src/cli/commands/workspaces.ts` reads records straight off disk on
+  purpose (diagnosis has to work with the daemon down); that asymmetry is
+  deliberate. Read locally, write through the daemon.
 
 ## Updating this file
 

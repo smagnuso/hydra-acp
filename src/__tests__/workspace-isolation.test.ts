@@ -904,24 +904,17 @@ describe("session isolation end-to-end", () => {
 
     await manager.runWorkspaceAction(session.sessionId, "start", "clash");
     const wsPath = session.cwd;
-    // The landing report streams rather than riding out on the return
-    // value, so that it arrives before the swap notice that follows it.
-    const stream = makeControlledStream();
-    await session.attach(
-      { clientId: "c_clash", connection: new JsonRpcConnection(stream) } as AttachedClient,
-      "none",
-    );
 
     // Same file, same line, two different edits.
     await fs.writeFile(path.join(repo, "tracked.txt"), "source version\n");
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "workspace version\n");
     await exec("git", ["commit", "-qam", "agent: my version"], { cwd: wsPath });
 
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
 
     // The merge still lands, and the clash is reported with a recovery
     // path rather than the source edit being silently dropped.
-    expect(streamedTexts(stream).join("")).toMatch(/overlap|could not be replayed/i);
+    expect(msg).toMatch(/overlap|could not be replayed/i);
     const refs = await exec("git", ["for-each-ref", "refs/hydra/landing"], { cwd: repo });
     expect(refs.stdout.trim().length).toBeGreaterThan(0);
   });
@@ -984,17 +977,12 @@ describe("session isolation end-to-end", () => {
     const wsPath = session.cwd;
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "agent work\n");
 
-    const stream = makeControlledStream();
-    await session.attach(
-      { clientId: "c_shipit", connection: new JsonRpcConnection(stream) } as AttachedClient,
-      "none",
-    );
-
     const msg = await manager.runWorkspaceAction(session.sessionId, "end");
-    // The merge streams (so it lands before the swap notice); the return
-    // value covers the return itself.
-    expect(streamedTexts(stream).join("")).toContain("Merged");
-    expect(msg).toContain("Returned to");
+    // One sentence for one action: what merged, where it went, and that
+    // the workspace is gone.
+    expect(msg).toContain("Merged");
+    expect(msg).toContain("returned there");
+    expect(msg).toContain("workspace removed");
 
     // Back in the real tree, with the work landed.
     expect(session.cwd).toBe(repo);
@@ -1046,10 +1034,7 @@ describe("session isolation end-to-end", () => {
       "none",
     );
 
-    await manager.runWorkspaceAction(session.sessionId, "end");
-    // Read the streamed report, which is where the landing (and any
-    // warning about it) now goes.
-    const report = streamedTexts(stream).join("");
+    const report = await manager.runWorkspaceAction(session.sessionId, "end");
     expect(report).toContain("Merged");
     // The agent's work survived: the whole point.
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("agent three\n");
@@ -1078,11 +1063,19 @@ describe("session isolation end-to-end", () => {
     expect(after.stdout).not.toContain(session.sessionId);
   });
 
-  it("labels a workspace swap by its cause, not by the compaction machinery", async () => {
+  it("says nothing on a workspace swap, least of all that it compacted", async () => {
     // Workspace moves borrow swapUpstream, which is the compaction path,
     // so they used to announce "Compaction completed." That is wrong
     // twice: nothing was summarized, and it invites worry about lost
     // context at the moment the user is confirming a clean transition.
+    //
+    // Naming the swap after its cause fixed the wrong half. The swap is a
+    // STEP inside `workspace start` / `end`, not the outcome of one, and
+    // the caller already reports the outcome — so announcing the step too
+    // printed three lines for one action, two of them saying "returned".
+    // It also fired before startWorkspace had written the cwd/binding
+    // record, claiming a move nothing on disk yet justified. Progress is
+    // covered by the workspace phases, which drive a live indicator.
     //
     // The synthetic message goes to ATTACHED CLIENTS rather than through
     // onBroadcast (it is deliberately not recorded to history), so the
@@ -1104,13 +1097,13 @@ describe("session isolation end-to-end", () => {
         .join("");
 
     await manager.runWorkspaceAction(session.sessionId, "start", "labelled");
-    expect(textOf()).toContain("Moved into the workspace");
     expect(textOf()).not.toContain("Compaction completed");
+    expect(textOf()).not.toMatch(/Moved into|Switched to/);
 
     stream.sent.length = 0;
     await manager.runWorkspaceAction(session.sessionId, "end");
-    expect(textOf()).toContain("Returned to the source tree");
     expect(textOf()).not.toContain("Compaction completed");
+    expect(textOf()).not.toMatch(/Returned to|Switched to/);
   });
 
   /** The streamed chunks in order, rather than joined into one blob. */
@@ -1123,11 +1116,16 @@ describe("session isolation end-to-end", () => {
       .filter((t) => t.length > 0);
   }
 
-  it("reports the merge before the return, in the order the work happened", async () => {
-    // The merge summary used to ride out on the command's RETURN value,
-    // which a client renders only when the turn ends, while the swap
-    // streams "Returned to the source tree." the instant the new agent is
-    // up. So `end` printed its LAST step before the step that preceded it.
+  it("states the whole outcome once, rather than a line per step", async () => {
+    // Three messages for one command, two of them saying "returned":
+    // the streamed merge summary, the swap's own "Returned to the source
+    // tree.", and the return value's "Returned to X. Workspace removed."
+    //
+    // The streaming existed only to dodge an ordering artifact — a
+    // command's result renders at end of turn, so the merge summary
+    // arrived AFTER the swap notice it preceded. Silencing the swap
+    // removes the artifact and the reason for the workaround together,
+    // which is what lets the whole outcome be one sentence.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     const stream = makeControlledStream();
@@ -1141,15 +1139,11 @@ describe("session isolation end-to-end", () => {
     stream.sent.length = 0;
     const result = await manager.runWorkspaceAction(session.sessionId, "end");
 
-    const texts = streamedTexts(stream);
-    const mergeAt = texts.findIndex((t) => t.includes("Merged"));
-    const returnAt = texts.findIndex((t) => t.includes("Returned to the source tree"));
-    expect(mergeAt).toBeGreaterThanOrEqual(0);
-    expect(returnAt).toBeGreaterThanOrEqual(0);
-    expect(mergeAt).toBeLessThan(returnAt);
-    // Said once, not twice: the result now covers only the return.
-    expect(result).not.toContain("Merged");
-    expect(result).toContain("Workspace removed");
+    // Nothing streamed: no half-report to be ordered against anything.
+    expect(streamedTexts(stream)).toEqual([]);
+    // And one line carrying every part, in the order it happened.
+    expect(result.split("\n")).toHaveLength(1);
+    expect(result).toMatch(/^Merged .* and returned there; workspace removed\.$/);
   });
 
   it("does not mistake its own landed work for the user's overlapping edits", async () => {
@@ -1181,8 +1175,7 @@ describe("session isolation end-to-end", () => {
     expect(refs.stdout).toContain(`refs/hydra/baseline/${session.sessionId}`);
 
     stream.sent.length = 0;
-    await manager.runWorkspaceAction(session.sessionId, "end");
-    const streamed = streamedTexts(stream).join("");
+    const streamed = await manager.runWorkspaceAction(session.sessionId, "end");
     expect(streamed).toContain("Merged");
     expect(streamed).not.toContain("WARNING");
 
@@ -1214,8 +1207,7 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent second version\n");
 
     stream.sent.length = 0;
-    await manager.runWorkspaceAction(session.sessionId, "end");
-    const streamed = streamedTexts(stream).join("");
+    const streamed = await manager.runWorkspaceAction(session.sessionId, "end");
     expect(streamed).toContain("WARNING");
     expect(streamed).toContain(`refs/hydra/landing/${session.sessionId}`);
 
@@ -1507,7 +1499,7 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(session.cwd, "tracked.txt"), "first pass\n");
 
     const msg = await manager.runWorkspaceAction(session.sessionId, "merge");
-    expect(msg).toContain("Still working in");
+    expect(msg).toContain("still working in");
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("first pass\n");
     expect(session.workspace).toBeDefined();
   });

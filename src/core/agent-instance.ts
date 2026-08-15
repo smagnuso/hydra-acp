@@ -230,7 +230,28 @@ export class AgentInstance {
       `agent ${this.agentId} pid=${this.child.pid} did not exit after ${signal}; sending SIGKILL`,
     );
     this.signalProcessGroup("SIGKILL");
-    await this.waitForExit(this.killEscalationMs);
+    // NOT the escalation budget. That number answers "how long do we
+    // wait for an agent that may be handling the signal gracefully",
+    // which is a question about the agent's cooperation. SIGKILL cannot
+    // be caught or ignored, so there is nothing left to be patient with:
+    // this wait is just reaping, and the only way `exit` fails to arrive
+    // is an uninterruptible-sleep or zombie case that no timeout fixes.
+    //
+    // Sharing the escalation number made `await kill()` resolve with the
+    // process still alive whenever the OS reap lost a race with a 100ms
+    // timer — which is a lie to every caller that treats a resolved
+    // kill() as "it's dead", and showed up as a flaky test under
+    // full-suite CPU contention.
+    await this.waitForExit(REAP_AFTER_SIGKILL_MS);
+    if (!this.exited) {
+      // Bounded rather than infinite so one stuck process cannot hang a
+      // daemon shutdown, but say so: at this point the process is
+      // unkillable by any normal means and that is worth knowing.
+      this.logger?.warn(
+        `agent ${this.agentId} pid=${this.child.pid} still has not exited ` +
+          `${REAP_AFTER_SIGKILL_MS}ms after SIGKILL; giving up on the reap`,
+      );
+    }
   }
 
   // Spawned with detached:true, so the child is the leader of its own
@@ -272,6 +293,11 @@ export class AgentInstance {
 }
 
 const DEFAULT_KILL_ESCALATION_MS = 2_000;
+// How long to wait for the OS to reap a SIGKILLed child. Generous on
+// purpose: this is not patience with the agent (SIGKILL is not
+// negotiable), it is only absorbing scheduler delay, so it should never
+// be the reason kill() reports a live process as dead.
+const REAP_AFTER_SIGKILL_MS = 5_000;
 
 function openAgentLog(agentId: string): fs.WriteStream | undefined {
   try {

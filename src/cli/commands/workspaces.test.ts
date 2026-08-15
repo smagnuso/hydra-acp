@@ -45,11 +45,11 @@ async function makeGitRepo(): Promise<string> {
 }
 
 /**
- * An orphan: a real worktree under the workspaces root that no session
+ * An unowned workspace: a real worktree under the workspaces root that no session
  * record mentions. Built with plain git so the test does not depend on
  * the provisioning path it is meant to be independent of.
  */
-async function makeOrphanWorktree(repo: string, label: string): Promise<string> {
+async function makeUnownedWorktree(repo: string, label: string): Promise<string> {
   const dir = path.join(paths.home(), "workspaces", "deadbeef", label);
   await fs.mkdir(path.dirname(dir), { recursive: true });
   await exec("git", ["worktree", "add", "-b", `hydra/${label}`, dir], { cwd: repo });
@@ -81,9 +81,9 @@ describe("workspace prune", () => {
     vi.restoreAllMocks();
   });
 
-  it("tears down an orphan completely, not just its directory", async () => {
+  it("tears down an unowned workspace completely, not just its directory", async () => {
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "stranded");
+    const dir = await makeUnownedWorktree(repo, "stranded");
     expect(await worktreeList(repo)).toContain(dir);
 
     await runWorkspacePrune();
@@ -97,7 +97,7 @@ describe("workspace prune", () => {
 
   it("keeps a branch that carries commits, and says so", async () => {
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "haswork");
+    const dir = await makeUnownedWorktree(repo, "haswork");
     await fs.writeFile(path.join(dir, "new.txt"), "committed in the workspace\n");
     await exec("git", ["add", "-A"], { cwd: dir });
     await exec("git", ["commit", "-q", "-m", "work"], { cwd: dir });
@@ -110,9 +110,9 @@ describe("workspace prune", () => {
     expect(out).toContain("commit(s) not in HEAD");
   });
 
-  it("keeps an orphan holding uncommitted work unless forced", async () => {
+  it("keeps an unowned workspace holding uncommitted work unless forced", async () => {
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "dirty");
+    const dir = await makeUnownedWorktree(repo, "dirty");
     await fs.writeFile(path.join(dir, "scratch.txt"), "unsaved\n");
 
     await runWorkspacePrune();
@@ -132,7 +132,7 @@ describe("workspace prune", () => {
     // segment of a path whose parent is a content hash, so there is no
     // way to reconstruct it by hand.
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "findme");
+    const dir = await makeUnownedWorktree(repo, "findme");
 
     await runWorkspaceList();
 
@@ -140,14 +140,14 @@ describe("workspace prune", () => {
     expect(out).toContain(shortenHomePath(dir));
   });
 
-  it("attributes an orphan to its source tree instead of reporting unknown", async () => {
+  it("attributes an unowned workspace to its source tree instead of reporting unknown", async () => {
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "whereami");
+    const dir = await makeUnownedWorktree(repo, "whereami");
 
     const rows = await collectWorkspaces();
     const row = rows.find((r) => r.path === dir);
 
-    expect(row?.state).toBe("orphan");
+    expect(row?.state).toBe("unowned");
     expect(row?.sourceCwd).toBe(repo);
     expect(row?.provider).toBe("git");
     expect(row?.branch).toBe("hydra/whereami");
@@ -155,7 +155,7 @@ describe("workspace prune", () => {
   });
 });
 
-// `remove` on a missing workspace.
+// `remove` on an inactive workspace.
 //
 // The directory is gone but the binding is not, and the row is built FROM
 // the binding — so the early "already gone; clearing nothing" return left
@@ -285,7 +285,7 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
   };
 }
 
-describe("workspace remove, missing", () => {
+describe("workspace remove — inactive", () => {
   let out: string;
   let daemon: FakeDaemon;
 
@@ -309,7 +309,7 @@ describe("workspace remove, missing", () => {
   it("clears the binding so the row stops being listed", async () => {
     const repo = await makeGitRepo();
     const { meta } = await makeMissing(repo, "gone", "sess-gone");
-    expect((await collectWorkspaces()).map((r) => r.state)).toEqual(["missing"]);
+    expect((await collectWorkspaces()).map((r) => r.state)).toEqual(["inactive"]);
 
     await runWorkspaceRemove({ target: "sess-gone" });
 
@@ -481,7 +481,7 @@ describe("workspace remove — on disk", () => {
     // destroyed, so deleting it as GC hygiene is what turns a forced
     // removal from recoverable into final.
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "autosave");
+    const dir = await makeUnownedWorktree(repo, "autosave");
     const meta = await bindSession("sess-auto", {
       path: dir,
       sourceCwd: repo,
@@ -508,7 +508,7 @@ describe("workspace remove — on disk", () => {
     // Clean removal destroys no copy of anything, so the ref is only
     // pinning objects and the hygiene argument stands unopposed.
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "clean");
+    const dir = await makeUnownedWorktree(repo, "clean");
     await bindSession("sess-clean", {
       path: dir,
       sourceCwd: repo,
@@ -526,11 +526,11 @@ describe("workspace remove — on disk", () => {
     expect(out).not.toContain("recoverable");
   });
 
-  it("tears an orphan down through its provider, not with a bare rm", async () => {
+  it("tears an unowned workspace down through its provider, not with a bare rm", async () => {
     // Same residue prune exists to avoid: a bare rm leaves git's
     // worktree registry and the branch aimed at a path that is gone.
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "unowned");
+    const dir = await makeUnownedWorktree(repo, "unowned");
 
     await runWorkspaceRemove({ target: "unowned" });
 
@@ -539,21 +539,21 @@ describe("workspace remove — on disk", () => {
     expect(await branches(repo)).not.toContain("hydra/unowned");
   });
 
-  it("keeps an orphan's branch when it carries commits, and says so", async () => {
+  it("keeps an unowned branch when it carries commits, and says so", async () => {
     const repo = await makeGitRepo();
-    const dir = await makeOrphanWorktree(repo, "orphanwork");
+    const dir = await makeUnownedWorktree(repo, "unownedwork");
     await fs.writeFile(path.join(dir, "work.txt"), "committed\n");
     await exec("git", ["add", "-A"], { cwd: dir });
     await exec("git", ["commit", "-q", "-m", "work"], { cwd: dir });
 
-    await runWorkspaceRemove({ target: "orphanwork" });
+    await runWorkspaceRemove({ target: "unownedwork" });
 
-    expect(await branches(repo)).toContain("hydra/orphanwork");
+    expect(await branches(repo)).toContain("hydra/unownedwork");
     expect(out).toContain("commit(s) not in HEAD");
   });
 });
 
-describe("workspace list — missing rows", () => {
+describe("workspace list — inactive rows", () => {
   let out: string;
 
   beforeEach(() => {
@@ -577,20 +577,20 @@ describe("workspace list — missing rows", () => {
     await runWorkspaceList();
 
     expect(out).not.toContain("ghost");
-    expect(out).toContain("1 missing");
-    expect(out).toContain("--missing");
+    expect(out).toContain("1 inactive");
+    expect(out).toContain("--inactive");
   });
 
-  it("lists them under --missing", async () => {
+  it("lists them under --inactive", async () => {
     const repo = await makeGitRepo();
     await makeMissing(repo, "ghost", "sess-ghost");
 
-    await runWorkspaceList({ missing: true });
+    await runWorkspaceList({ inactive: true });
 
     expect(out).toContain("ghost");
-    expect(out).toContain("1 missing");
+    expect(out).toContain("1 inactive");
     // The hint is for people who cannot see them; they can.
-    expect(out).not.toContain("--missing`");
+    expect(out).not.toContain("--inactive`");
   });
 
   it("keeps every row in --json", async () => {
@@ -600,6 +600,6 @@ describe("workspace list — missing rows", () => {
     await runWorkspaceList({ json: true });
 
     const parsed = JSON.parse(out) as { workspaces: Array<{ state: string }> };
-    expect(parsed.workspaces.map((w) => w.state)).toEqual(["missing"]);
+    expect(parsed.workspaces.map((w) => w.state)).toEqual(["inactive"]);
   });
 });

@@ -1828,11 +1828,11 @@ export class SessionManager {
     if (action === "status") {
       const ws = session.workspace;
       if (ws === undefined) {
-        return `Not isolated. Working directly in ${session.cwd}.\nUse \`/hydra workspace start\` to move into an isolated workspace.`;
+        return `Not isolated. Working directly in ${shortenHomePath(session.cwd)}.\nUse \`/hydra workspace start\` to move into an isolated workspace.`;
       }
       return [
-        `Isolated in ${ws.path}`,
-        `  source:   ${ws.sourceCwd}`,
+        `Isolated in ${shortenHomePath(ws.path)}`,
+        `  source:   ${shortenHomePath(ws.sourceCwd)}`,
         `  provider: ${ws.provider}${ws.vcs?.branch !== undefined ? ` (${ws.vcs.branch})` : ""}`,
         `Use \`/hydra workspace end\` to merge and return, or \`abandon\` to return without merging.`,
       ].join("\n");
@@ -1848,7 +1848,7 @@ export class SessionManager {
     }
     if (action === "merge") {
       session.broadcastWorkspacePhase({ phase: "landing" });
-      let landed: string;
+      let landed: { merged: string; warnings: string[] };
       try {
         landed = await this.mergeWorkspaceIntoSource(ws, session.sessionId);
       } catch (err) {
@@ -1863,7 +1863,10 @@ export class SessionManager {
         sourceCwd: ws.sourceCwd,
         label: ws.label,
       });
-      return `${landed}\nStill working in ${ws.path}.`;
+      return [
+        `${landed.merged}; still working in ${shortenHomePath(ws.path)}.`,
+        ...landed.warnings,
+      ].join("\n");
     }
     if (action === "end") {
       // Merge BEFORE leaving. If it refuses, the session stays put:
@@ -1874,7 +1877,7 @@ export class SessionManager {
       // two trees and the swap respawns an agent, so an `end` on a real
       // repository is long enough that silence reads as a hang.
       session.broadcastWorkspacePhase({ phase: "landing" });
-      let landed: string;
+      let landed: { merged: string; warnings: string[] };
       try {
         landed = await this.mergeWorkspaceIntoSource(ws, session.sessionId);
       } catch (err) {
@@ -1882,23 +1885,37 @@ export class SessionManager {
         session.broadcastWorkspacePhase({ phase: "failed", error: base });
         throw err;
       }
-      // Report the merge NOW rather than through the return value. The
-      // swap inside leaveWorkspace streams "Returned to the source tree."
-      // as soon as the new agent is up, but a command's result text waits
-      // for the turn to end, so returning the merge text here printed the
-      // landing AFTER the return that followed it.
-      session.broadcastSyntheticText(`\n${landed}\n`);
+      // One message, at the end. The merge used to be streamed here
+      // because the swap that follows announced itself, and a command's
+      // result text waits for the turn to end — so returning the merge
+      // text printed the landing AFTER the "returned" line it caused.
+      // The swap is silent now, so the ordering problem is gone and the
+      // whole outcome can be stated once, in the order it happened.
       session.broadcastWorkspacePhase({ phase: "returning" });
-      await this.leaveWorkspace(session, ws, { integrated: true });
-      return `Returned to ${ws.sourceCwd}. Workspace removed.`;
+      try {
+        await this.leaveWorkspace(session, ws, { integrated: true });
+      } catch (err) {
+        // The merge already succeeded. Losing that fact behind a swap
+        // failure would leave the user thinking the work is still only
+        // in a workspace they are being told they could not leave.
+        const base = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `${landed.merged}, but the session could not leave the workspace: ${base}`,
+        );
+      }
+      return [
+        `${landed.merged} and returned there; workspace removed.`,
+        ...landed.warnings,
+      ].join("\n");
     }
     // abandon
     session.broadcastWorkspacePhase({ phase: "returning" });
     await this.leaveWorkspace(session, ws, { integrated: false });
     return [
-      `Returned to ${ws.sourceCwd} WITHOUT merging.`,
-      `The workspace is still at ${ws.path} and its branch ${ws.vcs?.branch ?? "(none)"} is intact,`,
-      `so nothing is lost — land it later with \`hydra workspace merge\`, or drop it with \`hydra workspace remove\`.`,
+      `Returned to ${shortenHomePath(ws.sourceCwd)} WITHOUT merging.`,
+      `The workspace is still at ${shortenHomePath(ws.path)} and its branch ` +
+        `${ws.vcs?.branch ?? "(none)"} is intact, so nothing is lost — land it later with ` +
+        `\`hydra workspace merge\`, or drop it with \`hydra workspace remove\`.`,
     ].join("\n");
   }
 
@@ -1917,10 +1934,17 @@ export class SessionManager {
    * back in a form they did not choose — least of all as a commit that
    * turns their untracked files into tracked ones.
    */
+  /**
+   * Returns the outcome in parts rather than as a finished sentence, so
+   * each caller can say what it did in ONE line. `end` merges and then
+   * leaves; `merge` stays put. Handing them a pre-punctuated "Merged X
+   * into Y." forced them to append a second sentence about the same
+   * action, which is how one command came to print three lines.
+   */
   private async mergeWorkspaceIntoSource(
     ws: PersistedWorkspace,
     sessionId: string,
-  ): Promise<string> {
+  ): Promise<{ merged: string; warnings: string[] }> {
     const source = ws.sourceCwd;
     const branch = ws.vcs?.branch;
     if (branch === undefined) {
@@ -1928,7 +1952,7 @@ export class SessionManager {
     }
     const exists = await this.dirExists(source);
     if (!exists) {
-      throw new Error(`source tree ${source} no longer exists`);
+      throw new Error(`source tree ${shortenHomePath(source)} no longer exists`);
     }
     // A dirty source is the NORMAL case: `start` copied the work in
     // rather than taking it, so the same edits are expected to still be
@@ -1958,7 +1982,10 @@ export class SessionManager {
     if (!canFf.ok) {
       const current = (await execGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
       throw new Error(
-        `cannot fast-forward ${current} in ${source} to ${branch}. The source has moved on. ` +
+        // Prose gets the short path; the command keeps the absolute one,
+        // so it stays paste-able outside a shell that expands `~`.
+        `cannot fast-forward ${current} in ${shortenHomePath(source)} to ${branch}. ` +
+          `The source has moved on. ` +
           `Nothing was changed; merge it yourself with: git -C ${source} merge ${branch}`,
       );
     }
@@ -2039,21 +2066,21 @@ export class SessionManager {
       }
     }
 
-    const notes: string[] = [];
+    const warnings: string[] = [];
     if (!replayed) {
-      notes.push(
-        `\n  WARNING: the workspace's uncommitted changes could not be replayed; ` +
+      warnings.push(
+        `  WARNING: the workspace's uncommitted changes could not be replayed; ` +
           `they remain reachable from ${branch}.`,
       );
     }
     if (!divergenceOk) {
-      notes.push(
-        `\n  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
+      warnings.push(
+        `  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
           `changes and could not be replayed on top. They are preserved at ` +
           `${capture.retainedRef} — recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
       );
     }
-    return `Merged ${branch} into ${source}.${notes.join("")}`;
+    return { merged: `Merged ${branch} into ${shortenHomePath(source)}`, warnings };
   }
 
 
@@ -2175,7 +2202,8 @@ export class SessionManager {
   private async startWorkspace(session: Session, label?: string): Promise<string> {
     if (session.workspace !== undefined) {
       throw new Error(
-        `already isolated in ${session.workspace.path}. Use \`/hydra workspace end\` first.`,
+        `already isolated in ${shortenHomePath(session.workspace.path)}. ` +
+          `Use \`/hydra workspace end\` to merge and return first, or \`abandon\` to leave it behind.`,
       );
     }
     const sourceCwd = session.cwd;
@@ -2301,14 +2329,17 @@ export class SessionManager {
       ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
     });
 
-    const lines = [`Moved into workspace ${ws.path}`, `  source: ${sourceCwd}`];
+    // Paths shortened throughout: these lines are read, not copied, and
+    // three absolute paths under ~ push the parts that differ off the
+    // right of the screen.
+    const lines = [`Moved into workspace ${shortenHomePath(ws.path)}`, `  source: ${shortenHomePath(sourceCwd)}`];
     if (ws.vcs?.branch !== undefined) {
       lines.push(`  branch: ${ws.vcs.branch}`);
     }
     if (carried !== undefined) {
       lines.push(
         copied
-          ? `  copied your uncommitted work in; ${shortenHomePath(sourceCwd)} is untouched`
+          ? `  copied your uncommitted work in; the source tree is untouched`
           : `  WARNING: could not copy your uncommitted work; the workspace starts from HEAD`,
       );
     }

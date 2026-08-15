@@ -430,7 +430,7 @@ async function main(): Promise<void> {
       if (sub === undefined || sub === "list") {
         await runWorkspaceList({
           json: flags.json === true,
-          missing: flags.missing === true,
+          inactive: flags.inactive === true,
         });
         return;
       }
@@ -484,7 +484,7 @@ async function main(): Promise<void> {
       process.stderr.write(
         `Unknown workspace subcommand: ${sub}\n` +
           `Usage: hydra workspace [list|prune|merge|apply|remove] [<session>] ` +
-          `[--json] [--missing] [--force] [-m <msg>] [--into <path>] [--remove]\n`,
+          `[--json] [--inactive] [--force] [-m <msg>] [--into <path>] [--remove]\n`,
       );
       process.exit(2);
       return;

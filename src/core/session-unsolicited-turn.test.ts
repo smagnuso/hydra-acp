@@ -465,6 +465,55 @@ describe("armed background tasks", () => {
     ]);
   });
 
+  it("keeps a task id that a later update does not repeat", async () => {
+    // The id and the backgrounded-ness arrive on different updates:
+    // Monitor reports a taskId, Bash reports run_in_background, and
+    // either can come first. Re-arming rebuilds the entry from the
+    // current update alone, so an id already learned has to be carried
+    // forward or a later plain progress update erases it, and with it
+    // the only handle TaskStop has on the job.
+    // All three inside ONE turn. Delivered afterwards they would each
+    // open an unsolicited turn, whose attribution clears the armed entry,
+    // and the test would be measuring that instead.
+    const { session, mock } = makeSession();
+    const client: AttachedClient = {
+      clientId: "c_mixed",
+      connection: new JsonRpcConnection(makeControlledStream()),
+    };
+    await session.attach(client, "none");
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        const metas: Array<Record<string, unknown> | undefined> = [
+          undefined,
+          { toolResponse: { taskId: "bg_1" } },
+          undefined,
+        ];
+        for (const [i, meta] of metas.entries()) {
+          mock.triggerNotification("session/update", {
+            sessionId: "u_agent",
+            update: {
+              sessionUpdate: i === 0 ? "tool_call" : "tool_call_update",
+              toolCallId: "toolu_mixed",
+              title: "Terminal",
+              rawInput: { command: "ninja", run_in_background: true },
+              ...(meta !== undefined ? { _meta: { claudeCode: meta } } : {}),
+            },
+          });
+        }
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "kick off a build" }],
+    });
+    await settleDrain();
+
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Terminal", taskId: "bg_1" },
+    ]);
+  });
+
   it("counts a Monitor and carries its taskId", async () => {
     const { session } = await armDuringTurn({
       sessionUpdate: "tool_call_update",
@@ -593,6 +642,68 @@ describe("armed background tasks", () => {
     );
     expect(pushes).toHaveLength(1);
     expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  it("pushes once even when the clock ticks between updates", async () => {
+    // The deterministic form of the test above, which was flaky rather
+    // than wrong: three updates for one tool call, but with the clock
+    // advancing between them.
+    //
+    // Nothing here races. The loop is synchronous and single threaded, so
+    // the only varying input was Date.now(). Arming used to overwrite
+    // armedAt on every update, and the dedup key includes armedSince, so
+    // whether the updates coalesced depended on whether they landed
+    // inside the same millisecond. Fast machine, one push; loaded
+    // machine, one push per update. Forcing the tick makes the bug
+    // reproduce every time.
+    const { session, mock } = makeSession();
+    const stream = makeControlledStream();
+    const client: AttachedClient = {
+      clientId: "c_tick",
+      connection: new JsonRpcConnection(stream),
+    };
+    await session.attach(client, "none");
+
+    let clock = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      clock += 25;
+      return clock;
+    });
+    try {
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          for (let i = 0; i < 3; i++) {
+            mock.triggerNotification("session/update", {
+              sessionId: "u_agent",
+              update: {
+                sessionUpdate: i === 0 ? "tool_call" : "tool_call_update",
+                toolCallId: "toolu_tick",
+                title: "Terminal",
+                rawInput: { command: "ninja", run_in_background: true },
+              },
+            });
+          }
+          return { stopReason: "end_turn" };
+        },
+      );
+      await session.prompt(client.clientId, {
+        sessionId: "sess_u",
+        prompt: [{ type: "text", text: "build it" }],
+      });
+      await settleDrain();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const pushes = stream.sent.filter(
+      (m) => "method" in m && m.method === "hydra-acp/session/armed_tasks_updated",
+    );
+    expect(pushes).toHaveLength(1);
+    // And the elapsed clock still reads from when the job STARTED. This is
+    // the user-visible half: a task reporting progress for minutes must
+    // not keep looking like it just began.
+    const since = (pushes[0] as { params?: { since?: number } }).params?.since;
+    expect(session.armedSince).toBe(since);
   });
 
   // A real TaskStop happens INSIDE a turn (the agent decides to cancel a

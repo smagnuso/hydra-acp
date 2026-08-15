@@ -12,6 +12,7 @@ function withPermission(): {
   hintRow: number;
   row(n: number): string;
   arm(): void;
+  justAppeared(): void;
 } {
   const cap = makeCaptureTerm(100, 30);
   const dispatcher = {
@@ -67,6 +68,19 @@ function withPermission(): {
     // Pretend the modal has been up a while, so clicks are armed.
     arm: () => {
       priv.permissionArmedAt = 0;
+    },
+    // The inverse: pretend it appeared just now.
+    //
+    // The arm window is measured against the real clock, and this
+    // harness spends a full repaint of a 100x30 screen before the test
+    // body runs. On a loaded machine that setup can itself outlast the
+    // 350ms window, which armed the click a test wanted DROPPED and
+    // failed it for a reason having nothing to do with the behaviour
+    // under test. Re-stamping is enough: it removes setup duration from
+    // the measurement without mocking Date.now, which the click path
+    // also reads for unrelated reasons.
+    justAppeared: () => {
+      priv.permissionArmedAt = Date.now();
     },
   };
 }
@@ -150,6 +164,7 @@ describe("permission modal mouse", () => {
   // click already travelling toward the transcript must not land on it.
   it("drops a click that lands within the arm window", () => {
     const p = withPermission();
+    p.justAppeared();
     click(p.screen, 6, p.rowOf(1));
     expect(p.clicks).toEqual([]);
     // Hover is unaffected: it decides nothing.

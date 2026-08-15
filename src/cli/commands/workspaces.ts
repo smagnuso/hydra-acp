@@ -13,7 +13,7 @@
 // binding lives in the session record. But a workspace whose record is
 // gone is still not anonymous: the directory itself names its origin (a
 // git worktree in `.git`, a copy workspace in its manifest), which is
-// what attributeOrphan recovers. "Orphan" therefore means "no session
+// what attributeUnowned recovers. "Unowned" therefore means "no session
 // owns this", not "nothing is known about this" — the distinction
 // matters because it is the provider, recovered that way, that knows
 // how to tear one down completely.
@@ -47,13 +47,19 @@ interface Binding {
   };
 }
 
+// One axis: the directory's relationship to the sessions that use it.
+// Deliberately not the session vocabulary (BUSY/WARM/COLD) — that is a
+// fact about the daemon holding a session in memory, and the same
+// session can be cold with an `active` workspace or live with an
+// `inactive` one, so sharing words would put two tables in visible
+// disagreement about it.
 export type WorkspaceState =
   /** Directory exists and a session record points at it. */
-  | "bound"
-  /** Directory exists, no record references it. Reclaimable. */
-  | "orphan"
-  /** A record points here but the directory is gone. Rebuildable. */
-  | "missing";
+  | "active"
+  /** Directory exists, no session owns it. Reclaimable. */
+  | "unowned"
+  /** A session owns it but the directory is gone. Rebuildable. */
+  | "inactive";
 
 export interface WorkspaceRow {
   path: string;
@@ -135,7 +141,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
         sourceCwd: bound.workspace.sourceCwd,
         label: bound.workspace.label,
         provider: bound.workspace.provider,
-        state: "bound",
+        state: "active",
         sessionId: bound.sessionId,
         ...(bound.workspace.vcs?.branch !== undefined
           ? { branch: bound.workspace.vcs.branch }
@@ -145,14 +151,14 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
     }
     // No record points here, but the directory can usually still say
     // where it came from. Report that rather than "(unknown)": an
-    // orphan you can attribute is one you can decide about.
-    const attributed = await attributeOrphan(dir);
+    // unowned workspace you can attribute is one you can decide about.
+    const attributed = await attributeUnowned(dir);
     rows.push({
       path: dir,
       sourceCwd: attributed?.sourceCwd ?? "(unknown)",
       label: attributed?.label ?? path.basename(dir),
       provider: attributed?.provider ?? "(unknown)",
-      state: "orphan",
+      state: "unowned",
       ...(attributed?.vcs?.branch !== undefined ? { branch: attributed.vcs.branch } : {}),
     });
   }
@@ -164,7 +170,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
         sourceCwd: b.workspace.sourceCwd,
         label: b.workspace.label,
         provider: b.workspace.provider,
-        state: "missing",
+        state: "inactive",
         sessionId: b.sessionId,
         ...(b.workspace.vcs?.branch !== undefined ? { branch: b.workspace.vcs.branch } : {}),
       });
@@ -175,18 +181,18 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
   // cost. Only meaningful for a directory that exists and whose provider
   // we know.
   for (const row of rows) {
-    if (row.state === "missing" || row.provider === "(unknown)") {
+    if (row.state === "inactive" || row.provider === "(unknown)") {
       continue;
     }
     const provider = getProvider(row.provider);
     if (provider === undefined) {
       continue;
     }
-    // Bound rows use the recorded binding; orphans fall back to what the
+    // Active rows use the recorded binding; unowned ones fall back to what the
     // directory itself reported, so they get a real DIRTY answer too.
     const binding = byPath.get(row.path);
     const ws =
-      binding !== undefined ? toProviderWorkspace(binding.workspace) : await attributeOrphan(row.path);
+      binding !== undefined ? toProviderWorkspace(binding.workspace) : await attributeUnowned(row.path);
     if (ws === undefined) {
       continue;
     }
@@ -216,11 +222,11 @@ function runGit(args: string[], cwd: string): Promise<{ ok: boolean; out: string
  * The path is a dead end — a hash and a label — but the directory is
  * not: a git worktree names its parent repo in `.git`, and a copy
  * workspace records its source in the manifest sidecar. That is enough
- * to hand an orphan back to its provider, which matters because the
+ * to hand an unowned workspace back to its provider, which matters because the
  * provider is what knows how to delete one safely. Returns undefined
  * only when the directory belongs to neither shipped provider.
  */
-async function attributeOrphan(dir: string): Promise<Workspace | undefined> {
+async function attributeUnowned(dir: string): Promise<Workspace | undefined> {
   const common = await runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
   if (common.ok && common.out.trim().length > 0) {
     const gitDir = common.out.trim();
@@ -262,7 +268,7 @@ async function attributeOrphan(dir: string): Promise<Workspace | undefined> {
  * and so the target cannot be inferred from the filesystem at all.
  */
 async function resolveTarget(idOrLabel: string | undefined): Promise<WorkspaceRow> {
-  const rows = (await collectWorkspaces()).filter((r) => r.state === "bound");
+  const rows = (await collectWorkspaces()).filter((r) => r.state === "active");
   if (idOrLabel !== undefined) {
     const want = idOrLabel.replace(/^hydra_session_/, "");
     const hit = rows.filter(
@@ -549,7 +555,7 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
 /**
  * Finish removing a workspace whose directory is already gone.
  *
- * "Missing" rows are built FROM the session binding, not from the
+ * "Inactive" rows are built FROM the session binding, not from the
  * filesystem, so reporting "already gone, clearing nothing" and
  * returning left `remove` unable to clear the one row a user is most
  * likely to aim it at. Three things outlive the directory: the binding
@@ -568,7 +574,7 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
  * nothing (prune's rule, via the same function), the autosave is kept,
  * and whatever survives is named on the way out.
  */
-async function removeMissing(row: WorkspaceRow): Promise<void> {
+async function removeInactive(row: WorkspaceRow): Promise<void> {
   const bindings = await readBindings();
   const bound = bindings.find((b) => b.workspace.path === row.path);
   if (bound === undefined) {
@@ -598,7 +604,7 @@ async function removeMissing(row: WorkspaceRow): Promise<void> {
   if (branch !== undefined && !branch.startsWith("hydra/")) {
     notes.push(`kept ${branch} (not hydra's to delete)`);
   } else {
-    const held = await reclaimOrphanBranch(ws);
+    const held = await reclaimBranch(ws);
     if (held !== undefined) {
       notes.push(held);
     }
@@ -667,7 +673,7 @@ async function clearBinding(bound: Binding): Promise<void> {
 /**
  * Remove one named workspace.
  *
- * Distinct from `prune`, which sweeps unattributable orphans in bulk.
+ * Distinct from `prune`, which sweeps unattributable unowned ones in bulk.
  * This takes a target you named, so it will happily remove a workspace
  * that is still bound to a session — that is usually the point, and it
  * is recoverable: the session's next resurrect rebuilds the checkout
@@ -709,8 +715,8 @@ export async function runWorkspaceRemove(opts: {
   }
   const row = hits[0]!;
 
-  if (row.state === "missing") {
-    await removeMissing(row);
+  if (row.state === "inactive") {
+    await removeInactive(row);
     return;
   }
 
@@ -768,7 +774,7 @@ export async function runWorkspaceRemove(opts: {
     // which the branch preserves anyway).
     await provider.removeWorkspace(toProviderWorkspace(bound.workspace), { force: true });
   } else {
-    const held = await removeUnbound(row);
+    const held = await removeUnowned(row);
     if (held !== undefined) {
       notes.push(held);
     }
@@ -804,7 +810,7 @@ export async function runWorkspaceRemove(opts: {
         `git -C ${shortenHomePath(row.sourceCwd)} checkout ${retained}\n`,
     );
   }
-  if (row.state === "bound") {
+  if (row.state === "active") {
     process.stdout.write(
       `Its session still references it; the next resurrect rebuilds it from ${row.branch ?? "its branch"} ` +
         `or starts fresh from ${shortenHomePath(row.sourceCwd)}.\n`,
@@ -834,8 +840,8 @@ async function refExists(ws: Workspace, ref: string): Promise<boolean> {
  * Returns a note when the branch was kept, so committed work does not
  * survive silently with nothing left pointing at it.
  */
-async function removeUnbound(row: WorkspaceRow): Promise<string | undefined> {
-  const ws = await attributeOrphan(row.path);
+async function removeUnowned(row: WorkspaceRow): Promise<string | undefined> {
+  const ws = await attributeUnowned(row.path);
   const provider = ws === undefined ? undefined : getProvider(ws.provider);
   if (ws === undefined || provider === undefined) {
     // Genuinely unattributable: the directory is all there is to remove.
@@ -845,11 +851,11 @@ async function removeUnbound(row: WorkspaceRow): Promise<string | undefined> {
   }
   await provider.unlock(ws).catch(() => undefined);
   await provider.removeWorkspace(ws, { force: true });
-  return reclaimOrphanBranch(ws);
+  return reclaimBranch(ws);
 }
 
 export async function runWorkspaceList(
-  opts: { json?: boolean; missing?: boolean } = {},
+  opts: { json?: boolean; inactive?: boolean } = {},
 ): Promise<void> {
   const all = await collectWorkspaces();
   // JSON is a dump for tooling and every row carries `state`, so it
@@ -859,12 +865,12 @@ export async function runWorkspaceList(
     process.stdout.write(JSON.stringify({ workspaces: all }, null, 2) + "\n");
     return;
   }
-  // A missing row is a property of a SESSION (it points at a directory
+  // An inactive row is a property of a SESSION (it points at a directory
   // that is gone), not a workspace that exists, and sessions sit for
   // weeks. Keep it out of the table by default but never out of the
   // footer: hidden-and-counted is tidying, hidden-without-trace is how
   // you stop finding out that two sessions are stale.
-  const rows = opts.missing === true ? all : all.filter((r) => r.state !== "missing");
+  const rows = opts.inactive === true ? all : all.filter((r) => r.state !== "inactive");
   if (all.length === 0) {
     process.stdout.write("No workspaces.\n");
     return;
@@ -894,45 +900,46 @@ export async function runWorkspaceList(
     }
   }
 
-  const orphans = rows.filter((r) => r.state === "orphan").length;
-  if (orphans > 0) {
+  const unowned = rows.filter((r) => r.state === "unowned").length;
+  if (unowned > 0) {
     process.stdout.write(
-      `\n${orphans} orphan${orphans === 1 ? "" : "s"} (no session references them). ` +
+      `\n${unowned} unowned (no session references ${unowned === 1 ? "it" : "them"}). ` +
         `\`${invokedBinName()} workspace prune\` removes the ones holding no uncommitted work.\n`,
     );
   }
   // Counted from `all`, never from the filtered rows: the footer is the
   // only trace a hidden row leaves.
-  const missing = all.filter((r) => r.state === "missing").length;
-  if (missing > 0) {
+  const inactive = all.filter((r) => r.state === "inactive").length;
+  if (inactive > 0) {
     const bin = invokedBinName();
     process.stdout.write(
-      `${orphans > 0 ? "" : "\n"}${missing} missing (a session points at a directory that is ` +
+      `${unowned > 0 ? "" : "\n"}${inactive} inactive (a session points at a directory that is ` +
         `gone). Committed work is rebuilt from its branch on next resurrect; ` +
         `\`${bin} workspace remove\` clears the binding instead.\n` +
-        (opts.missing === true ? "" : `List them with \`${bin} workspace --missing\`.\n`),
+        (opts.inactive === true ? "" : `List them with \`${bin} workspace --inactive\`.\n`),
     );
   }
 }
 
 export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise<void> {
   const rows = await collectWorkspaces();
-  const orphans = rows.filter((r) => r.state === "orphan");
-  if (orphans.length === 0) {
+  const unowned = rows.filter((r) => r.state === "unowned");
+  if (unowned.length === 0) {
     process.stdout.write("Nothing to prune.\n");
     return;
   }
 
   let removed = 0;
   let kept = 0;
-  for (const row of orphans) {
-    // An orphan has no record, but it is not therefore anonymous: the
+  for (const row of unowned) {
+    // An unowned workspace has no record, but it is not therefore
+    // anonymous: the
     // directory still knows its own provider and source. Recovering that
     // is what lets the removal go through provider.removeWorkspace,
     // which is the only thing that tears down a workspace *completely* —
     // a bare rm of the directory leaves git's worktree registry (and the
     // branch) pointing at a path that no longer exists.
-    const ws = await attributeOrphan(row.path);
+    const ws = await attributeUnowned(row.path);
     const provider = ws === undefined ? undefined : getProvider(ws.provider);
     if (ws === undefined || provider === undefined) {
       // Genuinely unattributable. The old behaviour is right here: only
@@ -966,7 +973,7 @@ export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise
     await provider.unlock(ws).catch(() => undefined);
     await provider.removeWorkspace(ws, { force: opts.force === true }).catch(() => undefined);
     removed += 1;
-    const held = await reclaimOrphanBranch(ws);
+    const held = await reclaimBranch(ws);
     process.stdout.write(
       `remove ${shortenHomePath(row.path)}${held === undefined ? "" : ` (${held})`}\n`,
     );
@@ -981,13 +988,13 @@ export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise
  * Removing a worktree never removes its branch, so pruning without this
  * leaves a `hydra/…` ref per workspace forever. Deleting unconditionally
  * is not the fix: a branch with commits on it is the durable artifact
- * that `missing` workspaces are rebuilt from, and for an orphan it is
+ * that `inactive` workspaces are rebuilt from, and for an unowned one it is
  * the last copy. So the empty ones go and the rest are reported.
  *
  * Returns a note when the branch was kept, undefined when there was
  * nothing to keep or nothing to do.
  */
-async function reclaimOrphanBranch(ws: Workspace): Promise<string | undefined> {
+async function reclaimBranch(ws: Workspace): Promise<string | undefined> {
   const branch = ws.vcs?.branch;
   const repoRoot = ws.vcs?.repoRoot;
   // Only ever our own namespace — a workspace checked out on a user's

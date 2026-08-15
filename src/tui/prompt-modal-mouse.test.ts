@@ -14,6 +14,7 @@ function withCompaction(): {
   hintRow: number;
   row(n: number): string;
   arm(): void;
+  justAppeared(): void;
 } {
   const cap = makeCaptureTerm(100, 30);
   const dispatcher = {
@@ -66,6 +67,12 @@ function withCompaction(): {
     row: (n) => cap.row(n),
     arm: () => {
       priv.compactionArmedAt = 0;
+    },
+    // The inverse. See the twin in permission-mouse.test.ts: the window
+    // is real-clock, so a slow machine can spend it inside this harness
+    // and arm a click a test needs dropped.
+    justAppeared: () => {
+      priv.compactionArmedAt = Date.now();
     },
   };
 }
@@ -137,6 +144,7 @@ describe("compaction modal mouse", () => {
   // The prompt arrives unbidden right after attach.
   it("drops a click that lands within the arm window", () => {
     const c = withCompaction();
+    c.justAppeared();
     click(c.screen, 6, c.rowOf(0));
     expect(c.clicks).toEqual([]);
     c.arm();
