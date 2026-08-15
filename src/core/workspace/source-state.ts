@@ -56,10 +56,16 @@ export interface SourceCapture {
   /** The source's working state, held so the reset cannot lose it. */
   snapshot?: SnapshotId;
   /**
-   * What the source's changes are measured against: the snapshot taken
-   * at `start` when there was one, else HEAD. Using the start snapshot
-   * is what makes the copy invisible — it is present in both trees, so
-   * it cancels, and only genuine post-start edits survive the diff.
+   * What the source's changes are measured against, in preference order:
+   * the state left by the last successful landing, else the snapshot
+   * taken at `start`, else HEAD. Either snapshot makes the copy
+   * invisible, since it is present in both trees and so cancels out of
+   * the diff, leaving only genuine post-start edits.
+   *
+   * The landing baseline has to win where both exist. `merge` lands the
+   * workspace's work into the source and stays put, so measuring a later
+   * landing against `start` finds that work still sitting there and
+   * reports the workspace's own changes as the user's.
    */
   base: string;
   /** Ref holding `snapshot`, so a failed replay is still recoverable. */
@@ -77,20 +83,35 @@ export interface SourceCapture {
 export async function captureSourceForLanding(opts: {
   source: string;
   startSnapshotRef: string;
+  /**
+   * How the last successful landing left the source. Preferred over
+   * `startSnapshotRef`, and absent until a first landing has run.
+   */
+  baselineRef?: string;
   retainRef: string;
   provider: IsolationProvider | undefined;
 }): Promise<SourceCapture> {
-  const { source, startSnapshotRef, retainRef, provider } = opts;
+  const { source, startSnapshotRef, baselineRef, retainRef, provider } = opts;
   const status = await runGit(["status", "--porcelain", "-uall"], source);
-  const startTree = await runGit(["rev-parse", `${startSnapshotRef}^{commit}`], source);
   // Resolved to a sha, never left as the symbolic "HEAD". The replay
   // runs AFTER the fast-forward has moved HEAD, so a symbolic base
   // would diff against the merged tip: the patch would then read as
   // "undo what the agent did and put my version back", apply cleanly,
   // and silently discard the agent's work.
-  const head = await runGit(["rev-parse", "HEAD"], source);
-  const base =
-    startTree.ok && startTree.out.trim().length > 0 ? startTree.out.trim() : head.out.trim();
+  let base = "";
+  for (const ref of [baselineRef, startSnapshotRef]) {
+    if (ref === undefined) {
+      continue;
+    }
+    const resolved = await runGit(["rev-parse", `${ref}^{commit}`], source);
+    if (resolved.ok && resolved.out.trim().length > 0) {
+      base = resolved.out.trim();
+      break;
+    }
+  }
+  if (base.length === 0) {
+    base = (await runGit(["rev-parse", "HEAD"], source)).out.trim();
+  }
   if (status.ok && status.out.trim().length === 0) {
     return { clean: true, base };
   }
@@ -138,6 +159,18 @@ export async function replaySourceDivergence(opts: {
     return false;
   }
   if (patch.out.trim().length === 0) {
+    return true;
+  }
+  // Already applied is a no-op success, not an overlap. A prior `merge`
+  // put this very content into the source, so the patch reverses cleanly
+  // against the tree: that is what --reverse --check detects, and it
+  // writes nothing.
+  //
+  // Probed BEFORE --3way on purpose. --3way leaves conflict markers in
+  // the working tree when it fails, so reaching it in the
+  // nothing-to-do case would dirty files to answer a question that was
+  // already settled.
+  if (await applyPatch(source, patch.out, ["--reverse", "--check"])) {
     return true;
   }
   return applyPatch(source, patch.out, ["--3way"]);

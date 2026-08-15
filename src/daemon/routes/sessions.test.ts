@@ -246,6 +246,72 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.title).toBe("Cold rename");
   });
 
+  it("PATCH /v1/sessions/:id with { workspace: null } clears a cold session's binding", async () => {
+    // The binding outlives the workspace directory, which is what makes
+    // the next resurrect rebuild it. Clearing it is how a session is
+    // told to stop trying, and only the daemon may write that record.
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+    const meta = paths.sessionFile(id);
+    const before = JSON.parse(fs.readFileSync(meta, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(
+      meta,
+      JSON.stringify({
+        ...before,
+        workspace: { path: "/ws/x", sourceCwd: "/w", label: "x", provider: "git" },
+      }),
+    );
+    await session.close({ deleteRecord: false });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: null }),
+    });
+    expect(res.status).toBe(204);
+
+    const after = JSON.parse(fs.readFileSync(meta, "utf8")) as Record<string, unknown>;
+    expect(after.workspace).toBeUndefined();
+    // Subtracting one field, not rewriting the session.
+    expect(after.sessionId).toBe(before.sessionId);
+    expect(after.agentId).toBe(before.agentId);
+  });
+
+  it("PATCH /v1/sessions/:id refuses to clear a LIVE session's binding with 409", async () => {
+    // cwd is the workspace for a live session, so dropping the binding
+    // without moving the agent leaves it running somewhere nothing
+    // points at. `workspace end` / `abandon` does both.
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${session.sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: null }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/workspace end/);
+  });
+
+  it("PATCH /v1/sessions/:id rejects a non-null workspace with 400", async () => {
+    // Binding a session to a workspace swaps the agent's whole world;
+    // it is not a field write.
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${session.sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: { path: "/ws/y" } }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("PATCH /v1/sessions/:id 404s when no record exists at all", async () => {
     const res = await fetch(
       `${harness.baseUrl}/v1/sessions/hydra-doesnotexist`,

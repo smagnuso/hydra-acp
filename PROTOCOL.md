@@ -383,7 +383,7 @@ Producer side of `hydra cat --stream`: feed piped stdin into a live session's in
 
 #### `PATCH /v1/sessions/:id`
 
-Retitle a session or schedule an LLM-driven retitle. Two body shapes, mutually exclusive.
+Mutate one field of a session record. The body shapes below are mutually exclusive.
 
 **Request body — direct retitle**
 
@@ -402,6 +402,18 @@ Response: `204` on success, `400` on empty title, `404` on unknown session.
 Picker `T` and `/hydra title` route here. Synopsis runs out-of-band; the new title surfaces via `session_info_update` on the next refresh. Works on live and cold sessions.
 
 Response: `202` accepted, `404` on unknown session.
+
+**Request body — clear the workspace binding**
+
+```jsonc
+{ "workspace": null }
+```
+
+Drops the `workspace` field from the record, so an isolated session stops claiming a workspace and its next resurrect starts fresh from `sourceCwd` instead of rebuilding the checkout. Clear-only: any non-null value is rejected, because binding a session to a workspace swaps the agent's cwd, transcript, and snapshot refs together and belongs to `workspace start`.
+
+Cold sessions only. `hydra workspace remove` calls this after the directory is already gone; the branch and the last autosave ref are left in place for recovery.
+
+Response: `204` on success, `400` if `workspace` is anything but `null`, `404` on unknown session, `409` when the session is live — its `cwd` **is** the workspace, so the binding may only be dropped by something that moves the agent too (`workspace end` / `workspace abandon` in the session).
 
 #### `DELETE /v1/sessions/:id`
 

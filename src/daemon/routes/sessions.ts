@@ -355,7 +355,32 @@ export function registerSessionRoutes(
       title?: unknown;
       regen?: unknown;
       priority?: unknown;
+      workspace?: unknown;
     };
+    if ("workspace" in body) {
+      // Clear only. Binding a session to a workspace is a swap of the
+      // agent's whole world (cwd, re-seeded transcript, snapshot refs)
+      // and belongs to `workspace start`, not to a field write.
+      if (body.workspace !== null) {
+        reply.code(400).send({ error: "workspace may only be set to null (clear the binding)" });
+        return;
+      }
+      const outcome = await manager.clearWorkspaceBinding(id);
+      if (outcome === "missing") {
+        reply.code(404).send({ error: "session not found" });
+        return;
+      }
+      if (outcome === "live") {
+        reply.code(409).send({
+          error:
+            "session is live; its cwd is the workspace. Use `workspace end` or " +
+            "`workspace abandon` in the session so the agent moves with the binding.",
+        });
+        return;
+      }
+      reply.code(204).send();
+      return;
+    }
     if (body.priority !== undefined) {
       // Accept any non-negative integer; 0 / null clears. Reject other
       // shapes so a typo doesn't silently no-op.

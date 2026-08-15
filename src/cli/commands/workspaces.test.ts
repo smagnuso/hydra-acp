@@ -285,7 +285,7 @@ async function startFakeDaemon(): Promise<FakeDaemon> {
   };
 }
 
-describe("workspace remove — missing", () => {
+describe("workspace remove, missing", () => {
   let out: string;
   let daemon: FakeDaemon;
 

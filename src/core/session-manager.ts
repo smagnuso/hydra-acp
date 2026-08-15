@@ -1635,6 +1635,12 @@ export class SessionManager {
       await provider
         .dropSnapshotRef(asWorkspace, this.startRefFor(sessionId))
         .catch(() => undefined);
+      // And the landing baseline, for the same reason: written by a
+      // landing, read only by the next one, so a removed session leaves
+      // it with no reader and a GC root it will never release.
+      await provider
+        .dropSnapshotRef(asWorkspace, this.baselineRefFor(sessionId))
+        .catch(() => undefined);
     }
 
     const status = await provider
@@ -1713,6 +1719,25 @@ export class SessionManager {
    */
   private startRefFor(sessionId: string): string {
     return `refs/hydra/start/${sessionId}`;
+  }
+
+  /**
+   * How the source tree was left by the most recent successful landing.
+   *
+   * Preferred over startRefFor when measuring the source's divergence,
+   * and the reason is a bug this fixes: `merge` lands the workspace's
+   * work into the source and stays put, so a later `end` found that work
+   * sitting in the source, diffed it against the state at `start`, and
+   * reported the workspace's OWN changes as the user's overlapping
+   * edits. Landed content is not divergence. Re-baselining after each
+   * landing is what makes a second landing a no-op instead of a warning.
+   *
+   * Named `baseline`, not `landed`, to stay clearly distinct from
+   * `refs/hydra/landing/<id>`, which is the recovery copy held only while
+   * a replay might still fail.
+   */
+  private baselineRefFor(sessionId: string): string {
+    return `refs/hydra/baseline/${sessionId}`;
   }
 
   /**
@@ -1857,9 +1882,15 @@ export class SessionManager {
         session.broadcastWorkspacePhase({ phase: "failed", error: base });
         throw err;
       }
+      // Report the merge NOW rather than through the return value. The
+      // swap inside leaveWorkspace streams "Returned to the source tree."
+      // as soon as the new agent is up, but a command's result text waits
+      // for the turn to end, so returning the merge text here printed the
+      // landing AFTER the return that followed it.
+      session.broadcastSyntheticText(`\n${landed}\n`);
       session.broadcastWorkspacePhase({ phase: "returning" });
       await this.leaveWorkspace(session, ws, { integrated: true });
-      return `${landed}\nReturned to ${ws.sourceCwd}. Workspace removed.`;
+      return `Returned to ${ws.sourceCwd}. Workspace removed.`;
     }
     // abandon
     session.broadcastWorkspacePhase({ phase: "returning" });
@@ -1914,6 +1945,10 @@ export class SessionManager {
       // inverse of the agent's work rather than as the source's
       // divergence.
       startSnapshotRef: this.startRefFor(sessionId),
+      // Wins over the start ref once a first landing has run, so work
+      // this workspace already put into the source stops counting as the
+      // user's divergence on every landing after it.
+      baselineRef: this.baselineRefFor(sessionId),
       retainRef: `refs/hydra/landing/${sessionId}`,
       provider,
     });
@@ -1983,6 +2018,25 @@ export class SessionManager {
     const divergenceOk = await replaySourceDivergence({ source, capture });
     if (divergenceOk) {
       await releaseSourceCapture({ source, capture });
+    }
+
+    // Re-baseline: record how this landing left the source, so the NEXT
+    // one measures divergence from here instead of from `start`. Written
+    // even when a replay failed, because the question it answers is
+    // "what is in the source now", and the answer is this tree either
+    // way. What did not make it in is still held by the retained
+    // landing ref.
+    //
+    // Best-effort: a failure here costs a stale warning on the next
+    // landing, which is not worth failing a landing that has already
+    // succeeded over.
+    if (provider !== undefined) {
+      const after = await provider
+        .captureWorkingState(source, `hydra: source state after landing ${ws.label}`)
+        .catch(() => undefined);
+      if (after !== undefined) {
+        await execGit(["update-ref", this.baselineRefFor(sessionId), after], source);
+      }
     }
 
     const notes: string[] = [];
@@ -2077,6 +2131,12 @@ export class SessionManager {
     // for a session that has no further use for them.
     await provider
       .dropSnapshotRef(asWorkspace, this.startRefFor(session.sessionId))
+      .catch(() => undefined);
+    // Same on both exits, same reasoning: only a landing writes it and
+    // only the next landing reads it, and this session will not have
+    // another one.
+    await provider
+      .dropSnapshotRef(asWorkspace, this.baselineRefFor(session.sessionId))
       .catch(() => undefined);
     if (!opts.integrated) {
       return;
@@ -4519,6 +4579,37 @@ export class SessionManager {
   //   nothing in memory to broadcast to, but a later resurrect / list
   //   will pick up the new title.
   // Returns false when no record exists at all (live or on disk).
+  /**
+   * Drop a cold session's workspace binding.
+   *
+   * The binding outlives the directory: remove an isolated session's
+   * workspace and the record still names it, which is what makes the
+   * next resurrect rebuild the checkout. Clearing it is how you say the
+   * session should stop trying, and it has to happen here rather than
+   * in the CLI. A live session holds its record in memory and rewrites
+   * it, so a file edited underneath one is silently reverted; going
+   * through mutateRecord also serializes this against every other
+   * meta write instead of racing them.
+   *
+   * Live sessions are refused rather than served, because for them
+   * clearing the binding is only half the operation: `cwd` IS the
+   * workspace, so dropping the binding without moving the agent leaves
+   * it running in a directory nothing points at. `workspace end` /
+   * `abandon` does both, and is the caller the client should be sent to.
+   */
+  async clearWorkspaceBinding(
+    sessionId: string,
+  ): Promise<"cleared" | "live" | "missing"> {
+    if (this.get(sessionId) !== undefined) {
+      return "live";
+    }
+    if (!(await this.hasRecord(sessionId))) {
+      return "missing";
+    }
+    await this.mutateRecord(sessionId, {}, ["workspace"]);
+    return "cleared";
+  }
+
   // Set or clear the user-set priority on a session. Mirrors setTitle:
   // works on live (in-memory mutation + persist hook) and cold (direct
   // meta.json write) sessions. Pass 0 or undefined to clear (return to

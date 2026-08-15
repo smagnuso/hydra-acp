@@ -2341,6 +2341,33 @@ export class Session {
     this.notifyChain("workspace", { ...update });
   }
 
+  /**
+   * Show a line in the conversation stream that no agent produced.
+   *
+   * Broadcast-only and never recorded, matching the swap notices above
+   * it: history is the agent's transcript, and a status line from the
+   * daemon is not part of it.
+   *
+   * Exists because a command's result text is only rendered once its
+   * turn ends, while the swap notices stream the instant they happen. A
+   * multi-step command that reports solely through its return value
+   * therefore prints its LAST step first. This lets such a command
+   * report a step at the moment it completes instead.
+   */
+  broadcastSyntheticText(text: string): void {
+    const params = this.rewriteForClient({
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
+    });
+    for (const client of this.clients.values()) {
+      void client.connection.notify("session/update", params).catch(() => undefined);
+    }
+  }
+
   // Register a client and (asynchronously) load the replay slice it
   // should receive. Returns both the slice to replay and the actual
   // historyPolicy applied (which may differ from the requested one

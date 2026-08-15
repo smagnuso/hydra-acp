@@ -249,9 +249,9 @@ describe("buildHydraSessionMeta", () => {
   // key-by-key on purpose (so a malformed block fails open rather than
   // reaching a provider as junk), while HydraMeta declares every field
   // optional. Declare a field, emit it, forget to parse it, and every
-  // reader gets `undefined` with no type error and no test failure —
-  // which is how an isolated session came to attach with its binding
-  // stripped on the client side.
+  // reader gets `undefined` with no type error and no test failure. That
+  // is how an isolated session came to attach with its binding stripped
+  // on the client side.
   //
   // So: emit everything, parse it back, and require the round trip.
   it("parses back every field it emits", () => {

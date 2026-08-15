@@ -904,17 +904,24 @@ describe("session isolation end-to-end", () => {
 
     await manager.runWorkspaceAction(session.sessionId, "start", "clash");
     const wsPath = session.cwd;
+    // The landing report streams rather than riding out on the return
+    // value, so that it arrives before the swap notice that follows it.
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_clash", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
 
     // Same file, same line, two different edits.
     await fs.writeFile(path.join(repo, "tracked.txt"), "source version\n");
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "workspace version\n");
     await exec("git", ["commit", "-qam", "agent: my version"], { cwd: wsPath });
 
-    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "end");
 
     // The merge still lands, and the clash is reported with a recovery
     // path rather than the source edit being silently dropped.
-    expect(msg).toMatch(/overlap|could not be replayed/i);
+    expect(streamedTexts(stream).join("")).toMatch(/overlap|could not be replayed/i);
     const refs = await exec("git", ["for-each-ref", "refs/hydra/landing"], { cwd: repo });
     expect(refs.stdout.trim().length).toBeGreaterThan(0);
   });
@@ -977,8 +984,16 @@ describe("session isolation end-to-end", () => {
     const wsPath = session.cwd;
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "agent work\n");
 
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_shipit", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+
     const msg = await manager.runWorkspaceAction(session.sessionId, "end");
-    expect(msg).toContain("Merged");
+    // The merge streams (so it lands before the swap notice); the return
+    // value covers the return itself.
+    expect(streamedTexts(stream).join("")).toContain("Merged");
     expect(msg).toContain("Returned to");
 
     // Back in the real tree, with the work landed.
@@ -1025,13 +1040,22 @@ describe("session isolation end-to-end", () => {
       ).runWorkspaceSnapshot(session);
     }
 
-    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
-    expect(msg).toContain("Merged");
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_afterturns", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+
+    await manager.runWorkspaceAction(session.sessionId, "end");
+    // Read the streamed report, which is where the landing (and any
+    // warning about it) now goes.
+    const report = streamedTexts(stream).join("");
+    expect(report).toContain("Merged");
     // The agent's work survived: the whole point.
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("agent three\n");
     // The user's own edit came back too, and was not reported as a conflict.
     expect(await fs.readFile(path.join(repo, "mine.txt"), "utf8")).toBe("user edit\n");
-    expect(msg).not.toMatch(/could not be replayed|WARNING/i);
+    expect(report).not.toMatch(/could not be replayed|WARNING/i);
   });
 
   it("drops both the autosave and the landing baseline on exit", async () => {
@@ -1089,6 +1113,123 @@ describe("session isolation end-to-end", () => {
     expect(textOf()).not.toContain("Compaction completed");
   });
 
+  /** The streamed chunks in order, rather than joined into one blob. */
+  function streamedTexts(stream: { sent: unknown[] }): string[] {
+    return stream.sent
+      .map((m) => {
+        const u = (m as { params?: { update?: { content?: { text?: unknown } } } }).params?.update;
+        return typeof u?.content?.text === "string" ? u.content.text : "";
+      })
+      .filter((t) => t.length > 0);
+  }
+
+  it("reports the merge before the return, in the order the work happened", async () => {
+    // The merge summary used to ride out on the command's RETURN value,
+    // which a client renders only when the turn ends, while the swap
+    // streams "Returned to the source tree." the instant the new agent is
+    // up. So `end` printed its LAST step before the step that preceded it.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_order", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+    await manager.runWorkspaceAction(session.sessionId, "start", "ordered");
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent work\n");
+
+    stream.sent.length = 0;
+    const result = await manager.runWorkspaceAction(session.sessionId, "end");
+
+    const texts = streamedTexts(stream);
+    const mergeAt = texts.findIndex((t) => t.includes("Merged"));
+    const returnAt = texts.findIndex((t) => t.includes("Returned to the source tree"));
+    expect(mergeAt).toBeGreaterThanOrEqual(0);
+    expect(returnAt).toBeGreaterThanOrEqual(0);
+    expect(mergeAt).toBeLessThan(returnAt);
+    // Said once, not twice: the result now covers only the return.
+    expect(result).not.toContain("Merged");
+    expect(result).toContain("Workspace removed");
+  });
+
+  it("does not mistake its own landed work for the user's overlapping edits", async () => {
+    // `merge` lands the work and stays put. A later `end` then measured
+    // the source against the snapshot taken at `start`, found the work the
+    // merge had just put there, and reported the workspace's OWN changes
+    // as the user's edits overlapping it. Nothing was lost, but the
+    // warning said otherwise, which is worse than useless on a message
+    // about possible data loss.
+    //
+    // Asserted against the STREAMED text, not the return value: the merge
+    // summary (warnings included) now streams, so checking the return
+    // would pass no matter what.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_twice", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+    await manager.runWorkspaceAction(session.sessionId, "start", "twice");
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "original\nagent work\n");
+
+    const merged = await manager.runWorkspaceAction(session.sessionId, "merge");
+    expect(merged).not.toContain("WARNING");
+    // The landing recorded where it left the source, which is what the
+    // next one measures against.
+    const refs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
+    expect(refs.stdout).toContain(`refs/hydra/baseline/${session.sessionId}`);
+
+    stream.sent.length = 0;
+    await manager.runWorkspaceAction(session.sessionId, "end");
+    const streamed = streamedTexts(stream).join("");
+    expect(streamed).toContain("Merged");
+    expect(streamed).not.toContain("WARNING");
+
+    // And the work is in the source exactly once.
+    const landed = await fs.readFile(path.join(repo, "tracked.txt"), "utf8");
+    expect(landed).toBe("original\nagent work\n");
+    // The baseline is a GC root like the others, so leaving is where it goes.
+    const afterRefs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
+    expect(afterRefs.stdout).not.toContain(session.sessionId);
+  });
+
+  it("still reports a genuine overlap after a previous landing", async () => {
+    // The re-baseline must not turn the warning off wholesale: an edit
+    // the user makes to the same lines AFTER a merge is a real conflict
+    // and still has to be reported and preserved.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_conflict", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+    await manager.runWorkspaceAction(session.sessionId, "start", "conflict");
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent version\n");
+    await manager.runWorkspaceAction(session.sessionId, "merge");
+
+    // Post-merge, both sides now touch the same line.
+    await fs.writeFile(path.join(repo, "tracked.txt"), "user version\n");
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent second version\n");
+
+    stream.sent.length = 0;
+    await manager.runWorkspaceAction(session.sessionId, "end");
+    const streamed = streamedTexts(stream).join("");
+    expect(streamed).toContain("WARNING");
+    expect(streamed).toContain(`refs/hydra/landing/${session.sessionId}`);
+
+    // And the base it offers for recovery is the state the FIRST landing
+    // left, not the state at `start`. This is the re-baseline's own
+    // observable effect: measuring from `start` would make the earlier
+    // landed work part of "the user's edits", both in the diff the hint
+    // prints and in the patch that gets replayed.
+    const base = /diff (\S+) /.exec(streamed)?.[1];
+    expect(base).toBeDefined();
+    const atBase = await exec("git", ["show", `${base}:tracked.txt`], { cwd: repo });
+    expect(atBase.stdout).toBe("agent version\n");
+  });
+
   it("reports progress phases on the way out, as it does on the way in", async () => {
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
@@ -1130,7 +1271,7 @@ describe("session isolation end-to-end", () => {
     const reloaded = await restarted.loadFromDisk(session.sessionId);
     const revived = await restarted.resurrect(reloaded!);
 
-    // Read it the way a client does — through extractHydraMeta — not off
+    // Read it the way a client does, through extractHydraMeta, not off
     // the builder's output. Asserting on the raw object skips the parser,
     // and the parser was where the binding was being dropped: it parses
     // key-by-key and simply had no case for workspaceInfo, so every

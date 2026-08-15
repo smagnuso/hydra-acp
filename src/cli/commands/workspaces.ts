@@ -325,6 +325,12 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
       : await captureSourceForLanding({
           source,
           startSnapshotRef: `refs/hydra/start/${row.sessionId}`,
+          // Written by an in-session landing, and it has to win here for
+          // the same reason it does there: work a previous landing put
+          // into the source is not the user's divergence, and measuring
+          // from `start` reports it as an overlap on every landing after
+          // the first.
+          baselineRef: `refs/hydra/baseline/${row.sessionId}`,
           retainRef: `refs/hydra/landing/${row.sessionId}`,
           provider: getProvider(row.provider),
         });
@@ -518,6 +524,10 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
     // root, so a survivor pins objects for a workspace that is done.
     await runGit(["update-ref", "-d", `refs/hydra/snapshots/${row.sessionId}`], source);
     await runGit(["update-ref", "-d", `refs/hydra/start/${row.sessionId}`], source);
+    // The landing baseline goes too. Unlike an in-session landing, this
+    // one commits the workspace's work, so HEAD now describes where the
+    // source was left and is the honest base for anything that follows.
+    await runGit(["update-ref", "-d", `refs/hydra/baseline/${row.sessionId}`], source);
   }
   if (!remove) {
     process.stdout.write(
@@ -544,9 +554,8 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
  * returning left `remove` unable to clear the one row a user is most
  * likely to aim it at. Three things outlive the directory: the binding
  * (which is what lists the row, and what makes resurrect rebuild the
- * workspace), the branch, and the snapshot refs — and the refs are GC
- * roots, so leaving them pins objects for a checkout that no longer
- * exists.
+ * workspace), the branch, and the snapshot refs. The refs are GC roots,
+ * so leaving them pins objects for a checkout that no longer exists.
  *
  * Destroys nothing, which is what makes it need no guard. The two
  * things that outlive the directory can each hold the last copy of
