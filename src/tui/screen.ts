@@ -313,6 +313,11 @@ interface BannerState {
   // word "stalled" replaces "busy" so a hung upstream is visible at a
   // glance rather than hiding behind a quietly-ticking elapsed clock.
   stalled?: boolean;
+  // Epoch ms the oldest still-armed background task was armed. A modifier
+  // on status="ready", not a status: the session is idle and will take a
+  // prompt, but a job it started is still running and can restart it.
+  // Renders as "Running Xs". See PROTOCOL.md "Agent-initiated turns".
+  armedSince?: number;
 }
 
 // Re-exported from ./bar/types.js, where they live so the bar field

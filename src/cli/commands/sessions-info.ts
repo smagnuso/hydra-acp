@@ -60,6 +60,9 @@ interface SessionInfoData {
   agentId: string;
   currentModel?: string;
   status: "warm" | "cold";
+  // Live-only: background tasks the agent armed and has not woken for.
+  // Absent for cold sessions and for daemons that don't report it.
+  armedTasks?: number;
   createdAt: string;
   updatedAt: string;
   synopsis: SessionSynopsisShape | null;
@@ -118,10 +121,10 @@ export async function runSessionsInfo(
     `/v1/sessions/${encodeURIComponent(id)}`,
     { expectStatus: [200, 404] },
   );
-  const liveStatus =
-    infoRes.status === 200
-      ? (infoRes.body as { status?: "warm" | "cold" }).status
-      : undefined;
+  const liveEntry = infoRes.status === 200
+    ? (infoRes.body as { status?: "warm" | "cold"; armedTasks?: number })
+    : undefined;
+  const liveStatus = liveEntry?.status;
 
   const exportRes = await daemonFetch(
     `/v1/sessions/${encodeURIComponent(id)}/export`,
@@ -138,7 +141,7 @@ export async function runSessionsInfo(
     process.exit(1);
   }
 
-  const data = aggregate(bundle, liveStatus ?? "cold");
+  const data = aggregate(bundle, liveStatus ?? "cold", liveEntry?.armedTasks);
   // --diff opt-in: append a git-diff-shaped view of every file the
   // session edited beneath the summary. Same aggregation/fold/render
   // pipeline `hydra session diff` uses, against the same bundle we
@@ -178,6 +181,7 @@ export async function runSessionsInfo(
 export function aggregate(
   bundle: Bundle,
   status: "warm" | "cold",
+  armedTasks?: number,
 ): SessionInfoData {
   const r = bundle.session;
   const history = bundle.history;
@@ -204,6 +208,7 @@ export function aggregate(
     agentId: r.agentId,
     ...(r.currentModel !== undefined ? { currentModel: r.currentModel } : {}),
     status,
+    ...(armedTasks !== undefined ? { armedTasks } : {}),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     synopsis: (r.synopsis as SessionSynopsisShape | undefined) ?? null,
@@ -240,6 +245,13 @@ export function formatSummary(d: SessionInfoData, verbose: boolean): string {
   const modelPart = d.currentModel ? ` · ${d.currentModel}` : "";
   lines.push(`${pad("Agent:")}${d.agentId}${modelPart}`);
   lines.push(`${pad("Status:")}${d.status}`);
+  if (d.armedTasks !== undefined && d.armedTasks > 0) {
+    const plural = d.armedTasks === 1 ? "task" : "tasks";
+    lines.push(
+      `${pad("Background:")}${d.armedTasks} ${plural} armed ` +
+        `(may resume without a prompt)`,
+    );
+  }
   lines.push(`${pad("Created:")}${d.createdAt}`);
   lines.push(`${pad("Last active:")}${d.updatedAt}`);
   if (d.duration.totalMs !== null) {

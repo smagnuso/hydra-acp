@@ -423,6 +423,245 @@ describe("queue hold during an unsolicited turn", () => {
   });
 });
 
+// The third session state: the agent handed the turn back and is idle,
+// but a watch it started is still pending, so it can restart itself.
+describe("armed background tasks", () => {
+  async function armDuringTurn(
+    arming: Record<string, unknown>,
+  ): Promise<{
+    session: Session;
+    mock: ReturnType<typeof makeMockAgent>;
+    client: AttachedClient;
+  }> {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_agent",
+          update: arming,
+        });
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "kick off a build" }],
+    });
+    await settleDrain();
+    return { session, mock, client };
+  }
+
+  it("counts a backgrounded Bash after the turn hands back", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_bg",
+      title: "Terminal",
+      rawInput: { command: "ninja", description: "gibbon rebuild", run_in_background: true },
+    });
+    // Idle, but not finished.
+    expect(session.turnStartedAt).toBeUndefined();
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "gibbon rebuild" },
+    ]);
+  });
+
+  it("counts a Monitor and carries its taskId", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: {
+        claudeCode: { toolResponse: { taskId: "bgzem17m0", timeoutMs: 2400000 } },
+      },
+    });
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Monitor", taskId: "bgzem17m0" },
+    ]);
+  });
+
+  it("stops counting one once the agent wakes up for it", async () => {
+    const { session, mock } = await armDuringTurn({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_bg",
+      title: "Terminal",
+      rawInput: { command: "ninja", run_in_background: true },
+    });
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    agentChunk(mock, "build finished");
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  // Real timers on purpose. Expiry is timer-driven now rather than swept
+  // on read, so a task armed before vi.useFakeTimers() has already
+  // scheduled a real timeout that advanceTimersByTime will never fire.
+  // A short real timeoutMs exercises the actual path in ~80ms.
+  it("expires on the agent's own timeout so the badge can't stick", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: { claudeCode: { toolResponse: { taskId: "t1", timeoutMs: 50 } } },
+    });
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+    expect(session.armedSince).toBeUndefined();
+  });
+
+  it("pushes armed_tasks_updated on arm and again on expiry", async () => {
+    const { session, mock } = makeSession();
+    const stream = makeControlledStream();
+    const client: AttachedClient = {
+      clientId: "c_armed",
+      connection: new JsonRpcConnection(stream),
+    };
+    await session.attach(client, "none");
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_agent",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_mon",
+            title: "Monitor",
+            rawInput: { description: "device run" },
+            _meta: {
+              claudeCode: { toolResponse: { taskId: "t1", timeoutMs: 50 } },
+            },
+          },
+        });
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "start it" }],
+    });
+    await settleDrain();
+    await new Promise((r) => setTimeout(r, 120));
+
+    const pushes = stream.sent
+      .filter(
+        (m) =>
+          "method" in m && m.method === "hydra-acp/session/armed_tasks_updated",
+      )
+      .map((m) => (m as { params: Record<string, unknown> }).params);
+    // Armed, then gone. The second one is the whole point: a user who
+    // walked away has to learn the job they were told about is over.
+    expect(pushes.map((p) => p.count)).toEqual([1, 0]);
+    expect(typeof pushes[0]!.since).toBe("number");
+    expect(pushes[1]!.since).toBeUndefined();
+  });
+
+  // One tool call emits several updates on the wire (a real Monitor sent
+  // seven), and each carries the arming signal. Re-arming an entry already
+  // counted leaves count and since unchanged, so clients must hear it once.
+  it("pushes once when one tool call arms across several updates", async () => {
+    const { session, mock } = makeSession();
+    const stream = makeControlledStream();
+    const client: AttachedClient = {
+      clientId: "c_dedup",
+      connection: new JsonRpcConnection(stream),
+    };
+    await session.attach(client, "none");
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        for (let i = 0; i < 3; i++) {
+          mock.triggerNotification("session/update", {
+            sessionId: "u_agent",
+            update: {
+              sessionUpdate: i === 0 ? "tool_call" : "tool_call_update",
+              toolCallId: "toolu_bg",
+              title: "Terminal",
+              rawInput: { command: "ninja", run_in_background: true },
+            },
+          });
+        }
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "build it" }],
+    });
+    await settleDrain();
+
+    const pushes = stream.sent.filter(
+      (m) =>
+        "method" in m && m.method === "hydra-acp/session/armed_tasks_updated",
+    );
+    expect(pushes).toHaveLength(1);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  // A real TaskStop happens INSIDE a turn (the agent decides to cancel a
+  // watch while working), not as unsolicited activity. Delivering it out
+  // of turn would open an unsolicited turn, whose own attribution clears
+  // the armed entry, and the test would pass without exercising TaskStop
+  // at all.
+  async function stopDuringTurn(
+    session: Session,
+    mock: ReturnType<typeof makeMockAgent>,
+    client: AttachedClient,
+    taskId: string,
+  ): Promise<void> {
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_agent",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_stop",
+            title: "TaskStop",
+            rawInput: { task_id: taskId },
+            _meta: { claudeCode: { toolName: "TaskStop" } },
+          },
+        });
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "never mind, stop that" }],
+    });
+    await settleDrain();
+  }
+
+  it("stops counting one the agent explicitly kills with TaskStop", async () => {
+    const { session, mock, client } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: { claudeCode: { toolResponse: { taskId: "bk8zd9dly" } } },
+    });
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    await stopDuringTurn(session, mock, client, "bk8zd9dly");
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  it("ignores a TaskStop for some other task", async () => {
+    const { session, mock, client } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: { claudeCode: { toolResponse: { taskId: "keep_me" } } },
+    });
+    await stopDuringTurn(session, mock, client, "someone_else");
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  it("does not count ordinary foreground tool calls", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_fg",
+      title: "Terminal",
+      rawInput: { command: "ls" },
+    });
+    expect(session.armedBackgroundTasks).toEqual([]);
+  });
+});
+
 describe("unsolicited turn attribution", () => {
   // The real sequence: the agent arms a background task inside a turn
   // hydra asked for, that turn ends legitimately, and the agent then wakes
@@ -468,6 +707,63 @@ describe("unsolicited turn attribution", () => {
     expect(hydraMeta(started[0]!).cause).toEqual({
       toolCallId: "toolu_bg1",
       label: "gibbon rebuild",
+    });
+  });
+
+  // Regression, from a live resumption that came out as "background task".
+  // A Monitor reports its taskId on a late, sparse update carrying neither
+  // title nor rawInput; the description arrived earlier under the same
+  // toolCallId. Reading only the arming update loses it.
+  it("borrows a Monitor's description from its earlier updates", async () => {
+    const { session, mock, client, sent } = await makeSessionAfterOneTurn();
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        // Verbatim shape of the 17:01:40-17:01:42 sequence on the wire.
+        for (const update of [
+          {
+            sessionUpdate: "tool_call",
+            toolCallId: "toolu_mon",
+            title: "Monitor",
+            _meta: { claudeCode: { toolName: "Monitor" } },
+          },
+          {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_mon",
+            title: "Monitor",
+            rawInput: { description: "validation harness completion" },
+            _meta: { claudeCode: { toolName: "Monitor" } },
+          },
+          {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_mon",
+            _meta: {
+              claudeCode: {
+                toolName: "Monitor",
+                toolResponse: { taskId: "bgzem17m0", timeoutMs: 2400000 },
+              },
+            },
+          },
+        ]) {
+          mock.triggerNotification("session/update", {
+            sessionId: "u_agent",
+            update,
+          });
+        }
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "start the validation run" }],
+    });
+    await settleDrain();
+
+    agentChunk(mock, "validation runs complete");
+    const started = updatesOfKind(sent, "turn_started");
+    expect(started).toHaveLength(1);
+    expect(hydraMeta(started[0]!).cause).toEqual({
+      toolCallId: "toolu_mon",
+      label: "validation harness completion",
     });
   });
 

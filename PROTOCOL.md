@@ -1749,6 +1749,61 @@ cannot pull the upstream out from under a working agent, and a user prompt
 reaching the head of the queue is held rather than dispatched. See
 [`prompt_queue/held`](#notifications-hydra-acpprompt_queueheld-and-released).
 
+**Armed tasks (the third session state).** A session that has handed the
+turn back but still has a background watch pending is neither "working" nor
+"done": it is idle right now and can restart itself with no prompt. Session
+list entries therefore carry `armedTasks`, a count of background tasks the
+agent armed and has not yet been seen to wake up for. A nonzero count
+renders as `BUSY` in `hydra session list` and the TUI picker even with no
+turn in flight, since the session is not finished with you. Note this makes
+`BUSY` in the STATE cell weaker than the `busy` field: a prompt sent to an
+armed-but-idle session is dispatched immediately rather than queued. Clients
+that need the distinction should read `busy` and `armedTasks` separately.
+
+The count is **best-effort and must not be relied on**. Notification
+delivery waits for a turn boundary, so a task can fire long after its
+nominal timeout (the trace has one armed with `timeoutMs: 3600000` delivered
+3h51m later, batched with three others). Entries are expired on a TTL so the
+badge cannot stick forever, which means it can read `0` while a wakeup is
+still coming. A single notification can also batch several tasks while only
+one gets attributed to the resulting turn, so the count can overstate.
+
+The daemon clears an entry when it attributes a resumption to it, and when
+the agent cancels the task with `TaskStop` (which reports the id as
+`rawInput.task_id`). It cannot see an agent that kills the underlying
+process some other way: a `pkill` from a plain Bash leaves the watch dead
+with no signal at all, and the entry survives until its TTL.
+
+#### Notification: `hydra-acp/session/armed_tasks_updated`
+
+Daemon to every attached client, whenever the armed set changes: a task is
+armed, one is attributed to a resumption, one is cancelled via `TaskStop`,
+or one expires.
+
+```jsonc
+{
+  "sessionId": "<id>",
+  "count":     1,
+  "since":     1717012800000,   // absent when count is 0
+  "tasks":     [ { "label": "device run", "taskId": "bgzem17m0" } ]
+}
+```
+
+`since` is when the *oldest still-armed* task was armed. Clients clock a
+"running" readout from it, because the useful question is how long the job
+has been going, not how long the user has been idle since the turn ended.
+
+Pushed rather than polled on purpose: the transition that matters most is
+the task going away while nobody is looking. An idle session gets no other
+traffic, so a client that only learned the count at attach time would keep
+claiming a job was running long after it finished. For the same reason
+expiry is timer-driven in the daemon rather than evaluated on read.
+
+Deduplicated on the rendered state: several updates for one tool call all
+carry the arming signal (a real `Monitor` sent seven), and re-arming an
+entry already counted leaves `count` and `since` unchanged, so it fires
+once.
+
 **Vendor coupling.** The `cause` label is derived from
 `_meta.claudeCode.toolResponse.taskId` and `rawInput.run_in_background`, which
 are `claude-acp` extensions rather than ACP. This is the only place hydra keys

@@ -1515,6 +1515,22 @@ export function _buildToolsLines(args: {
   // can spot a cancelled / refused / truncated turn at a glance.
   // Amended is the exception: stays quiet since it's a user action.
   const pureThinking = total === 0 && inProgress;
+  // Nothing to say yet. The composer rule two rows below already reads
+  // "Thinking 1m 2s", so painting "⚙ thinking · 1m 2s" here stacked the
+  // same word against itself.
+  //
+  // A blank row rather than no rows, because upsertLines no-ops on an
+  // empty array: without a line to own, the key never enters the
+  // scrollback index and the block loses its anchor under the prompt,
+  // reappearing at the end of the turn below whatever prose came first.
+  // One empty row holds the slot, and the real header (tools, or the
+  // frozen "thought · Xs") splices into it in place.
+  //
+  // Applies only while live and empty. A finished or stopped turn falls
+  // through and renders its header as before, since inProgress is false.
+  if (pureThinking) {
+    return { lines: [{ body: "" }], rowOwners: [null] };
+  }
   const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
     isAmended ? "tool-status-cancelled" : "tool-status-fail";
   const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
@@ -1873,6 +1889,11 @@ async function runSession(
   // reading "ready" rather than counting idle from its creation.
   let replayedTurnEndSeen = false;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
+  // Epoch ms the oldest still-armed background task was armed, or null.
+  // Pushed by hydra-acp/session/armed_tasks_updated and seeded from the
+  // attach snapshot; drives the composer's "Running Xs" and the sidebar's
+  // running branch.
+  let armedSince: number | null = null;
   // Timer that periodically polls the daemon for the current session's
   // forkSynthesisState so the banner indicator stays in sync while
   // attached. Stopped when synthesis completes, fails, or on teardown.
@@ -1890,7 +1911,17 @@ async function runSession(
   // stash it in sessionElapsedTimer and clearInterval on teardown.
   const startSessionElapsedTimer = (): NodeJS.Timeout => {
     return setInterval(() => {
-      if (sessionBusySince === null || screenRef === null) {
+      if (screenRef === null) {
+        return;
+      }
+      if (sessionBusySince === null) {
+        // Not mid-turn, but a background task is still running: nudge the
+        // banner so the "Running Xs" clock advances. The elapsed field
+        // derives that from armedSince itself, and paintRow no-ops when
+        // the rendered text hasn't changed, so an empty set is enough.
+        if (armedSince !== null) {
+          screenRef.setBanner({});
+        }
         return;
       }
       const idleMs =
@@ -1953,7 +1984,9 @@ async function runSession(
       screenRef?.setSidebarSnapshot({ busySince: null, lastTurnEndedAt });
       lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
-      if (sessionElapsedTimer !== null) {
+      // Keep ticking when a background task is still armed: the banner
+      // flips to "Running Xs" and that clock has to keep moving.
+      if (sessionElapsedTimer !== null && armedSince === null) {
         clearInterval(sessionElapsedTimer);
         sessionElapsedTimer = null;
       }
@@ -2200,6 +2233,36 @@ async function runSession(
       refreshQueueDisplay();
     }
   };
+  // The agent armed or released a background task. Distinct from a turn:
+  // the session is idle and will take a prompt, but that job can restart
+  // it. Pushed rather than polled because the transition that matters most
+  // ("the job you were told about is gone") happens while nobody is
+  // looking. See PROTOCOL.md "Agent-initiated turns".
+  const applyArmedTasks = (since: number | null): void => {
+    if (armedSince === since) {
+      return;
+    }
+    armedSince = since;
+    // setBanner merges, so clearing has to be an explicit undefined rather
+    // than an omitted key.
+    screenRef?.setBanner({ armedSince: since ?? undefined });
+    screenRef?.setSidebarSnapshot({ armedSince: since });
+    if (since !== null && sessionElapsedTimer === null && screenRef !== null) {
+      sessionElapsedTimer = startSessionElapsedTimer();
+    }
+    if (since === null && sessionBusySince === null && sessionElapsedTimer !== null) {
+      clearInterval(sessionElapsedTimer);
+      sessionElapsedTimer = null;
+    }
+  };
+  conn.onNotification("hydra-acp/session/armed_tasks_updated", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { count?: unknown; since?: unknown };
+    const count = typeof p.count === "number" ? p.count : 0;
+    applyArmedTasks(
+      count > 0 && typeof p.since === "number" ? p.since : null,
+    );
+  });
   conn.onNotification("hydra-acp/prompt_queue/held", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as { messageId?: unknown };

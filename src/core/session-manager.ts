@@ -2886,6 +2886,10 @@ export class SessionManager {
       attachedClients: session.attachedCount,
       status: "warm",
       busy: session.turnStartedAt !== undefined,
+      armedTasks: session.armedBackgroundTasks.length,
+      ...(session.armedSince !== undefined
+        ? { armedSince: session.armedSince }
+        : {}),
       awaitingInput: session.awaitingInput,
       agentPid: session.agentPid,
     };
@@ -2930,6 +2934,8 @@ export class SessionManager {
         status: "warm",
         agentPid: live.agentPid,
         busy: live.turnStartedAt !== undefined,
+        armedTasks: live.armedBackgroundTasks.length,
+        ...(live.armedSince !== undefined ? { armedSince: live.armedSince } : {}),
         awaitingInput: live.awaitingInput,
       };
     }
@@ -2961,6 +2967,7 @@ export class SessionManager {
       attachedClients: 0,
       status: "cold",
       busy: false,
+      armedTasks: 0,
       awaitingInput: false,
     };
   }
@@ -3081,6 +3088,10 @@ export class SessionManager {
         status: "warm",
         agentPid: session.agentPid,
         busy: session.turnStartedAt !== undefined,
+        armedTasks: session.armedBackgroundTasks.length,
+        ...(session.armedSince !== undefined
+          ? { armedSince: session.armedSince }
+          : {}),
         awaitingInput: session.awaitingInput,
         compactionState: session.compactionState,
         forkSynthesisState: session.forkSynthesisState,
@@ -3133,6 +3144,7 @@ export class SessionManager {
         attachedClients: 0,
         status: "cold",
         busy: false,
+        armedTasks: 0,
         awaitingInput: false,
         compactionState: r.compactionState,
         forkSynthesisState: r.forkSynthesisState,

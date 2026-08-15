@@ -30,6 +30,18 @@ export interface FieldDef {
   resolveGroups?(ctx: FieldContext): FieldGroup[] | null;
 }
 
+// "Thinking" rather than "Busy" so the composer matches the two other
+// places that name this state (the sidebar's `● thinking` and the
+// scrollback block's `thinking · Xs`); the composer was the odd one out.
+//
+// "Running" is a separate word for a separate thing: the agent is idle and
+// will take a prompt, but a background task it started is still going and
+// can restart it. Folding that into "Thinking" would be wrong twice over,
+// since nothing is thinking and the session is not busy.
+function armedAndIdle(ctx: FieldContext): boolean {
+  return ctx.banner.status === "ready" && ctx.banner.armedSince !== undefined;
+}
+
 function statusLabel(ctx: FieldContext): { label: string; token: ThemeToken } {
   const status = ctx.banner.status;
   const stalled = status === "busy" && ctx.banner.stalled === true;
@@ -39,14 +51,16 @@ function statusLabel(ctx: FieldContext): { label: string; token: ThemeToken } {
   } else if (stalled) {
     label = "Stalled";
   } else if (status === "busy") {
-    label = "Busy";
+    label = "Thinking";
+  } else if (armedAndIdle(ctx)) {
+    label = "Running";
   } else {
     label = status.charAt(0).toUpperCase() + status.slice(1);
   }
   let token: ThemeToken;
   if (stalled || status === "disconnected") {
     token = "status-alert";
-  } else if (status === "busy") {
+  } else if (status === "busy" || armedAndIdle(ctx)) {
     token = "status-active";
   } else if (status === "cold") {
     token = "status-cold";
@@ -140,6 +154,17 @@ export const FIELDS: Record<string, FieldDef> = {
   elapsed: {
     priority: 60,
     resolve: (ctx) => {
+      // Armed clocks from when the job started, not from the turn end:
+      // "this job has been going 12m" is the question, "you have been idle
+      // 12m" is not. Computed here rather than pushed as elapsedMs so it
+      // keeps ticking between banner updates.
+      if (armedAndIdle(ctx)) {
+        const running = Date.now() - ctx.banner.armedSince!;
+        if (running < 1000) {
+          return null;
+        }
+        return [{ text: formatElapsed(running), token: "status-active" }];
+      }
       if (
         ctx.banner.status !== "busy" ||
         ctx.banner.elapsedMs === undefined ||

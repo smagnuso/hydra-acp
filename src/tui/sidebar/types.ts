@@ -93,6 +93,11 @@ export interface SidebarSnapshot {
   busySince: number | null;
   // Wall clock of the last turn-complete, for the idle counter.
   lastTurnEndedAt: number | null;
+  // Epoch ms the oldest still-armed background task was armed, or null.
+  // Distinct from busySince: the agent is idle and will take a prompt, but
+  // a job it started is still running and can restart it unprompted. Ranks
+  // between busy and idle in the activity gadget.
+  armedSince: number | null;
   queued: number;
   usage: SidebarUsage;
   plan: PlanEntry[];
@@ -291,6 +296,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     now,
     busySince: null,
     lastTurnEndedAt: null,
+    armedSince: null,
     queued: 0,
     usage: {},
     plan: [],

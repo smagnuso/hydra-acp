@@ -135,6 +135,42 @@ describe("activity gadget", () => {
     expect(activityGadget.render(snap(), ctx())[0]!.body).toContain("ready");
   });
 
+  // Between thinking and idle: the agent handed the turn back, but a job
+  // it started is still going and can wake it up unprompted. Showing
+  // "idle 12m" there is the misleading case this exists to fix.
+  it("shows running, clocked from the job start, while a task is armed", () => {
+    const lines = activityGadget.render(
+      snap({
+        armedSince: 1_000_000 - 92_000,
+        lastTurnEndedAt: 1_000_000 - 250_000,
+      }),
+      ctx(),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.body).toContain("running");
+    // From the arming, not the turn end: 1m32s, not 4m10s.
+    expect(lines[0]!.body).toContain("1m 32s");
+    expect(lines[0]!.body).not.toContain("idle");
+  });
+
+  it("prefers thinking over running when a turn is in flight", () => {
+    const lines = activityGadget.render(
+      snap({ busySince: 1_000_000 - 1_000, armedSince: 1_000_000 - 600_000 }),
+      ctx(),
+    );
+    expect(lines[0]!.body).toContain("thinking");
+    expect(lines[0]!.body).not.toContain("running");
+  });
+
+  it("falls back to idle once the armed task clears", () => {
+    const lines = activityGadget.render(
+      snap({ armedSince: null, lastTurnEndedAt: 1_000_000 - 250_000 }),
+      ctx(),
+    );
+    expect(lines[0]!.body).toContain("idle");
+    expect(lines[0]!.body).not.toContain("running");
+  });
+
   it("re-renders once per whole second, not per millisecond", () => {
     const base = snap({ busySince: 0 });
     const k = (now: number): string =>

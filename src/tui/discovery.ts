@@ -104,6 +104,10 @@ export interface DiscoveredSession {
   // request / posed question). Drives the picker's "waiting on you"
   // glyph, distinct from the busy dot.
   awaitingInput?: boolean;
+  // Background tasks the agent armed and has not woken up for. Nonzero
+  // makes the picker read BUSY even with no turn in flight, distinguishing
+  // "finished" from "idle but will restart itself".
+  armedTasks?: number;
   // clientInfo from the process that issued session/new. Carried for
   // log/display; the effective filtering signal is `interactive` below.
   originatingClient?: { name: string; version?: string };
@@ -205,6 +209,7 @@ export async function listSessions(
     forkedFromMessageId: s.forkedFromMessageId,
     busy: s.busy,
     awaitingInput: s.awaitingInput,
+    armedTasks: s.armedTasks,
     originatingClient: s.originatingClient,
     interactive: s.interactive,
     priority: s.priority,

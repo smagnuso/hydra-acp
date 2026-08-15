@@ -9,6 +9,7 @@ import {
   searchSessions,
   syncInstalledAgents,
 } from "./discovery.js";
+import { toRow } from "../cli/session-row.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 
 // Deliberately NOT the real daemon port (DEFAULT_DAEMON_PORT): every
@@ -72,6 +73,35 @@ describe("listSessions", () => {
         title: undefined,
       },
     ]);
+  });
+
+  // The picker renders through the same toRow as the CLI, but
+  // DiscoveredSession is its own summary type: an optional field the daemon
+  // sends is silently dropped if this mapping forgets to copy it, and
+  // TypeScript stays quiet because the field is optional on both sides.
+  // That is exactly how armedTasks shipped invisible to the TUI while the
+  // CLI rendered it correctly. Assert the user-visible outcome, not just
+  // the field, so the whole path stays covered.
+  it("preserves armedTasks so the picker reflects a pending wakeup", async () => {
+    const out = await listSessions(
+      target,
+      {},
+      fakeOk({
+        sessions: [
+          {
+            sessionId: "s1",
+            cwd: "/x",
+            updatedAt: "2025-01-01T00:00:00Z",
+            attachedClients: 1,
+            status: "warm",
+            busy: false,
+            armedTasks: 2,
+          },
+        ],
+      }),
+    );
+    expect(out[0]?.armedTasks).toBe(2);
+    expect(toRow(out[0]!, Date.now()).state).toBe("BUSY");
   });
 
   it("throws on non-2xx", async () => {

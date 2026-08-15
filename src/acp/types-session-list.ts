@@ -114,6 +114,27 @@ export const SessionListEntry = z.object({
   // questions). Always false for cold sessions. Lets pickers render a
   // distinct "waiting on you" glyph instead of the busy dot.
   awaitingInput: z.boolean().default(false),
+  // Count of background tasks the agent has armed (a Monitor, or a Bash
+  // with run_in_background) and not yet been seen to wake up for. Nonzero
+  // with busy=false is a third state, distinct from both "working" and
+  // "done": the agent handed the turn back and is idle right now, but a
+  // watch is still pending and it can restart itself with no prompt. Lets
+  // pickers distinguish "finished" from "will wake up".
+  //
+  // Best-effort. Delivery of a task notification waits for a turn
+  // boundary, so a task can fire long after its nominal timeout; entries
+  // are expired on a TTL to stop the badge sticking forever, which means
+  // it can read 0 while a wakeup is still coming. Always 0 for cold
+  // sessions. See PROTOCOL.md "Agent-initiated turns".
+  //
+  // Optional rather than defaulted: additive, so an older daemon simply
+  // omits it and clients read absent as zero.
+  armedTasks: z.number().int().nonnegative().optional(),
+  // Epoch ms when the longest-running still-armed task was armed. Absent
+  // when none are. Lets a client attaching mid-flight seed its "running
+  // Xs" clock from when the job started rather than from the turn end,
+  // which is a different and less useful number.
+  armedSince: z.number().int().positive().optional(),
   // Present when compaction is in progress (requested, running,
   // swap_pending, or swap_deferred). Absent for idle sessions and
   // those that have never been compacted. Lets list views surface a

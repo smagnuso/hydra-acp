@@ -415,6 +415,24 @@ const UNSOLICITED_TURN_IDLE_MS = 90_000;
 // Renders as a single header line, so anything longer is already unreadable.
 const BACKGROUND_TASK_LABEL_MAX = 120;
 
+// Cap on the per-tool-call label cache. Only needs to span the gap between
+// a tool call's descriptive update and the later sparse one that carries
+// its background-task arming, which is milliseconds in practice; the cap
+// just stops a long session accumulating one entry per tool call forever.
+const TOOL_LABEL_LIMIT = 128;
+
+// How long an armed background task counts toward the "this session may
+// wake itself up" badge when the agent gave no timeout of its own (a
+// backgrounded Bash reports none; a Monitor reports timeoutMs).
+//
+// Any value here is a hint, not a guarantee. Delivery waits for a turn
+// boundary, so a task can fire long after its nominal timeout: the trace
+// has one armed with timeoutMs=3600000 that was delivered 3h51m later,
+// batched with three others. Erring short is the safer direction: a badge
+// that clears early degrades to today's behaviour, whereas one that sticks
+// claims a wakeup is coming when none is.
+const ARMED_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000;
+
 // Queue hold (see holdForUnsolicitedTurn). While the agent is mid-way
 // through a turn it started by itself, promoting the next user prompt
 // drops it onto a running agent, which is what produces interleaved
@@ -683,6 +701,26 @@ export class Session {
   // call that armed it. Only used to label an unsolicited turn with what
   // woke it up; nothing depends on it being accurate or present.
   private lastBackgroundTask: { toolCallId: string; label: string } | undefined;
+  // Best label seen per tool call, so a sparse arming update can borrow the
+  // description that arrived on an earlier update for the same call. See
+  // rememberToolLabel. FIFO-trimmed at TOOL_LABEL_LIMIT.
+  private toolLabels = new Map<
+    string,
+    { label: string; fromDescription: boolean }
+  >();
+  // Background tasks the agent has armed and that we have not yet seen it
+  // wake up for, keyed by toolCallId. Drives the "may wake itself up"
+  // signal on the session list. Best-effort by nature; see
+  // ARMED_TASK_DEFAULT_TTL_MS.
+  private armedTasks = new Map<
+    string,
+    { label: string; taskId?: string; armedAt: number; expiresAt: number }
+  >();
+  private armedExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+  // Last {count, since} pushed to clients, so a mutation that doesn't move
+  // the rendered state (re-arming a task already counted) stays silent.
+  private lastArmedBroadcast: { count: number; since: number | undefined } |
+    undefined;
   // Whether a turn has ever ended on this session in this process. Gates
   // unsolicited-turn detection: the failure mode is an agent *resuming*
   // after a turn ended, so before the first turn_complete there is nothing
@@ -2922,6 +2960,8 @@ export class Session {
     }
     const rawInput = update.rawInput as Record<string, unknown> | undefined;
     const claudeMeta = extractClaudeCodeMeta(update._meta);
+    this.rememberToolLabel(toolCallId, update, rawInput, claudeMeta);
+    this.noteBackgroundTaskStopped(update, rawInput, claudeMeta);
     const taskId = typeof claudeMeta?.toolResponse?.taskId === "string"
       ? claudeMeta.toolResponse.taskId
       : undefined;
@@ -2930,20 +2970,201 @@ export class Session {
     if (!isBackground) {
       return;
     }
-    // Prefer the agent's own description, fall back to the tool title.
+    const label = this.toolLabels.get(toolCallId)?.label ?? "background task";
+    this.lastBackgroundTask = { toolCallId, label };
+    const timeoutMs = typeof claudeMeta?.toolResponse?.timeoutMs === "number" &&
+        claudeMeta.toolResponse.timeoutMs > 0
+      ? claudeMeta.toolResponse.timeoutMs
+      : ARMED_TASK_DEFAULT_TTL_MS;
+    const armedAt = Date.now();
+    this.armedTasks.set(toolCallId, {
+      label,
+      ...(taskId !== undefined ? { taskId } : {}),
+      armedAt,
+      expiresAt: armedAt + timeoutMs,
+    });
+    this.onArmedTasksChanged();
+  }
+
+  // Background tasks currently armed: the agent finished its turn and
+  // handed control back, but a watch it started is still pending, so the
+  // session can restart itself without anyone prompting it.
+  //
+  // This is the third session state, distinct from both "working" and
+  // "done": idle right now, but a wakeup is queued.
+  get armedBackgroundTasks(): Array<{ label: string; taskId?: string }> {
+    return [...this.armedTasks.values()].map((t) => ({
+      label: t.label,
+      ...(t.taskId !== undefined ? { taskId: t.taskId } : {}),
+    }));
+  }
+
+  // When the longest-running armed task was armed, or undefined when none
+  // are. Clients clock their "running Xs" readout from this: the useful
+  // question is how long the job has been going, not how long the user has
+  // been idle since the turn ended.
+  get armedSince(): number | undefined {
+    let oldest: number | undefined;
+    for (const task of this.armedTasks.values()) {
+      if (oldest === undefined || task.armedAt < oldest) {
+        oldest = task.armedAt;
+      }
+    }
+    return oldest;
+  }
+
+  // Called after any mutation of armedTasks. Re-arms the expiry timer and
+  // tells attached clients, but only when the derived state they render
+  // actually moved.
+  //
+  // Expiry is timer-driven rather than swept on read because the state is
+  // now pushed, not polled: a session sitting idle for an hour has nobody
+  // reading the getter, and "the job you were told about has expired" is
+  // exactly the transition a user who walked away needs to see.
+  private onArmedTasksChanged(): void {
+    this.scheduleArmedExpiry();
+    const count = this.armedTasks.size;
+    const since = this.armedSince;
+    if (count === this.lastArmedBroadcast?.count &&
+      since === this.lastArmedBroadcast?.since) {
+      return;
+    }
+    this.lastArmedBroadcast = { count, since };
+    if (this.closed) {
+      return;
+    }
+    this.broadcastQueueNotification("hydra-acp/session/armed_tasks_updated", {
+      sessionId: this.sessionId,
+      count,
+      ...(since !== undefined ? { since } : {}),
+      tasks: this.armedBackgroundTasks,
+    });
+  }
+
+  private scheduleArmedExpiry(): void {
+    if (this.armedExpiryTimer !== undefined) {
+      clearTimeout(this.armedExpiryTimer);
+      this.armedExpiryTimer = undefined;
+    }
+    let soonest: number | undefined;
+    for (const task of this.armedTasks.values()) {
+      if (soonest === undefined || task.expiresAt < soonest) {
+        soonest = task.expiresAt;
+      }
+    }
+    if (soonest === undefined || this.closed) {
+      return;
+    }
+    this.armedExpiryTimer = setTimeout(
+      () => {
+        this.armedExpiryTimer = undefined;
+        const now = Date.now();
+        let dropped = false;
+        for (const [id, task] of this.armedTasks) {
+          if (task.expiresAt <= now) {
+            this.armedTasks.delete(id);
+            dropped = true;
+          }
+        }
+        if (dropped) {
+          this.onArmedTasksChanged();
+        } else {
+          this.scheduleArmedExpiry();
+        }
+      },
+      Math.max(0, soonest - Date.now()),
+    );
+    if (typeof this.armedExpiryTimer.unref === "function") {
+      this.armedExpiryTimer.unref();
+    }
+  }
+
+  // The agent explicitly cancelled a background task, so stop counting it
+  // toward the armed badge. TaskStop reports the id it killed as
+  // rawInput.task_id, matching the taskId harvested at arming time.
+  //
+  // Only a partial answer to stale entries: an agent that kills the
+  // underlying process some other way (observed: `pkill` from a plain
+  // Bash) leaves the watch dead with no in-band signal at all, and the
+  // entry survives until its TTL. There is no fix for that from outside
+  // the agent, which is why the count is documented as best-effort.
+  private noteBackgroundTaskStopped(
+    update: Record<string, unknown>,
+    rawInput: Record<string, unknown> | undefined,
+    claudeMeta: { toolName?: unknown } | undefined,
+  ): void {
+    const isTaskStop = claudeMeta?.toolName === "TaskStop" ||
+      update.title === "TaskStop";
+    if (!isTaskStop) {
+      return;
+    }
+    const stopped = rawInput?.task_id;
+    if (typeof stopped !== "string" || stopped.length === 0) {
+      return;
+    }
+    let dropped = false;
+    for (const [id, task] of this.armedTasks) {
+      if (task.taskId === stopped) {
+        this.armedTasks.delete(id);
+        dropped = true;
+      }
+    }
+    if (dropped) {
+      this.onArmedTasksChanged();
+    }
+  }
+
+  // Remember the best human-readable label seen for a tool call, across
+  // all of its updates.
+  //
+  // Not merely a convenience: a Monitor reports its taskId on a late,
+  // sparse tool_call_update that carries neither `title` nor `rawInput`,
+  // while the description ("validation harness completion") arrived on
+  // earlier updates for the same toolCallId. Reading only the update that
+  // carries the arming signal therefore yields the generic fallback, which
+  // is what shipped and what a live resumption caught.
+  //
+  // A description always wins and always overwrites (later ones are more
+  // current); a title only fills an empty slot, so it can't clobber a
+  // description that arrived first.
+  private rememberToolLabel(
+    toolCallId: string,
+    update: Record<string, unknown>,
+    rawInput: Record<string, unknown> | undefined,
+    claudeMeta: { toolName?: unknown } | undefined,
+  ): void {
+    const description = rawInput !== undefined &&
+        typeof rawInput.description === "string" && rawInput.description
+      ? rawInput.description
+      : undefined;
     // Truncated because this is agent-authored text we re-broadcast as a
     // one-line header; a pathological description shouldn't ride along on
     // every client's turn marker.
-    const described = rawInput !== undefined &&
-        typeof rawInput.description === "string" && rawInput.description
-      ? rawInput.description
-      : typeof update.title === "string"
-      ? update.title
-      : "background task";
-    this.lastBackgroundTask = {
-      toolCallId,
-      label: described.slice(0, BACKGROUND_TASK_LABEL_MAX),
-    };
+    if (description !== undefined) {
+      this.toolLabels.set(toolCallId, {
+        label: description.slice(0, BACKGROUND_TASK_LABEL_MAX),
+        fromDescription: true,
+      });
+    } else if (this.toolLabels.get(toolCallId)?.fromDescription !== true) {
+      const fallback = typeof update.title === "string" && update.title
+        ? update.title
+        : typeof claudeMeta?.toolName === "string" && claudeMeta.toolName
+        ? claudeMeta.toolName
+        : undefined;
+      if (fallback !== undefined) {
+        this.toolLabels.set(toolCallId, {
+          label: fallback.slice(0, BACKGROUND_TASK_LABEL_MAX),
+          fromDescription: false,
+        });
+      }
+    }
+    while (this.toolLabels.size > TOOL_LABEL_LIMIT) {
+      const oldest = this.toolLabels.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.toolLabels.delete(oldest);
+    }
   }
 
   // Open a synthetic turn for agent work nobody requested.
@@ -2962,6 +3183,13 @@ export class Session {
   private openUnsolicitedTurn(): void {
     const startedAt = Date.now();
     const cause = this.lastBackgroundTask;
+    // The wakeup we attribute this to has now happened, so it stops
+    // counting toward the armed badge. Any others stay until they fire or
+    // expire; a single notification can batch several, but we only get to
+    // attribute one.
+    if (cause && this.armedTasks.delete(cause.toolCallId)) {
+      this.onArmedTasksChanged();
+    }
     this.unsolicitedTurn = {
       messageId: generateMessageId(),
       startedAt,
@@ -6678,6 +6906,10 @@ export class Session {
     // history never ends on a turn_started with no turn_ended after it.
     // Must precede the closing/closed flags for the broadcast to go out.
     this.closeUnsolicitedTurn("closed");
+    if (this.armedExpiryTimer !== undefined) {
+      clearTimeout(this.armedExpiryTimer);
+      this.armedExpiryTimer = undefined;
+    }
     const deleteRecord = opts.deleteRecord || this.deleteRecordIntent;
     opts = { deleteRecord };
     this.closing = true;
@@ -7939,7 +8171,10 @@ const STATE_UPDATE_KINDS = new Set([
 // so every field is optional and a shape mismatch degrades to undefined.
 function extractClaudeCodeMeta(
   meta: unknown,
-): { toolResponse?: { taskId?: unknown } } | undefined {
+): {
+  toolName?: unknown;
+  toolResponse?: { taskId?: unknown; timeoutMs?: unknown };
+} | undefined {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
     return undefined;
   }
@@ -7947,11 +8182,21 @@ function extractClaudeCodeMeta(
   if (!block || typeof block !== "object" || Array.isArray(block)) {
     return undefined;
   }
-  const toolResponse = (block as Record<string, unknown>).toolResponse;
-  if (!toolResponse || typeof toolResponse !== "object") {
-    return {};
+  const obj = block as Record<string, unknown>;
+  const out: {
+    toolName?: unknown;
+    toolResponse?: { taskId?: unknown; timeoutMs?: unknown };
+  } = {};
+  if (obj.toolName !== undefined) {
+    out.toolName = obj.toolName;
   }
-  return { toolResponse: toolResponse as { taskId?: unknown } };
+  if (obj.toolResponse && typeof obj.toolResponse === "object") {
+    out.toolResponse = obj.toolResponse as {
+      taskId?: unknown;
+      timeoutMs?: unknown;
+    };
+  }
+  return out;
 }
 
 function isStateUpdate(method: string, params: unknown): boolean {

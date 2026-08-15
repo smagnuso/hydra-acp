@@ -93,7 +93,7 @@ describe("chrome bars", () => {
   it("default layout matches the pre-refactor output at 120 columns", () => {
     const r = render(120);
     expect(r.top).toBe(
-      "── Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────────────────────────────────────────────────── 12.4k/200.0k · $0.31 ──",
+      "── Thinking 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────────────────────────────────────────────── 12.4k/200.0k · $0.31 ──",
     );
     expect(r.sessionbar).toBe(
       "~/dev/hydra-acp/cli · make the sessionbar configurable                                claude•claude-sonnet-4-5-20250929",
@@ -103,7 +103,7 @@ describe("chrome bars", () => {
   it("default layout matches the pre-refactor output at 80 columns", () => {
     const r = render(80);
     expect(r.top).toBe(
-      "── Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────────── 12.4k/200.0k · $0.31 ──",
+      "── Thinking 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────── 12.4k/200.0k · $0.31 ──",
     );
     expect(r.sessionbar).toBe(
       "~/dev/hydra-acp/cli · make the sessionbar co… claude•claude-sonnet-4-5-20250929",
@@ -144,7 +144,7 @@ describe("chrome bars", () => {
   it("sheds low-priority fields before high-priority ones", () => {
     const r = render(40);
     // Status survives (priority Infinity); the session id does not.
-    expect(r.top).toContain("Busy");
+    expect(r.top).toContain("Thinking");
     expect(r.top).not.toContain("hydra-a1b2c3d4e5");
   });
 
@@ -173,6 +173,48 @@ describe("chrome bars", () => {
     expect(r.sessionbar).not.toContain("·");
   });
 
+  // The agent handed the turn back but a job it started is still going.
+  // Not "Thinking" (nothing is) and not plain "Ready" (it can restart
+  // itself), so it gets its own word, clocked from when the job started
+  // rather than from the turn end.
+  it("renders Running while a background task is armed", () => {
+    const r = render(120, {
+      session: { title: undefined, usage: undefined },
+      banner: {
+        queued: 0,
+        status: "ready",
+        elapsedMs: undefined,
+        armedSince: Date.now() - 62_000,
+      },
+    });
+    expect(r.top).toContain("Running 1m 2s");
+    expect(r.top).not.toContain("Ready");
+    expect(r.top).not.toContain("Thinking");
+  });
+
+  it("prefers Thinking over Running when a turn is actually in flight", () => {
+    const r = render(120, {
+      session: { title: undefined, usage: undefined },
+      banner: {
+        queued: 0,
+        status: "busy",
+        elapsedMs: 62_000,
+        armedSince: Date.now() - 600_000,
+      },
+    });
+    expect(r.top).toContain("Thinking 1m 2s");
+    expect(r.top).not.toContain("Running");
+  });
+
+  it("returns to Ready once the armed task clears", () => {
+    const r = render(120, {
+      session: { title: undefined, usage: undefined },
+      banner: { queued: 0, status: "ready", elapsedMs: undefined },
+    });
+    expect(r.top).toContain("Ready");
+    expect(r.top).not.toContain("Running");
+  });
+
   it("records click ranges for the hint chunks", () => {
     const w = 120;
     const r = render(w);
@@ -193,7 +235,7 @@ describe("chrome bars", () => {
     const r = render(80, { bar });
     expect(r.top).toContain("claude · claude-sonnet-4-5-20250929");
     expect(r.top).toContain("$0.31");
-    expect(r.top).not.toContain("Busy");
+    expect(r.top).not.toContain("Thinking");
     expect(r.bottom.startsWith(" hello ")).toBe(true);
     expect(r.sessionbar).toContain("hydra-a1b2c3d4e5");
     expect(r.sessionbar).toContain("12.4k/200.0k");
@@ -223,7 +265,7 @@ describe("chrome bars", () => {
       sessionbar: { left: ["cwd"], right: [] },
     };
     const r = render(80, { bar });
-    expect(r.top.startsWith("── Busy ")).toBe(true);
+    expect(r.top.startsWith("── Thinking ")).toBe(true);
   });
 
   // The notification channel is force-rendered over composer.bottom.right
@@ -531,7 +573,7 @@ describe("chrome bar gestures", () => {
 
   it("claims the gesture on an inert field so it can't start a selection", () => {
     const { r, priv, actions } = gestures();
-    const x = r.top.indexOf("Busy") + 1;
+    const x = r.top.indexOf("Thinking") + 1;
     expect(priv.handleBarPress({ x, y: 1 })).toBe(true);
     expect(priv.handleBarRelease({ x, y: 1 })).toBe(true);
     expect(actions).toEqual([]);
@@ -740,7 +782,7 @@ describe('the "..." defaults sentinel', () => {
 
   it("carries the default's own overrides into the expansion", () => {
     // `elapsed` must keep its " " separator or the row reads
-    // "Busy · 1m 2s" instead of "Busy 1m 2s".
+    // "Busy · 1m 2s" instead of "Thinking 1m 2s".
     const out = expandSide("composerTop", "left", ["...", "cwd"]);
     expect(out[1]).toEqual({ field: "elapsed", separator: " " });
   });
@@ -781,7 +823,7 @@ describe('the "..." defaults sentinel', () => {
       sessionbar: { left: [], right: [] },
     };
     const r = render(140, { bar });
-    expect(r.top).toContain("Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued · ~/dev");
+    expect(r.top).toContain("Thinking 1m 2s · hydra-a1b2c3d4e5 · 2 queued · ~/dev");
     expect(r.top).toContain("12.4k/200.0k · $0.31");
   });
 });

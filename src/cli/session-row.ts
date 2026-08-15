@@ -51,6 +51,12 @@ export interface SessionSummary {
   // whichever base word applies, so `BUSY◦` and `WARM◦` stay
   // distinguishable.
   awaitingInput?: boolean;
+  // Count of background tasks the agent armed and has not yet woken up
+  // for. Nonzero means the session can restart itself with no prompt, so
+  // it renders `BUSY` even with no turn in flight: "idle, done" and
+  // "idle, will wake up" read very differently when scanning a list, and
+  // only the first is safe to treat as finished.
+  armedTasks?: number;
   // Present when compaction is in progress. Drives the trailing ⟳ in
   // the STATE cell (`WARM⟳`) so operators can spot mid-compaction
   // sessions at a glance without a per-session GET /compact/status call.
@@ -227,6 +233,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
       s.awaitingInput,
       isCompactionInProgress(s.compactionState),
       s.forkSynthesisState,
+      s.armedTasks,
     ),
     agent: formatAgentCell(s.agentId),
     model: shortenModel(s.currentModel) ?? "-",
@@ -301,11 +308,22 @@ function formatState(
   awaitingInput: boolean | undefined,
   compacting: boolean | undefined,
   forkSynthesisState?: "running" | "failed",
+  armedTasks?: number,
 ): string {
   if (status === "cold") {
     return "COLD";
   }
-  const base = busy ? "BUSY" : "WARM";
+  // A session with a background task still armed reads as BUSY even though
+  // no turn is in flight: it isn't finished with you, and it can start a
+  // turn nobody asked for at any moment. Deliberately collapsed into the
+  // existing word rather than given a third one, so the STATE cell keeps a
+  // two-word vocabulary.
+  //
+  // The cost, accepted: BUSY no longer implies "your prompt will queue".
+  // An armed-but-idle session takes a prompt immediately. The wire keeps
+  // the distinction (`busy` and `armedTasks` are separate fields); only
+  // this cell collapses it.
+  const base = busy || (armedTasks ?? 0) > 0 ? "BUSY" : "WARM";
   const failed = forkSynthesisState === "failed" ? "\u26a0" : "";
   if (awaitingInput) {
     return `${base}\u25e6${failed}`;

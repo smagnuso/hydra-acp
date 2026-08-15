@@ -188,6 +188,62 @@ describe("toRow state column", () => {
     const r = toRow({ ...base, attachedClients: 0, status: "cold", busy: true });
     expect(r.state).toBe("COLD");
   });
+
+  // "Idle, finished" and "idle, but a background task will wake it up"
+  // both used to render WARM. Only the first is safe to treat as done, so
+  // the second reads BUSY despite no turn being in flight.
+  it("renders BUSY for an idle session with a pending wakeup", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 1,
+      status: "warm",
+      busy: false,
+      armedTasks: 1,
+    });
+    expect(r.state).toBe("BUSY");
+  });
+
+  it("still renders BUSY while the agent is mid-turn with tasks armed", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 1,
+      status: "warm",
+      busy: true,
+      armedTasks: 2,
+    });
+    expect(r.state).toBe("BUSY");
+  });
+
+  it("composes the armed state with the awaiting-input marker", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 1,
+      status: "warm",
+      busy: false,
+      armedTasks: 1,
+      awaitingInput: true,
+    });
+    expect(r.state).toBe("BUSY◦");
+  });
+
+  it("renders WARM when armedTasks is absent or zero", () => {
+    expect(toRow({ ...base, attachedClients: 1, status: "warm" }).state)
+      .toBe("WARM");
+    expect(
+      toRow({ ...base, attachedClients: 1, status: "warm", armedTasks: 0 })
+        .state,
+    ).toBe("WARM");
+  });
+
+  it("never renders the armed state for a cold session", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 0,
+      status: "cold",
+      armedTasks: 3,
+    });
+    expect(r.state).toBe("COLD");
+  });
 });
 
 describe("parseColumns", () => {

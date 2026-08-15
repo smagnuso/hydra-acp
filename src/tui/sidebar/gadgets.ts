@@ -192,6 +192,9 @@ export const activityGadget: Gadget = {
     if (s.busySince !== null) {
       return `busy:${Math.floor((s.now - s.busySince) / 1000)}`;
     }
+    if (s.armedSince !== null) {
+      return `running:${Math.floor((s.now - s.armedSince) / 1000)}`;
+    }
     if (s.lastTurnEndedAt !== null) {
       // Quantized, so the key changes exactly as often as the display does
       // — an un-quantized key re-rendered the gadget every second to
@@ -207,6 +210,18 @@ export const activityGadget: Gadget = {
           labelValue("● thinking", shortDuration(s.now - s.busySince), ctx),
           // The session is in a turn. "thinking" is the label; the state
           // covers tool execution and streaming too.
+          "status-active",
+        ),
+      ];
+    }
+    // Between thinking and idle: the agent handed the turn back, but a
+    // background task it started is still going and can wake it up. Clocked
+    // from when the job started, not from the turn end, because the useful
+    // reading is how long the job has run.
+    if (s.armedSince !== null) {
+      return [
+        row(
+          labelValue("◐ running", shortDuration(s.now - s.armedSince), ctx),
           "status-active",
         ),
       ];

@@ -2970,6 +2970,7 @@ function buildViewerResponseMeta(
      attachedClients: 0,
      status: "cold",
      busy: false,
+     armedTasks: 0,
      awaitingInput: false,
    };
   const extras: WarmSessionMetaExtras = {

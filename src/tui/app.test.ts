@@ -160,6 +160,91 @@ describe("_buildToolsLines", () => {
     ...opts,
   });
 
+  // The composer rule already reads "Thinking 1m 2s" two rows below, so a
+  // live block with nothing in it but the word "thinking" stacked the same
+  // word against itself. One blank row instead: no word, but the key still
+  // enters the scrollback index and keeps the block anchored under the
+  // prompt, so the real header splices in there rather than appending at
+  // the end of the turn.
+  it("holds an empty row while live with no tools yet", () => {
+    const result = _buildToolsLines({
+      order: [],
+      states: new Map(),
+      startedAt: 1_000,
+      endedAt: null,
+      stopReason: null,
+      expanded: false,
+    });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]!.body).toBe("");
+    expect(result.lines[0]!.prefix ?? "").toBe("");
+    expect(result.rowOwners).toEqual([null]);
+  });
+
+  // The anchor is the whole reason the row is blank rather than absent:
+  // upsertLines no-ops on an empty array, so a zero-line block never gets
+  // a position and the frozen header lands at the end of the turn.
+  it("keeps a line at every stage so the block never loses its slot", () => {
+    const base = {
+      states: new Map(),
+      startedAt: 1_000,
+      expanded: false,
+    };
+    const live = _buildToolsLines({
+      ...base,
+      order: [],
+      endedAt: null,
+      stopReason: null,
+    });
+    const frozen = _buildToolsLines({
+      ...base,
+      order: [],
+      endedAt: 9_000,
+      stopReason: "end_turn",
+    });
+    expect(live.lines.length).toBeGreaterThan(0);
+    expect(frozen.lines.length).toBeGreaterThan(0);
+  });
+
+  it("still freezes a text-only turn so its timing trace survives", () => {
+    const result = _buildToolsLines({
+      order: [],
+      states: new Map(),
+      startedAt: 1_000,
+      endedAt: 9_000,
+      stopReason: "end_turn",
+      expanded: false,
+    });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]!.body).toContain("thought");
+  });
+
+  it("still shows a stopped turn that never ran a tool", () => {
+    const result = _buildToolsLines({
+      order: [],
+      states: new Map(),
+      startedAt: 1_000,
+      endedAt: 4_000,
+      stopReason: "cancelled",
+      expanded: false,
+    });
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]!.body).toContain("cancelled");
+  });
+
+  it("appears as soon as the first tool fires", () => {
+    const result = _buildToolsLines({
+      order: ["tc-aaa"],
+      states: new Map([["tc-aaa", makeState("tc-aaa", { status: "pending" })]]),
+      startedAt: 1_000,
+      endedAt: null,
+      stopReason: null,
+      expanded: false,
+    });
+    expect(result.lines.length).toBeGreaterThan(0);
+    expect(result.rowOwners[0]).toBeNull();
+  });
+
   it("collapsed tool → 1 line, rowOwners[1] = toolCallId", () => {
     const order = ["tc-aaa"];
     const states = new Map([["tc-aaa", makeState("tc-aaa")]]);

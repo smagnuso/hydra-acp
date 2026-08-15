@@ -37,6 +37,12 @@ export interface BannerInfo {
   queued: number;
   elapsedMs?: number;
   stalled?: boolean;
+  // Epoch ms when the oldest still-armed background task was armed, or
+  // undefined when none are. A modifier on `ready` rather than a status of
+  // its own: the agent really is idle and really will take a prompt, it
+  // just also has a job running that can restart it. Drives the "Running"
+  // label and clocks its elapsed from the job's start.
+  armedSince?: number;
 }
 
 export interface TransientInfo {
