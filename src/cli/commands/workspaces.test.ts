@@ -13,6 +13,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { paths, shortenHomePath } from "../../core/paths.js";
+import { writeDaemonPidFile } from "../../core/daemon-pidfile.js";
+import { writeServiceToken } from "../../core/service-token.js";
 import {
   collectWorkspaces,
   runWorkspaceList,
@@ -219,10 +221,89 @@ async function bindingOf(meta: string): Promise<unknown> {
   return JSON.parse(await fs.readFile(meta, "utf8")).workspace;
 }
 
+/**
+ * A stand-in for the daemon's `PATCH /v1/sessions/:id` route.
+ *
+ * The CLI does not write session records any more, it asks — so these
+ * tests need something to ask, and it has to perform the clear for real
+ * or every assertion about the record would be measuring the fake
+ * instead of the command. `live` reproduces the single refusal the real
+ * route makes; `patches` records the wire calls so the contract itself
+ * can be asserted rather than only its effect.
+ */
+interface FakeDaemon {
+  live: Set<string>;
+  patches: Array<{ id: string; body: unknown }>;
+  close: () => Promise<void>;
+}
+
+async function startFakeDaemon(): Promise<FakeDaemon> {
+  const { createServer } = await import("node:http");
+  const live = new Set<string>();
+  const patches: Array<{ id: string; body: unknown }> = [];
+  const server = createServer((req, res) => {
+    const match = /^\/v1\/sessions\/([^/?]+)$/.exec(req.url ?? "");
+    if (req.method !== "PATCH" || match === null) {
+      res.writeHead(404).end("{}");
+      return;
+    }
+    const id = decodeURIComponent(match[1]!);
+    let raw = "";
+    req.on("data", (c) => (raw += String(c)));
+    req.on("end", () => {
+      void (async () => {
+        const body: unknown = raw.length > 0 ? JSON.parse(raw) : {};
+        patches.push({ id, body });
+        if (live.has(id)) {
+          res.writeHead(409, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "session is live; its cwd is the workspace." }));
+          return;
+        }
+        const meta = path.join(paths.home(), "sessions", id, "meta.json");
+        const rec = JSON.parse(await fs.readFile(meta, "utf8")) as Record<string, unknown>;
+        delete rec.workspace;
+        await fs.writeFile(meta, JSON.stringify(rec));
+        res.writeHead(204).end();
+      })();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await writeDaemonPidFile({
+    pid: process.pid,
+    host: "127.0.0.1",
+    port,
+    loopbackPort: port,
+    startedAt: new Date(0).toISOString(),
+  });
+  // daemonFetch authenticates before it dials.
+  await writeServiceToken("test-token");
+  return {
+    live,
+    patches,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 describe("workspace remove — missing", () => {
+  let out: string;
+  let daemon: FakeDaemon;
+
+  beforeEach(async () => {
+    out = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    });
+    daemon = await startFakeDaemon();
+  });
+
   afterEach(async () => {
+    vi.restoreAllMocks();
+    await daemon.close();
     await fs.rm(path.join(paths.home(), "sessions"), { recursive: true, force: true });
     await fs.rm(path.join(paths.home(), "workspaces"), { recursive: true, force: true });
+    await fs.rm(paths.pidFile(), { force: true });
   });
 
   it("clears the binding so the row stops being listed", async () => {
@@ -254,33 +335,29 @@ describe("workspace remove — missing", () => {
     expect(await worktreeList(repo)).not.toContain("gone");
   });
 
-  it("refuses when the branch still holds commits, and changes nothing", async () => {
-    // The branch is the only surviving copy of that work, and clearing
-    // the binding is what strands it.
+  it("keeps a branch that still holds commits, and says so", async () => {
+    // Clearing the binding is what strands the branch, so this is the
+    // moment it must be named. Deleting it here would make `remove`
+    // destroy on `missing` what it preserves on `bound`.
     const repo = await makeGitRepo();
     const { meta } = await makeMissing(repo, "work", "sess-work", { commit: true });
 
-    await expect(runWorkspaceRemove({ target: "sess-work" })).rejects.toThrow(
-      /1 commit\(s\) not in HEAD/,
-    );
-    expect(await bindingOf(meta)).toMatchObject({ label: "work" });
+    await runWorkspaceRemove({ target: "sess-work" });
+
+    expect(await bindingOf(meta)).toBeUndefined();
     expect(await branches(repo)).toContain("hydra/work");
+    expect(out).toContain("1 commit(s) not in HEAD");
   });
 
-  it("names the command that would keep the work", async () => {
-    const repo = await makeGitRepo();
-    await makeMissing(repo, "work", "sess-hint", { commit: true });
-    await expect(runWorkspaceRemove({ target: "sess-hint" })).rejects.toThrow(
-      /hydra workspace merge sess-hint/,
-    );
-  });
-
-  it("discards the commits under --force", async () => {
+  it("keeps the commits under --force too", async () => {
+    // --force covers the daemon guard, not the branch: there is no
+    // uncommitted work to discard here, so nothing this command does is
+    // destructive in either mode.
     const repo = await makeGitRepo();
     const { meta } = await makeMissing(repo, "work", "sess-force", { commit: true });
     await runWorkspaceRemove({ target: "sess-force", force: true });
     expect(await bindingOf(meta)).toBeUndefined();
-    expect(await branches(repo)).not.toContain("hydra/work");
+    expect(await branches(repo)).toContain("hydra/work");
   });
 
   it("never deletes a branch outside hydra's namespace", async () => {
@@ -297,17 +374,232 @@ describe("workspace remove — missing", () => {
     expect(stdout).toContain("feature/mine");
   });
 
-  it("drops the snapshot refs it left behind", async () => {
-    // They are GC roots: leaving them pins objects for a checkout that
-    // no longer exists.
+  it("drops the start ref but keeps the autosave", async () => {
+    // Both are GC roots, which is the argument for dropping them. The
+    // autosave outranks it: with the directory gone it is the only copy
+    // of whatever was uncommitted when it went. Nothing can be landed
+    // from a checkout that no longer exists, so the start ref is pure
+    // garbage and goes.
     const repo = await makeGitRepo();
     await makeMissing(repo, "refs", "sess-refs");
     const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
     for (const ref of ["refs/hydra/snapshots/sess-refs", "refs/hydra/start/sess-refs"]) {
       await exec("git", ["update-ref", ref, head], { cwd: repo });
     }
+
     await runWorkspaceRemove({ target: "sess-refs" });
+
+    const { stdout } = await exec("git", ["for-each-ref", "--format=%(refname)", "refs/hydra/"], {
+      cwd: repo,
+    });
+    expect(stdout.trim()).toBe("refs/hydra/snapshots/sess-refs");
+    expect(out).toContain("last autosave");
+  });
+
+  it("clears the binding through the daemon, not by editing the record", async () => {
+    // The record belongs to the daemon: it holds live copies in memory
+    // and rewrites them, so a file edited underneath it is reverted.
+    // This is the one CLI path that would otherwise write one directly.
+    const repo = await makeGitRepo();
+    await makeMissing(repo, "wire", "sess-wire");
+
+    await runWorkspaceRemove({ target: "sess-wire" });
+
+    expect(daemon.patches).toEqual([{ id: "sess-wire", body: { workspace: null } }]);
+  });
+
+  it("surfaces the daemon's refusal for a live session, and changes nothing", async () => {
+    // A live session's cwd IS the workspace, so the binding may only be
+    // dropped by something that moves the agent too. The refusal has to
+    // arrive before any git state is touched, or a command that failed
+    // has still half-run.
+    const repo = await makeGitRepo();
+    const { meta, branch } = await makeMissing(repo, "hot", "sess-hot");
+    daemon.live.add("sess-hot");
+
+    await expect(runWorkspaceRemove({ target: "sess-hot" })).rejects.toThrow(/session is live/);
+
+    expect(await bindingOf(meta)).toMatchObject({ label: "hot" });
+    expect(await branches(repo)).toContain(branch);
+    expect(await worktreeList(repo)).toContain("hot");
+  });
+
+  it("fails loudly when the daemon is unreachable", async () => {
+    // No fallback to a direct write: the daemon is required, and a
+    // command that cannot reach it has not done half its job silently.
+    const repo = await makeGitRepo();
+    const { meta } = await makeMissing(repo, "down", "sess-down");
+    await daemon.close();
+
+    await expect(runWorkspaceRemove({ target: "sess-down" })).rejects.toThrow(
+      /could not reach the daemon/,
+    );
+    expect(await bindingOf(meta)).toMatchObject({ label: "down" });
+  });
+});
+
+// `remove` on a workspace that still exists, and what it does with the
+// two things that can hold the only copy of work: the directory (for
+// uncommitted changes) and the autosave ref (for the same changes, as of
+// the last turn).
+
+describe("workspace remove — on disk", () => {
+  let out: string;
+
+  beforeEach(() => {
+    out = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(path.join(paths.home(), "sessions"), { recursive: true, force: true });
+    await fs.rm(path.join(paths.home(), "workspaces"), { recursive: true, force: true });
+  });
+
+  it("refuses when it cannot tell whether the directory holds work", async () => {
+    // Unknown is not clean. collectWorkspaces reports undefined for a
+    // failed status, an unresolvable provider and a failed attribution
+    // alike, and reading any of them as "nothing to lose" deletes a
+    // directory nobody checked. `prune` already fails closed here.
+    const dir = path.join(paths.home(), "workspaces", "deadbeef", "opaque");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "work.txt"), "not in any vcs\n");
+
+    await expect(runWorkspaceRemove({ target: "opaque" })).rejects.toThrow(/cannot tell whether/);
+    await expect(fs.access(dir)).resolves.toBeUndefined();
+
+    await runWorkspaceRemove({ target: "opaque", force: true });
+    await expect(fs.access(dir)).rejects.toThrow();
+  });
+
+  it("keeps the autosave ref when --force discards uncommitted work", async () => {
+    // The ref is the recovery mechanism for exactly what --force just
+    // destroyed, so deleting it as GC hygiene is what turns a forced
+    // removal from recoverable into final.
+    const repo = await makeGitRepo();
+    const dir = await makeOrphanWorktree(repo, "autosave");
+    const meta = await bindSession("sess-auto", {
+      path: dir,
+      sourceCwd: repo,
+      label: "autosave",
+      branch: "hydra/autosave",
+      repoRoot: repo,
+    });
+    await fs.writeFile(path.join(dir, "scratch.txt"), "unsaved\n");
+    const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await exec("git", ["update-ref", "refs/hydra/snapshots/sess-auto", head], { cwd: repo });
+    await exec("git", ["update-ref", "refs/hydra/start/sess-auto", head], { cwd: repo });
+
+    await runWorkspaceRemove({ target: "sess-auto", force: true });
+
+    const { stdout } = await exec("git", ["for-each-ref", "--format=%(refname)", "refs/hydra/"], {
+      cwd: repo,
+    });
+    expect(stdout.trim()).toBe("refs/hydra/snapshots/sess-auto");
+    expect(out).toContain("recoverable from the last autosave");
+    expect(meta).toContain("sess-auto");
+  });
+
+  it("drops the autosave ref when the removal discarded nothing", async () => {
+    // Clean removal destroys no copy of anything, so the ref is only
+    // pinning objects and the hygiene argument stands unopposed.
+    const repo = await makeGitRepo();
+    const dir = await makeOrphanWorktree(repo, "clean");
+    await bindSession("sess-clean", {
+      path: dir,
+      sourceCwd: repo,
+      label: "clean",
+      branch: "hydra/clean",
+      repoRoot: repo,
+    });
+    const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await exec("git", ["update-ref", "refs/hydra/snapshots/sess-clean", head], { cwd: repo });
+
+    await runWorkspaceRemove({ target: "sess-clean" });
+
     const { stdout } = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
     expect(stdout.trim()).toBe("");
+    expect(out).not.toContain("recoverable");
+  });
+
+  it("tears an orphan down through its provider, not with a bare rm", async () => {
+    // Same residue prune exists to avoid: a bare rm leaves git's
+    // worktree registry and the branch aimed at a path that is gone.
+    const repo = await makeGitRepo();
+    const dir = await makeOrphanWorktree(repo, "unowned");
+
+    await runWorkspaceRemove({ target: "unowned" });
+
+    await expect(fs.access(dir)).rejects.toThrow();
+    expect(await worktreeList(repo)).not.toContain("unowned");
+    expect(await branches(repo)).not.toContain("hydra/unowned");
+  });
+
+  it("keeps an orphan's branch when it carries commits, and says so", async () => {
+    const repo = await makeGitRepo();
+    const dir = await makeOrphanWorktree(repo, "orphanwork");
+    await fs.writeFile(path.join(dir, "work.txt"), "committed\n");
+    await exec("git", ["add", "-A"], { cwd: dir });
+    await exec("git", ["commit", "-q", "-m", "work"], { cwd: dir });
+
+    await runWorkspaceRemove({ target: "orphanwork" });
+
+    expect(await branches(repo)).toContain("hydra/orphanwork");
+    expect(out).toContain("commit(s) not in HEAD");
+  });
+});
+
+describe("workspace list — missing rows", () => {
+  let out: string;
+
+  beforeEach(() => {
+    out = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(path.join(paths.home(), "sessions"), { recursive: true, force: true });
+    await fs.rm(path.join(paths.home(), "workspaces"), { recursive: true, force: true });
+  });
+
+  it("hides them from the table but never from the footer", async () => {
+    const repo = await makeGitRepo();
+    await makeMissing(repo, "ghost", "sess-ghost");
+
+    await runWorkspaceList();
+
+    expect(out).not.toContain("ghost");
+    expect(out).toContain("1 missing");
+    expect(out).toContain("--missing");
+  });
+
+  it("lists them under --missing", async () => {
+    const repo = await makeGitRepo();
+    await makeMissing(repo, "ghost", "sess-ghost");
+
+    await runWorkspaceList({ missing: true });
+
+    expect(out).toContain("ghost");
+    expect(out).toContain("1 missing");
+    // The hint is for people who cannot see them; they can.
+    expect(out).not.toContain("--missing`");
+  });
+
+  it("keeps every row in --json", async () => {
+    const repo = await makeGitRepo();
+    await makeMissing(repo, "ghost", "sess-ghost");
+
+    await runWorkspaceList({ json: true });
+
+    const parsed = JSON.parse(out) as { workspaces: Array<{ state: string }> };
+    expect(parsed.workspaces.map((w) => w.state)).toEqual(["missing"]);
   });
 });

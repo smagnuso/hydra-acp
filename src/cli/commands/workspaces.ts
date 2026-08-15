@@ -22,7 +22,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { paths } from "../../core/paths.js";
-import { readJsonSafe, writeJsonAtomic } from "../../core/json-store.js";
+import { readJsonSafe } from "../../core/json-store.js";
 import { getProvider } from "../../core/workspace/registry.js";
 import { shortenHomePath } from "../../core/paths.js";
 import { asSnapshotId, type Workspace } from "../../core/workspace/provider.js";
@@ -32,11 +32,11 @@ import {
   replaySourceDivergence,
   type SourceCapture,
 } from "../../core/workspace/source-state.js";
+import { invokedBinName } from "../../core/bin-name.js";
+import { daemonFetch } from "./_shared.js";
 
 interface Binding {
   sessionId: string;
-  /** The record this came from, so clearing the binding can write it back. */
-  metaPath: string;
   workspace: {
     path: string;
     sourceCwd: string;
@@ -78,12 +78,11 @@ async function readBindings(): Promise<Binding[]> {
   const names = await fs.readdir(dir).catch(() => [] as string[]);
   const out: Binding[] = [];
   for (const name of names) {
-    const metaPath = path.join(dir, name, "meta.json");
     const rec = await readJsonSafe<{ sessionId?: string; workspace?: Binding["workspace"] }>(
-      metaPath,
+      path.join(dir, name, "meta.json"),
     );
     if (rec?.workspace?.path !== undefined && typeof rec.sessionId === "string") {
-      out.push({ sessionId: rec.sessionId, metaPath, workspace: rec.workspace });
+      out.push({ sessionId: rec.sessionId, workspace: rec.workspace });
     }
   }
   return out;
@@ -549,14 +548,18 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
  * roots, so leaving them pins objects for a checkout that no longer
  * exists.
  *
- * The branch is the exception and is treated as one: for a missing
- * workspace it is the only surviving copy of committed work, and
- * clearing the binding is what strands it, since nothing would point at
- * it afterwards. So commits not already in the source's HEAD stop this
- * without `--force`, in the same shape as the uncommitted-changes guard
- * on the live path.
+ * Destroys nothing, which is what makes it need no guard. The two
+ * things that outlive the directory can each hold the last copy of
+ * work: the branch holds what was committed, and the autosave ref holds
+ * what was not, as of the last turn before the directory went away.
+ * Neither is this command's to discard — the same call on a `bound` row
+ * keeps the branch too, and treating it as deletable here inverted that
+ * on the one state where the DIRTY column reads `?` and you cannot see
+ * what you are agreeing to. So the branch is deleted only when it holds
+ * nothing (prune's rule, via the same function), the autosave is kept,
+ * and whatever survives is named on the way out.
  */
-async function removeMissing(row: WorkspaceRow, force: boolean): Promise<void> {
+async function removeMissing(row: WorkspaceRow): Promise<void> {
   const bindings = await readBindings();
   const bound = bindings.find((b) => b.workspace.path === row.path);
   if (bound === undefined) {
@@ -566,56 +569,45 @@ async function removeMissing(row: WorkspaceRow, force: boolean): Promise<void> {
     return;
   }
 
+  // First, because it is the only step that can be refused: the daemon
+  // turns down a live session, and a refused command should not have
+  // already pruned git state on its way to failing. Everything after
+  // this reports failures as notes rather than throwing, so the command
+  // either changes nothing or runs to the end.
+  await clearBinding(bound);
+
   const ws = toProviderWorkspace(bound.workspace);
   const branch = ws.vcs?.branch;
   const repoRoot = ws.vcs?.repoRoot;
   const notes: string[] = [];
 
-  // Only ever our own namespace: a workspace checked out on a user's
-  // own branch must not have that branch deleted out from under them.
-  const ours = branch !== undefined && repoRoot !== undefined && branch.startsWith("hydra/");
-  if (ours) {
-    const ahead = await runGit(["rev-list", "--count", `HEAD..${branch!}`], repoRoot!);
-    const count = ahead.ok ? Number.parseInt(ahead.out.trim(), 10) : Number.NaN;
-    if (!ahead.ok || Number.isNaN(count)) {
-      if (!force) {
-        throw new Error(
-          `cannot tell whether ${branch!} still holds work (comparing it to HEAD failed). ` +
-            `Pass --force to clear the binding and delete it anyway.`,
-        );
-      }
-    } else if (count > 0 && !force) {
-      const want = row.sessionId?.replace(/^hydra_session_/, "") ?? row.label;
-      throw new Error(
-        `${shortenHomePath(row.path)} is gone, but ${branch!} still has ${count} commit(s) not in ` +
-          `HEAD. Land them with \`hydra workspace merge ${want}\`, or pass --force to discard them.`,
-      );
-    }
-  }
-
-  // Clear the stale worktree registration before the branch: git refuses
-  // to delete a branch it still believes is checked out somewhere.
+  // Before the branch: git refuses to delete a branch it still believes
+  // is checked out somewhere, and the registration still points here.
   if (repoRoot !== undefined) {
     await runGit(["worktree", "prune"], repoRoot);
   }
-  if (ours) {
-    const deleted = await runGit(["branch", "-D", branch!], repoRoot!);
-    notes.push(deleted.ok ? `deleted ${branch!}` : `could not delete ${branch!}`);
-  } else if (branch !== undefined) {
+  if (branch !== undefined && !branch.startsWith("hydra/")) {
     notes.push(`kept ${branch} (not hydra's to delete)`);
-  }
-
-  const provider = getProvider(bound.workspace.provider);
-  if (provider !== undefined && row.sessionId !== undefined) {
-    for (const ref of [
-      `refs/hydra/snapshots/${row.sessionId}`,
-      `refs/hydra/start/${row.sessionId}`,
-    ]) {
-      await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
+  } else {
+    const held = await reclaimOrphanBranch(ws);
+    if (held !== undefined) {
+      notes.push(held);
     }
   }
 
-  await clearBinding(bound);
+  // The start ref measured the source at isolation time, for landing.
+  // Nothing can be landed from a checkout that is gone, so it is pure
+  // GC root now. The autosave is the opposite: with the directory gone
+  // it is the only copy of whatever was uncommitted, so it stays.
+  const provider = getProvider(bound.workspace.provider);
+  if (provider !== undefined && row.sessionId !== undefined) {
+    await provider.dropSnapshotRef(ws, `refs/hydra/start/${row.sessionId}`).catch(() => undefined);
+    const autosave = `refs/hydra/snapshots/${row.sessionId}`;
+    if (await refExists(ws, autosave)) {
+      notes.push(`kept ${autosave} (last autosave)`);
+    }
+  }
+
   process.stdout.write(
     `cleared ${shortenHomePath(row.path)}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}\n`,
   );
@@ -625,21 +617,42 @@ async function removeMissing(row: WorkspaceRow, force: boolean): Promise<void> {
 }
 
 /**
- * Drop the workspace field from a session record.
+ * Ask the daemon to drop a session's workspace binding.
  *
- * Rewrites the whole record rather than the field, because the daemon's
- * own schema is the authority on shape and this only ever subtracts.
- * A live daemon holds the record in memory and would write its copy back
- * over this, which is why the caller says so in its output rather than
- * pretending the change is unconditional.
+ * Everything else in this file reads the filesystem, deliberately. This
+ * does not, and the asymmetry is the point: reading a record with the
+ * daemon down is the diagnostic this file exists for, but *writing* one
+ * is the daemon's alone. It holds live records in memory and rewrites
+ * them, so a file edited underneath it is silently reverted; its writer
+ * also serializes against every other meta write, which no outside
+ * writer can join. Editing meta.json from here would have been the only
+ * place in the CLI that touches a session record directly — every other
+ * session mutation (delete, kill, retitle, priority) is a daemon call,
+ * and this is not the one to make an exception for.
  */
 async function clearBinding(bound: Binding): Promise<void> {
-  const rec = await readJsonSafe<Record<string, unknown>>(bound.metaPath);
-  if (rec === undefined || rec === null) {
+  const id = encodeURIComponent(bound.sessionId);
+  let res;
+  try {
+    res = await daemonFetch(`/v1/sessions/${id}`, {
+      method: "PATCH",
+      body: { workspace: null },
+      rethrowNetworkError: true,
+    });
+  } catch (err) {
+    throw new Error(
+      `could not reach the daemon to clear the binding, and only it may write that record: ` +
+        `${(err as Error).message}`,
+    );
+  }
+  if (res.ok) {
     return;
   }
-  delete rec.workspace;
-  await writeJsonAtomic(bound.metaPath, rec);
+  const detail =
+    res.body !== null && typeof res.body === "object" && "error" in res.body
+      ? String((res.body as { error?: unknown }).error)
+      : `HTTP ${res.status}`;
+  throw new Error(detail);
 }
 
 /**
@@ -688,12 +701,23 @@ export async function runWorkspaceRemove(opts: {
   const row = hits[0]!;
 
   if (row.state === "missing") {
-    await removeMissing(row, opts.force === true);
+    await removeMissing(row);
     return;
   }
 
   if (opts.force !== true) {
-    if (row.changedCount !== undefined && row.changedCount > 0) {
+    // Unknown is not clean. `collectWorkspaces` swallows a failed
+    // status, an unresolvable provider and a failed attribution alike,
+    // all of which land here as undefined — so reading that as "nothing
+    // to lose" removes a directory whose contents nobody checked.
+    // `prune` already fails closed on the same input; match it.
+    if (row.changedCount === undefined) {
+      throw new Error(
+        `cannot tell whether ${shortenHomePath(row.path)} holds uncommitted work ` +
+          `(its state could not be read). Pass --force to remove it anyway.`,
+      );
+    }
+    if (row.changedCount > 0) {
       throw new Error(
         `${shortenHomePath(row.path)} has ${row.changedCount} uncommitted change(s). ` +
           `Land them with \`hydra workspace merge ${want}\`, or pass --force to discard them.`,
@@ -720,17 +744,14 @@ export async function runWorkspaceRemove(opts: {
   const bound = bindings.find((b) => b.workspace.path === row.path);
   const provider = bound !== undefined ? getProvider(bound.workspace.provider) : undefined;
 
-  // Drop the autosave ref first: it is a GC root, so leaving it behind
-  // pins objects for a workspace that no longer exists.
-  if (provider !== undefined && bound !== undefined && row.sessionId !== undefined) {
-    await provider
-      .dropSnapshotRef(toProviderWorkspace(bound.workspace), `refs/hydra/snapshots/${row.sessionId}`)
-      .catch(() => undefined);
-    await provider
-      .dropSnapshotRef(toProviderWorkspace(bound.workspace), `refs/hydra/start/${row.sessionId}`)
-      .catch(() => undefined);
-  }
+  // Whether this removal is about to destroy the only live copy of
+  // something. Uncommitted work exists nowhere but the directory, so
+  // discarding it is the case the autosave ref exists to cover. Unknown
+  // counts as discarding: under --force we get here without having been
+  // able to look.
+  const discarding = row.changedCount === undefined || row.changedCount > 0;
 
+  const notes: string[] = [];
   if (provider !== undefined && bound !== undefined) {
     // force at the provider layer: this function already made the
     // keep-or-delete decision above, and the provider's own guard is
@@ -738,13 +759,42 @@ export async function runWorkspaceRemove(opts: {
     // which the branch preserves anyway).
     await provider.removeWorkspace(toProviderWorkspace(bound.workspace), { force: true });
   } else {
-    // Orphan, or a provider we no longer know: the directory is all
-    // there is to remove.
-    await fs.rm(row.path, { recursive: true, force: true });
-    await fs.rm(`${row.path}.manifest.json`, { force: true }).catch(() => undefined);
+    const held = await removeUnbound(row);
+    if (held !== undefined) {
+      notes.push(held);
+    }
   }
 
-  process.stdout.write(`removed ${shortenHomePath(row.path)}\n`);
+  // Only now that the directory is actually gone. These refs are GC
+  // roots, so a survivor pins objects for a checkout that no longer
+  // exists — but dropping them first would strip the refs off a
+  // workspace that is still there if the removal above threw.
+  //
+  // The autosave is the exception, and outranks the hygiene: when the
+  // removal just discarded uncommitted work, this ref is the only
+  // remaining copy of it. Deleting it here is what turns `--force` from
+  // recoverable into final.
+  let retained: string | undefined;
+  if (provider !== undefined && bound !== undefined && row.sessionId !== undefined) {
+    const ws = toProviderWorkspace(bound.workspace);
+    await provider.dropSnapshotRef(ws, `refs/hydra/start/${row.sessionId}`).catch(() => undefined);
+    const autosave = `refs/hydra/snapshots/${row.sessionId}`;
+    if (discarding && (await refExists(ws, autosave))) {
+      retained = autosave;
+    } else {
+      await provider.dropSnapshotRef(ws, autosave).catch(() => undefined);
+    }
+  }
+
+  process.stdout.write(
+    `removed ${shortenHomePath(row.path)}${notes.length > 0 ? ` (${notes.join("; ")})` : ""}\n`,
+  );
+  if (retained !== undefined) {
+    process.stdout.write(
+      `Discarded uncommitted work is recoverable from the last autosave: ` +
+        `git -C ${shortenHomePath(row.sourceCwd)} checkout ${retained}\n`,
+    );
+  }
   if (row.state === "bound") {
     process.stdout.write(
       `Its session still references it; the next resurrect rebuilds it from ${row.branch ?? "its branch"} ` +
@@ -753,48 +803,105 @@ export async function runWorkspaceRemove(opts: {
   }
 }
 
-export async function runWorkspaceList(opts: { json?: boolean } = {}): Promise<void> {
-  const rows = await collectWorkspaces();
+/** Whether a ref is present, so we never advertise a recovery that isn't there. */
+async function refExists(ws: Workspace, ref: string): Promise<boolean> {
+  const repoRoot = ws.vcs?.repoRoot;
+  if (repoRoot === undefined) {
+    return false;
+  }
+  return (await runGit(["rev-parse", "--verify", "--quiet", ref], repoRoot)).ok;
+}
+
+/**
+ * Tear down a workspace no session record claims.
+ *
+ * `prune` already does this properly and this used to do it differently:
+ * a bare `rm` of the directory, which removes the checkout but tells git
+ * nothing, leaving a stale worktree registration and an abandoned branch
+ * behind — the exact residue prune's docstring warns about. The
+ * attribution needed to route it through the provider instead is the
+ * same one `collectWorkspaces` already computed for the DIRTY column.
+ *
+ * Returns a note when the branch was kept, so committed work does not
+ * survive silently with nothing left pointing at it.
+ */
+async function removeUnbound(row: WorkspaceRow): Promise<string | undefined> {
+  const ws = await attributeOrphan(row.path);
+  const provider = ws === undefined ? undefined : getProvider(ws.provider);
+  if (ws === undefined || provider === undefined) {
+    // Genuinely unattributable: the directory is all there is to remove.
+    await fs.rm(row.path, { recursive: true, force: true });
+    await fs.rm(`${row.path}.manifest.json`, { force: true }).catch(() => undefined);
+    return undefined;
+  }
+  await provider.unlock(ws).catch(() => undefined);
+  await provider.removeWorkspace(ws, { force: true });
+  return reclaimOrphanBranch(ws);
+}
+
+export async function runWorkspaceList(
+  opts: { json?: boolean; missing?: boolean } = {},
+): Promise<void> {
+  const all = await collectWorkspaces();
+  // JSON is a dump for tooling and every row carries `state`, so it
+  // stays complete: a flag that silently shrinks machine-readable output
+  // is worse than the noise it saves.
   if (opts.json === true) {
-    process.stdout.write(JSON.stringify({ workspaces: rows }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ workspaces: all }, null, 2) + "\n");
     return;
   }
-  if (rows.length === 0) {
+  // A missing row is a property of a SESSION (it points at a directory
+  // that is gone), not a workspace that exists, and sessions sit for
+  // weeks. Keep it out of the table by default but never out of the
+  // footer: hidden-and-counted is tidying, hidden-without-trace is how
+  // you stop finding out that two sessions are stale.
+  const rows = opts.missing === true ? all : all.filter((r) => r.state !== "missing");
+  if (all.length === 0) {
     process.stdout.write("No workspaces.\n");
     return;
   }
 
-  // WORKSPACE goes last because it is the only variable-width column;
-  // the short ones stay aligned to the left where they can be scanned.
-  const cols = [
-    ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"],
-    ...rows.map((r) => [
-      r.state,
-      r.sessionId?.replace(/^hydra_session_/, "") ?? "-",
-      shortenHomePath(r.sourceCwd),
-      r.label,
-      r.changedCount === undefined ? "?" : r.changedCount > 0 ? String(r.changedCount) : "-",
-      shortenHomePath(r.path),
-    ]),
-  ];
-  const widths = cols[0]!.map((_, i) => Math.max(...cols.map((row) => (row[i] ?? "").length)));
-  for (const row of cols) {
-    process.stdout.write(row.map((c, i) => (c ?? "").padEnd(widths[i] ?? 0)).join("  ").trimEnd() + "\n");
+  if (rows.length === 0) {
+    process.stdout.write("No workspaces on disk.\n");
+  } else {
+    // WORKSPACE goes last because it is the only variable-width column;
+    // the short ones stay aligned to the left where they can be scanned.
+    const cols = [
+      ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"],
+      ...rows.map((r) => [
+        r.state,
+        r.sessionId?.replace(/^hydra_session_/, "") ?? "-",
+        shortenHomePath(r.sourceCwd),
+        r.label,
+        r.changedCount === undefined ? "?" : r.changedCount > 0 ? String(r.changedCount) : "-",
+        shortenHomePath(r.path),
+      ]),
+    ];
+    const widths = cols[0]!.map((_, i) => Math.max(...cols.map((row) => (row[i] ?? "").length)));
+    for (const row of cols) {
+      process.stdout.write(
+        row.map((c, i) => (c ?? "").padEnd(widths[i] ?? 0)).join("  ").trimEnd() + "\n",
+      );
+    }
   }
 
   const orphans = rows.filter((r) => r.state === "orphan").length;
-  const missing = rows.filter((r) => r.state === "missing").length;
   if (orphans > 0) {
     process.stdout.write(
       `\n${orphans} orphan${orphans === 1 ? "" : "s"} (no session references them). ` +
-        `\`hydra workspace prune\` removes the ones holding no uncommitted work.\n`,
+        `\`${invokedBinName()} workspace prune\` removes the ones holding no uncommitted work.\n`,
     );
   }
+  // Counted from `all`, never from the filtered rows: the footer is the
+  // only trace a hidden row leaves.
+  const missing = all.filter((r) => r.state === "missing").length;
   if (missing > 0) {
+    const bin = invokedBinName();
     process.stdout.write(
-      `${missing} missing (a session points at a directory that is gone). ` +
-        `Committed work is rebuilt from its branch on next resurrect; ` +
-        `\`hydra workspace remove\` clears the binding instead.\n`,
+      `${orphans > 0 ? "" : "\n"}${missing} missing (a session points at a directory that is ` +
+        `gone). Committed work is rebuilt from its branch on next resurrect; ` +
+        `\`${bin} workspace remove\` clears the binding instead.\n` +
+        (opts.missing === true ? "" : `List them with \`${bin} workspace --missing\`.\n`),
     );
   }
 }

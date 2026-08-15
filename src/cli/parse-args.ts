@@ -23,6 +23,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "include-cat",
   "info",
   "json",
+  "missing",
   "new",
   "no-color",
   "no-from-note",
