@@ -10,6 +10,7 @@
 
 import type { ChromeActionTarget } from "../chrome-action.js";
 import type { FormattedLine } from "../format.js";
+import { shortenHomePath } from "../../core/paths.js";
 import { RUNNING_TOOL_CAP } from "./running-tools.js";
 import type {
   Gadget,
@@ -614,9 +615,10 @@ export const sessionInfoGadget: Gadget = {
   // silently drop a block. This one describes what you are attached to.
   id: "info",
   title: "info",
-  relevant: (s) => s.agent !== null || s.model !== null || s.sessionId !== null,
+  relevant: (s) =>
+    s.agent !== null || s.model !== null || s.sessionId !== null || s.workspace !== null,
   versionKey: (s, ctx) =>
-    `${ctx.width}|${s.agent}|${s.model}|${s.mode}|${s.sessionId}`,
+    `${ctx.width}|${s.agent}|${s.model}|${s.mode}|${s.sessionId}|${s.workspace?.label ?? ""}`,
   render: (s, ctx) => {
     const { cellWidth } = ctx.metrics;
     const lines: SidebarLine[] = [];
@@ -648,6 +650,21 @@ export const sessionInfoGadget: Gadget = {
       // Not a chooser: the id is what it is, so copy it — and copy the
       // whole id, not the head-clipped form the row displays.
       field("id", s.sessionId, { action: "copy", value: s.sessionId });
+    }
+    if (s.workspace !== null) {
+      // Two lines, because they answer different questions: which
+      // workspace this is, and which project its edits belong to. The
+      // second is the one that is otherwise unrecoverable — a workspace
+      // path is a hash directory that names no project.
+      // openPath rather than a copy action: a directory you can see is a
+      // directory you will try to open, and routing through openPath puts
+      // both rows in the same resolution path as every other clickable
+      // path — including the check that refuses a workspace which no
+      // longer exists.
+      const wsRow = fieldRow("workspace", s.workspace.label, ctx);
+      lines.push({ ...wsRow, openPath: s.workspace.path });
+      const srcRow = fieldRow("source", shortenHomePath(s.workspace.sourceCwd), ctx);
+      lines.push({ ...srcRow, openPath: s.workspace.sourceCwd });
     }
     return lines;
   },

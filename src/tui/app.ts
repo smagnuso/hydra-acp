@@ -2484,7 +2484,7 @@ async function runSession(
    * wrong branch as clean, and opening a diff shows an unchanged file
    * because that copy of it really is unchanged.
    *
-   * The bar shows `source ⧉label` rather than the workspace path, which
+   * The bar shows `source [label]` rather than the workspace path, which
    * is a hash segment and a label and says nothing useful. That matches
    * `hydra session list`. The real path stays reachable through the
    * cwdFull field and copy-on-double-click.
@@ -2541,15 +2541,27 @@ async function runSession(
     gitTopLevel = null;
     const source = typeof u.sourceCwd === "string" ? u.sourceCwd : u.cwd;
     const label = typeof u.label === "string" ? u.label : undefined;
+    // cwd stays the REAL directory; the label rides alongside so the bar
+    // field can compose the text while both stay independently openable.
     screen.setSessionbar({
-      cwd:
-        phase === "entered" && label !== undefined
-          ? `${shortenHomePath(source)} ⧉${label}`
-          : shortenHomePath(source),
+      cwd: u.cwd,
+      ...(phase === "entered" && label !== undefined
+        ? { workspace: { label, path: u.cwd, sourceCwd: source } }
+        : { workspace: undefined }),
     });
     pollGitOnce();
+    // The bar text is transient; the sidebar line persists. "Which tree am
+    // I actually editing" is the question isolation makes ambiguous, and
+    // it should be answerable at any moment rather than only in the two
+    // seconds after it changed.
+    screen.setSidebarSnapshot({
+      workspace:
+        phase === "entered" && label !== undefined
+          ? { label, path: u.cwd, sourceCwd: source }
+          : null,
+    });
     screen.notify(
-      phase === "entered" ? `isolated in ⧉${label ?? "workspace"}` : "returned to source tree",
+      phase === "entered" ? `isolated in ${label ?? "a workspace"}` : "returned to source tree",
       2000,
     );
   };
@@ -2917,6 +2929,7 @@ async function runSession(
   // this TUI so the deferred-echo plumbing can bind a local pending
   // entry to the messageId hydra minted.
   let ownClientId: string | undefined;
+  let initialWorkspace: { path: string; sourceCwd: string; label: string } | undefined;
   let initialModel: string | undefined;
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
@@ -3081,6 +3094,11 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
+    // Attaching to an already-isolated session fires no workspace phase
+    // event — the transition happened before we were here — so the state
+    // has to be read off the attach response or the bar and sidebar would
+    // silently show an ordinary session sitting in a hash directory.
+    initialWorkspace = hydraMeta.workspaceInfo;
     if (hydraMeta.title) {
       resolvedTitle = hydraMeta.title;
     }
@@ -4017,10 +4035,30 @@ async function runSession(
       ? null
       : stripHydraSessionPrefix(resolvedSessionId),
     agent: sessionbarAgent,
+    workspace:
+      initialWorkspace === undefined
+        ? null
+        : {
+            label: initialWorkspace.label,
+            path: initialWorkspace.path,
+            sourceCwd: initialWorkspace.sourceCwd,
+          },
   });
   screen.setSessionbar({
     agent: sessionbarAgent,
+    // Show the PROJECT plus the workspace label, not the workspace path.
+    // resolvedCwd is a hash directory under ~/.hydra-acp for an isolated
+    // session, which names no project and so tells the reader nothing.
     cwd: resolvedCwd,
+    ...(initialWorkspace === undefined
+      ? {}
+      : {
+          workspace: {
+            label: initialWorkspace.label,
+            path: initialWorkspace.path,
+            sourceCwd: initialWorkspace.sourceCwd,
+          },
+        }),
     sessionId: resolvedSessionId,
     title: resolvedTitle,
     model: initialModel,

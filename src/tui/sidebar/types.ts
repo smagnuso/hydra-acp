@@ -121,6 +121,12 @@ export interface SidebarSnapshot {
   agent: string | null;
   model: string | null;
   mode: string | null;
+  // Set while the session is running in an isolated workspace. Worth a
+  // permanent line rather than only the transient bar text: "which tree
+  // am I actually editing" is the question isolation makes ambiguous, and
+  // the answer should be readable at any moment, not just at the moment
+  // it changed.
+  workspace: { label: string; path: string; sourceCwd: string } | null;
 }
 
 export interface SidebarTextMetrics {
@@ -309,5 +315,6 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     agent: null,
     model: null,
     mode: null,
+    workspace: null,
   };
 }

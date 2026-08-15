@@ -69,6 +69,7 @@ import { renderCompactionSeed } from "./compaction-seed.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import type { PersistedWorkspace, RollbackBreadcrumb } from "./session-store.js";
 import {
+  buildDepartureNote,
   buildWorkspacePreamble,
   isSourceTreeBreach,
   mentionsSourceTree,
@@ -872,6 +873,22 @@ export class Session {
   // introduce-once, then re-assert only when a prompt names the source
   // tree.
   private workspacePreambleSent = false;
+  // The workspace this session most recently LEFT, kept after the binding
+  // is cleared.
+  //
+  // Needed because leaving does not erase the agent's memory: its context
+  // is full of paths under a directory that is no longer where its work
+  // belongs. This drives a one-time departure note and an ongoing rewrite
+  // of stale workspace paths, which is the mirror of what the entry
+  // preamble and inbound rewriting do.
+  //
+  // Retained indefinitely rather than cleared after one turn: a stale
+  // reference can surface many turns later, when the agent revisits
+  // something it did before the swap.
+  private formerWorkspace:
+    | { path: string; sourceCwd: string; removed: boolean }
+    | undefined;
+  private departureNoteSent = false;
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
@@ -1637,6 +1654,13 @@ export class Session {
     historyLength: number;
     artifact: SessionSynopsis;
     title?: string;
+    /**
+     * Set when leaving, so the session can tell the replacement agent
+     * that the workspace paths in its context are no longer live. Whether
+     * the directory was removed changes the advice: a removed one fails
+     * loudly, a retained one silently absorbs work that can never land.
+     */
+    left?: { path: string; removed: boolean };
   }): Promise<void> {
     await this.swapUpstream({
       artifact: opts.artifact,
@@ -1655,6 +1679,20 @@ export class Session {
       reason: opts.workspace !== undefined ? "workspace-enter" : "workspace-leave",
     });
     this.workspace = opts.workspace;
+    if (opts.left !== undefined) {
+      this.formerWorkspace = {
+        path: opts.left.path,
+        sourceCwd: opts.cwd,
+        removed: opts.left.removed,
+      };
+      // Arm the departure note. The replacement agent has not seen it, so
+      // this is not a re-assertion.
+      this.departureNoteSent = false;
+    } else {
+      // Entering: any prior departure is irrelevant, and leaving it set
+      // would rewrite paths belonging to a workspace two moves ago.
+      this.formerWorkspace = undefined;
+    }
   }
 
   async swapUpstream(opts: {
@@ -2642,6 +2680,24 @@ export class Session {
   private reportIsolationBreach(editedPath: string, toolCallId: unknown): void {
     const ws = this.workspace;
     if (ws === undefined) {
+      // The inverse case: writing into a workspace this session has LEFT.
+      // After `abandon` that directory is still there and still writable,
+      // so the write succeeds, looks fine, and can never reach the source
+      // tree. Silent wasted work is worth as much noise as a breach.
+      const former = this.formerWorkspace;
+      if (former !== undefined && editedPath.startsWith(`${former.path}/`)) {
+        this.logger?.warn?.(
+          `STALE WORKSPACE WRITE on session ${this.sessionId}: the agent wrote ${editedPath}, ` +
+            `which is inside the workspace this session already left. That work will not reach ` +
+            `${former.sourceCwd}.`,
+        );
+        this.notifyChain("workspace.staleWrite", {
+          path: editedPath,
+          formerWorkspacePath: former.path,
+          sourceCwd: former.sourceCwd,
+          toolCallId,
+        });
+      }
       return;
     }
     if (!isSourceTreeBreach(editedPath, ws.sourceCwd, ws.path)) {
@@ -2660,10 +2716,52 @@ export class Session {
     });
   }
 
+  /**
+   * The post-departure half: this session used to be isolated and isn't
+   * any more.
+   *
+   * Two jobs, both about the agent's own memory rather than the user's
+   * words. The transcript it inherited refers to files by workspace path,
+   * so those paths get rewritten to the source tree, and a one-time note
+   * says plainly that the workspace is no longer where its work belongs.
+   *
+   * Worth doing even though `end` deletes the workspace: after `abandon`
+   * the directory is still there and still writable, so an agent that
+   * keeps using it does work that looks successful and never lands. That
+   * is the failure this exists to prevent, and it is silent, which is why
+   * a note is not enough on its own — the rewrite is what actually
+   * redirects the next action.
+   */
+  private applyDepartedPromptRewrite(prompt: unknown[]): unknown[] {
+    const former = this.formerWorkspace;
+    if (former === undefined) {
+      return prompt;
+    }
+    let sawFormerMention = false;
+    let out = mapPromptText(prompt, (text) => {
+      if (!mentionsSourceTree(text, former.path)) {
+        return text;
+      }
+      sawFormerMention = true;
+      return rewriteSourcePaths(text, former.path, former.sourceCwd).text;
+    });
+
+    if (!this.departureNoteSent || sawFormerMention) {
+      const note = buildDepartureNote({
+        sourceCwd: former.sourceCwd,
+        formerWorkspacePath: former.path,
+        removed: former.removed,
+      });
+      out = prefixPromptText(out, `${note}\n\n`);
+      this.departureNoteSent = true;
+    }
+    return out;
+  }
+
   private applyWorkspacePromptRewrite(prompt: unknown[]): unknown[] {
     const ws = this.workspace;
     if (ws === undefined) {
-      return prompt;
+      return this.applyDepartedPromptRewrite(prompt);
     }
     let sawSourceMention = false;
     let out = mapPromptText(prompt, (text) => {

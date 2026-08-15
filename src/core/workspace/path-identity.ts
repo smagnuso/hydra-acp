@@ -113,6 +113,40 @@ export interface PreambleContext {
  * isolated session and again on every prompt that names the source tree,
  * and a long block dilutes the parts that matter.
  */
+/**
+ * The block prepended after a session LEAVES a workspace.
+ *
+ * The mirror of buildWorkspacePreamble, and needed for the same reason
+ * read backwards: the agent just spent many turns working under the
+ * workspace path, so its context is full of paths that are no longer
+ * where its work belongs. Nothing in the conversation says otherwise.
+ *
+ * The `abandon` case is the one this exists for. After `end` the
+ * workspace is deleted, so a stale path fails loudly with ENOENT and the
+ * agent self-corrects. After `abandon` the directory is still there and
+ * still writable, so an agent that keeps using it produces work that
+ * looks fine and can never land.
+ */
+export function buildDepartureNote(ctx: {
+  sourceCwd: string;
+  formerWorkspacePath: string;
+  /** True when the workspace was removed, so stale paths will ENOENT. */
+  removed: boolean;
+}): string {
+  const lines: string[] = [];
+  lines.push("[workspace] You have LEFT the isolated workspace.");
+  lines.push(`- Your working directory is now ${ctx.sourceCwd}`);
+  lines.push(
+    ctx.removed
+      ? `- The workspace at ${ctx.formerWorkspacePath} has been removed. Paths under it from earlier in this conversation no longer exist.`
+      : `- The workspace at ${ctx.formerWorkspacePath} still exists but is NO LONGER YOURS. Editing anything under it is wasted: that work will not reach ${ctx.sourceCwd}.`,
+  );
+  lines.push(
+    "- Earlier turns refer to files by their workspace paths. Treat those as referring to the same files under your current working directory, and prefer repo-relative paths from here on.",
+  );
+  return lines.join("\n");
+}
+
 export function buildWorkspacePreamble(ctx: PreambleContext): string {
   const lines: string[] = [];
   lines.push(

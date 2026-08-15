@@ -267,6 +267,31 @@ export const FIELDS: Record<string, FieldDef> = {
   cwd: {
     priority: 70,
     resolve: (ctx) => {
+      const ws = ctx.session.workspace;
+      // Isolated: show the PROJECT plus the workspace label, because the
+      // literal cwd is a hash directory that names no project. Two spans
+      // rather than one, so each opens what its text actually names —
+      // collapsing them would force one of the two to lie about where a
+      // double-click goes.
+      if (ws !== undefined) {
+        const projectText = shortenHomePath(ws.sourceCwd);
+        return [
+          {
+            text: projectText,
+            token: "bar-text",
+            flex: true,
+            minWidth: 8,
+            doubleAction: "open" as const,
+            value: ws.sourceCwd,
+          },
+          {
+            text: ` [${ws.label}]`,
+            token: "bar-text",
+            doubleAction: "open" as const,
+            value: ws.path,
+          },
+        ];
+      }
       const text = shortenHomePath(ctx.session.cwd);
       // Double-click hands the *absolute* path to tui.openFileCommand
       // (the display form is ~-abbreviated and may be truncated).

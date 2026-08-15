@@ -2041,6 +2041,10 @@ export class SessionManager {
       artifact: {
         summary: `Returned to the source tree at ${ws.sourceCwd}${opts.integrated ? " after merging the workspace" : " without merging"}.`,
       } as SessionSynopsis,
+      // `removed` is the difference between a stale path that fails
+      // loudly and one that silently absorbs work. `end` deletes the
+      // workspace; `abandon` keeps it, which is the dangerous case.
+      left: { path: ws.path, removed: opts.integrated },
     });
 
     // Clear cwd and the binding in one write. Two writes could strand a

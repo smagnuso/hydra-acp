@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { isAbsolute, join as joinPath, resolve as resolvePath, sep } from "node:path";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
@@ -5034,6 +5034,82 @@ export class Screen {
   // (failures of the spawn itself surface via notify, not the return
   // value). Returns false when the feature is disabled, the token isn't
   // path-shaped, or no such file exists — so callers can fall through.
+  /**
+   * Decide what an already-resolved path should actually open, when it
+   * points into an isolated workspace that is not the one we are in.
+   *
+   * File rows and scrollback links store paths resolved EAGERLY, at the
+   * moment the tool event arrived. That is correct at the time and stays
+   * correct for the source tree, but a row created inside a workspace
+   * holds a path that outlives the workspace. After `/hydra workspace
+   * end` the directory is deleted, so the link is dead. After `abandon`
+   * it survives and is still writable, so clicking it opens a file whose
+   * edits can never reach the project — the worse case, because it looks
+   * like it worked.
+   *
+   * The discrimination needs no per-session memory: the workspaces root
+   * is deterministic, so "a workspace that is not mine" is a structural
+   * test. Existence then separates the two cases by itself, since `end`
+   * removes the directory and `abandon` does not. Being structural, this
+   * also survives a daemon restart and correctly flags another session's
+   * workspace.
+   *
+   * Returns the path to open, or null to refuse.
+   */
+  private reconcileWorkspacePath(file: string): string | null {
+    const root = joinPath(paths.home(), "workspaces") + sep;
+    const insideSomeWorkspace = file.startsWith(root);
+    if (!insideSomeWorkspace) {
+      return file;
+    }
+    const cwd = this.sessionbar.cwd;
+    if (cwd.length > 0 && (file === cwd || file.startsWith(cwd + sep))) {
+      // Our own current workspace: an ordinary open.
+      return file;
+    }
+
+    // Any kind of entry, not just a regular file: the sidebar's workspace
+    // and source rows open DIRECTORIES, and isFile() would report an
+    // existing workspace as missing and send it down the redirect path.
+    let exists = false;
+    try {
+      statSync(file);
+      exists = true;
+    } catch {
+      exists = false;
+    }
+
+    if (exists) {
+      // The `abandon` shape. Opening is legitimate — inspecting or
+      // salvaging abandoned work is a real reason to click — so allow it
+      // and say plainly that edits will not land.
+      this.notify(
+        "opening a file in a workspace this session left — edits there will not reach your project",
+        5000,
+      );
+      return file;
+    }
+
+    // The `end` shape: the workspace is gone and its work was merged, so
+    // the same file under the current tree is what the row meant. The
+    // workspace layout is <root>/<hash>/<label>/<rest>, so `rest` is
+    // recoverable even though the hash is not reversible.
+    const rest = file.slice(root.length).split(sep).slice(2).join(sep);
+    if (rest.length > 0 && cwd.length > 0) {
+      const candidate = joinPath(cwd, rest);
+      try {
+        if (statSync(candidate).isFile()) {
+          this.notify("that workspace is gone — opened the file in your project instead", 4000);
+          return candidate;
+        }
+      } catch {
+        // Fall through to the refusal below.
+      }
+    }
+    this.notify("that file was in a workspace that no longer exists", 4000);
+    return null;
+  }
+
   tryOpenPathString(raw: string): boolean {
     if (this.openFileCommand === null) {
       return false;
@@ -5046,7 +5122,11 @@ export class Screen {
       bare = m[1]!;
       lineNum = Number.parseInt(m[2]!, 10);
     }
-    const file = this.resolvePathToken(bare);
+    const resolved = this.resolvePathToken(bare);
+    if (resolved === null) {
+      return false;
+    }
+    const file = this.reconcileWorkspacePath(resolved);
     if (file === null) {
       return false;
     }

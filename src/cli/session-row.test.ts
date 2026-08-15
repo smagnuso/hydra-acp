@@ -455,7 +455,7 @@ describe("toRow cwd column — workspace isolation", () => {
       workspace: { sourceCwd: "/home/u/proj", label: "ok" },
       workspaceError: "setup hiccup",
     });
-    expect(row.cwd).toContain("⧉ok");
+    expect(row.cwd).toContain("[ok]");
     expect(row.cwd).not.toContain("not-isolated");
   });
 });

@@ -1602,7 +1602,21 @@ export function registerAcpWsEndpoint(
             hydraSessionId: params.sessionId,
             upstreamSessionId: hydraHints.upstreamSessionId,
             agentId: hydraHints.agentId,
-            cwd: hydraHints.cwd,
+            // The recorded workspace WINS over a hint cwd.
+            //
+            // `workspace` flows through from disk while `cwd` is taken
+            // from the hints, so a shim that reconnects reporting the
+            // directory it was launched from — the SOURCE tree, typically
+            // — would pair a source cwd with a live isolation binding.
+            // The session would then edit the user's checkout while every
+            // surface claimed it was isolated, and the recovery ladder
+            // would not notice because that directory exists.
+            //
+            // A hint says where a client thinks it was; the binding says
+            // where this session's edits are supposed to land. When they
+            // disagree, the binding is the one that was persisted on
+            // purpose.
+            cwd: fromDisk?.workspace?.path ?? hydraHints.cwd,
             ...(hydraHints.title !== undefined ? { title: hydraHints.title } : {}),
             ...(hydraHints.agentArgs !== undefined
               ? { agentArgs: hydraHints.agentArgs }

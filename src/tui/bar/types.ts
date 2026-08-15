@@ -20,7 +20,20 @@ export interface UsageState {
  */
 export interface SessionInfo {
   agent: string;
+  // ALWAYS a real absolute path, never a pre-formatted display string.
+  // The cwd field's double-click hands this to the open command, so
+  // formatting it upstream silently turns the gesture into an attempt to
+  // open a directory that does not exist.
   cwd: string;
+  // Set while the session is isolated. Kept as separate state rather than
+  // folded into `cwd` so the field can compose the display text while
+  // both directories remain independently openable: the path names the
+  // project, the label names the workspace, and each opens what it says.
+  // `path` is the workspace, `sourceCwd` the project it derives from.
+  // Note `cwd` above stays the WORKSPACE while isolated: it is what
+  // relative-token double-click resolution resolves against, so it has to
+  // remain the directory the agent is actually in.
+  workspace?: { label: string; path: string; sourceCwd: string };
   sessionId: string;
   title?: string;
   usage?: UsageState;

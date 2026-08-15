@@ -214,7 +214,7 @@ export function parseColumns(raw: string): ColumnKey[] {
  */
 export function formatCwdCell(s: SessionSummary): string {
   if (s.workspace !== undefined) {
-    return `${shortenHomePath(s.workspace.sourceCwd)} ⧉${s.workspace.label}`;
+    return `${shortenHomePath(s.workspace.sourceCwd)} [${s.workspace.label}]`;
   }
   if (s.workspaceError !== undefined) {
     return `${shortenHomePath(s.cwd)} !not-isolated`;

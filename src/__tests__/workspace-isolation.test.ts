@@ -1113,6 +1113,144 @@ describe("session isolation end-to-end", () => {
     expect(phases).toContain("left");
   });
 
+  it("still reports the workspace to clients after a resurrect", async () => {
+    // What a reattaching TUI actually reads. Session.workspace being right
+    // is necessary but not sufficient: the projection into _meta is a
+    // separate step, and state that only propagates via change events is
+    // invisible to a client that joins after the change.
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "survives" },
+    });
+    const originalPath = session.cwd;
+
+    const restarted = makeManager();
+    const reloaded = await restarted.loadFromDisk(session.sessionId);
+    const revived = await restarted.resurrect(reloaded!);
+
+    const meta = buildHydraSessionMeta(restarted.liveListEntry(revived));
+    const info = meta.workspaceInfo as { sourceCwd?: string; path?: string } | undefined;
+    expect(info?.sourceCwd).toBe(repo);
+    expect(info?.path).toBe(originalPath);
+    // cwd and the binding must still agree, or a client shows one tree
+    // while the agent edits another.
+    expect(meta.cwd).toBe(info?.path);
+  });
+
+  it("reports the REBUILT workspace after recovery, not the vanished one", async () => {
+    // The recovery ladder can relocate a session, so the projection has to
+    // follow it. Reporting the recorded path here would point a client at
+    // a directory that no longer exists.
+    const repo = await makeGitRepo();
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: repo,
+      workspace: { label: "relocated" },
+    });
+    await fs.writeFile(path.join(session.cwd, "work.txt"), "committed\n");
+    await exec("git", ["add", "-A"], { cwd: session.cwd });
+    await exec("git", ["commit", "-q", "-m", "work"], { cwd: session.cwd });
+    await fs.rm(session.cwd, { recursive: true, force: true });
+
+    const restarted = makeManager();
+    const revived = await restarted.resurrect((await restarted.loadFromDisk(session.sessionId))!);
+
+    const meta = buildHydraSessionMeta(restarted.liveListEntry(revived));
+    const info = meta.workspaceInfo as { path?: string; sourceCwd?: string } | undefined;
+    expect(info?.sourceCwd).toBe(repo);
+    expect(meta.cwd).toBe(revived.cwd);
+    expect(meta.cwd).toBe(info?.path);
+    // And it is a directory that actually exists.
+    expect((await fs.stat(revived.cwd)).isDirectory()).toBe(true);
+  });
+
+  it("tells the agent it has left, and redirects stale workspace paths", async () => {
+    // Leaving does not erase the agent's memory. Its transcript refers to
+    // files by workspace path, and nothing in the conversation says those
+    // are no longer where its work belongs.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "departing");
+    const wsPath = session.cwd;
+    await manager.runWorkspaceAction(session.sessionId, "end");
+
+    const rewrite = (
+      session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
+    ).applyWorkspacePromptRewrite.bind(session);
+
+    const first = rewrite([
+      { type: "text", text: `check ${wsPath}/tracked.txt again` },
+    ]) as { text: string }[];
+    // Told plainly, once.
+    expect(first[0]?.text).toContain("LEFT the isolated workspace");
+    expect(first[0]?.text).toContain(repo);
+    // And the stale path is redirected to where the work now lives.
+    expect(first[0]?.text).toContain(`${repo}/tracked.txt`);
+    expect(first[0]?.text).not.toContain(`${wsPath}/tracked.txt`);
+
+    // An ordinary follow-up does not re-pay for the note.
+    const second = rewrite([{ type: "text", text: "carry on" }]) as { text: string }[];
+    expect(second[0]?.text).toBe("carry on");
+
+    // But naming the dead workspace re-asserts, same as on the way in.
+    const third = rewrite([{ type: "text", text: `what about ${wsPath}/other.txt` }]) as {
+      text: string;
+    }[];
+    expect(third[0]?.text).toContain("LEFT the isolated workspace");
+  });
+
+  it("warns differently after abandon, because the directory still absorbs writes", async () => {
+    // `end` removes the workspace, so a stale path fails loudly. `abandon`
+    // keeps it, so writes succeed and never land — the silent case, which
+    // needs the stronger wording.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "abandoning");
+    const wsPath = session.cwd;
+    await manager.runWorkspaceAction(session.sessionId, "abandon");
+
+    const out = (
+      session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
+    ).applyWorkspacePromptRewrite([{ type: "text", text: "keep going" }]) as {
+      text: string;
+    }[];
+    expect(out[0]?.text).toContain("NO LONGER YOURS");
+    expect(out[0]?.text).toContain("will not reach");
+
+    // And a write into the abandoned directory is reported rather than
+    // silently accepted.
+    const events: string[] = [];
+    (session as unknown as { notifyChain(k: string, p: unknown): void }).notifyChain = (k) => {
+      events.push(k);
+    };
+    (
+      session as unknown as { reportIsolationBreach(p: string, t: unknown): void }
+    ).reportIsolationBreach(`${wsPath}/ghost.ts`, "tool-1");
+    expect(events).toContain("workspace.staleWrite");
+  });
+
+  it("clears the departure state when re-entering a workspace", async () => {
+    // Leaving a stale rewrite armed would redirect paths belonging to a
+    // workspace two moves ago.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "firstws");
+    const firstPath = session.cwd;
+    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "start", "secondws");
+
+    const out = (
+      session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
+    ).applyWorkspacePromptRewrite([{ type: "text", text: `look at ${firstPath}/x.ts` }]) as {
+      text: string;
+    }[];
+    // Now isolated again, so the ENTRY preamble applies, not a departure note.
+    expect(out[0]?.text).toContain("[workspace]");
+    expect(out[0]?.text).not.toContain("LEFT the isolated workspace");
+  });
+
   it("can start again after ending, without colliding with its own leftovers", async () => {
     // Regression. The default label is derived from the session id, so
     // it repeats; `end` used to keep the branch, so the second start hit
