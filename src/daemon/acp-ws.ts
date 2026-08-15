@@ -2969,6 +2969,10 @@ function buildViewerResponseMeta(
      sessionId: fromDisk.hydraSessionId,
      upstreamSessionId: fromDisk.upstreamSessionId,
      cwd: fromDisk.cwd,
+     // cwd for an isolated session is the workspace, which cannot say
+     // which project it belongs to. A viewer that gets one without the
+     // other renders a session sitting in an anonymous hash directory.
+     workspace: fromDisk.workspace,
      title: fromDisk.title,
      agentId: fromDisk.agentId,
      currentModel: fromDisk.currentModel,

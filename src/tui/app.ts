@@ -3092,10 +3092,9 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
-    // Attaching to an already-isolated session fires no workspace phase
-    // event — the transition happened before we were here — so the state
-    // has to be read off the attach response or the bar and sidebar would
-    // silently show an ordinary session sitting in a hash directory.
+    // A session created with --workspace is isolated before any phase
+    // event could reach us, so the binding is read off the response.
+    // The attach branch below needs the same read for the same reason.
     initialWorkspace = hydraMeta.workspaceInfo;
     if (hydraMeta.title) {
       resolvedTitle = hydraMeta.title;
@@ -3176,6 +3175,12 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
+    // Read with cwd, because for an isolated session cwd alone is a
+    // hash directory that names no project. The move into the workspace
+    // happened before this client existed, so no workspace phase event
+    // is coming: without this the bar showed the raw hash path and the
+    // sidebar said nothing about isolation at all.
+    initialWorkspace = hydraMeta.workspaceInfo;
     if (hydraMeta.title) {
       resolvedTitle = hydraMeta.title;
     }

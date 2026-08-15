@@ -3768,6 +3768,13 @@ export class SessionManager {
         sessionId: session.sessionId,
         upstreamSessionId: session.upstreamSessionId,
         cwd: session.cwd,
+        // Emitted alongside cwd, which for an isolated session is a hash
+        // directory naming no project. This literal is a second warm-entry
+        // builder beside liveListEntry, and it silently lagged it: the
+        // attach response carried the binding while `session list` and
+        // GET /v1/sessions reported the same session as ordinary.
+        workspace: session.workspace,
+        workspaceError: session.workspaceError,
         title: session.title,
         agentId: session.agentId,
         currentModel: session.currentModel,

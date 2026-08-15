@@ -334,6 +334,52 @@ export function extractHydraMeta(
     }
     out.workspace = req;
   }
+  // The RESPONSE-side counterpart, and a different shape from the
+  // request above: `workspace` asks for isolation, `workspaceInfo`
+  // describes one that exists.
+  //
+  // All four fields are required together, and a block missing any of
+  // them is dropped whole rather than passed on partially: every reader
+  // uses `sourceCwd` to name the project that `path` alone cannot, so a
+  // half-populated binding would render worse than none.
+  if (
+    obj.workspaceInfo !== null &&
+    typeof obj.workspaceInfo === "object" &&
+    !Array.isArray(obj.workspaceInfo)
+  ) {
+    const w = obj.workspaceInfo as Record<string, unknown>;
+    if (
+      typeof w.path === "string" &&
+      typeof w.sourceCwd === "string" &&
+      typeof w.label === "string" &&
+      typeof w.provider === "string"
+    ) {
+      const info: WorkspaceInfoMeta = {
+        path: w.path,
+        sourceCwd: w.sourceCwd,
+        label: w.label,
+        provider: w.provider,
+      };
+      if (typeof w.snapshot === "string") {
+        info.snapshot = w.snapshot;
+      }
+      // Provider-specific and optional by contract: a copy-provider
+      // workspace has no branch at all.
+      if (w.vcs !== null && typeof w.vcs === "object" && !Array.isArray(w.vcs)) {
+        const vcs: Record<string, string> = {};
+        for (const [k, v] of Object.entries(w.vcs as Record<string, unknown>)) {
+          if (typeof v === "string") {
+            vcs[k] = v;
+          }
+        }
+        info.vcs = vcs;
+      }
+      out.workspaceInfo = info;
+    }
+  }
+  if (typeof obj.workspaceError === "string") {
+    out.workspaceError = obj.workspaceError;
+  }
   if (typeof obj.clientId === "string") {
     out.clientId = obj.clientId;
   }

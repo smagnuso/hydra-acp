@@ -244,6 +244,119 @@ describe("buildHydraSessionMeta", () => {
     agentId: "claude-acp",
   };
 
+  // The builder and extractHydraMeta are two hand-maintained lists of the
+  // same field set, and nothing forced them to agree: extract parses
+  // key-by-key on purpose (so a malformed block fails open rather than
+  // reaching a provider as junk), while HydraMeta declares every field
+  // optional. Declare a field, emit it, forget to parse it, and every
+  // reader gets `undefined` with no type error and no test failure —
+  // which is how an isolated session came to attach with its binding
+  // stripped on the client side.
+  //
+  // So: emit everything, parse it back, and require the round trip.
+  it("parses back every field it emits", () => {
+    const meta = buildHydraSessionMeta(
+      {
+        ...baseEntry,
+        upstreamSessionId: "up_1",
+        workspace: {
+          path: "/ws/feature-x",
+          sourceCwd: "/w",
+          label: "feature-x",
+          provider: "git",
+          snapshot: "abc123",
+          vcs: { kind: "git", branch: "hydra/feature-x" },
+        },
+        workspaceError: "provider unavailable",
+        currentModel: "opus",
+      },
+      {
+        clientId: "cli_abc",
+        currentMode: "ask",
+        agentArgs: ["--foo"],
+        availableCommands: [{ name: "c" }],
+        availableModes: [{ id: "ask" }],
+        availableModels: [{ modelId: "m" }],
+        turnStartedAt: 123,
+      },
+    );
+    const parsed = extractHydraMeta({ "hydra-acp": meta }) as Record<string, unknown>;
+
+    // Triage fields with their own readers on the client side: they are
+    // deliberately outside HydraMeta, so extract not knowing them is
+    // correct rather than an omission.
+    const notInHydraMeta = new Set([
+      "attachedClients",
+      "status",
+      "busy",
+      "awaitingInput",
+      "armedTasks",
+      "armedSince",
+      "updatedAt",
+      "interactive",
+      "priority",
+      "agentPid",
+      "compactionState",
+      "forkSynthesisState",
+      "forkedFromSessionId",
+      "forkedFromMessageId",
+      "parentSessionId",
+      "originatingClient",
+      "currentUsage",
+      "synopsis",
+      "summarizedThroughEntry",
+      "agentCommands",
+      "agentModes",
+      "agentModels",
+      "availableCommands",
+      "availableModes",
+      "availableModels",
+      "queue",
+      "agentCapabilities",
+      "resurrected",
+      "sessionId",
+      "lineageId",
+    ]);
+    const dropped = Object.keys(meta).filter(
+      (k) => !notInHydraMeta.has(k) && parsed[k] === undefined,
+    );
+    expect(dropped).toEqual([]);
+  });
+
+  it("carries the workspace binding through to the client, not just its cwd", () => {
+    // Regression, and the specific case above: cwd for an isolated
+    // session is an anonymous hash directory, so a client that gets cwd
+    // without sourceCwd has no project to name and cannot tell that the
+    // session is isolated at all.
+    const meta = buildHydraSessionMeta({
+      ...baseEntry,
+      cwd: "/ws/feature-x",
+      workspace: {
+        path: "/ws/feature-x",
+        sourceCwd: "/w",
+        label: "feature-x",
+        provider: "git",
+        vcs: { kind: "git", branch: "hydra/feature-x" },
+      },
+    });
+    const parsed = extractHydraMeta({ "hydra-acp": meta });
+    expect(parsed.workspaceInfo).toEqual({
+      path: "/ws/feature-x",
+      sourceCwd: "/w",
+      label: "feature-x",
+      provider: "git",
+      vcs: { kind: "git", branch: "hydra/feature-x" },
+    });
+  });
+
+  it("drops a workspace block that is missing the fields readers rely on", () => {
+    // Partial is worse than absent: sourceCwd is what names the project.
+    const parsed = extractHydraMeta({
+      "hydra-acp": { workspaceInfo: { path: "/ws/x", label: "x" } },
+    });
+    expect(parsed.workspaceInfo).toBeUndefined();
+  });
+
   it("emits the title under the spec-aligned title key", () => {
     const meta = buildHydraSessionMeta(baseEntry);
     expect(meta.title).toBe("my session");

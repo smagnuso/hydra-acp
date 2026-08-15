@@ -1130,13 +1130,32 @@ describe("session isolation end-to-end", () => {
     const reloaded = await restarted.loadFromDisk(session.sessionId);
     const revived = await restarted.resurrect(reloaded!);
 
-    const meta = buildHydraSessionMeta(restarted.liveListEntry(revived));
-    const info = meta.workspaceInfo as { sourceCwd?: string; path?: string } | undefined;
+    // Read it the way a client does — through extractHydraMeta — not off
+    // the builder's output. Asserting on the raw object skips the parser,
+    // and the parser was where the binding was being dropped: it parses
+    // key-by-key and simply had no case for workspaceInfo, so every
+    // client saw undefined while the wire carried the real thing.
+    const meta = extractHydraMeta({
+      "hydra-acp": buildHydraSessionMeta(restarted.liveListEntry(revived)),
+    });
+    const info = meta.workspaceInfo;
     expect(info?.sourceCwd).toBe(repo);
     expect(info?.path).toBe(originalPath);
     // cwd and the binding must still agree, or a client shows one tree
     // while the agent edits another.
     expect(meta.cwd).toBe(info?.path);
+
+    // The same session as `session list` and GET /v1/sessions see it.
+    // That path is a separate warm-entry literal from liveListEntry, and
+    // it was reporting this session as an ordinary one in a hash dir.
+    // includeNonInteractive: a freshly resurrected session with no
+    // history yet reads as non-interactive and is filtered out by default.
+    const listed = (await restarted.list({ includeNonInteractive: true })).find(
+      (e) => e.sessionId === revived.sessionId,
+    );
+    expect(listed).toBeDefined();
+    expect(listed?.workspace?.sourceCwd).toBe(repo);
+    expect(listed?.cwd).toBe(originalPath);
   });
 
   it("reports the REBUILT workspace after recovery, not the vanished one", async () => {

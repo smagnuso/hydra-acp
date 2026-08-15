@@ -1079,6 +1079,67 @@ describe("startDaemon", () => {
         ws.close();
       });
 
+      it("tells a viewer the session is isolated, not just where its cwd is", async () => {
+        // Regression. The viewer path builds its _meta from the on-disk
+        // record and forwarded `cwd` while dropping `workspace`, so an
+        // isolated session arrived as an ordinary one sitting in an
+        // anonymous hash directory: the bar had no project to name and
+        // the sidebar said nothing about isolation at all.
+        const sessionId = await importColdSession();
+        const meta = path.join(tmpHome, "sessions", sessionId, "meta.json");
+        const rec = JSON.parse(await fs.readFile(meta, "utf8"));
+        const wsPath = path.join(tmpHome, "workspaces", "ab12", "feature-x");
+        rec.cwd = wsPath;
+        rec.workspace = {
+          path: wsPath,
+          sourceCwd: "/work",
+          label: "feature-x",
+          provider: "git",
+        };
+        await fs.writeFile(meta, JSON.stringify(rec));
+
+        const ws = await openWs();
+        const attachResponse = new Promise<{
+          result: {
+            _meta?: {
+              "hydra-acp"?: {
+                cwd?: string;
+                workspaceInfo?: { path?: string; sourceCwd?: string; label?: string };
+              };
+            };
+          };
+        }>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as { id?: number; result?: unknown };
+            if (msg.id === 1 && msg.result) {
+              resolve(msg as never);
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "session/attach",
+            params: {
+              sessionId,
+              _meta: { "hydra-acp": { readonly: true } },
+              clientInfo: { name: "ro-test" },
+            },
+          }),
+        );
+        const hydra = (await attachResponse).result._meta?.["hydra-acp"];
+        expect(hydra?.cwd).toBe(wsPath);
+        // The source tree is the part cwd cannot express, and the only
+        // thing that lets a client name the project.
+        expect(hydra?.workspaceInfo).toMatchObject({
+          path: wsPath,
+          sourceCwd: "/work",
+          label: "feature-x",
+        });
+        ws.close();
+      });
+
       it("readonly attach rejects session/prompt with PermissionDenied (-32011)", async () => {
         const sessionId = await importColdSession();
         const ws = await openWs();
