@@ -50,6 +50,13 @@ function applyPatch(cwd: string, patch: string, extra: string[] = []): Promise<b
   });
 }
 
+function toList(v: string | readonly string[] | undefined): readonly string[] {
+  if (v === undefined) {
+    return [];
+  }
+  return typeof v === "string" ? [v] : v;
+}
+
 export interface SourceCapture {
   /** Nothing uncommitted; the landing needs no reset and no replay. */
   clean: boolean;
@@ -82,16 +89,24 @@ export interface SourceCapture {
  */
 export async function captureSourceForLanding(opts: {
   source: string;
-  startSnapshotRef: string;
+  /**
+   * Accepts several names, tried in order, so a caller can offer a
+   * renamed ref plus the name it used to have. The anchors moved from
+   * session-keyed to workspace-keyed, and a workspace created before
+   * that change has only the old one.
+   */
+  startSnapshotRef: string | readonly string[];
   /**
    * How the last successful landing left the source. Preferred over
    * `startSnapshotRef`, and absent until a first landing has run.
    */
-  baselineRef?: string;
+  baselineRef?: string | readonly string[];
   retainRef: string;
   provider: IsolationProvider | undefined;
 }): Promise<SourceCapture> {
-  const { source, startSnapshotRef, baselineRef, retainRef, provider } = opts;
+  const { source, retainRef, provider } = opts;
+  const startSnapshotRef = toList(opts.startSnapshotRef);
+  const baselineRef = toList(opts.baselineRef);
   const status = await runGit(["status", "--porcelain", "-uall"], source);
   // Resolved to a sha, never left as the symbolic "HEAD". The replay
   // runs AFTER the fast-forward has moved HEAD, so a symbolic base
@@ -99,10 +114,10 @@ export async function captureSourceForLanding(opts: {
   // "undo what the agent did and put my version back", apply cleanly,
   // and silently discard the agent's work.
   let base = "";
-  for (const ref of [baselineRef, startSnapshotRef]) {
-    if (ref === undefined) {
-      continue;
-    }
+  // Every baseline candidate before any start candidate: a later landing
+  // measured against `start` would find the work the last landing put
+  // there and report the workspace's own changes as the user's.
+  for (const ref of [...baselineRef, ...startSnapshotRef]) {
     const resolved = await runGit(["rev-parse", `${ref}^{commit}`], source);
     if (resolved.ok && resolved.out.trim().length > 0) {
       base = resolved.out.trim();

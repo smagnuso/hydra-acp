@@ -39,6 +39,7 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
+import { allAnchorRefs, landingRetainRef, legacyAnchorRefs, workspaceAnchorRefs } from "./workspace/refs.js";
 import {
   captureSourceForLanding,
   releaseSourceCapture,
@@ -413,6 +414,14 @@ export class SessionManager {
   // concurrent snapshot updates (e.g. an agent emitting model + mode
   // back-to-back) don't lose writes via interleaved reads.
   private metaWriteQueues = new Map<string, Promise<unknown>>();
+  // Keyed by workspace PATH, not by session. A session joining a
+  // workspace and a session tearing one down are a read-then-write on the
+  // same shared fact (who is in here), and they live in different session
+  // records — so the per-session meta-write slot cannot order them
+  // against each other. Without this queue a join landing between "count
+  // the live sessions" and "remove the directory" has its workspace
+  // deleted out from under it.
+  private workspaceQueues = new Map<string, Promise<unknown>>();
   // Short-TTL cache for list(). Coalesces the extension polling storm
   // (slack/browser/notifier/archiver each poll /v1/sessions every ~2s)
   // into a single fs sweep. Keyed by filter so picker variants (cwd
@@ -1585,6 +1594,67 @@ export class SessionManager {
       );
       return;
     }
+    // Everything from the count to the removal runs in one per-workspace
+    // slot. Splitting them would leave a window where a join sees a live
+    // workspace and this sees an empty one, and the join loses its
+    // checkout mid-turn. Unlike leaveWorkspace, this runs on the
+    // session-close path where the departing session may still be
+    // registered, so it is excluded by name rather than by relying on
+    // when its binding happens to be cleared.
+    return this.enqueueKeyed(this.workspaceQueues, workspace.path, async () => {
+      const others = this.liveSessionsIn(workspace.path, sessionId);
+      if (others.length > 0) {
+        this.logger?.info?.(
+          `session workspace: keeping ${workspace.path} — ${others.length} live session(s) still in it`,
+        );
+        return;
+      }
+      await this.tearDownWorkspace(provider, workspace, sessionId);
+    });
+  }
+
+  /**
+   * Why the workspace's branch could not fast-forward into its source
+   * right now, or undefined if it could.
+   *
+   * Read-only and best-effort. Used to warn a detaching co-tenant early;
+   * the authoritative check still runs at landing time.
+   */
+  private async fastForwardBlocked(ws: PersistedWorkspace): Promise<string | undefined> {
+    const branch = ws.vcs?.branch;
+    if (branch === undefined) {
+      return "the workspace has no branch to merge from";
+    }
+    const head = await execGit(["rev-parse", "HEAD"], ws.sourceCwd);
+    if (!head.ok || head.out.trim().length === 0) {
+      return undefined;
+    }
+    const ancestor = await execGit(
+      ["merge-base", "--is-ancestor", head.out.trim(), branch],
+      ws.sourceCwd,
+    );
+    if (ancestor.ok) {
+      return undefined;
+    }
+    const current = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], ws.sourceCwd);
+    return (
+      `${shortenHomePath(ws.sourceCwd)} has moved on since this workspace was created ` +
+      `(it is on ${current.out.trim() || "an unknown branch"}). ` +
+      `Land it by hand with: git -C ${ws.sourceCwd} merge ${branch}`
+    );
+  }
+
+  /**
+   * The teardown itself, once it is established that nobody is left.
+   *
+   * Split out only so the refcount check and this can share one
+   * per-workspace slot without a hundred lines inside a closure.
+   */
+  private async tearDownWorkspace(
+    provider: IsolationProvider,
+    workspace: PersistedWorkspace,
+    sessionId?: string,
+  ): Promise<void> {
     const asWorkspace = {
       path: workspace.path,
       sourceCwd: workspace.sourceCwd,
@@ -1621,26 +1691,21 @@ export class SessionManager {
       }
     }
 
-    // Drop the autosave ref regardless of what happens to the directory.
-    // A snapshot ref is a GC root, so leaving one behind pins its objects
-    // forever and `git gc` can never reclaim them: the repository would
-    // grow without bound across sessions.
+    // Drop every anchor regardless of what happens to the directory.
+    // Each is a GC root, so leaving one behind pins its objects forever
+    // and `git gc` can never reclaim them: the repository would grow
+    // without bound across sessions. The autosave is the per-turn
+    // snapshot; the start ref and landing baseline exist only to measure
+    // the source's divergence at landing time, so a workspace that is
+    // going away leaves all three with no reader.
+    //
+    // Both namings: the anchors are keyed by label now, but a workspace
+    // created before the re-key still has session-keyed ones, and those
+    // pin objects just as effectively.
     if (sessionId !== undefined) {
-      await provider
-        .dropSnapshotRef(asWorkspace, this.snapshotRefFor(sessionId))
-        .catch(() => undefined);
-      // The start ref too. It is only a baseline for measuring the
-      // source's divergence at landing time, so once the session is gone
-      // it has no reader left — and like any ref it is a GC root.
-      await provider
-        .dropSnapshotRef(asWorkspace, this.startRefFor(sessionId))
-        .catch(() => undefined);
-      // And the landing baseline, for the same reason: written by a
-      // landing, read only by the next one, so a removed session leaves
-      // it with no reader and a GC root it will never release.
-      await provider
-        .dropSnapshotRef(asWorkspace, this.baselineRefFor(sessionId))
-        .catch(() => undefined);
+      for (const ref of allAnchorRefs(workspace.label, sessionId)) {
+        await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
+      }
     }
 
     const status = await provider
@@ -1699,8 +1764,8 @@ export class SessionManager {
    * these refs pin objects forever, so whoever writes one owns deleting
    * it (releaseWorkspace does).
    */
-  private snapshotRefFor(sessionId: string): string {
-    return `refs/hydra/snapshots/${sessionId}`;
+  private snapshotRefFor(label: string): string {
+    return workspaceAnchorRefs(label).autosave;
   }
 
   /**
@@ -1717,8 +1782,8 @@ export class SessionManager {
    * Two writers, two lifetimes, two names: this one is written once and
    * never churns; the autosave churns every turn.
    */
-  private startRefFor(sessionId: string): string {
-    return `refs/hydra/start/${sessionId}`;
+  private startRefFor(label: string): string {
+    return workspaceAnchorRefs(label).start;
   }
 
   /**
@@ -1736,8 +1801,8 @@ export class SessionManager {
    * `refs/hydra/landing/<id>`, which is the recovery copy held only while
    * a replay might still fail.
    */
-  private baselineRefFor(sessionId: string): string {
-    return `refs/hydra/baseline/${sessionId}`;
+  private baselineRefFor(label: string): string {
+    return workspaceAnchorRefs(label).baseline;
   }
 
   /**
@@ -1801,7 +1866,7 @@ export class SessionManager {
     );
     await provider.retainSnapshot(
       asWorkspace,
-      this.snapshotRefFor(session.sessionId),
+      this.snapshotRefFor(workspace.label),
       snapshot,
     );
   }
@@ -1869,6 +1934,33 @@ export class SessionManager {
       ].join("\n");
     }
     if (action === "end") {
+      // A co-tenant leaving does NOT land the workspace.
+      //
+      // `end` is about this session's relationship to the workspace; the
+      // merge is about the workspace's relationship to the source. They
+      // are only fused because they have always coincided. Landing now
+      // would commit whatever a still-working co-tenant has half-written
+      // onto this branch and into the source, so the merge waits until
+      // the tree has no live writer left — which is the last departure.
+      const others = this.liveSessionsIn(ws.path, session.sessionId);
+      if (others.length > 0) {
+        session.broadcastWorkspacePhase({ phase: "returning" });
+        await this.leaveWorkspace(session, ws, { integrated: false });
+        const who = others.map((s) => s.sessionId).join(", ");
+        const lines = [
+          `Left ${shortenHomePath(ws.path)} and returned to ${shortenHomePath(ws.sourceCwd)}.`,
+          `Nothing landed yet: ${who} still working there. It lands when the last session leaves.`,
+        ];
+        // Worth checking now rather than letting it surface to whoever
+        // leaves last: a doomed fast-forward is much more actionable to
+        // the person who caused it than to the person who happens to be
+        // holding the workspace an hour later.
+        const blocked = await this.fastForwardBlocked(ws);
+        if (blocked !== undefined) {
+          lines.push(`WARNING: that merge will not fast-forward as things stand — ${blocked}`);
+        }
+        return lines.join("\n");
+      }
       // Merge BEFORE leaving. If it refuses, the session stays put:
       // returning to the source tree with the work stranded behind is
       // the one outcome that would surprise, since `end` reads as
@@ -1968,12 +2060,15 @@ export class SessionManager {
       // it holds WORKSPACE state, so the replay diff came out as the
       // inverse of the agent's work rather than as the source's
       // divergence.
-      startSnapshotRef: this.startRefFor(sessionId),
+      // Label-keyed first, then the session-keyed name a workspace
+      // created before the re-key still carries. Absent refs resolve to
+      // nothing and fall through, so offering both is free.
+      startSnapshotRef: [this.startRefFor(ws.label), legacyAnchorRefs(sessionId).start],
       // Wins over the start ref once a first landing has run, so work
       // this workspace already put into the source stops counting as the
       // user's divergence on every landing after it.
-      baselineRef: this.baselineRefFor(sessionId),
-      retainRef: `refs/hydra/landing/${sessionId}`,
+      baselineRef: [this.baselineRefFor(ws.label), legacyAnchorRefs(sessionId).baseline],
+      retainRef: landingRetainRef(sessionId),
       provider,
     });
 
@@ -2062,7 +2157,7 @@ export class SessionManager {
         .captureWorkingState(source, `hydra: source state after landing ${ws.label}`)
         .catch(() => undefined);
       if (after !== undefined) {
-        await execGit(["update-ref", this.baselineRefFor(sessionId), after], source);
+        await execGit(["update-ref", this.baselineRefFor(ws.label), after], source);
       }
     }
 
@@ -2150,27 +2245,64 @@ export class SessionManager {
     if (provider === undefined) {
       return;
     }
+    // Anything below this point is about the WORKSPACE rather than about
+    // this session, so a co-tenant still working in it gets to keep it.
+    // The lock in particular: it is a presence marker with a single
+    // reason string, so unlocking on the first departure would leave a
+    // directory someone is still writing in open to `workspace remove`.
+    // One slot from the count through the removal, so a join cannot slip
+    // in between and lose its checkout.
+    await this.enqueueKeyed(this.workspaceQueues, ws.path, async () => {
+      const others = this.liveSessionsIn(ws.path, session.sessionId);
+      if (others.length > 0) {
+        this.logger?.info?.(
+          `session workspace: ${session.sessionId} left ${ws.path}; ` +
+            `${others.length} live session(s) remain, so it stays`,
+        );
+        return;
+      }
+      await this.reclaimAfterLastLeaver(provider, asWorkspace, ws, session.sessionId, opts);
+    });
+  }
+
+  /**
+   * Drop a workspace's refs, lock and directory once its last session has
+   * gone. Split from leaveWorkspace only to keep the per-workspace slot's
+   * closure readable.
+   */
+  private async reclaimAfterLastLeaver(
+    provider: IsolationProvider,
+    asWorkspace: Workspace,
+    ws: PersistedWorkspace,
+    sessionId: string,
+    opts: { integrated: boolean },
+  ): Promise<void> {
     await provider.unlock(asWorkspace).catch(() => undefined);
     // The start ref goes on BOTH exits, unlike the autosave ref. It is a
     // baseline for landing, not a copy of anything: the source kept its
     // own work when `start` copied it, so nothing here is the last copy
     // of the user's edits. Leaving it behind on abandon would pin objects
     // for a session that has no further use for them.
-    await provider
-      .dropSnapshotRef(asWorkspace, this.startRefFor(session.sessionId))
-      .catch(() => undefined);
-    // Same on both exits, same reasoning: only a landing writes it and
-    // only the next landing reads it, and this session will not have
-    // another one.
-    await provider
-      .dropSnapshotRef(asWorkspace, this.baselineRefFor(session.sessionId))
-      .catch(() => undefined);
+    for (const ref of [
+      this.startRefFor(ws.label),
+      legacyAnchorRefs(sessionId).start,
+      // Same on both exits, same reasoning: only a landing writes it and
+      // only the next landing reads it, and this session will not have
+      // another one.
+      this.baselineRefFor(ws.label),
+      legacyAnchorRefs(sessionId).baseline,
+    ]) {
+      await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
+    }
     if (!opts.integrated) {
       return;
     }
-    await provider
-      .dropSnapshotRef(asWorkspace, this.snapshotRefFor(session.sessionId))
-      .catch(() => undefined);
+    for (const ref of [
+      this.snapshotRefFor(ws.label),
+      legacyAnchorRefs(sessionId).autosave,
+    ]) {
+      await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
+    }
     // Discard the line too, which is safe only in this exact situation:
     // the work is merged into the source, and the binding has just been
     // cleared so nothing can reference it for recovery. Keeping it would
@@ -2185,19 +2317,189 @@ export class SessionManager {
   }
 
   /**
+   * Why this session must not join that workspace, or undefined if it may.
+   *
+   * Compares working TREES rather than asking whether either is dirty.
+   * Both worktrees share one object store, so a tree written from either
+   * is comparable from the source repo, and equal trees mean the join
+   * changes no content anywhere.
+   *
+   * Costs two working-tree walks and leaves two unreferenced commit
+   * objects behind (gc reclaims them). Paid once per join attempt, which
+   * is the same price an autosave pays every turn.
+   */
+  private async joinDivergence(
+    provider: IsolationProvider,
+    sourceCwd: string,
+    ws: PersistedWorkspace,
+  ): Promise<string | undefined> {
+    const [sourceState, wsState] = await Promise.all([
+      provider
+        .captureWorkingState(sourceCwd, "hydra: source state at join")
+        .catch(() => undefined),
+      provider.captureWorkingState(ws.path, "hydra: workspace state at join").catch(() => undefined),
+    ]);
+    if (sourceState === undefined || wsState === undefined) {
+      // Could not look. Fall back to the conservative answer rather than
+      // guessing that they agree.
+      return (
+        `could not compare ${shortenHomePath(sourceCwd)} with ${shortenHomePath(ws.path)}, ` +
+        `so refusing to join a workspace that may not match your tree`
+      );
+    }
+    const trees = await Promise.all(
+      [sourceState, wsState].map(async (sha) =>
+        (await execGit(["rev-parse", `${sha}^{tree}`], sourceCwd)).out.trim(),
+      ),
+    );
+    if (trees[0]!.length > 0 && trees[0] === trees[1]) {
+      return undefined;
+    }
+    return (
+      `${shortenHomePath(sourceCwd)} and ${shortenHomePath(ws.path)} have diverged, and joining ` +
+      `does not carry work across — whichever side you are not in would be left behind. ` +
+      `Land or stash one of them first: \`git -C ${sourceCwd} stash\` if the difference is yours, ` +
+      `or \`/hydra workspace merge\` from the session already in there if it is theirs.`
+    );
+  }
+
+  /** Live sessions isolated in `label`, derived from `sourceCwd`. */
+  private liveSessionsWithLabel(sourceCwd: string, label: string): Session[] {
+    const out: Session[] = [];
+    for (const s of this.sessions.values()) {
+      if (s.workspace?.label === label && s.workspace.sourceCwd === sourceCwd) {
+        out.push(s);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Seat this session in a workspace another live session is already in.
+   *
+   * Two agents in one checkout is not what isolation prevents: two
+   * non-isolated sessions in one source tree already race that way, and
+   * always have. What isolation protects is the USER's tree, and that
+   * protection is unaffected here. So co-tenancy is a risk to accept
+   * rather than a mistake to block — but only when it is chosen, which is
+   * what naming an occupied label does.
+   *
+   * Provisions nothing. The directory, the branch and the landing anchor
+   * all exist already, and the anchor is why they had to stop being keyed
+   * by session id: the eventual merge measures divergence from where the
+   * source stood when the WORK began, not from whenever the last joiner
+   * happened to arrive.
+   *
+   * Refuses on a dirty source, unlike `start`. A fresh workspace carries
+   * your uncommitted work in and resets the source behind it; neither
+   * half is safe here. Dropping a third-party diff into a tree another
+   * agent is mid-edit in can clobber their work, and resetting the source
+   * would be resetting a tree that is not this session's to reset.
+   */
+  private async joinWorkspace(
+    session: Session,
+    host: Session,
+    ws: PersistedWorkspace,
+    sourceCwd: string,
+  ): Promise<string> {
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider === undefined) {
+      throw new Error(`no provider "${ws.provider}" to join that workspace with`);
+    }
+    // A dirty source is the NORMAL case for a joiner, not an edge case:
+    // `start` COPIES the uncommitted work in rather than moving it, so
+    // the tree the first session left behind is still dirty with exactly
+    // what it carried across. Refusing on dirtiness alone would reject
+    // the most ordinary join there is.
+    //
+    // What actually matters is whether the two trees agree. If they do,
+    // the join carries no risk at all, because there is nothing to carry:
+    // the workspace already contains precisely what the source has. If
+    // they have diverged, joining would silently leave one side's edits
+    // behind, and that is worth refusing.
+    if (provider.capabilities().supports.captureWorkingState) {
+      const diverged = await this.joinDivergence(provider, sourceCwd, ws);
+      if (diverged !== undefined) {
+        throw new Error(diverged);
+      }
+    }
+
+    // Serialized against teardown. Without this the last leaver can count
+    // zero live sessions, and remove the directory while this join is
+    // mid-swap into it.
+    return await this.enqueueKeyed(this.workspaceQueues, ws.path, async () => {
+      if (this.sessions.get(host.sessionId)?.workspace?.path !== ws.path) {
+        throw new Error(
+          `${shortenHomePath(ws.path)} was released while joining it; run the command again`,
+        );
+      }
+      session.broadcastWorkspacePhase({ phase: "swapping" });
+      const history = await this.histories.load(session.sessionId).catch(() => []);
+      await session.swapIntoWorkspace({
+        cwd: ws.path,
+        workspace: {
+          path: ws.path,
+          sourceCwd: ws.sourceCwd,
+          label: ws.label,
+          provider: ws.provider,
+          ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+          ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+        },
+        historyLength: history.length,
+        artifact: {
+          summary: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}, shared with another session.`,
+        } as SessionSynopsis,
+      });
+      await this.mutateRecord(session.sessionId, {
+        cwd: session.cwd,
+        workspace: session.workspace,
+      });
+      this.invalidateListCache();
+      session.broadcastWorkspacePhase({
+        phase: "entered",
+        cwd: session.cwd,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+      });
+
+      const sharers = this.liveSessionsIn(ws.path, session.sessionId).map((s) => s.sessionId);
+      const lines = [
+        `Joined workspace ${shortenHomePath(ws.path)}`,
+        `  source: ${shortenHomePath(ws.sourceCwd)}`,
+      ];
+      if (ws.vcs?.branch !== undefined) {
+        lines.push(`  branch: ${ws.vcs.branch}`);
+      }
+      lines.push(`  shared with: ${sharers.join(", ")}`);
+      lines.push(`  your edits will interleave with that session's`);
+      lines.push(
+        `Use \`/hydra workspace end\` to leave; the work lands when the last session leaves.`,
+      );
+      return lines.join("\n");
+    });
+  }
+
+  /**
    * Move a live session into a fresh isolated workspace.
    *
-   * Takes the session's UNCOMMITTED work with it rather than copying it:
-   * the source tree is reset once the work is safely in the workspace,
-   * so the change exists in exactly one place. A copy would look
-   * friendlier and behave worse — you would later be unable to merge,
-   * because the source would be dirty with the same edit you are trying
-   * to land.
+   * COPIES the session's uncommitted work rather than taking it, and
+   * leaves the source tree exactly as it was found. The source is not
+   * private to this session: the user's editor is open on it and other
+   * sessions are working in it, so taking the work would mean the first
+   * workspace to start silently claims it. The cost is that the same
+   * edits then exist in two places, which is why landing captures and
+   * replays the source rather than gating on it being clean.
    *
-   * The move is snapshot-first. `captureWorkingState` writes a commit
-   * object and we point a ref at it BEFORE touching the source tree, so
-   * a crash anywhere in the middle leaves the pre-move state recoverable
-   * rather than lost between two directories.
+   * (This comment used to claim the opposite — that the work was moved
+   * and the source reset. Nothing here resets the source; copyCarriedWork
+   * applies a patch into the workspace and stops. The landing path is
+   * built on the copy semantics, so the code was right and the comment
+   * was wrong.)
+   *
+   * Snapshot-first regardless. `captureWorkingState` writes a commit
+   * object and we point a ref at it BEFORE the workspace is populated, so
+   * a crash in the middle leaves the pre-start state recoverable.
    */
   private async startWorkspace(session: Session, label?: string): Promise<string> {
     if (session.workspace !== undefined) {
@@ -2221,6 +2523,20 @@ export class SessionManager {
       );
     }
     const caps = provider.capabilities();
+
+    // An explicit label naming a workspace somebody is LIVE in means
+    // join it, not make a second one beside it. A bare `start` cannot
+    // reach this: its default label is derived from the session id, so it
+    // never collides. And a label whose branch or directory merely
+    // survives, with nobody in it, still gets suffixed — that is the
+    // start-after-abandon case, where adopting the work you just walked
+    // away from would be the opposite of what you asked for.
+    if (label !== undefined) {
+      const host = this.liveSessionsWithLabel(sourceCwd, label)[0];
+      if (host !== undefined && host.workspace !== undefined) {
+        return await this.joinWorkspace(session, host, host.workspace, sourceCwd);
+      }
+    }
 
     // Snapshot the working tree first, while it is still intact.
     let carried: SnapshotId | undefined;
@@ -2259,7 +2575,7 @@ export class SessionManager {
     // the first turn in the workspace — leaving the landing to diff the
     // workspace against the source and compute the inverse of the
     // agent's own work.
-    const startRef = this.startRefFor(session.sessionId);
+    const startRef = this.startRefFor(ws.label);
     let setup: string | undefined;
     let copied = false;
     try {
@@ -4906,20 +5222,59 @@ export class SessionManager {
     sessionId: string,
     task: () => Promise<void>,
   ): Promise<void> {
-    const prev = this.metaWriteQueues.get(sessionId) ?? Promise.resolve();
-    // Swallow the predecessor's error before chaining so `task` runs
-    // exactly once. The earlier `prev.then(task, task)` passed task as
-    // both fulfilled and rejected handler, which re-ran the work on a
-    // predecessor failure.
+    return this.enqueueKeyed(this.metaWriteQueues, sessionId, task);
+  }
+
+  /**
+   * Serialize `task` against others sharing `key`.
+   *
+   * Swallows the predecessor's error before chaining so `task` runs
+   * exactly once. An earlier `prev.then(task, task)` passed task as both
+   * the fulfilled and the rejected handler, which re-ran the work when a
+   * predecessor failed.
+   */
+  private enqueueKeyed<T>(
+    queues: Map<string, Promise<unknown>>,
+    key: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const prev = queues.get(key) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(task);
     const settled = next.catch(() => undefined);
-    this.metaWriteQueues.set(sessionId, settled);
+    queues.set(key, settled);
     void settled.finally(() => {
-      if (this.metaWriteQueues.get(sessionId) === settled) {
-        this.metaWriteQueues.delete(sessionId);
+      if (queues.get(key) === settled) {
+        queues.delete(key);
       }
     });
     return next;
+  }
+
+  /**
+   * Live sessions whose binding names this workspace.
+   *
+   * Derived from the records rather than kept as a counter, deliberately:
+   * a counter drifts, because a crash between "session died" and
+   * "decrement" pins the workspace forever. A query cannot drift, since a
+   * session that is gone stops answering.
+   *
+   * LIVE sessions only. A cold session's record keeps pointing at its
+   * workspace on purpose (that is the `inactive` state, and it is safe
+   * because a resurrect rebuilds the checkout from the branch), so
+   * counting every claim would let one cold session pin a directory
+   * forever and nothing would ever be reclaimed.
+   */
+  private liveSessionsIn(workspacePath: string, exclude?: string): Session[] {
+    const out: Session[] = [];
+    for (const s of this.sessions.values()) {
+      if (s.sessionId === exclude) {
+        continue;
+      }
+      if (s.workspace?.path === workspacePath) {
+        out.push(s);
+      }
+    }
+    return out;
   }
 
   async closeAll(): Promise<void> {

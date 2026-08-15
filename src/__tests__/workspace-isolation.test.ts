@@ -442,7 +442,7 @@ describe("session isolation end-to-end", () => {
       cwd: repo,
       workspace: { label: "autosave" },
     });
-    const ref = `refs/hydra/snapshots/${session.sessionId}`;
+    const ref = `refs/hydra/snapshots/ws/${session.workspace?.label}`;
 
     await fs.writeFile(path.join(session.cwd, "unsaved.ts"), "export const x = 1;\n");
     // Drive the same hook a completed turn fires.
@@ -480,7 +480,7 @@ describe("session isolation end-to-end", () => {
     // No ref at all: a read-only turn should not pay for a tree walk's
     // worth of objects, and most turns are read-only.
     await expect(
-      exec("git", ["rev-parse", "--verify", `refs/hydra/snapshots/${session.sessionId}`], {
+      exec("git", ["rev-parse", "--verify", "refs/hydra/snapshots/ws/quiet"], {
         cwd: repo,
       }),
     ).rejects.toThrow();
@@ -931,10 +931,54 @@ describe("session isolation end-to-end", () => {
 
     // The START ref, not the autosave ref. They were the same name once,
     // which is exactly how the autosave came to clobber this baseline.
-    const ref = `refs/hydra/start/${session.sessionId}`;
+    const ref = `refs/hydra/start/ws/${session.workspace?.label}`;
     const sha = (await exec("git", ["rev-parse", ref], { cwd: repo })).stdout.trim();
     const shown = await exec("git", ["show", `${sha}:precious.txt`], { cwd: repo });
     expect(shown.stdout).toBe("do not lose me\n");
+  });
+
+  it("lands from a session-keyed anchor written before the re-key", async () => {
+    // The anchors moved from refs/hydra/start/<sessionId> to
+    // .../start/ws/<label>, because they describe the workspace's
+    // relationship to its source rather than any session's. A workspace
+    // that existed across that change has only the old name, and it is
+    // the only record of where the source stood when the work began —
+    // so landing has to still find it. Losing it silently would not
+    // fail: it would fall back to HEAD and report the user's own
+    // pre-existing edits as an overlap with the workspace.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    // Uncommitted at `start`, so it gets copied into the workspace, and
+    // then edited BY THE AGENT there. That combination is what makes the
+    // anchor load-bearing: measured from the anchor, the copy cancels out
+    // of the diff and only the agent's version lands. Measured from HEAD
+    // instead, the user's version reads as divergence and gets replayed
+    // on top of the agent's, which is the failure this guards.
+    await fs.writeFile(path.join(repo, "mine.txt"), "user version\n");
+    await manager.runWorkspaceAction(session.sessionId, "start", "legacy");
+    const label = session.workspace!.label;
+
+    // Rename the anchor to the pre-re-key spelling, leaving nothing at
+    // the new one: exactly the on-disk state of an older workspace.
+    const fresh = `refs/hydra/start/ws/${label}`;
+    const sha = (await exec("git", ["rev-parse", fresh], { cwd: repo })).stdout.trim();
+    await exec("git", ["update-ref", `refs/hydra/start/${session.sessionId}`, sha], { cwd: repo });
+    await exec("git", ["update-ref", "-d", fresh], { cwd: repo });
+
+    await fs.writeFile(path.join(session.cwd, "mine.txt"), "agent version\n");
+    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
+
+    // The agent's version landed, cleanly. Falling back to HEAD would
+    // instead replay the user's copied-in version over it and report an
+    // overlap, so this is the assertion that proves the old anchor was
+    // found rather than merely tolerated.
+    expect(msg).toContain("Merged");
+    expect(msg).not.toMatch(/overlap|could not be replayed/i);
+    expect(await fs.readFile(path.join(repo, "mine.txt"), "utf8")).toBe("agent version\n");
+
+    // And the legacy ref is reaped rather than left pinning objects.
+    const refs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
+    expect(refs.stdout).not.toContain(session.sessionId);
   });
 
   it("persists cwd and the binding together, and reports status", async () => {
@@ -951,6 +995,118 @@ describe("session isolation end-to-end", () => {
     const status = await manager.runWorkspaceAction(session.sessionId, "status");
     expect(status).toContain("Isolated in");
     expect(status).toContain(repo);
+  });
+
+  it("joins a workspace when its label names one a live session is in", async () => {
+    // Co-tenancy has to be CHOSEN, and naming an occupied label is the
+    // choice. Two agents in one checkout is not what isolation prevents:
+    // two non-isolated sessions in one source tree already race that way.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "shared");
+    const wsPath = owner.cwd;
+
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    const msg = await manager.runWorkspaceAction(guest.sessionId, "start", "shared");
+
+    expect(msg).toContain("Joined workspace");
+    expect(msg).toContain(owner.sessionId);
+    // Same directory, same branch, no second checkout beside it.
+    expect(guest.cwd).toBe(wsPath);
+    expect(guest.workspace?.label).toBe("shared");
+    expect(guest.workspace?.vcs?.branch).toBe("hydra/shared");
+    const branches = await exec("git", ["branch", "--list", "hydra/*"], { cwd: repo });
+    expect(branches.stdout).not.toContain("hydra/shared-2");
+  });
+
+  it("still suffixes when the label survives with nobody in it", async () => {
+    // The start-after-abandon case. The name is taken by a branch, not by
+    // a session, and adopting work you just walked away from would be the
+    // opposite of what you asked for.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "letgo");
+    await manager.runWorkspaceAction(session.sessionId, "abandon");
+
+    const msg = await manager.runWorkspaceAction(session.sessionId, "start", "letgo");
+
+    expect(msg).toContain("Moved into workspace");
+    expect(msg).not.toContain("Joined");
+    expect(session.workspace?.label).toBe("letgo-2");
+  });
+
+  it("keeps the workspace when a co-tenant leaves, and lands on the last exit", async () => {
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "team");
+    const wsPath = owner.cwd;
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(guest.sessionId, "start", "team");
+
+    await fs.writeFile(path.join(wsPath, "tracked.txt"), "shared work\n");
+
+    // Guest leaves first: detach, no merge, workspace intact.
+    const left = await manager.runWorkspaceAction(guest.sessionId, "end");
+    expect(left).toContain("Nothing landed yet");
+    expect(left).toContain(owner.sessionId);
+    expect(guest.cwd).toBe(repo);
+    await expect(fs.access(wsPath)).resolves.toBeUndefined();
+    expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("original\n");
+
+    // Owner leaves last: now it lands and the directory goes.
+    const landed = await manager.runWorkspaceAction(owner.sessionId, "end");
+    expect(landed).toContain("Merged");
+    expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("shared work\n");
+    await expect(fs.access(wsPath)).rejects.toThrow();
+  });
+
+  it("joins a dirty source when the workspace already matches it", async () => {
+    // The ordinary case, and the one a dirtiness check would have wrongly
+    // rejected: `start` COPIES the work in, so the source is still dirty
+    // with exactly what the workspace received. Equal trees mean the join
+    // moves no content, so there is nothing to lose.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await fs.writeFile(path.join(repo, "wip.txt"), "shared wip\n");
+    await manager.runWorkspaceAction(owner.sessionId, "start", "carried");
+    // Present in both trees now, which is the state under test.
+    expect(await fs.readFile(path.join(repo, "wip.txt"), "utf8")).toBe("shared wip\n");
+    expect(await fs.readFile(path.join(owner.cwd, "wip.txt"), "utf8")).toBe("shared wip\n");
+
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    const msg = await manager.runWorkspaceAction(guest.sessionId, "start", "carried");
+
+    expect(msg).toContain("Joined workspace");
+    expect(guest.cwd).toBe(owner.cwd);
+  });
+
+  it("refuses to join when the two trees have diverged", async () => {
+    // Joining carries nothing across, so whichever side the joiner is not
+    // in would be silently left behind.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "busy");
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await fs.writeFile(path.join(repo, "mine.txt"), "only in the source\n");
+
+    await expect(
+      manager.runWorkspaceAction(guest.sessionId, "start", "busy"),
+    ).rejects.toThrow(/diverged/);
+    expect(guest.workspace).toBeUndefined();
+  });
+
+  it("refuses to join when the workspace has moved on", async () => {
+    // The mirror image: the agent in there has done work the source has
+    // never seen. Same rule, other direction.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "ahead");
+    await fs.writeFile(path.join(owner.cwd, "agent.txt"), "only in the workspace\n");
+
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await expect(
+      manager.runWorkspaceAction(guest.sessionId, "start", "ahead"),
+    ).rejects.toThrow(/diverged/);
   });
 
   it("refuses to start when already isolated", async () => {
@@ -998,7 +1154,7 @@ describe("session isolation end-to-end", () => {
     // needs no recovery anchor, and a live ref pins objects forever.
     await expect(fs.access(wsPath)).rejects.toThrow();
     await expect(
-      exec("git", ["rev-parse", "--verify", `refs/hydra/snapshots/${session.sessionId}`], {
+      exec("git", ["rev-parse", "--verify", "refs/hydra/snapshots/ws/quiet"], {
         cwd: repo,
       }),
     ).rejects.toThrow();
@@ -1056,7 +1212,7 @@ describe("session isolation end-to-end", () => {
     ).runWorkspaceSnapshot(session);
 
     const before = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
-    expect(before.stdout).toContain(`refs/hydra/start/${session.sessionId}`);
+    expect(before.stdout).toContain("refs/hydra/start/ws/refs");
 
     await manager.runWorkspaceAction(session.sessionId, "end");
     const after = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
@@ -1172,7 +1328,7 @@ describe("session isolation end-to-end", () => {
     // The landing recorded where it left the source, which is what the
     // next one measures against.
     const refs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
-    expect(refs.stdout).toContain(`refs/hydra/baseline/${session.sessionId}`);
+    expect(refs.stdout).toContain(`refs/hydra/baseline/ws/${session.workspace?.label}`);
 
     stream.sent.length = 0;
     const streamed = await manager.runWorkspaceAction(session.sessionId, "end");
@@ -1468,7 +1624,7 @@ describe("session isolation end-to-end", () => {
     );
     const ref = await exec(
       "git",
-      ["rev-parse", `refs/hydra/snapshots/${session.sessionId}`],
+      ["rev-parse", "refs/hydra/snapshots/ws/nevermind"],
       { cwd: repo },
     );
     expect(ref.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);

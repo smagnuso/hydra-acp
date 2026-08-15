@@ -553,6 +553,50 @@ describe("workspace remove — on disk", () => {
   });
 });
 
+describe("workspace list — shared workspaces", () => {
+  let out: string;
+
+  beforeEach(() => {
+    out = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(path.join(paths.home(), "sessions"), { recursive: true, force: true });
+    await fs.rm(path.join(paths.home(), "workspaces"), { recursive: true, force: true });
+  });
+
+  it("reports one row naming every session that claims it", async () => {
+    // The row is per WORKSPACE. Keying the lookup by path and letting the
+    // last binding win collapsed co-tenants, so a shared directory looked
+    // exactly like a solo one and the other session was invisible.
+    const repo = await makeGitRepo();
+    const dir = await makeUnownedWorktree(repo, "together");
+    for (const id of ["sess-one", "sess-two"]) {
+      await bindSession(id, {
+        path: dir,
+        sourceCwd: repo,
+        label: "together",
+        branch: "hydra/together",
+        repoRoot: repo,
+      });
+    }
+
+    const rows = await collectWorkspaces();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.state).toBe("active");
+    expect(rows[0]?.sessionIds?.sort()).toEqual(["sess-one", "sess-two"]);
+
+    await runWorkspaceList();
+    expect(out).toContain("sess-one,sess-two");
+  });
+});
+
 describe("workspace list — inactive rows", () => {
   let out: string;
 

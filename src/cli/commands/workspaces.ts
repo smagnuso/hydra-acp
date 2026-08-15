@@ -33,6 +33,12 @@ import {
   type SourceCapture,
 } from "../../core/workspace/source-state.js";
 import { invokedBinName } from "../../core/bin-name.js";
+import {
+  allAnchorRefs,
+  landingRetainRef,
+  legacyAnchorRefs,
+  workspaceAnchorRefs,
+} from "../../core/workspace/refs.js";
 import { daemonFetch } from "./_shared.js";
 
 interface Binding {
@@ -67,7 +73,14 @@ export interface WorkspaceRow {
   label: string;
   provider: string;
   state: WorkspaceState;
+  /** First claimant, kept for the single-session callers that resolve a target. */
   sessionId?: string;
+  /**
+   * Every session claiming this path. More than one once workspaces can
+   * be joined; the row is per WORKSPACE, so collapsing co-tenants to the
+   * first would hide the fact that a directory is shared at all.
+   */
+  sessionIds?: string[];
   branch?: string;
   /** undefined when it could not be determined (missing dir, no provider). */
   clean?: boolean;
@@ -129,13 +142,22 @@ function toProviderWorkspace(b: Binding["workspace"]): Workspace {
 
 export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
   const bindings = await readBindings();
-  const byPath = new Map(bindings.map((b) => [b.workspace.path, b]));
+  const byPath = new Map<string, Binding[]>();
+  for (const b of bindings) {
+    const at = byPath.get(b.workspace.path);
+    if (at === undefined) {
+      byPath.set(b.workspace.path, [b]);
+    } else {
+      at.push(b);
+    }
+  }
   const dirs = new Set(await readDirs());
   const rows: WorkspaceRow[] = [];
 
   for (const dir of dirs) {
-    const bound = byPath.get(dir);
-    if (bound !== undefined) {
+    const claims = byPath.get(dir);
+    const bound = claims?.[0];
+    if (claims !== undefined && bound !== undefined) {
       rows.push({
         path: dir,
         sourceCwd: bound.workspace.sourceCwd,
@@ -143,6 +165,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
         provider: bound.workspace.provider,
         state: "active",
         sessionId: bound.sessionId,
+        sessionIds: claims.map((c) => c.sessionId),
         ...(bound.workspace.vcs?.branch !== undefined
           ? { branch: bound.workspace.vcs.branch }
           : {}),
@@ -163,18 +186,21 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
     });
   }
 
-  for (const b of bindings) {
-    if (!dirs.has(b.workspace.path)) {
-      rows.push({
-        path: b.workspace.path,
-        sourceCwd: b.workspace.sourceCwd,
-        label: b.workspace.label,
-        provider: b.workspace.provider,
-        state: "inactive",
-        sessionId: b.sessionId,
-        ...(b.workspace.vcs?.branch !== undefined ? { branch: b.workspace.vcs.branch } : {}),
-      });
+  for (const [dir, claims] of byPath) {
+    if (dirs.has(dir)) {
+      continue;
     }
+    const b = claims[0]!;
+    rows.push({
+      path: dir,
+      sourceCwd: b.workspace.sourceCwd,
+      label: b.workspace.label,
+      provider: b.workspace.provider,
+      state: "inactive",
+      sessionId: b.sessionId,
+      sessionIds: claims.map((c) => c.sessionId),
+      ...(b.workspace.vcs?.branch !== undefined ? { branch: b.workspace.vcs.branch } : {}),
+    });
   }
 
   // Cleanliness decides what prune may touch, so it is worth the stat
@@ -190,7 +216,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
     }
     // Active rows use the recorded binding; unowned ones fall back to what the
     // directory itself reported, so they get a real DIRTY answer too.
-    const binding = byPath.get(row.path);
+    const binding = byPath.get(row.path)?.[0];
     const ws =
       binding !== undefined ? toProviderWorkspace(binding.workspace) : await attributeUnowned(row.path);
     if (ws === undefined) {
@@ -330,14 +356,22 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
       ? undefined
       : await captureSourceForLanding({
           source,
-          startSnapshotRef: `refs/hydra/start/${row.sessionId}`,
+          // Label-keyed, then the session-keyed name a workspace made
+          // before the re-key still carries.
+          startSnapshotRef: [
+            workspaceAnchorRefs(row.label).start,
+            legacyAnchorRefs(row.sessionId).start,
+          ],
           // Written by an in-session landing, and it has to win here for
           // the same reason it does there: work a previous landing put
           // into the source is not the user's divergence, and measuring
           // from `start` reports it as an overlap on every landing after
           // the first.
-          baselineRef: `refs/hydra/baseline/${row.sessionId}`,
-          retainRef: `refs/hydra/landing/${row.sessionId}`,
+          baselineRef: [
+            workspaceAnchorRefs(row.label).baseline,
+            legacyAnchorRefs(row.sessionId).baseline,
+          ],
+          retainRef: landingRetainRef(row.sessionId),
           provider: getProvider(row.provider),
         });
   if (capture === undefined) {
@@ -526,14 +560,14 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
   // The autosave ref exists to make unintegrated work recoverable. Once
   // it is integrated the ref is only pinning objects, so drop it.
   if (row.sessionId !== undefined) {
-    // Both refs: the autosave and the landing baseline. Each is a GC
-    // root, so a survivor pins objects for a workspace that is done.
-    await runGit(["update-ref", "-d", `refs/hydra/snapshots/${row.sessionId}`], source);
-    await runGit(["update-ref", "-d", `refs/hydra/start/${row.sessionId}`], source);
-    // The landing baseline goes too. Unlike an in-session landing, this
-    // one commits the workspace's work, so HEAD now describes where the
-    // source was left and is the honest base for anything that follows.
-    await runGit(["update-ref", "-d", `refs/hydra/baseline/${row.sessionId}`], source);
+    // Every anchor, both namings. Each is a GC root, so a survivor pins
+    // objects for a workspace that is done. The landing baseline goes too:
+    // unlike an in-session landing, this one commits the workspace's work,
+    // so HEAD now describes where the source was left and is the honest
+    // base for anything that follows.
+    for (const ref of allAnchorRefs(row.label, row.sessionId)) {
+      await runGit(["update-ref", "-d", ref], source);
+    }
   }
   if (!remove) {
     process.stdout.write(
@@ -616,9 +650,17 @@ async function removeInactive(row: WorkspaceRow): Promise<void> {
   // it is the only copy of whatever was uncommitted, so it stays.
   const provider = getProvider(bound.workspace.provider);
   if (provider !== undefined && row.sessionId !== undefined) {
-    await provider.dropSnapshotRef(ws, `refs/hydra/start/${row.sessionId}`).catch(() => undefined);
-    const autosave = `refs/hydra/snapshots/${row.sessionId}`;
-    if (await refExists(ws, autosave)) {
+    for (const ref of [
+      workspaceAnchorRefs(row.label).start,
+      legacyAnchorRefs(row.sessionId).start,
+    ]) {
+      await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
+    }
+    const autosave = await firstExistingRef(ws, [
+      workspaceAnchorRefs(row.label).autosave,
+      legacyAnchorRefs(row.sessionId).autosave,
+    ]);
+    if (autosave !== undefined) {
       notes.push(`kept ${autosave} (last autosave)`);
     }
   }
@@ -792,12 +834,25 @@ export async function runWorkspaceRemove(opts: {
   let retained: string | undefined;
   if (provider !== undefined && bound !== undefined && row.sessionId !== undefined) {
     const ws = toProviderWorkspace(bound.workspace);
-    await provider.dropSnapshotRef(ws, `refs/hydra/start/${row.sessionId}`).catch(() => undefined);
-    const autosave = `refs/hydra/snapshots/${row.sessionId}`;
-    if (discarding && (await refExists(ws, autosave))) {
+    for (const ref of [
+      workspaceAnchorRefs(row.label).start,
+      legacyAnchorRefs(row.sessionId).start,
+    ]) {
+      await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
+    }
+    const candidates = [
+      workspaceAnchorRefs(row.label).autosave,
+      legacyAnchorRefs(row.sessionId).autosave,
+    ];
+    const autosave = await firstExistingRef(ws, candidates);
+    if (discarding && autosave !== undefined) {
       retained = autosave;
     } else {
-      await provider.dropSnapshotRef(ws, autosave).catch(() => undefined);
+      // Nothing was lost, so the ref is only pinning objects. Reap every
+      // naming rather than just the one that resolved.
+      for (const ref of candidates) {
+        await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
+      }
     }
   }
 
@@ -816,6 +871,26 @@ export async function runWorkspaceRemove(opts: {
         `or starts fresh from ${shortenHomePath(row.sourceCwd)}.\n`,
     );
   }
+}
+
+/**
+ * The first of these refs that actually exists, or undefined.
+ *
+ * Used wherever a name changed: callers offer the current name and the
+ * one a workspace created before the re-key still carries, and get back
+ * whichever is really there. Also the guard against advertising a
+ * recovery that does not exist.
+ */
+async function firstExistingRef(
+  ws: Workspace,
+  refs: readonly string[],
+): Promise<string | undefined> {
+  for (const ref of refs) {
+    if (await refExists(ws, ref)) {
+      return ref;
+    }
+  }
+  return undefined;
 }
 
 /** Whether a ref is present, so we never advertise a recovery that isn't there. */
@@ -885,7 +960,9 @@ export async function runWorkspaceList(
       ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"],
       ...rows.map((r) => [
         r.state,
-        r.sessionId?.replace(/^hydra_session_/, "") ?? "-",
+        (r.sessionIds ?? (r.sessionId === undefined ? [] : [r.sessionId]))
+        .map((id) => id.replace(/^hydra_session_/, ""))
+        .join(",") || "-",
         shortenHomePath(r.sourceCwd),
         r.label,
         r.changedCount === undefined ? "?" : r.changedCount > 0 ? String(r.changedCount) : "-",
