@@ -504,7 +504,14 @@ export class Session {
   // The session's REAL working directory, and what every spawn path uses.
   // For an isolated session this is the workspace path, not the directory
   // the caller named at session/new; see `workspace` below.
-  readonly cwd: string;
+  //
+  // Mutable, but ONLY via swapUpstream({ newCwd }). A running process's
+  // cwd cannot change, so assigning this without replacing the agent
+  // would leave the field describing a directory the agent is not in —
+  // and every later respawn would then silently relocate it. The pairing
+  // with `workspace` matters too: whenever a binding exists, cwd equals
+  // workspace.path, and both are written to the record together.
+  cwd: string;
   // agent / agentId / upstreamSessionId are mutable so /hydra agent can
   // replace the underlying agent process while keeping the same Session
   // record. agentMeta is the metadata returned by the agent at session/new
@@ -777,7 +784,11 @@ export class Session {
   // must be findable by the tree it derives from, not only by where it
   // physically runs) and for the `_meta["hydra-acp"].workspace`
   // projection.
-  readonly workspace: PersistedWorkspace | undefined;
+  // Mutable only through swapIntoWorkspace / clearWorkspaceBinding, which
+  // keep it in lockstep with `cwd`. Assigning it directly would let the
+  // record claim an isolation that the agent's actual working directory
+  // contradicts.
+  workspace: PersistedWorkspace | undefined;
   // Why isolation was asked for and did not happen. Set only on the
   // fail-open path, so `workspace === undefined && workspaceError !== undefined`
   // is the "you asked and did not get it" case a client needs to surface.
@@ -1518,6 +1529,51 @@ export class Session {
   // Mirrors doResurrectFromImport + seedFromImport in session-manager.ts:
   // spawn fresh agent → initialize → session/new → restore model/mode →
   // seed with compaction transcript → swap references → kill old agent.
+  /**
+   * Move a live session into an isolated workspace, or back out of one.
+   *
+   * The agent process cannot change directory, so this replaces it.
+   * Everything that makes that safe already lives in swapUpstream, and
+   * routing through it is the point rather than an implementation
+   * detail: it banks cost into `cumulativeCost` (a bare respawn would
+   * silently reset lifetime spend to zero), re-mints `mcpServers` so the
+   * recall server rebuilds against current state, waits for quiescence,
+   * and re-seeds the new agent with a transcript.
+   *
+   * `summarizedThroughEntry` is stamped to the current history length,
+   * which is the trick fork uses: it arms recall immediately, so the
+   * replacement agent can `search` the whole prior conversation, without
+   * paying to generate a synopsis first. That matters here because the
+   * natural moment to isolate is right after planning, when the
+   * conversation is at its most valuable and least worth waiting on.
+   *
+   * `cwd` and `workspace` move together and are persisted by the caller
+   * in one record write. Passing `workspace: undefined` is the exit
+   * path: the binding is dropped rather than left pointing at a
+   * directory the session has left, which would otherwise make
+   * `hydra workspace list` report it as a rebuildable "missing".
+   */
+  async swapIntoWorkspace(opts: {
+    cwd: string;
+    workspace: PersistedWorkspace | undefined;
+    historyLength: number;
+    artifact: SessionSynopsis;
+    title?: string;
+  }): Promise<void> {
+    await this.swapUpstream({
+      artifact: opts.artifact,
+      ...(opts.title !== undefined ? { title: opts.title } : {}),
+      tailK: 8,
+      // A small verbatim floor: the user is mid-thought when they switch,
+      // so the last few turns should survive literally rather than only
+      // as summary, even though recall can reach the rest.
+      tailFloor: 4,
+      summarizedThroughEntry: opts.historyLength,
+      newCwd: opts.cwd,
+    });
+    this.workspace = opts.workspace;
+  }
+
   async swapUpstream(opts: {
     artifact: SessionSynopsis;
     title?: string;
@@ -1534,6 +1590,17 @@ export class Session {
     // defaults as reported by session/new; agentAdvertisedCommands /
     // models / modes are reset from the fresh response.
     newAgentId?: string;
+    // Respawn the agent in a DIFFERENT directory (the `/hydra workspace`
+    // path). A process's cwd is fixed at exec, so moving a live session
+    // into or out of an isolated workspace can only happen by replacing
+    // the agent — which is exactly what this function already does.
+    //
+    // Routing through here rather than a bespoke respawn is what keeps
+    // three easily-missed invariants intact: cost is banked into
+    // cumulativeCost (a bare respawn silently resets lifetime spend),
+    // mcpServers are re-minted so the recall server re-evaluates its
+    // gate, and the swap waits for quiescence first.
+    newCwd?: string;
   }): Promise<void> {
     const quiesced = await this.isQuiescedForSwap();
     if (!quiesced) {
@@ -1554,7 +1621,9 @@ export class Session {
     const oldAgentId = this.agentId;
     const targetAgentId = opts.newAgentId ?? this.agentId;
     const crossAgent = targetAgentId !== this.agentId;
-    const cwd = this.cwd;
+    // Target directory for the replacement agent. Defaults to where we
+    // already are; set by the workspace path to move the session.
+    const cwd = opts.newCwd ?? this.cwd;
     const agentArgs = this.agentArgs;
     const forwardedEnv = this.forwardedEnv;
     const persistedModel = this.currentModel;
@@ -1591,6 +1660,11 @@ export class Session {
     });
 
     this.accumulateAndResetCost();
+    // Commit the new working directory only now that the replacement
+    // agent actually exists. Doing it earlier would leave the field
+    // lying about where the process is if the spawn failed, and every
+    // subsequent respawn reads this value.
+    this.cwd = cwd;
     this.wireAgent(fresh.agent);
 
     // Restore model and mode only for same-agent swaps. Cross-agent
