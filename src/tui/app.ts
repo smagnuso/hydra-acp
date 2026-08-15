@@ -58,7 +58,7 @@ export {
   CLARIFIER_QUESTION_DISMISS_METHOD,
 };
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
-import { paths } from "../core/paths.js";
+import { paths, shortenHomePath } from "../core/paths.js";
 import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
@@ -2038,6 +2038,7 @@ async function runSession(
     "usage_update",
     "config_option_update",
     "hydra_compaction",
+    "hydra_workspace",
     "clarifier_question_asked",
     "clarifier_question_answered",
     "clarifier_question_dismissed",
@@ -2093,6 +2094,10 @@ async function runSession(
     }
     if (rawTag === "hydra_compaction") {
       handleCompactionUpdate(update);
+      return;
+    }
+    if (rawTag === "hydra_workspace") {
+      handleWorkspaceUpdate(update);
       return;
     }
     if (rawTag === "clarifier_question_asked") {
@@ -2465,6 +2470,88 @@ async function runSession(
       const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
       screen.notify(`compaction failed: ${truncated}`, 5000);
     }
+  };
+
+  /**
+   * The session moved to a different directory, or is in the middle of
+   * moving there.
+   *
+   * Relocation is the part that matters. `resolvedCwd` is resolved once
+   * at session/new or attach and is what `@`-completion, the git panel
+   * and diff path resolution are all computed against, so without this
+   * the UI keeps pointing at the tree the session just left: completion
+   * offers files from the wrong checkout, the git panel reports the
+   * wrong branch as clean, and opening a diff shows an unchanged file
+   * because that copy of it really is unchanged.
+   *
+   * The bar shows `source ⧉label` rather than the workspace path, which
+   * is a hash segment and a label and says nothing useful. That matches
+   * `hydra session list`. The real path stays reachable through the
+   * cwdFull field and copy-on-double-click.
+   */
+  const handleWorkspaceUpdate = (update: unknown): void => {
+    const u = (update ?? {}) as {
+      phase?: unknown;
+      cwd?: unknown;
+      sourceCwd?: unknown;
+      label?: unknown;
+      error?: unknown;
+    };
+    const phase = typeof u.phase === "string" ? u.phase : undefined;
+    if (phase === "provisioning") {
+      screen.setWorkspaceIndicator("creating workspace...");
+      return;
+    }
+    if (phase === "setup") {
+      screen.setWorkspaceIndicator("running workspace setup...");
+      return;
+    }
+    if (phase === "swapping") {
+      screen.setWorkspaceIndicator("moving session into workspace...");
+      return;
+    }
+    // Exit-direction phases. Separate names rather than reusing
+    // "swapping" with a direction flag: the indicator text is the whole
+    // point of these events, and "moving session into workspace" during
+    // an `end` would say the opposite of what is happening.
+    if (phase === "landing") {
+      screen.setWorkspaceIndicator("merging workspace back...");
+      return;
+    }
+    if (phase === "returning") {
+      screen.setWorkspaceIndicator("returning to source tree...");
+      return;
+    }
+    if (phase === "failed") {
+      screen.setWorkspaceIndicator(null);
+      const raw = typeof u.error === "string" ? u.error : "unknown error";
+      screen.notify(`workspace failed: ${raw.length > 40 ? raw.slice(0, 40) + "..." : raw}`, 5000);
+      return;
+    }
+    if (phase !== "entered" && phase !== "left") {
+      return;
+    }
+    screen.setWorkspaceIndicator(null);
+    if (typeof u.cwd !== "string" || u.cwd.length === 0) {
+      return;
+    }
+    resolvedCwd = u.cwd;
+    // Cached from the previous tree, and the new one is a different
+    // repository root even when it is the same project.
+    gitTopLevel = null;
+    const source = typeof u.sourceCwd === "string" ? u.sourceCwd : u.cwd;
+    const label = typeof u.label === "string" ? u.label : undefined;
+    screen.setSessionbar({
+      cwd:
+        phase === "entered" && label !== undefined
+          ? `${shortenHomePath(source)} ⧉${label}`
+          : shortenHomePath(source),
+    });
+    pollGitOnce();
+    screen.notify(
+      phase === "entered" ? `isolated in ⧉${label ?? "workspace"}` : "returned to source tree",
+      2000,
+    );
   };
 
   // Periodically poll the daemon for the current session's forkSynthesisState.

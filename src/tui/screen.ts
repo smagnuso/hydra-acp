@@ -884,6 +884,7 @@ export class Screen {
    private bannerSearchIndicator: string | null = null;
    private compactionIndicator: string | null = null;
     private synthesisIndicator: string | null = null;
+    private workspaceIndicator: string | null = null;
     // Bottom-of-screen "btw" overlay pane. Closed by default; when open,
     // reserves `btwOverlayHeight` rows from the bottom (1 separator + 1
   // header + height-2 content). The main scrollback area shrinks to make
@@ -2514,6 +2515,22 @@ export class Screen {
     this.syncedPartialRepaint(() => this.drawBanner());
   }
 
+  // Persistent workspace-transition indicator. Ranks above synthesis and
+  // compaction: those run in the background and the session stays usable
+  // through them, whereas a workspace move is replacing the agent under
+  // the user and is the thing they just asked for. Caller clears it.
+  //
+  // Third indicator with an identical shape to the other two. If a
+  // fourth arrives, replace all of them with a keyed map rather than
+  // adding another field and another branch in bannerRightContent.
+  setWorkspaceIndicator(text: string | null): void {
+    if (this.workspaceIndicator === text) {
+      return;
+    }
+    this.workspaceIndicator = text;
+    this.syncedPartialRepaint(() => this.drawBanner());
+  }
+
   // Runtime toggle for terminal mouse capture. With capture on, the
   // wheel drives scrollback but text selection requires shift+drag
   // (terminals route mouse events to the app). With capture off, plain
@@ -2905,7 +2922,10 @@ export class Screen {
   // since the user can't see which match they're on from the highlight
   // alone; prompt-history's match is visible in the buffer, so no
   // counter needed there.
-  private bannerRightContent(): { text: string; kind: "search" | "notify" | "synthesis" | "compaction" } | null {
+  private bannerRightContent(): {
+    text: string;
+    kind: "search" | "notify" | "synthesis" | "compaction" | "workspace";
+  } | null {
     if (this.scrollbackSearch !== null) {
       const sb = this.scrollbackSearch;
       const counter =
@@ -2921,6 +2941,9 @@ export class Screen {
     }
     if (this.bannerNotification !== null) {
       return { text: this.bannerNotification, kind: "notify" };
+    }
+    if (this.workspaceIndicator !== null) {
+      return { text: this.workspaceIndicator, kind: "workspace" };
     }
     if (this.synthesisIndicator !== null) {
       return { text: this.synthesisIndicator, kind: "synthesis" };

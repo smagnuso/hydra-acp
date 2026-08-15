@@ -1191,7 +1191,7 @@ The cap is only evaluated when `fromSession` is present. **Label-only sends are 
 
 | Field | Type | Semantics |
 |---|---|---|
-| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `current_model_update`, `current_mode_update`, `available_commands_update`, `available_modes_update`, `usage_update`, `config_option_update`, `hydra_compaction`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
+| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `current_model_update`, `current_mode_update`, `available_commands_update`, `available_modes_update`, `usage_update`, `config_option_update`, `hydra_compaction`, `hydra_workspace`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
 
 **Why it exists.** Replay is otherwise undatable. A client that attaches to an existing session receives the whole history through the same notification channel as live traffic (by design — see [`session/attach`](#request-sessionattach)), with nothing distinguishing the two. Without `recordedAt`, the only clock available is time-of-receipt, so every replayed `tool_call` appears to have started the instant the client attached, and elapsed-time rendering reads `0s` for work that ran hours ago. `_meta["hydra-acp"].turnStartedAt` on the attach response fixes this at *turn* granularity only; `recordedAt` generalizes it to every event.
 
@@ -1848,6 +1848,48 @@ Attached clients receive `session/update` notifications as compaction progresses
 ```
 
 **Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed.
+
+### session/update — workspace lifecycle
+
+Emitted while a session moves into or out of an isolated workspace
+(`/hydra workspace start|end|abandon`). `update.sessionUpdate` is
+`"hydra_workspace"` for every phase. Ephemeral: never written to
+`history.jsonl`, so replaying clients do not see it.
+
+```jsonc
+// provisioning — the workspace checkout is being created
+{ "sessionUpdate": "hydra_workspace", "phase": "provisioning" }
+
+// setup — repo-defined setup hooks are running (these may install dependencies)
+{ "sessionUpdate": "hydra_workspace", "phase": "setup" }
+
+// swapping — the agent process is being replaced in the new directory
+{ "sessionUpdate": "hydra_workspace", "phase": "swapping" }
+
+// entered — terminal. The session now lives at `cwd`.
+{ "sessionUpdate": "hydra_workspace", "phase": "entered",
+  "cwd": "/home/u/.hydra-acp/workspaces/<hash>/feature",
+  "sourceCwd": "/home/u/dev/proj", "label": "feature", "branch": "hydra/feature" }
+
+// left — terminal. The session is back in the source tree.
+{ "sessionUpdate": "hydra_workspace", "phase": "left",
+  "cwd": "/home/u/dev/proj", "sourceCwd": "/home/u/dev/proj", "integrated": true }
+
+// failed — terminal. The move was unwound; the session did not relocate.
+{ "sessionUpdate": "hydra_workspace", "phase": "failed", "error": "..." }
+```
+
+**Why a client must handle this.** A session's cwd is otherwise learned
+once, from `session/new` or `session/attach`, and there is no other
+signal that it changed. That cwd is what a client resolves file
+completion, VCS status, and diff paths against, so a client that ignores
+these events keeps operating on the tree the session has left — silently,
+because the old directory still exists and still answers.
+
+**Ordering guarantee:** the terminal phases fire *after* the session
+record is persisted, so a client acting on the new `cwd` can never
+outrun the state that justifies it. Non-terminal phases are progress
+only and carry no state.
 
 **Cold sessions:** broadcasts are dropped for sessions with no attached clients. The persistent `compactionState` field in the session record provides visibility for cold sessions.
 

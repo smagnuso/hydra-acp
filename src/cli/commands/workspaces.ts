@@ -9,10 +9,14 @@
 // running.
 //
 // A workspace and its source tree share no path prefix, so the
-// directory name cannot tell you which project it belongs to. The
-// binding lives in the session record, and a workspace whose record is
-// gone is genuinely unattributable from the directory alone: that is
-// what makes "orphan" a real state rather than a bookkeeping nicety.
+// directory *name* cannot tell you which project it belongs to. The
+// binding lives in the session record. But a workspace whose record is
+// gone is still not anonymous: the directory itself names its origin (a
+// git worktree in `.git`, a copy workspace in its manifest), which is
+// what attributeOrphan recovers. "Orphan" therefore means "no session
+// owns this", not "nothing is known about this" — the distinction
+// matters because it is the provider, recovered that way, that knows
+// how to tear one down completely.
 
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
@@ -22,6 +26,12 @@ import { readJsonSafe } from "../../core/json-store.js";
 import { getProvider } from "../../core/workspace/registry.js";
 import { shortenHomePath } from "../../core/paths.js";
 import { asSnapshotId, type Workspace } from "../../core/workspace/provider.js";
+import {
+  captureSourceForLanding,
+  releaseSourceCapture,
+  replaySourceDivergence,
+  type SourceCapture,
+} from "../../core/workspace/source-state.js";
 
 interface Binding {
   sessionId: string;
@@ -131,15 +141,17 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
       });
       continue;
     }
-    // No record points here. The directory name is a hash, so the source
-    // tree is not recoverable from it — this is why orphans need
-    // reporting rather than silent cleanup.
+    // No record points here, but the directory can usually still say
+    // where it came from. Report that rather than "(unknown)": an
+    // orphan you can attribute is one you can decide about.
+    const attributed = await attributeOrphan(dir);
     rows.push({
       path: dir,
-      sourceCwd: "(unknown)",
-      label: path.basename(dir),
-      provider: "(unknown)",
+      sourceCwd: attributed?.sourceCwd ?? "(unknown)",
+      label: attributed?.label ?? path.basename(dir),
+      provider: attributed?.provider ?? "(unknown)",
       state: "orphan",
+      ...(attributed?.vcs?.branch !== undefined ? { branch: attributed.vcs.branch } : {}),
     });
   }
 
@@ -168,11 +180,15 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
     if (provider === undefined) {
       continue;
     }
+    // Bound rows use the recorded binding; orphans fall back to what the
+    // directory itself reported, so they get a real DIRTY answer too.
     const binding = byPath.get(row.path);
-    if (binding === undefined) {
+    const ws =
+      binding !== undefined ? toProviderWorkspace(binding.workspace) : await attributeOrphan(row.path);
+    if (ws === undefined) {
       continue;
     }
-    const status = await provider.status(toProviderWorkspace(binding.workspace)).catch(() => undefined);
+    const status = await provider.status(ws).catch(() => undefined);
     if (status !== undefined) {
       row.clean = status.clean;
       row.changedCount = status.changedPaths.length;
@@ -189,6 +205,47 @@ function runGit(args: string[], cwd: string): Promise<{ ok: boolean; out: string
       resolve({ ok: !e, out: o ?? "", err: s ?? "" });
     });
   });
+}
+
+/**
+ * Recover a workspace's identity from the directory itself, for use when
+ * no session record points at it.
+ *
+ * The path is a dead end — a hash and a label — but the directory is
+ * not: a git worktree names its parent repo in `.git`, and a copy
+ * workspace records its source in the manifest sidecar. That is enough
+ * to hand an orphan back to its provider, which matters because the
+ * provider is what knows how to delete one safely. Returns undefined
+ * only when the directory belongs to neither shipped provider.
+ */
+async function attributeOrphan(dir: string): Promise<Workspace | undefined> {
+  const common = await runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
+  if (common.ok && common.out.trim().length > 0) {
+    const gitDir = common.out.trim();
+    const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], dir);
+    return {
+      path: dir,
+      sourceCwd: path.dirname(gitDir),
+      label: path.basename(dir),
+      provider: "git",
+      vcs: {
+        repoRoot: path.dirname(gitDir),
+        ...(branch.ok && branch.out.trim().length > 0 ? { branch: branch.out.trim() } : {}),
+      },
+    };
+  }
+  const manifest = await readJsonSafe<{ sourceCwd?: string; label?: string }>(
+    `${dir}.manifest.json`,
+  );
+  if (manifest?.sourceCwd !== undefined) {
+    return {
+      path: dir,
+      sourceCwd: manifest.sourceCwd,
+      label: manifest.label ?? path.basename(dir),
+      provider: "copy",
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -234,6 +291,8 @@ interface TargetChecks {
   source: string;
   branch: string;
   base: string;
+  /** The source's pre-landing state, held so the reset cannot lose it. */
+  capture?: SourceCapture;
 }
 
 /**
@@ -253,18 +312,77 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
   if (!exists) {
     throw new Error(`source tree ${shortenHomePath(source)} no longer exists`);
   }
-  const dirty = await runGit(["status", "--porcelain", "--untracked-files=no"], source);
-  if (dirty.ok && dirty.out.trim().length > 0) {
-    throw new Error(
-      `${shortenHomePath(source)} has uncommitted changes; commit or stash them first so a ` +
-        `partially-applied result cannot be confused with your own work`,
-    );
+  // A dirty source is the NORMAL case: `start` copies the user's work
+  // in rather than taking it, so the same edits are still sitting here.
+  // Capture it instead of refusing, so the reset this enables cannot
+  // lose anything and post-start edits get replayed rather than
+  // rejected. Same reconciliation the daemon's `end` performs.
+  const capture =
+    row.sessionId === undefined
+      ? undefined
+      : await captureSourceForLanding({
+          source,
+          startSnapshotRef: `refs/hydra/start/${row.sessionId}`,
+          retainRef: `refs/hydra/landing/${row.sessionId}`,
+          provider: getProvider(row.provider),
+        });
+  if (capture === undefined) {
+    // No session owns this workspace, so there is no start snapshot to
+    // measure against and no way to tell the copy from the user's own
+    // work. Refusing is the only safe answer left.
+    const dirty = await runGit(["status", "--porcelain", "-uall"], source);
+    if (dirty.ok && dirty.out.trim().length > 0) {
+      throw new Error(
+        `${shortenHomePath(source)} has uncommitted changes; commit or stash them first so a ` +
+          `partially-applied result cannot be confused with your own work`,
+      );
+    }
   }
   const branch = row.branch ?? "";
   if (branch.length === 0) {
     throw new Error(`workspace ${row.label} has no branch to merge from`);
   }
-  return { source, branch, base: "" };
+  return { source, branch, base: "", capture };
+}
+
+/**
+ * Clear the source so a fast-forward can run.
+ *
+ * Safe only because `captureSourceForLanding` already retained what is
+ * being cleared; the caller replays it afterwards. Called at the last
+ * possible moment, after every check that could still refuse, so a
+ * command that fails has not touched the tree.
+ */
+async function clearForLanding(source: string, capture: SourceCapture | undefined): Promise<void> {
+  if (capture === undefined || capture.clean) {
+    return;
+  }
+  const reset = await runGit(["reset", "--hard", "HEAD"], source);
+  const cleaned = await runGit(["clean", "-fd"], source);
+  if (!reset.ok || !cleaned.ok) {
+    throw new Error(
+      `could not clear ${shortenHomePath(source)} for the merge; your work is preserved at ` +
+        `${capture.retainedRef}. Nothing was landed.`,
+    );
+  }
+}
+
+/** Put the source's own post-start edits back, and report if they clash. */
+async function replayAfterLanding(
+  source: string,
+  capture: SourceCapture | undefined,
+): Promise<void> {
+  if (capture === undefined) {
+    return;
+  }
+  if (await replaySourceDivergence({ source, capture })) {
+    await releaseSourceCapture({ source, capture });
+    return;
+  }
+  process.stdout.write(
+    `WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's changes ` +
+      `and could not be replayed. They are preserved at ${capture.retainedRef}\n`,
+  );
 }
 
 export async function runWorkspaceMerge(opts: {
@@ -274,7 +392,7 @@ export async function runWorkspaceMerge(opts: {
   remove?: boolean;
 }): Promise<void> {
   const row = await resolveTarget(opts.target);
-  const { source, branch } = await preflight(row, opts.into);
+  const { source, branch, capture } = await preflight(row, opts.into);
 
   // Establish that the merge CAN fast-forward before mutating anything.
   //
@@ -314,6 +432,8 @@ export async function runWorkspaceMerge(opts: {
     process.stdout.write(`committed workspace changes on ${branch}\n`);
   }
 
+  await clearForLanding(source, capture);
+
   const currentBranch = (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
   const merged = await runGit(["merge", "--ff-only", branch], source);
   if (!merged.ok) {
@@ -327,6 +447,7 @@ export async function runWorkspaceMerge(opts: {
         (merged.err.trim() ? `git said: ${merged.err.trim()}\n` : ""),
     );
   }
+  await replayAfterLanding(source, capture);
   process.stdout.write(
     `merged ${branch} into ${currentBranch} at ${shortenHomePath(source)}\n`,
   );
@@ -338,7 +459,7 @@ export async function runWorkspaceApply(opts: {
   into?: string;
 }): Promise<void> {
   const row = await resolveTarget(opts.target);
-  const { source } = await preflight(row, opts.into);
+  const { source, capture } = await preflight(row, opts.into);
 
   const provider = getProvider(row.provider);
   if (provider === undefined || !provider.capabilities().supports.captureWorkingState) {
@@ -367,6 +488,7 @@ export async function runWorkspaceApply(opts: {
     process.stdout.write("Nothing to apply: the workspace matches its base.\n");
     return;
   }
+  await clearForLanding(source, capture);
   const applied = await new Promise<{ ok: boolean; err: string }>((resolve) => {
     const child = execFile(
       "git",
@@ -379,6 +501,7 @@ export async function runWorkspaceApply(opts: {
   if (!applied.ok) {
     throw new Error(`could not apply the change set: ${applied.err.trim()}`);
   }
+  await replayAfterLanding(source, capture);
   process.stdout.write(
     `applied ${row.label} into ${shortenHomePath(source)} as staged changes (not committed)\n`,
   );
@@ -389,7 +512,10 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
   // The autosave ref exists to make unintegrated work recoverable. Once
   // it is integrated the ref is only pinning objects, so drop it.
   if (row.sessionId !== undefined) {
+    // Both refs: the autosave and the landing baseline. Each is a GC
+    // root, so a survivor pins objects for a workspace that is done.
     await runGit(["update-ref", "-d", `refs/hydra/snapshots/${row.sessionId}`], source);
+    await runGit(["update-ref", "-d", `refs/hydra/start/${row.sessionId}`], source);
   }
   if (!remove) {
     process.stdout.write(
@@ -494,6 +620,9 @@ export async function runWorkspaceRemove(opts: {
     await provider
       .dropSnapshotRef(toProviderWorkspace(bound.workspace), `refs/hydra/snapshots/${row.sessionId}`)
       .catch(() => undefined);
+    await provider
+      .dropSnapshotRef(toProviderWorkspace(bound.workspace), `refs/hydra/start/${row.sessionId}`)
+      .catch(() => undefined);
   }
 
   if (provider !== undefined && bound !== undefined) {
@@ -529,14 +658,17 @@ export async function runWorkspaceList(opts: { json?: boolean } = {}): Promise<v
     return;
   }
 
+  // WORKSPACE goes last because it is the only variable-width column;
+  // the short ones stay aligned to the left where they can be scanned.
   const cols = [
-    ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY"],
+    ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"],
     ...rows.map((r) => [
       r.state,
       r.sessionId?.replace(/^hydra_session_/, "") ?? "-",
       shortenHomePath(r.sourceCwd),
       r.label,
       r.changedCount === undefined ? "?" : r.changedCount > 0 ? String(r.changedCount) : "-",
+      shortenHomePath(r.path),
     ]),
   ];
   const widths = cols[0]!.map((_, i) => Math.max(...cols.map((row) => (row[i] ?? "").length)));
@@ -571,20 +703,82 @@ export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise
   let removed = 0;
   let kept = 0;
   for (const row of orphans) {
-    // An orphan has no record, so no provider either, and cleanliness
-    // cannot be established through one. Fall back to "is the directory
-    // non-empty of changes we can see" being unknowable, and require
-    // --force. Deleting work nobody can attribute is the one mistake
-    // that cannot be walked back.
-    if (opts.force !== true) {
-      kept += 1;
-      process.stdout.write(`keep   ${shortenHomePath(row.path)} (state unknown; use --force)\n`);
+    // An orphan has no record, but it is not therefore anonymous: the
+    // directory still knows its own provider and source. Recovering that
+    // is what lets the removal go through provider.removeWorkspace,
+    // which is the only thing that tears down a workspace *completely* —
+    // a bare rm of the directory leaves git's worktree registry (and the
+    // branch) pointing at a path that no longer exists.
+    const ws = await attributeOrphan(row.path);
+    const provider = ws === undefined ? undefined : getProvider(ws.provider);
+    if (ws === undefined || provider === undefined) {
+      // Genuinely unattributable. The old behaviour is right here: only
+      // --force may delete work nobody can account for.
+      if (opts.force !== true) {
+        kept += 1;
+        process.stdout.write(
+          `keep   ${shortenHomePath(row.path)} (unrecognized workspace; use --force)\n`,
+        );
+        continue;
+      }
+      await fs.rm(row.path, { recursive: true, force: true }).catch(() => undefined);
+      await fs.rm(`${row.path}.manifest.json`, { force: true }).catch(() => undefined);
+      removed += 1;
+      process.stdout.write(`remove ${shortenHomePath(row.path)} (unrecognized)\n`);
       continue;
     }
-    await fs.rm(row.path, { recursive: true, force: true }).catch(() => undefined);
-    await fs.rm(`${row.path}.manifest.json`, { force: true }).catch(() => undefined);
+    // Now that the provider is known, cleanliness is a real question
+    // with a real answer, so --force stops being the only option.
+    const status = await provider.status(ws).catch(() => undefined);
+    const dirty = status === undefined || status.changedPaths.length > 0;
+    if (dirty && opts.force !== true) {
+      kept += 1;
+      const why =
+        status === undefined
+          ? "state unknown"
+          : `${status.changedPaths.length} uncommitted change(s)`;
+      process.stdout.write(`keep   ${shortenHomePath(row.path)} (${why}; use --force)\n`);
+      continue;
+    }
+    await provider.unlock(ws).catch(() => undefined);
+    await provider.removeWorkspace(ws, { force: opts.force === true }).catch(() => undefined);
     removed += 1;
-    process.stdout.write(`remove ${shortenHomePath(row.path)}\n`);
+    const held = await reclaimOrphanBranch(ws);
+    process.stdout.write(
+      `remove ${shortenHomePath(row.path)}${held === undefined ? "" : ` (${held})`}\n`,
+    );
   }
   process.stdout.write(`\n${removed} removed, ${kept} kept.\n`);
+}
+
+/**
+ * Delete the workspace's branch once the workspace itself is gone, but
+ * only when the branch is empty of work.
+ *
+ * Removing a worktree never removes its branch, so pruning without this
+ * leaves a `hydra/…` ref per workspace forever. Deleting unconditionally
+ * is not the fix: a branch with commits on it is the durable artifact
+ * that `missing` workspaces are rebuilt from, and for an orphan it is
+ * the last copy. So the empty ones go and the rest are reported.
+ *
+ * Returns a note when the branch was kept, undefined when there was
+ * nothing to keep or nothing to do.
+ */
+async function reclaimOrphanBranch(ws: Workspace): Promise<string | undefined> {
+  const branch = ws.vcs?.branch;
+  const repoRoot = ws.vcs?.repoRoot;
+  // Only ever our own namespace — a workspace checked out on a user's
+  // branch must not have that branch deleted out from under them.
+  if (branch === undefined || repoRoot === undefined || !branch.startsWith("hydra/")) {
+    return undefined;
+  }
+  const ahead = await runGit(["rev-list", "--count", `HEAD..${branch}`], repoRoot);
+  if (!ahead.ok) {
+    return `branch ${branch} kept (could not compare it to HEAD)`;
+  }
+  if (Number.parseInt(ahead.out.trim(), 10) > 0) {
+    return `branch ${branch} kept — it has ${ahead.out.trim()} commit(s) not in HEAD`;
+  }
+  const deleted = await runGit(["branch", "-D", branch], repoRoot);
+  return deleted.ok ? undefined : `branch ${branch} kept (delete failed)`;
 }

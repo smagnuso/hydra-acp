@@ -156,10 +156,22 @@ describe.each(FIXTURES)("IsolationProvider contract [$kind]", (fixture) => {
     expect((await fs.stat(ws.path)).isDirectory()).toBe(true);
   });
 
-  it("refuses a duplicate label rather than adopting the existing directory", async () => {
-    const { provider, source } = await created("dupe");
+  it("never hands back an existing workspace for a duplicate label", async () => {
+    // The property that matters is distinctness, not refusal. Callers ask
+    // for isolation rather than for a particular name, so a taken label
+    // gets suffixed; what must never happen is two sessions pointed at
+    // one checkout, which is the failure this whole mechanism prevents.
+    const { provider, source, ws } = await created("dupe");
     const again = await provider.createWorkspace({ sourceCwd: source, label: "dupe" });
-    expect(again.ok).toBe(false);
+    expect(again.ok).toBe(true);
+    if (!again.ok) {
+      return;
+    }
+    expect(again.workspace.path).not.toBe(ws.path);
+    // Both remain usable and independent.
+    await fs.writeFile(path.join(ws.path, "a.txt"), "first\n");
+    await fs.writeFile(path.join(again.workspace.path, "a.txt"), "second\n");
+    expect(await fs.readFile(path.join(ws.path, "a.txt"), "utf8")).toBe("first\n");
   });
 
   it("reports a missing source as a reason rather than throwing", async () => {

@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "../json-store.js";
 import {
   WorkspaceUnsupportedError,
+  findFreeLabel,
   sanitizeLabel,
   workspaceRootFor,
   type Capabilities,
@@ -169,24 +170,27 @@ export class CopyProvider implements IsolationProvider {
     }
 
     const root = workspaceRootFor(source);
-    const label = sanitizeLabel(opts.label);
-    const target = path.join(root, label);
-
     try {
       await fs.mkdir(root, { recursive: true });
     } catch (err) {
       return { ok: false, reason: `could not create workspace root: ${String(err)}` };
     }
 
-    // Refuse rather than merge into an existing directory: silently
-    // copying over someone else's workspace is the failure this whole
-    // feature exists to prevent.
-    try {
-      await fs.access(target);
-      return { ok: false, reason: `workspace already exists at ${target}` };
-    } catch {
-      // Expected: the target should not exist yet.
+    // Suffix past a taken label rather than merging into an existing
+    // directory. Copying over someone else's workspace is the failure
+    // this whole mechanism exists to prevent, and refusing outright
+    // would make the git and copy providers disagree about the same
+    // call — which the shared contract suite exists to catch.
+    const label = await findFreeLabel(sanitizeLabel(opts.label), async (candidate) =>
+      fs
+        .access(path.join(root, candidate))
+        .then(() => false)
+        .catch(() => true),
+    );
+    if (label === undefined) {
+      return { ok: false, reason: `no free name available for "${opts.label}"` };
     }
+    const target = path.join(root, label);
 
     try {
       await fs.cp(contentSource, target, {

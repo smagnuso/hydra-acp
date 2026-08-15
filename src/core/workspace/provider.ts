@@ -158,7 +158,24 @@ export interface IsolationProvider {
   capabilities(): Capabilities;
 
   createWorkspace(opts: CreateWorkspaceOptions): Promise<CreateWorkspaceResult>;
-  removeWorkspace(ws: Workspace, opts: { force: boolean }): Promise<void>;
+  /**
+   * `discardLine` also discards the provider's line of work (for git,
+   * the branch), not just the checkout.
+   *
+   * Default false, because the line is what makes a removed workspace
+   * recoverable: rematerialize rebuilds a vanished checkout from it. Set
+   * it only when nothing can reference the line any more AND its content
+   * is safe elsewhere — otherwise a surviving line is the difference
+   * between "recoverable" and "gone".
+   *
+   * Keeping it around forever is not free either: a line name that
+   * outlives its workspace collides with the next workspace that wants
+   * the same label.
+   */
+  removeWorkspace(
+    ws: Workspace,
+    opts: { force: boolean; discardLine?: boolean },
+  ): Promise<void>;
   /**
    * Rebuild a workspace directory that has gone missing, from whatever
    * the provider retained.
@@ -230,6 +247,37 @@ export function workspaceRootFor(sourceCwd: string): string {
     .digest("hex")
     .slice(0, 12);
   return path.join(hydraHome(), "workspaces", digest);
+}
+
+/**
+ * Find a label no existing workspace is using, suffixing `-2`, `-3`, …
+ *
+ * Callers ask for isolation, not for a particular name, so a taken label
+ * is adjusted rather than refused. What must never happen is handing back
+ * an EXISTING workspace: two sessions in one checkout is the failure this
+ * whole mechanism exists to prevent.
+ *
+ * `isFree` is provider-supplied because "taken" differs by provider. For
+ * git a label is taken when either its directory or its branch exists,
+ * and the branch half is the subtle one: a branch outlives its checkout
+ * (that is what makes a removed workspace recoverable), so a label whose
+ * directory is long gone can still be spoken for.
+ */
+export async function findFreeLabel(
+  requested: string,
+  isFree: (label: string) => Promise<boolean>,
+  limit = 100,
+): Promise<string | undefined> {
+  if (await isFree(requested)) {
+    return requested;
+  }
+  for (let n = 2; n <= limit; n += 1) {
+    const candidate = `${requested}-${n}`;
+    if (await isFree(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 /** Filesystem-safe label. Keeps the caller's intent legible in the path. */

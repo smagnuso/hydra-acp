@@ -47,7 +47,7 @@ export interface BannerInfo {
 
 export interface TransientInfo {
   text: string;
-  kind: "search" | "notify" | "synthesis" | "compaction";
+  kind: "search" | "notify" | "synthesis" | "compaction" | "workspace";
 }
 
 /** Everything a field resolver may read. */

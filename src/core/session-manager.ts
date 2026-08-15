@@ -39,13 +39,54 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
-import { asSnapshotId, type SnapshotId } from "./workspace/provider.js";
+import {
+  captureSourceForLanding,
+  releaseSourceCapture,
+  replaySourceDivergence,
+} from "./workspace/source-state.js";
+import {
+  asSnapshotId,
+  type IsolationProvider,
+  type SnapshotId,
+  type Workspace,
+} from "./workspace/provider.js";
 import {
   applyCarry,
   readWorkspaceRepoConfig,
   runWorkspaceHook,
   type WorkspaceRepoConfig,
 } from "./workspace/setup.js";
+import { execFile as execFileCb } from "node:child_process";
+
+// Minimal git runner for the workspace-move path. Errors are returned,
+// not thrown: every caller here has a meaningful fallback and none of
+// them should take the session down.
+function execGit(
+  args: string[],
+  cwd: string,
+): Promise<{ ok: boolean; out: string; err: string }> {
+  return new Promise((resolve) => {
+    execFileCb("git", args, { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }, (e, o, s) => {
+      resolve({ ok: !e, out: o ?? "", err: s ?? "" });
+    });
+  });
+}
+
+function execGitStdin(
+  args: string[],
+  cwd: string,
+  stdin: string,
+): Promise<{ ok: boolean; err: string }> {
+  return new Promise((resolve) => {
+    const child = execFileCb(
+      "git",
+      args,
+      { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
+      (e, _o, s) => resolve({ ok: !e, err: s ?? "" }),
+    );
+    child.stdin?.end(stdin);
+  });
+}
 import {
   TombstoneStore,
   shouldResurrectFromUpstream,
@@ -56,7 +97,7 @@ import { generateSynopsis } from "./synopsis-agent.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
 import { collectToolBlobHashes } from "./tool-content.js";
-import { paths } from "./paths.js";
+import { paths, shortenHomePath } from "./paths.js";
 import { expandHome } from "./config.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
 import { encodeBundle, type Bundle } from "./bundle.js";
@@ -919,6 +960,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
+      workspaceHook: (action, name) =>
+        this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1245,6 +1288,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
+      workspaceHook: (action, name) =>
+        this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1369,6 +1414,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
+      workspaceHook: (action, name) =>
+        this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1582,6 +1629,12 @@ export class SessionManager {
       await provider
         .dropSnapshotRef(asWorkspace, this.snapshotRefFor(sessionId))
         .catch(() => undefined);
+      // The start ref too. It is only a baseline for measuring the
+      // source's divergence at landing time, so once the session is gone
+      // it has no reader left — and like any ref it is a GC root.
+      await provider
+        .dropSnapshotRef(asWorkspace, this.startRefFor(sessionId))
+        .catch(() => undefined);
     }
 
     const status = await provider
@@ -1642,6 +1695,24 @@ export class SessionManager {
    */
   private snapshotRefFor(sessionId: string): string {
     return `refs/hydra/snapshots/${sessionId}`;
+  }
+
+  /**
+   * The source tree's state at the moment `start` isolated the session.
+   *
+   * Deliberately a DIFFERENT ref from snapshotRefFor, which is the
+   * per-turn workspace autosave. They were the same name once, and the
+   * autosave overwrote this on the first turn inside the workspace — so
+   * by landing time the "state of the source at start" was actually the
+   * state of the WORKSPACE, and the replay diff came out as the inverse
+   * of the agent's own work. `git apply --3way` rejected it, which is
+   * the only reason it did not silently revert the session's changes.
+   *
+   * Two writers, two lifetimes, two names: this one is written once and
+   * never churns; the autosave churns every turn.
+   */
+  private startRefFor(sessionId: string): string {
+    return `refs/hydra/start/${sessionId}`;
   }
 
   /**
@@ -1710,6 +1781,584 @@ export class SessionManager {
     );
   }
 
+  /**
+   * `/hydra workspace <verb>` — move a live session into an isolated
+   * workspace, or back out of one.
+   *
+   * Why mid-session rather than only at creation: the moment you know
+   * you need isolation is usually partway through, when a plan turns
+   * into edits that will collide with other work. Requiring the decision
+   * up front means either isolating sessions that never needed it, or
+   * discovering too late that you are in the wrong tree.
+   */
+  async runWorkspaceAction(
+    sessionId: string,
+    action: "start" | "merge" | "end" | "abandon" | "status",
+    name?: string,
+  ): Promise<string> {
+    const session = this.get(sessionId);
+    if (session === undefined) {
+      throw new Error("session is not live");
+    }
+    if (action === "status") {
+      const ws = session.workspace;
+      if (ws === undefined) {
+        return `Not isolated. Working directly in ${session.cwd}.\nUse \`/hydra workspace start\` to move into an isolated workspace.`;
+      }
+      return [
+        `Isolated in ${ws.path}`,
+        `  source:   ${ws.sourceCwd}`,
+        `  provider: ${ws.provider}${ws.vcs?.branch !== undefined ? ` (${ws.vcs.branch})` : ""}`,
+        `Use \`/hydra workspace end\` to merge and return, or \`abandon\` to return without merging.`,
+      ].join("\n");
+    }
+    if (action === "start") {
+      return this.startWorkspace(session, name);
+    }
+    const ws = session.workspace;
+    if (ws === undefined) {
+      throw new Error(
+        `this session is not in a workspace. Use \`/hydra workspace start\` first.`,
+      );
+    }
+    if (action === "merge") {
+      session.broadcastWorkspacePhase({ phase: "landing" });
+      let landed: string;
+      try {
+        landed = await this.mergeWorkspaceIntoSource(ws, session.sessionId);
+      } catch (err) {
+        const base = err instanceof Error ? err.message : String(err);
+        session.broadcastWorkspacePhase({ phase: "failed", error: base });
+        throw err;
+      }
+      // Staying put, so clear the indicator rather than leaving it lit.
+      session.broadcastWorkspacePhase({
+        phase: "entered",
+        cwd: session.cwd,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+      });
+      return `${landed}\nStill working in ${ws.path}.`;
+    }
+    if (action === "end") {
+      // Merge BEFORE leaving. If it refuses, the session stays put:
+      // returning to the source tree with the work stranded behind is
+      // the one outcome that would surprise, since `end` reads as
+      // "finish this", not "walk away from it".
+      // Progress phases, matching what `start` reports. The merge walks
+      // two trees and the swap respawns an agent, so an `end` on a real
+      // repository is long enough that silence reads as a hang.
+      session.broadcastWorkspacePhase({ phase: "landing" });
+      let landed: string;
+      try {
+        landed = await this.mergeWorkspaceIntoSource(ws, session.sessionId);
+      } catch (err) {
+        const base = err instanceof Error ? err.message : String(err);
+        session.broadcastWorkspacePhase({ phase: "failed", error: base });
+        throw err;
+      }
+      session.broadcastWorkspacePhase({ phase: "returning" });
+      await this.leaveWorkspace(session, ws, { integrated: true });
+      return `${landed}\nReturned to ${ws.sourceCwd}. Workspace removed.`;
+    }
+    // abandon
+    session.broadcastWorkspacePhase({ phase: "returning" });
+    await this.leaveWorkspace(session, ws, { integrated: false });
+    return [
+      `Returned to ${ws.sourceCwd} WITHOUT merging.`,
+      `The workspace is still at ${ws.path} and its branch ${ws.vcs?.branch ?? "(none)"} is intact,`,
+      `so nothing is lost — land it later with \`hydra workspace merge\`, or drop it with \`hydra workspace remove\`.`,
+    ].join("\n");
+  }
+
+  /**
+   * Fast-forward the source onto the workspace's branch and replay
+   * whatever the workspace had left uncommitted.
+   *
+   * Every check runs BEFORE anything is written, so a merge that cannot
+   * land is a no-op rather than something that half-happened. Shared by
+   * `merge` (stay) and `end` (leave), which must behave identically at
+   * the point of landing.
+   *
+   * The round trip is meant to be faithful: what was committed comes
+   * back committed, what was uncommitted comes back uncommitted. `start`
+   * copied the user's WIP in without asking, so `end` must not hand it
+   * back in a form they did not choose — least of all as a commit that
+   * turns their untracked files into tracked ones.
+   */
+  private async mergeWorkspaceIntoSource(
+    ws: PersistedWorkspace,
+    sessionId: string,
+  ): Promise<string> {
+    const source = ws.sourceCwd;
+    const branch = ws.vcs?.branch;
+    if (branch === undefined) {
+      throw new Error(`workspace ${ws.label} has no branch to merge from`);
+    }
+    const exists = await this.dirExists(source);
+    if (!exists) {
+      throw new Error(`source tree ${source} no longer exists`);
+    }
+    // A dirty source is the NORMAL case: `start` copied the work in
+    // rather than taking it, so the same edits are expected to still be
+    // sitting here. Capture that state rather than gating on it. Once
+    // it is captured the reset below cannot lose anything, which turns
+    // "has the source diverged?" from a question that has to be
+    // answered before proceeding into one that answers itself at the
+    // end — and only fails when two edits genuinely overlap.
+    const provider = getWorkspaceProvider(ws.provider);
+    const capture = await captureSourceForLanding({
+      source,
+      // The START ref. Using the per-turn autosave ref here was the bug:
+      // it holds WORKSPACE state, so the replay diff came out as the
+      // inverse of the agent's work rather than as the source's
+      // divergence.
+      startSnapshotRef: this.startRefFor(sessionId),
+      retainRef: `refs/hydra/landing/${sessionId}`,
+      provider,
+    });
+
+    const sourceHead = (await execGit(["rev-parse", "HEAD"], source)).out.trim();
+    const canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+    if (!canFf.ok) {
+      const current = (await execGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
+      throw new Error(
+        `cannot fast-forward ${current} in ${source} to ${branch}. The source has moved on. ` +
+          `Nothing was changed; merge it yourself with: git -C ${source} merge ${branch}`,
+      );
+    }
+
+    // Capture what the workspace has NOT committed, but do not commit it.
+    // Work the agent chose to commit should arrive as commits; work it
+    // left uncommitted — including the user's own WIP that was copied in
+    // — should arrive as uncommitted changes. Synthesizing a commit for
+    // the latter hands back something the user never chose to create,
+    // and quietly promotes their untracked files to tracked ones.
+    let pending: SnapshotId | undefined;
+    const outstanding = await execGit(["status", "--porcelain", "-uall"], ws.path);
+    if (outstanding.ok && outstanding.out.trim().length > 0 && provider !== undefined) {
+      pending = await provider
+        .captureWorkingState(ws.path, `hydra: uncommitted work in ${ws.label}`)
+        .catch(() => undefined);
+      if (pending === undefined) {
+        throw new Error(
+          `could not capture the uncommitted work in ${shortenHomePath(ws.path)}; nothing was changed`,
+        );
+      }
+    }
+
+    // Every check that could refuse has now run, and both trees are
+    // captured. First write happens here.
+    if (!capture.clean) {
+      const reset = await execGit(["reset", "--hard", "HEAD"], source);
+      const cleaned = await execGit(["clean", "-fd"], source);
+      if (!reset.ok || !cleaned.ok) {
+        throw new Error(
+          `could not clear ${shortenHomePath(source)} for the merge; your work is preserved ` +
+            `at ${capture.retainedRef}. Nothing was merged.`,
+        );
+      }
+    }
+
+    const merged = await execGit(["merge", "--ff-only", branch], source);
+    if (!merged.ok) {
+      throw new Error(`merge failed: ${merged.err.trim() || "unknown error"}`);
+    }
+
+    // Replay the uncommitted remainder on top, as uncommitted changes.
+    // Applied without --index so modifications land unstaged and new
+    // files land untracked, which is the shape they had in the
+    // workspace.
+    let replayed = true;
+    if (pending !== undefined) {
+      const tip = (await execGit(["rev-parse", "HEAD"], source)).out.trim();
+      const patch = await execGit(["diff", "--binary", tip, pending], source);
+      if (patch.ok && patch.out.trim().length > 0) {
+        replayed = (await execGitStdin(["apply"], source, patch.out)).ok;
+      }
+    }
+
+    // Then whatever the source had that the workspace never saw. Empty
+    // unless the user kept editing after isolating.
+    const divergenceOk = await replaySourceDivergence({ source, capture });
+    if (divergenceOk) {
+      await releaseSourceCapture({ source, capture });
+    }
+
+    const notes: string[] = [];
+    if (!replayed) {
+      notes.push(
+        `\n  WARNING: the workspace's uncommitted changes could not be replayed; ` +
+          `they remain reachable from ${branch}.`,
+      );
+    }
+    if (!divergenceOk) {
+      notes.push(
+        `\n  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
+          `changes and could not be replayed on top. They are preserved at ` +
+          `${capture.retainedRef} — recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
+      );
+    }
+    return `Merged ${branch} into ${source}.${notes.join("")}`;
+  }
+
+
+  /**
+   * Swap the session back to its source tree and drop the binding.
+   *
+   * The two exits differ only in what they leave behind, and both
+   * choices follow from whether the work is safe elsewhere:
+   *
+   *   integrated  → the work is on the source branch, so the workspace
+   *                 is redundant and the snapshot ref is pure GC
+   *                 pressure. Remove both.
+   *   abandoned   → nothing was landed, so the directory and the ref are
+   *                 the only copies. Keep both and say where they are.
+   *
+   * The branch survives either way; it costs nothing and it is what
+   * makes a discarded workspace recoverable.
+   */
+  private async leaveWorkspace(
+    session: Session,
+    ws: PersistedWorkspace,
+    opts: { integrated: boolean },
+  ): Promise<void> {
+    const provider = getWorkspaceProvider(ws.provider);
+    const asWorkspace = {
+      path: ws.path,
+      sourceCwd: ws.sourceCwd,
+      label: ws.label,
+      provider: ws.provider,
+      ...(ws.snapshot !== undefined ? { snapshot: asSnapshotId(ws.snapshot) } : {}),
+      ...(ws.vcs !== undefined ? { vcs: ws.vcs } : {}),
+    };
+
+    const history = await this.histories.load(session.sessionId).catch(() => []);
+    await session.swapIntoWorkspace({
+      cwd: ws.sourceCwd,
+      workspace: undefined,
+      historyLength: history.length,
+      artifact: {
+        summary: `Returned to the source tree at ${ws.sourceCwd}${opts.integrated ? " after merging the workspace" : " without merging"}.`,
+      } as SessionSynopsis,
+    });
+
+    // Clear cwd and the binding in one write. Two writes could strand a
+    // record claiming isolation while sitting in the source tree.
+    await this.mutateRecord(
+      session.sessionId,
+      { cwd: session.cwd },
+      ["workspace"],
+    );
+    this.invalidateListCache();
+
+    // The return trip needs announcing for the same reason the outbound
+    // one does: a client still pointed at the workspace would be
+    // resolving paths inside a directory that is about to be removed.
+    session.broadcastWorkspacePhase({
+      phase: "left",
+      cwd: session.cwd,
+      sourceCwd: ws.sourceCwd,
+      integrated: opts.integrated,
+    });
+
+    if (provider === undefined) {
+      return;
+    }
+    await provider.unlock(asWorkspace).catch(() => undefined);
+    // The start ref goes on BOTH exits, unlike the autosave ref. It is a
+    // baseline for landing, not a copy of anything: the source kept its
+    // own work when `start` copied it, so nothing here is the last copy
+    // of the user's edits. Leaving it behind on abandon would pin objects
+    // for a session that has no further use for them.
+    await provider
+      .dropSnapshotRef(asWorkspace, this.startRefFor(session.sessionId))
+      .catch(() => undefined);
+    if (!opts.integrated) {
+      return;
+    }
+    await provider
+      .dropSnapshotRef(asWorkspace, this.snapshotRefFor(session.sessionId))
+      .catch(() => undefined);
+    // Discard the line too, which is safe only in this exact situation:
+    // the work is merged into the source, and the binding has just been
+    // cleared so nothing can reference it for recovery. Keeping it would
+    // also squat on the label — a session that ends a workspace and
+    // starts another would collide with its own leftover branch.
+    //
+    // `abandon` deliberately does not reach this code: there the line is
+    // the only record of unmerged work.
+    await provider
+      .removeWorkspace(asWorkspace, { force: true, discardLine: true })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Move a live session into a fresh isolated workspace.
+   *
+   * Takes the session's UNCOMMITTED work with it rather than copying it:
+   * the source tree is reset once the work is safely in the workspace,
+   * so the change exists in exactly one place. A copy would look
+   * friendlier and behave worse — you would later be unable to merge,
+   * because the source would be dirty with the same edit you are trying
+   * to land.
+   *
+   * The move is snapshot-first. `captureWorkingState` writes a commit
+   * object and we point a ref at it BEFORE touching the source tree, so
+   * a crash anywhere in the middle leaves the pre-move state recoverable
+   * rather than lost between two directories.
+   */
+  private async startWorkspace(session: Session, label?: string): Promise<string> {
+    if (session.workspace !== undefined) {
+      throw new Error(
+        `already isolated in ${session.workspace.path}. Use \`/hydra workspace end\` first.`,
+      );
+    }
+    const sourceCwd = session.cwd;
+    const provider = getWorkspaceProvider();
+    if (provider === undefined) {
+      throw new Error("no workspace provider available");
+    }
+    // Preconditions before provisioning, not after. The swap at the end
+    // re-checks this, but by then the workspace exists and the user's
+    // work has been moved into it — a refusal there is not a no-op, it
+    // is a mess someone has to clean up.
+    if (!(await session.isQuiescedForSwap())) {
+      throw new Error(
+        "the agent is still working — wait for the current turn to finish, then try again",
+      );
+    }
+    const caps = provider.capabilities();
+
+    // Snapshot the working tree first, while it is still intact.
+    let carried: SnapshotId | undefined;
+    if (caps.supports.captureWorkingState) {
+      const status = await provider
+        .status({ path: sourceCwd, sourceCwd, label: "source", provider: provider.kind })
+        .catch(() => undefined);
+      if (status !== undefined && status.changedPaths.length > 0) {
+        carried = await provider
+          .captureWorkingState(sourceCwd, `hydra: work carried into workspace`)
+          .catch(() => undefined);
+        if (carried === undefined) {
+          throw new Error(
+            "could not snapshot your uncommitted work, so refusing to move it. Commit or stash first.",
+          );
+        }
+      }
+    }
+
+    session.broadcastWorkspacePhase({ phase: "provisioning" });
+    const created = await provider.createWorkspace({
+      sourceCwd,
+      label: label ?? `s-${session.sessionId.slice(-8)}`,
+    });
+    if (!created.ok) {
+      session.broadcastWorkspacePhase({ phase: "failed", error: created.reason });
+      throw new Error(created.reason);
+    }
+    const ws = created.workspace;
+
+    // Past this point every step changes state outside this function.
+    // Any failure unwinds them in reverse — otherwise a late error
+    // strands an orphan workspace holding work the source no longer has.
+    // The START ref, not the autosave ref. Landing measures the source's
+    // divergence against this, and the autosave would overwrite it on
+    // the first turn in the workspace — leaving the landing to diff the
+    // workspace against the source and compute the inverse of the
+    // agent's own work.
+    const startRef = this.startRefFor(session.sessionId);
+    let setup: string | undefined;
+    let copied = false;
+    try {
+      if (caps.locking) {
+        await provider.lock(ws, `session ${session.sessionId}`).catch(() => undefined);
+      }
+      // Retain the pre-move snapshot under the session's own ref before
+      // the source is reset. This is the recovery anchor for the window
+      // where the work exists in neither place, so a failure to write it
+      // aborts the move rather than being swallowed: without the ref,
+      // a crash after the reset takes the work with it.
+      if (carried !== undefined) {
+        await provider.retainSnapshot(ws, startRef, carried);
+      }
+
+      // Setup runs the repo's own hooks, which the design doc's example
+      // fills with dependency installs. Named separately because it is
+      // the phase most likely to be the slow one.
+      session.broadcastWorkspacePhase({ phase: "setup" });
+      setup = await this.applyWorkspaceSetup(ws, session.sessionId);
+      copied = carried !== undefined ? await this.copyCarriedWork(ws, carried, sourceCwd) : true;
+
+      session.broadcastWorkspacePhase({ phase: "swapping" });
+      const history = await this.histories.load(session.sessionId).catch(() => []);
+      await session.swapIntoWorkspace({
+        cwd: ws.path,
+        workspace: {
+          path: ws.path,
+          sourceCwd: ws.sourceCwd,
+          label: ws.label,
+          provider: ws.provider,
+          ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+          ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+        },
+        historyLength: history.length,
+        artifact: {
+          summary: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}.`,
+        } as SessionSynopsis,
+      });
+    } catch (err) {
+      const note = await this.unwindStartWorkspace({
+        provider,
+        ws,
+        startRef,
+        carried,
+      });
+      const base = err instanceof Error ? err.message : String(err);
+      session.broadcastWorkspacePhase({ phase: "failed", error: base });
+      throw new Error(note === undefined ? base : `${base}\n${note}`);
+    }
+
+    // cwd and the binding are written together: a record claiming one
+    // without the other is the inconsistency every consumer trips on.
+    await this.mutateRecord(session.sessionId, {
+      cwd: session.cwd,
+      workspace: session.workspace,
+    });
+    this.invalidateListCache();
+
+    // Announced only after the record is written, so a client acting on
+    // the new cwd cannot outrun the state that justifies it.
+    session.broadcastWorkspacePhase({
+      phase: "entered",
+      cwd: session.cwd,
+      sourceCwd: ws.sourceCwd,
+      label: ws.label,
+      ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+    });
+
+    const lines = [`Moved into workspace ${ws.path}`, `  source: ${sourceCwd}`];
+    if (ws.vcs?.branch !== undefined) {
+      lines.push(`  branch: ${ws.vcs.branch}`);
+    }
+    if (carried !== undefined) {
+      lines.push(
+        copied
+          ? `  copied your uncommitted work in; ${shortenHomePath(sourceCwd)} is untouched`
+          : `  WARNING: could not copy your uncommitted work; the workspace starts from HEAD`,
+      );
+    }
+    if (setup !== undefined) {
+      lines.push(`  ${setup}`);
+    }
+    lines.push(`Use \`/hydra workspace end\` to merge back and return.`);
+    return lines.join("\n");
+  }
+
+  /**
+   * Reproduce the snapshotted work inside the workspace, leaving the
+   * source tree exactly as it was found.
+   *
+   * Copy, not move. The source tree is not private to this session: the
+   * user's editor is open on it, other sessions are working in it, and
+   * crucially the NEXT `workspace start` snapshots whatever is there at
+   * that moment. Taking the work would mean the first workspace to start
+   * silently claims it and every later one begins from a different
+   * baseline, decided by typing order and reported to nobody. For
+   * competition siblings, which exist precisely to be identical at t=0,
+   * that is not a surprise but a wrong answer.
+   *
+   * The duplicate this leaves behind is reconciled at `end`, where the
+   * source can be compared against this same snapshot and cleared only
+   * once the content is provably preserved on the branch.
+   */
+  private async copyCarriedWork(
+    ws: { path: string; sourceCwd: string; vcs?: Record<string, string> },
+    snapshot: SnapshotId,
+    sourceCwd: string,
+  ): Promise<boolean> {
+    const repoRoot = ws.vcs?.repoRoot ?? sourceCwd;
+    const patch = await this.patchFromSnapshot(repoRoot, snapshot);
+    if (patch === undefined) {
+      return false;
+    }
+    // Applied WITHOUT --index, so the copy lands unstaged and new files
+    // land untracked. Staging it would put the user's WIP in the index
+    // the agent is about to commit from, and the agent's first bare
+    // `git commit` would sweep it into a commit nobody asked for —
+    // exactly the outcome `end` goes to trouble to avoid.
+    return (await execGitStdin(["apply"], ws.path, patch)).ok;
+  }
+
+  // The working-state snapshot as a patch against HEAD. Undefined when
+  // there is nothing to move or the diff cannot be produced.
+  private async patchFromSnapshot(
+    repoRoot: string,
+    snapshot: SnapshotId,
+  ): Promise<string | undefined> {
+    const head = await execGit(["rev-parse", "HEAD"], repoRoot);
+    if (!head.ok) {
+      return undefined;
+    }
+    const patch = await execGit(["diff", "--binary", head.out.trim(), snapshot], repoRoot);
+    if (!patch.ok || patch.out.trim().length === 0) {
+      return undefined;
+    }
+    return patch.out;
+  }
+
+  /**
+   * Undo a partially-completed `workspace start`.
+   *
+   * Short because `start` copies: the source tree was never modified, so
+   * there is nothing to put back and no window in which the work exists
+   * only inside the workspace. Tearing down the provisioned side is the
+   * whole job.
+   */
+  private async unwindStartWorkspace(opts: {
+    provider: IsolationProvider;
+    ws: Workspace;
+    startRef: string;
+    carried: SnapshotId | undefined;
+  }): Promise<string | undefined> {
+    const { provider, ws, startRef, carried } = opts;
+    await provider.unlock(ws).catch(() => undefined);
+    if (carried !== undefined) {
+      await provider.dropSnapshotRef(ws, startRef).catch(() => undefined);
+    }
+    await provider.removeWorkspace(ws, { force: true }).catch(() => undefined);
+    return undefined;
+  }
+
+  private async applyWorkspaceSetup(
+    ws: { path: string; sourceCwd: string; label: string },
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const cfg = await readWorkspaceRepoConfig(ws.sourceCwd).catch(
+      (): WorkspaceRepoConfig => ({}),
+    );
+    const notes: string[] = [];
+    if (cfg.carry !== undefined && cfg.carry.length > 0) {
+      const res = await applyCarry(ws.sourceCwd, ws.path, cfg.carry).catch(() => undefined);
+      if (res !== undefined && res.copied.length > 0) {
+        notes.push(`carried ${res.copied.length} config file(s)`);
+      }
+    }
+    if (cfg.postCreate !== undefined) {
+      const hook = await runWorkspaceHook(cfg.postCreate, {
+        workspacePath: ws.path,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        sessionId,
+        ...(cfg.hookTimeoutSeconds !== undefined
+          ? { timeoutSeconds: cfg.hookTimeoutSeconds }
+          : {}),
+      });
+      notes.push(hook.ok ? "ran postCreate" : `postCreate FAILED: ${hook.reason ?? "unknown"}`);
+    }
+    return notes.length > 0 ? notes.join("; ") : undefined;
+  }
+
   private async deriveForkWorkspace(
     parent: PersistedWorkspace,
     label: string,
@@ -1720,18 +2369,27 @@ export class SessionManager {
     }
     const caps = provider.capabilities();
 
-    let from: SnapshotId | undefined;
-    if (caps.supports.captureWorkingState) {
-      from = await provider
-        .captureWorkingState(parent.path, `hydra: fork of ${parent.label}`)
-        .catch(() => undefined);
-    }
+    // Base the fork on the parent's BRANCH TIP, then replay the parent's
+    // uncommitted work on top as uncommitted changes.
+    //
+    // The tempting shortcut is to snapshot the parent and branch from
+    // that commit, which is what this used to do. It quietly converts
+    // whatever the parent had in progress into a commit authored
+    // "hydra: fork of <label>", so the fork reports itself clean and a
+    // later merge lands your work as machine-authored history. Matching
+    // `/hydra workspace start` here means a fork looks exactly like its
+    // parent did: same commits, same dirty files, same authorship story.
+    const parentTip = caps.sharedHistory
+      ? (await execGit(["rev-parse", "HEAD"], parent.path)).out.trim()
+      : "";
 
     const created = await provider
       .createWorkspace({
         sourceCwd: parent.sourceCwd,
         label,
-        ...(from !== undefined ? { from } : { contentFrom: parent.path }),
+        ...(parentTip.length > 0
+          ? { from: asSnapshotId(parentTip) }
+          : { contentFrom: parent.path }),
       })
       .catch((err: unknown) => ({ ok: false as const, reason: String(err) }));
     if (!created.ok) {
@@ -1741,6 +2399,20 @@ export class SessionManager {
       return undefined;
     }
     const ws = created.workspace;
+
+    // Replay the parent's in-progress edits into the fork, uncommitted.
+    // Copy, not move: the parent keeps working, so it keeps its files.
+    if (parentTip.length > 0 && caps.supports.captureWorkingState) {
+      const snap = await provider
+        .captureWorkingState(parent.path, `hydra: fork carry from ${parent.label}`)
+        .catch(() => undefined);
+      if (snap !== undefined && snap !== parentTip) {
+        await this.copyUncommittedInto(parent.path, ws.path, parentTip, snap).catch(
+          () => undefined,
+        );
+      }
+    }
+
     return {
       path: ws.path,
       sourceCwd: ws.sourceCwd,
@@ -1749,6 +2421,25 @@ export class SessionManager {
       ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
       ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
     };
+  }
+
+  /**
+   * Apply the delta between two commits into a workspace as uncommitted
+   * changes. Used to replay in-progress work into a new workspace
+   * without recording it as somebody's commit.
+   */
+  private async copyUncommittedInto(
+    repoRoot: string,
+    targetPath: string,
+    fromCommit: string,
+    toCommit: string,
+  ): Promise<boolean> {
+    const patch = await execGit(["diff", "--binary", fromCommit, toCommit], repoRoot);
+    if (!patch.ok || patch.out.trim().length === 0) {
+      return false;
+    }
+    const applied = await execGitStdin(["apply", "--index"], targetPath, patch.out);
+    return applied.ok;
   }
 
   private async recoverWorkspace(

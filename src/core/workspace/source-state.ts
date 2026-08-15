@@ -1,0 +1,155 @@
+// Landing a workspace back into a source tree that is legitimately
+// dirty.
+//
+// `workspace start` copies the user's uncommitted work rather than
+// taking it, because the source tree is shared: their editor is open on
+// it, other sessions are working in it, and the next `start` snapshots
+// whatever is present at that moment. The cost of copying is that at
+// landing time the same edits exist in two places, and the source may
+// have moved on besides.
+//
+// The obvious way to settle that is a gate: compare the source against
+// the snapshot `start` took, and refuse unless it matches. That is what
+// this module used to do, and it was too strict. Under copy semantics,
+// carrying on working in the source IS the intended workflow, so the
+// gate refused the ordinary case — and it refused on any difference at
+// all, including an edit to a file the workspace never touched.
+//
+// So: capture instead of check. Snapshot the source before touching it,
+// let the landing proceed, then replay whatever the source had that the
+// workspace did not. A reset is not destructive once its input is
+// captured, and the only genuine failure left is two edits to the same
+// lines, which is the one case a human actually has to arbitrate.
+//
+// Git-specific by nature: it exists to serve `merge --ff-only`, and a
+// provider with no branches has nothing to land.
+
+import { execFile as execFileCb } from "node:child_process";
+import type { IsolationProvider, SnapshotId } from "./provider.js";
+
+function runGit(
+  args: string[],
+  cwd: string,
+): Promise<{ ok: boolean; out: string; err: string }> {
+  return new Promise((resolve) => {
+    execFileCb("git", args, { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }, (e, o, s) => {
+      resolve({ ok: !e, out: o ?? "", err: s ?? "" });
+    });
+  });
+}
+
+function applyPatch(cwd: string, patch: string, extra: string[] = []): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = execFileCb(
+      "git",
+      ["apply", ...extra],
+      { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
+      (e) => resolve(!e),
+    );
+    child.stdin?.end(patch);
+  });
+}
+
+export interface SourceCapture {
+  /** Nothing uncommitted; the landing needs no reset and no replay. */
+  clean: boolean;
+  /** The source's working state, held so the reset cannot lose it. */
+  snapshot?: SnapshotId;
+  /**
+   * What the source's changes are measured against: the snapshot taken
+   * at `start` when there was one, else HEAD. Using the start snapshot
+   * is what makes the copy invisible — it is present in both trees, so
+   * it cancels, and only genuine post-start edits survive the diff.
+   */
+  base: string;
+  /** Ref holding `snapshot`, so a failed replay is still recoverable. */
+  retainedRef?: string;
+}
+
+/**
+ * Record the source tree's state before a landing writes to it.
+ *
+ * Performs no mutation, so a caller that gives up after this has
+ * changed nothing. The returned snapshot is retained under a ref rather
+ * than left dangling: if a later step fails, that ref is the only thing
+ * standing between the user and a `reset --hard` they did not ask for.
+ */
+export async function captureSourceForLanding(opts: {
+  source: string;
+  startSnapshotRef: string;
+  retainRef: string;
+  provider: IsolationProvider | undefined;
+}): Promise<SourceCapture> {
+  const { source, startSnapshotRef, retainRef, provider } = opts;
+  const status = await runGit(["status", "--porcelain", "-uall"], source);
+  const startTree = await runGit(["rev-parse", `${startSnapshotRef}^{commit}`], source);
+  // Resolved to a sha, never left as the symbolic "HEAD". The replay
+  // runs AFTER the fast-forward has moved HEAD, so a symbolic base
+  // would diff against the merged tip: the patch would then read as
+  // "undo what the agent did and put my version back", apply cleanly,
+  // and silently discard the agent's work.
+  const head = await runGit(["rev-parse", "HEAD"], source);
+  const base =
+    startTree.ok && startTree.out.trim().length > 0 ? startTree.out.trim() : head.out.trim();
+  if (status.ok && status.out.trim().length === 0) {
+    return { clean: true, base };
+  }
+  if (provider?.capabilities().supports.captureWorkingState !== true) {
+    throw new Error(
+      `${source} has uncommitted changes and this provider cannot snapshot them, ` +
+        `so they cannot be preserved across the merge. Commit or stash them first.`,
+    );
+  }
+  const snapshot = await provider
+    .captureWorkingState(source, "hydra: source state before landing")
+    .catch(() => undefined);
+  if (snapshot === undefined) {
+    throw new Error(
+      `could not snapshot the uncommitted changes in ${source}, so refusing to touch them`,
+    );
+  }
+  await runGit(["update-ref", retainRef, snapshot], source);
+  return { clean: false, snapshot, base, retainedRef: retainRef };
+}
+
+/**
+ * Put back whatever the source had that the workspace did not.
+ *
+ * Empty in the common case: work copied in at `start` sits in both
+ * trees, so it cancels out of `diff(base, snapshot)` and only edits made
+ * after isolating remain. Applied without `--index` so modifications
+ * land unstaged and new files land untracked, matching how the user was
+ * holding them.
+ *
+ * `--3way` because by this point the tree has moved: the merge brought
+ * in the agent's commits, so a plain context match is too brittle. A
+ * false return is a real overlap between the two sets of edits.
+ */
+export async function replaySourceDivergence(opts: {
+  source: string;
+  capture: SourceCapture;
+}): Promise<boolean> {
+  const { source, capture } = opts;
+  if (capture.clean || capture.snapshot === undefined) {
+    return true;
+  }
+  const patch = await runGit(["diff", "--binary", capture.base, capture.snapshot], source);
+  if (!patch.ok) {
+    return false;
+  }
+  if (patch.out.trim().length === 0) {
+    return true;
+  }
+  return applyPatch(source, patch.out, ["--3way"]);
+}
+
+/** Drop the recovery ref once the landing has succeeded. */
+export async function releaseSourceCapture(opts: {
+  source: string;
+  capture: SourceCapture;
+}): Promise<void> {
+  if (opts.capture.retainedRef === undefined) {
+    return;
+  }
+  await runGit(["update-ref", "-d", opts.capture.retainedRef], opts.source);
+}

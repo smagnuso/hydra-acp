@@ -27,6 +27,7 @@ import * as path from "node:path";
 import {
   WorkspaceUnsupportedError,
   asSnapshotId,
+  findFreeLabel,
   sanitizeLabel,
   workspaceRootFor,
   type Capabilities,
@@ -222,10 +223,8 @@ export class GitProvider implements IsolationProvider {
     }
 
     const base = opts.from ?? asSnapshotId(head.stdout.trim());
-    const label = sanitizeLabel(opts.label);
+    const requested = sanitizeLabel(opts.label);
     const root = workspaceRootFor(source);
-    const target = path.join(root, label);
-    const branch = `${BRANCH_NAMESPACE}/${label}`;
 
     try {
       await fs.mkdir(root, { recursive: true });
@@ -233,15 +232,39 @@ export class GitProvider implements IsolationProvider {
       return { ok: false, reason: `could not create workspace root: ${String(err)}` };
     }
 
-    // Refuse rather than adopt an existing directory. Silently reusing
-    // one is how two sessions end up sharing a checkout, which is the
-    // failure this feature exists to prevent.
-    try {
-      await fs.access(target);
-      return { ok: false, reason: `workspace already exists at ${target}` };
-    } catch {
-      // Expected: the target should not exist yet.
+    // Find a label whose directory AND branch are both free.
+    //
+    // Both halves matter, and the branch half is easy to miss: a branch
+    // can outlive its checkout (that is what makes a removed workspace
+    // recoverable), so a label whose directory is gone may still have a
+    // branch holding the name. Checking only the directory produces a
+    // `worktree add` that dies on "a branch named X already exists",
+    // which is exactly what happens when a session starts a workspace,
+    // ends it, and starts another.
+    //
+    // Suffixing rather than refusing: the caller asked for isolation,
+    // not for a specific name, and the label it gets back is reported on
+    // the returned workspace.
+    const label = await findFreeLabel(requested, async (candidate) => {
+      const dirTaken = await fs
+        .access(path.join(root, candidate))
+        .then(() => true)
+        .catch(() => false);
+      if (dirTaken) {
+        return false;
+      }
+      const branchTaken = await runGit(
+        ["rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH_NAMESPACE}/${candidate}`],
+        repoRoot,
+        QUERY_TIMEOUT_MS,
+      );
+      return !branchTaken.ok;
+    });
+    if (label === undefined) {
+      return { ok: false, reason: `no free name available for "${requested}"` };
     }
+    const target = path.join(root, label);
+    const branch = `${BRANCH_NAMESPACE}/${label}`;
 
     const add = await runGit(
       ["worktree", "add", "--no-track", "-b", branch, target, base],
@@ -268,7 +291,10 @@ export class GitProvider implements IsolationProvider {
     };
   }
 
-  async removeWorkspace(ws: Workspace, opts: { force: boolean }): Promise<void> {
+  async removeWorkspace(
+    ws: Workspace,
+    opts: { force: boolean; discardLine?: boolean },
+  ): Promise<void> {
     // Make the keep-or-delete judgment here rather than delegating it to
     // git. `git worktree remove` deletes a worktree containing UNTRACKED
     // files without complaint (verified on git 2.43); it only refuses for
@@ -294,6 +320,13 @@ export class GitProvider implements IsolationProvider {
       repoRoot,
       MUTATE_TIMEOUT_MS,
     );
+    // Drop the branch when the caller says the line is finished with.
+    // -D rather than -d: an unmerged branch here means the caller
+    // explicitly decided its content is safe elsewhere, and -d would
+    // second-guess that with a refusal the caller cannot act on.
+    if (opts.discardLine === true && ws.vcs?.branch !== undefined) {
+      await runGit(["branch", "-D", ws.vcs.branch], repoRoot, QUERY_TIMEOUT_MS);
+    }
     if (!removed.ok) {
       // Forced removal: git may refuse if its metadata is already gone.
       // The directory is what the caller wants rid of.

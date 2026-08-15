@@ -30,6 +30,13 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Schedule a swap to a different agent (synthesizes a brief in the target's idiom, rotates on idle); `status` reports any pending swap",
   },
   {
+    verb: "workspace",
+    name: "hydra workspace",
+    argsHint: "<start [name] | merge | end | abandon | status>",
+    description:
+      "Move this session into an isolated workspace so its edits cannot collide with other work, then land or discard them. `start` copies your uncommitted changes in and leaves the real tree untouched; `end` merges and returns; `abandon` returns without merging.",
+  },
+  {
     verb: "kill",
     name: "hydra kill",
     description:

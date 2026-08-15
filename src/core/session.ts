@@ -300,6 +300,11 @@ export interface SessionInit {
   workspace?: PersistedWorkspace;
   /** Reason isolation was requested but fell back; see Session.workspaceError. */
   workspaceError?: string;
+  /** Backs `/hydra workspace`; see Session.workspaceHook. */
+  workspaceHook?: (
+    action: "start" | "merge" | "end" | "abandon" | "status",
+    name?: string,
+  ) => Promise<string>;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -604,6 +609,20 @@ export class Session {
   // and return already_running for the latter.
   private currentEntry: QueueEntry | undefined;
   private promptInFlight = false;
+  // True only while the agent itself is being driven. Narrower than
+  // promptInFlight, which is held for the whole drain loop including
+  // entries the daemon answers by itself. Daemon-side slash commands
+  // never reach the agent, so during one the agent is genuinely idle —
+  // and a command like `/hydra workspace` whose whole job is to swap the
+  // agent has to be able to observe that. Keying the swap gate on
+  // promptInFlight instead makes such a command refuse itself: it is the
+  // in-flight work it is waiting on.
+  private agentTurnInFlight = false;
+  // Guards against two swaps interleaving. isQuiescedForSwap is a
+  // precondition, not a lock: it can be true for two callers at once
+  // (a slash command and a REST-driven uncompact, say), and the second
+  // swap would then rotate the upstream out from under the first.
+  private swapInFlight = false;
   // True while applyModeChange / applyModelChange is executing. Guards
   // isQuiescedForSwap so a mode/model change that arrives mid-prompt
   // (from the agent's current_mode_update / current_model_update) does
@@ -840,6 +859,15 @@ export class Session {
   // the workspace exists; folded into the orientation preamble so an
   // agent does not try to "repair" an artifact of isolation.
   workspaceNotes: readonly string[] = [];
+  // Backs `/hydra workspace <verb>`. Wired by SessionManager, which owns
+  // the provider registry and the record store. Returns the message to
+  // show the user.
+  private workspaceHook:
+    | ((
+        action: "start" | "merge" | "end" | "abandon" | "status",
+        name?: string,
+      ) => Promise<string>)
+    | undefined;
   // Whether the orientation preamble has ridden a prompt yet. Drives
   // introduce-once, then re-assert only when a prompt names the source
   // tree.
@@ -1034,6 +1062,7 @@ export class Session {
     this.cwd = init.cwd;
     this.workspace = init.workspace;
     this.workspaceError = init.workspaceError;
+    this.workspaceHook = init.workspaceHook;
     this.agentId = init.agentId;
     this.agent = init.agent;
     this.upstreamSessionId = init.upstreamSessionId;
@@ -1521,13 +1550,21 @@ export class Session {
   // True when the session is safe to swap upstream out from under.
   // Used by T10 to decide whether it is safe to swap the upstream
   // session without losing in-flight work. Returns true only when:
-  // - no prompt is in flight (drainQueue is idle)
+  // - the agent isn't being driven (no prompt in flight to it). Note
+  //   this is agentTurnInFlight, not promptInFlight: a daemon-side
+  //   slash command occupies the queue without touching the agent, and
+  //   the swap-driving commands are themselves such entries.
   // - no tool-call chain is open (every tool_call has a corresponding
   //   tool_call_update with status="completed"|"failed")
   // - no mode_change or model_change transition is in progress.
   // - the agent isn't mid-way through a turn it started by itself.
   async isQuiescedForSwap(): Promise<boolean> {
-    if (this.promptInFlight || this.unsolicitedTurn !== undefined) {
+    if (this.agentTurnInFlight || this.unsolicitedTurn !== undefined) {
+      return false;
+    }
+    // Seeds and other internal prompts drive the agent without going
+    // through the queue at all, so they need their own term here.
+    if (this.internalPromptCapture !== undefined) {
       return false;
     }
     if (this.modeChangeInFlight || this.modelChangeInFlight) {
@@ -1540,13 +1577,16 @@ export class Session {
     return true;
   }
 
-  // Synchronous sibling of isQuiescedForSwap. Checks only in-memory
-  // state — no history-store scan for open tool calls — so the answer is
-  // available without an async hop. Used by the onIdle dispatch path so
-  // debounced timers (transformer session.idle) can be scheduled
-  // immediately at activity edges; consumers that need the stronger
-  // open-tool-call guarantee (e.g. compaction swap) re-verify via
-  // isQuiescedForSwap before acting.
+  // Synchronous idle check for the onIdle dispatch path, so debounced
+  // timers (transformer session.idle) can be scheduled immediately at
+  // activity edges without an async hop.
+  //
+  // Deliberately broader than isQuiescedForSwap in two ways: it skips
+  // the history-store scan for open tool calls, and it keys on
+  // promptInFlight rather than agentTurnInFlight. "Idle" here means the
+  // session is doing nothing at all, which a daemon-side slash command
+  // still counts as doing. Consumers needing the swap-strength
+  // guarantee re-verify via isQuiescedForSwap before acting.
   isQuiescedSync(): boolean {
     if (this.promptInFlight || this.unsolicitedTurn !== undefined) {
       return false;
@@ -1608,6 +1648,11 @@ export class Session {
       tailFloor: 4,
       summarizedThroughEntry: opts.historyLength,
       newCwd: opts.cwd,
+      // Direction stated, not inferred. Reading it off this.workspace
+      // would depend on the fact that the field is assigned only after
+      // the swap returns, which is exactly the kind of ordering nobody
+      // should have to know to change this code safely.
+      reason: opts.workspace !== undefined ? "workspace-enter" : "workspace-leave",
     });
     this.workspace = opts.workspace;
   }
@@ -1639,6 +1684,12 @@ export class Session {
     // mcpServers are re-minted so the recall server re-evaluates its
     // gate, and the swap waits for quiescence first.
     newCwd?: string;
+    /**
+     * Why this swap is happening, so user-facing messaging can describe
+     * the cause rather than the machinery it borrowed. Defaults to
+     * "compaction", which is what every pre-existing caller means.
+     */
+    reason?: "compaction" | "workspace-enter" | "workspace-leave";
   }): Promise<void> {
     const quiesced = await this.isQuiescedForSwap();
     if (!quiesced) {
@@ -1646,6 +1697,32 @@ export class Session {
         "session is not quiesced for swap — wait for in-flight work to complete",
       );
     }
+    if (this.swapInFlight) {
+      throw new Error("a swap is already in progress for this session");
+    }
+    this.swapInFlight = true;
+    try {
+      await this.doSwapUpstream(opts);
+    } finally {
+      this.swapInFlight = false;
+    }
+  }
+
+  private async doSwapUpstream(opts: {
+    artifact: SessionSynopsis;
+    title?: string;
+    tailK: number;
+    tailFloor?: number;
+    summarizedThroughEntry?: number;
+    newAgentId?: string;
+    newCwd?: string;
+    /**
+     * Why this swap is happening, so user-facing messaging can describe
+     * the cause rather than the machinery it borrowed. Defaults to
+     * "compaction", which is what every pre-existing caller means.
+     */
+    reason?: "compaction" | "workspace-enter" | "workspace-leave";
+  }): Promise<void> {
     // Pre-swap observation hook. Fires before the agent is replaced so
     // subscribers (notifier, archiver, audit) can stamp the old upstream
     // identity. Notification-only; not cancellable in this stage.
@@ -1896,9 +1973,21 @@ export class Session {
     // completion via the hydra_compaction phase:"swapped" event
     // already broadcast above plus the cleared compactionState in
     // meta.json.
-    const completedText = crossAgent
-      ? `\nSwitched to ${targetAgentId}.\n`
-      : "\nCompaction completed.\n";
+    // Name the swap by its CAUSE, not by the machinery it borrowed.
+    //
+    // Every mid-life agent replacement runs through this function, so
+    // "Compaction completed." used to be shown for a workspace move as
+    // well — which is wrong twice over: nothing was summarized away, and
+    // it invites the user to worry about lost context at exactly the
+    // moment they are trying to confirm a clean workspace transition.
+    const completedText =
+      opts.reason === "workspace-enter"
+        ? "\nMoved into the workspace.\n"
+        : opts.reason === "workspace-leave"
+          ? "\nReturned to the source tree.\n"
+          : crossAgent
+          ? `\nSwitched to ${targetAgentId}.\n`
+          : "\nCompaction completed.\n";
     const completedParams = this.rewriteForClient({
       sessionId: this.upstreamSessionId,
       update: {
@@ -2176,6 +2265,42 @@ export class Session {
     // deferred to a future stage (requires a request-shaped dispatch
     // wired into SessionManager.dispatchSynthesisSwap).
     this.notifyChain("compaction", { ...update });
+  }
+
+  /**
+   * Send a hydra_workspace lifecycle event to attached clients.
+   *
+   * Two jobs, which is why it is one event rather than two. Progress:
+   * entering a workspace provisions a checkout, runs setup hooks that
+   * may install dependencies, and then respawns the agent, so the
+   * command can sit for a minute with the composer looking idle — which
+   * is exactly when someone presses Enter again.
+   *
+   * And relocation: a client resolves the session's cwd once, at
+   * session/new or attach, and has no other way to learn it changed.
+   * That cwd is not decoration — it is what file completion, the git
+   * panel and diff resolution are all computed against, so a client
+   * that misses this event keeps aiming at the tree the session just
+   * left. The terminal phases therefore carry the new cwd and binding.
+   *
+   * Ephemeral, like the compaction phases: NOT written to history.
+   */
+  broadcastWorkspacePhase(update: Record<string, unknown>): void {
+    const params = this.rewriteForClient({
+      sessionId: this.upstreamSessionId,
+      update: { sessionUpdate: "hydra_workspace", ...update },
+    });
+    for (const handler of this.broadcastHandlers) {
+      try {
+        handler({ method: "session/update", params, recordedAt: Date.now() });
+      } catch {
+        void 0;
+      }
+    }
+    for (const client of this.clients.values()) {
+      void client.connection.notify("session/update", params).catch(() => undefined);
+    }
+    this.notifyChain("workspace", { ...update });
   }
 
   // Register a client and (asynchronously) load the replay slice it
@@ -5540,6 +5665,8 @@ export class Session {
           // Kill is intentionally not queued (see runKillCommand
           // comment) — fire directly in both paths.
           return this.runKillCommand();
+        case "workspace":
+          return this.runWorkspaceCommand(remainder);
         case "restart":
           return inline ? this.runRestartCommandInline() : this.runRestartCommand();
         case "compact":
@@ -6301,6 +6428,44 @@ export class Session {
 
   private runUncompactCommand(): Promise<unknown> {
     return this.enqueuePrompt(() => this.runUncompactCommandInline());
+  }
+
+  /**
+   * `/hydra workspace <verb>`.
+   *
+   * Parsing lives here; the work lives on SessionManager behind
+   * workspaceHook, because it needs the provider registry, the record
+   * store, and history length — none of which Session should know
+   * about. Same split as forkHook and uncompactHook.
+   */
+  private async runWorkspaceCommand(remainder: string): Promise<unknown> {
+    if (!this.workspaceHook) {
+      this.emitExtensionReply(
+        "Workspaces are not available on this session (no workspace hook configured).",
+      );
+      return { stopReason: "end_turn" };
+    }
+    const [verb = "status", ...rest] = remainder.split(/\s+/).filter((s) => s.length > 0);
+    const name = rest.join(" ").trim();
+    const known = ["start", "merge", "end", "abandon", "status"];
+    if (!known.includes(verb)) {
+      this.emitExtensionReply(
+        `Unknown workspace verb "${verb}". Use one of: ${known.join(", ")}.`,
+      );
+      return { stopReason: "end_turn" };
+    }
+    try {
+      const message = await this.workspaceHook(
+        verb as "start" | "merge" | "end" | "abandon" | "status",
+        name.length > 0 ? name : undefined,
+      );
+      this.emitExtensionReply(message);
+    } catch (err) {
+      this.emitExtensionReply(
+        `Workspace ${verb} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { stopReason: "end_turn" };
   }
 
   private async runUncompactCommandInline(): Promise<unknown> {
@@ -8068,6 +8233,7 @@ export class Session {
       outboundPrompt = prefixPromptText(entry.prompt, SLASH_ESCAPE_PREFIX);
     }
     let response: unknown;
+    this.agentTurnInFlight = true;
     try {
       // Workspace-isolated sessions: fix up paths and, where needed,
       // remind the agent which tree it is in. Applied here, on the way
@@ -8106,6 +8272,8 @@ export class Session {
       }
       this.clearAmendIfMatches(entry.messageId);
       throw err;
+    } finally {
+      this.agentTurnInFlight = false;
     }
     if (!this.closed) {
       this.broadcastTurnComplete(

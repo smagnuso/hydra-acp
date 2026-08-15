@@ -294,6 +294,41 @@ describe("chrome bars", () => {
     expect(cap.row(2)).toContain("needle");
   });
 
+  // Entering a workspace provisions a checkout, may run a dependency
+  // install, and then respawns the agent. Without a persistent
+  // indicator the composer looks idle for the whole minute, which is
+  // when people press Enter again.
+  it("shows workspace progress, and shows it over compaction", () => {
+    const cap = makeCaptureTerm(120, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBanner({ status: "ready", queued: 0, hint: "⇧⇥ mode · ^p pick" });
+    screen.setCompactionIndicator("compacting...");
+    screen.setWorkspaceIndicator("running workspace setup...");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2)).toContain("running workspace setup...");
+    expect(cap.row(2)).not.toContain("compacting...");
+
+    // Cleared on the terminal phase, and whatever was underneath resumes.
+    screen.setWorkspaceIndicator(null);
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2)).toContain("compacting...");
+  });
+
   it("still shows notifications when composer.bottom.right is empty", () => {
     const cap = makeCaptureTerm(120, 24);
     const screen = new Screen({
