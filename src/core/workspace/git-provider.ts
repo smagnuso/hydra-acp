@@ -463,6 +463,35 @@ export class GitProvider implements IsolationProvider {
     );
     const env = { GIT_INDEX_FILE: tmpIndex };
     try {
+      // Seed the temp index from HEAD before adding anything.
+      //
+      // Without this the index starts EMPTY, so git considers nothing
+      // tracked and applies ignore rules to every path — including paths
+      // that are tracked in the real repository. A file that is both
+      // committed and matched by .gitignore (a `.DS_Store` someone added
+      // years ago, a `.env` committed before the rule existed, generated
+      // output added and later ignored) is therefore skipped by `add -A`,
+      // vanishes from the snapshot tree, and reads as a DELETION against
+      // HEAD.
+      //
+      // That is not cosmetic. The carried-work patch replays the deletion
+      // into a fresh workspace, and a later landing commits it and
+      // fast-forwards it into the source — quietly removing a tracked
+      // file from the repository, with nothing reporting a loss because
+      // from the workspace's side the file was already gone.
+      //
+      // Seeded from HEAD, those paths are tracked in this index too, so
+      // ignore rules stop applying to them exactly as they do in the real
+      // one. A file genuinely missing from the working tree still stages
+      // as a deletion, which is the behaviour we want to keep.
+      const head = await runGit(["rev-parse", "--verify", "HEAD"], sourceCwd, QUERY_TIMEOUT_MS);
+      const hasHead = head.ok && head.stdout.trim().length > 0;
+      if (hasHead) {
+        const seeded = await runGit(["read-tree", "HEAD"], sourceCwd, MUTATE_TIMEOUT_MS, env);
+        if (!seeded.ok) {
+          throw new Error(`could not seed the snapshot index: ${seeded.stderr.trim()}`);
+        }
+      }
       const staged = await runGit(["add", "-A"], sourceCwd, MUTATE_TIMEOUT_MS, env);
       if (!staged.ok) {
         throw new Error(`could not stage working state: ${staged.stderr.trim()}`);
@@ -474,10 +503,10 @@ export class GitProvider implements IsolationProvider {
 
       // Parent the snapshot on HEAD when there is one so the object is
       // reachable in a sensible chain. An unborn HEAD yields a root
-      // commit, which is still a perfectly good snapshot.
-      const head = await runGit(["rev-parse", "HEAD"], sourceCwd, QUERY_TIMEOUT_MS);
+      // commit, which is still a perfectly good snapshot — and is why the
+      // seeding above is conditional.
       const args = ["commit-tree", tree.stdout.trim(), "-m", message];
-      if (head.ok && head.stdout.trim().length > 0) {
+      if (hasHead) {
         args.push("-p", head.stdout.trim());
       }
       const commit = await runGit(args, sourceCwd, MUTATE_TIMEOUT_MS, env);

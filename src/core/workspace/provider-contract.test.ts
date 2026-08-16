@@ -335,6 +335,50 @@ describe("git provider specifics", () => {
     expect(blob.stdout).toBe("modified\n");
   });
 
+  it("keeps a file that is tracked AND ignore-matched, rather than snapshotting a deletion", async () => {
+    // Git's rule is that ignore patterns do not apply to already-tracked
+    // files, which is why such a file reads as clean in the real repo. It
+    // is a common shape: a .DS_Store committed years ago, a .env added
+    // before the rule existed, generated output added and later ignored.
+    //
+    // The snapshot is built in a temp index, and an EMPTY index means git
+    // considers nothing tracked, so the rule stops protecting those paths
+    // and `add -A` skips them. The file then vanishes from the tree and
+    // reads as a deletion against HEAD — which the carried-work patch
+    // replays into a new workspace, and a later landing commits and
+    // fast-forwards into the source, quietly deleting a tracked file.
+    const provider = new GitProvider();
+    const source = await makeGitSource();
+
+    await fs.writeFile(path.join(source, ".gitignore"), ".DS_Store\n");
+    await fs.writeFile(path.join(source, ".DS_Store"), "mac junk\n");
+    await exec("git", ["add", "-f", ".DS_Store", ".gitignore"], { cwd: source });
+    await exec("git", ["commit", "-qm", "committed before it was ignored"], { cwd: source });
+    // Clean, exactly as it looks in a real repo.
+    const status = await exec("git", ["status", "--porcelain"], { cwd: source });
+    expect(status.stdout.trim()).toBe("");
+
+    const snap = await provider.captureWorkingState(source, "snapshot");
+
+    const listed = await exec("git", ["ls-tree", "-r", "--name-only", snap], { cwd: source });
+    expect(listed.stdout).toContain(".DS_Store");
+    const diff = await exec("git", ["diff", "--name-status", "HEAD", snap], { cwd: source });
+    expect(diff.stdout).not.toContain(".DS_Store");
+  });
+
+  it("still snapshots a genuine deletion of a tracked file", async () => {
+    // The counterpart: seeding the index from HEAD must not make real
+    // deletions invisible.
+    const provider = new GitProvider();
+    const source = await makeGitSource();
+    await fs.rm(path.join(source, "file.txt"));
+
+    const snap = await provider.captureWorkingState(source, "snapshot");
+
+    const diff = await exec("git", ["diff", "--name-status", "HEAD", snap], { cwd: source });
+    expect(diff.stdout.trim()).toMatch(/^D\s+file\.txt$/);
+  });
+
   it("retains a snapshot under refs/hydra without creating a branch", async () => {
     const provider = new GitProvider();
     const source = await makeGitSource();
