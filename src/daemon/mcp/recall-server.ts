@@ -43,7 +43,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Session } from "../../core/session.js";
-import { renderTranscript } from "../../core/history-transcript.js";
+import {
+  type MergedToolCall,
+  type SessionUpdate,
+  normalizeToolName,
+  readMetaToolName,
+  readToolOutputText,
+  renderTranscript,
+} from "../../core/history-transcript.js";
 import { classifyUpdate, mcpJsonResult } from "./helpers.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
@@ -68,6 +75,62 @@ function getSpeaker(
     default:
       return "agent";
   }
+}
+
+// Per-call and whole-response ceilings on returned tool output. Sized
+// off real sessions, where a whole session's output runs tens of KB and
+// the largest single result is a couple of KB: generous enough that the
+// common call returns complete, bounded enough that recalling twenty
+// calls cannot blow the context the agent is trying to conserve.
+const OUTPUT_PER_CALL_MAX_CHARS = 2_000;
+const OUTPUT_TOTAL_MAX_CHARS = 20_000;
+
+// Searchable text for one history entry.
+//
+// renderTranscript is the right renderer for conversation, but it is the
+// wrong one for search over tool activity: it emits a tool line only for
+// the opening `tool_call`, whose rawInput is empty, and drops
+// tool_call_update entirely. Every command and every byte of output in a
+// session was therefore invisible to `search`, which quietly reduced it
+// to a search over assistant prose.
+//
+// Tool entries are matched against their own arguments and output instead,
+// so a hit reports the entry that actually contains the text.
+function renderEntryForSearch(
+  entry: Parameters<typeof renderTranscript>[0][number],
+  kind: string,
+  update: Record<string, unknown>,
+): string {
+  if (kind !== "tool_call" && kind !== "tool_call_update") {
+    return renderTranscript([entry]);
+  }
+  const parts: string[] = [];
+  const name = readMetaToolName(update as SessionUpdate);
+  if (name !== undefined) {
+    parts.push(`Tool: ${name}`);
+  } else if (typeof update.title === "string" && update.title.length > 0) {
+    parts.push(`Tool: ${update.title}`);
+  }
+  const rawInput = update.rawInput;
+  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+    for (const [key, value] of Object.entries(rawInput as Record<string, unknown>)) {
+      if (typeof value === "string" && value.length > 0) {
+        parts.push(`${key}=${value}`);
+      }
+    }
+  }
+  if (Array.isArray(update.locations)) {
+    for (const loc of update.locations as Array<Record<string, unknown>>) {
+      if (typeof loc?.path === "string" && loc.path.length > 0) {
+        parts.push(loc.path);
+      }
+    }
+  }
+  const output = readToolOutputText(update as SessionUpdate);
+  if (output !== undefined) {
+    parts.push(output);
+  }
+  return parts.join("\n");
 }
 
 // 150-char window centered on the match index. Mirrors the stdin server
@@ -137,7 +200,7 @@ export function buildRecallMcpServer(
       "search",
       {
         description:
-          "Search this session's prior conversation history (the part that was compacted out of your working memory) by keyword. Returns matching entry ids with short snippets so you can decide which to pull in full via `range`. Use this when the compaction summary mentions something but you need the verbatim detail.",
+          "Search this session's prior conversation history (the part that was compacted out of your working memory) by keyword. Covers assistant and user messages, the arguments of every tool call including full shell commands, and what those calls printed. Returns matching entry ids with short snippets so you can decide which to pull in full via `range`. Use this when the compaction summary mentions something but you need the verbatim detail.",
         inputSchema: {
           query: z.string().min(1).describe("Case-insensitive substring to search for."),
           limit: z
@@ -178,13 +241,15 @@ export function buildRecallMcpServer(
           if (!classified) {
             continue;
           }
-          const { kind } = classified;
-          if (kind === "tool_call" && !include_tool_calls) {
+          const { kind, update } = classified;
+          if ((kind === "tool_call" || kind === "tool_call_update") && !include_tool_calls) {
             continue;
           }
-          const rendered = renderTranscript([entry] as unknown as Parameters<
-            typeof renderTranscript
-          >[0]);
+          const rendered = renderEntryForSearch(
+            entry as unknown as Parameters<typeof renderTranscript>[0][number],
+            kind,
+            update,
+          );
           const idx = rendered.toLowerCase().indexOf(needle);
           if (idx < 0) {
             continue;
@@ -212,7 +277,7 @@ export function buildRecallMcpServer(
       "range",
       {
         description:
-          "Pull a contiguous range of prior conversation entries verbatim from this session's pre-compaction history. Use after `search` narrows in on what you need. Capped at 50 entries per call.",
+          "Pull a contiguous range of prior conversation entries verbatim from this session's pre-compaction history, including each tool call's arguments and what it printed. Use after `search` narrows in on what you need. Capped at 50 entries per call.",
         inputSchema: {
           from_entry: z
             .number()
@@ -263,7 +328,18 @@ export function buildRecallMcpServer(
         // Slice fetches only the archives that overlap [from, to] and
         // streams them; a range near the live tail opens no archives.
         const slice = await session.sliceRecallHistory(clamped_from, clamped_to);
-        const text = renderTranscript(slice as unknown as Parameters<typeof renderTranscript>[0]);
+        // Output is included here but not in the seed: `range` is an
+        // explicit pull, and without it `search` could match text that
+        // the tool it points at could not then show.
+        const text = renderTranscript(
+          slice as unknown as Parameters<typeof renderTranscript>[0],
+          {
+            toolOutput: {
+              maxPerCall: OUTPUT_PER_CALL_MAX_CHARS,
+              maxTotal: OUTPUT_TOTAL_MAX_CHARS,
+            },
+          },
+        );
         return {
           content: [{ type: "text", text }],
           structuredContent: { text, entry_count: slice.length, truncated },
@@ -275,14 +351,31 @@ export function buildRecallMcpServer(
       "tool_calls",
       {
         description:
-          "Search this session's prior tool invocations by tool name and/or file path. Returns when each tool was called, the arguments, and the result status. Use this to recall which files were read/edited, what shell commands ran, etc.",
+          "Search this session's prior tool invocations by tool name, ACP kind, and/or file path. Returns when each tool was called, its arguments (including the full shell command), the result status, and what the call printed. Use this to recall which files were read/edited, what shell commands ran, and what they output.",
         inputSchema: {
-          tool_name: z.string().optional(),
+          tool_name: z
+            .string()
+            .optional()
+            .describe(
+              "Case-insensitive substring of the tool name. Names vary by agent for the same tool (Bash, Terminal, bash), so prefer `kind` when you want every shell invocation.",
+            ),
+          kind: z
+            .string()
+            .optional()
+            .describe(
+              "ACP tool kind: execute (shell), read, edit, think, other. Agent-independent, unlike tool_name.",
+            ),
           file_path: z.string().optional(),
           limit: z.number().int().min(1).max(100).optional(),
+          include_output: z
+            .boolean()
+            .optional()
+            .describe(
+              "Include what each call printed (default true). Set false when you only need the commands and not their results.",
+            ),
         },
       },
-      async ({ tool_name, file_path, limit = 20 }) => {
+      async ({ tool_name, kind: kind_filter, file_path, limit = 20, include_output = true }) => {
         const session = await getSession();
         if (!session.summarizedThroughEntry || session.summarizedThroughEntry === 0) {
           return mcpJsonResult({
@@ -292,10 +385,11 @@ export function buildRecallMcpServer(
           });
         }
         const hasToolName = typeof tool_name === "string" && tool_name.length > 0;
+        const hasKind = typeof kind_filter === "string" && kind_filter.length > 0;
         const hasFilePath = typeof file_path === "string" && file_path.length > 0;
-        if (!hasToolName && !hasFilePath) {
+        if (!hasToolName && !hasKind && !hasFilePath) {
           throw new Error(
-            "tool_calls: at least one of tool_name or file_path must be provided",
+            "tool_calls: at least one of tool_name, kind, or file_path must be provided",
           );
         }
         // Coalesce tool_call + subsequent tool_call_update events for each
@@ -313,9 +407,16 @@ export function buildRecallMcpServer(
         interface Merged {
           entryId: number;
           toolName: string;
+          // Whether toolName came from a source that actually names the
+          // tool, as opposed to the opening event's title. Agents rewrite
+          // `title` to the command as a call runs, so a name taken from
+          // any later event is the command wearing the name's slot.
+          nameAuthoritative: boolean;
+          kind?: string;
           rawInput: Record<string, unknown>;
           locations: string[];
           status: string;
+          output?: string;
           timestamp?: string;
         }
         const merged = new Map<string, Merged>();
@@ -345,6 +446,7 @@ export function buildRecallMcpServer(
             m = {
               entryId,
               toolName: "(unnamed)",
+              nameAuthoritative: false,
               rawInput: {},
               locations: [],
               status: "in_progress",
@@ -359,14 +461,38 @@ export function buildRecallMcpServer(
             m.entryId = entryId;
           }
 
-          if (typeof update.name === "string" && update.name.length > 0) {
-            m.toolName = update.name;
-          } else if (
-            m.toolName === "(unnamed)" &&
-            typeof update.title === "string" &&
-            update.title.length > 0
-          ) {
-            m.toolName = update.title;
+          // Name resolution, in descending order of trust. The title
+          // branch is gated on this being the OPENING event: walking
+          // newest-first, an ungated "first title wins" lands on the
+          // final update, whose title is the command text, and then no
+          // tool_name filter can ever match it.
+          if (!m.nameAuthoritative) {
+            const metaName = readMetaToolName(update as SessionUpdate);
+            if (metaName !== undefined) {
+              m.toolName = metaName;
+              m.nameAuthoritative = true;
+            } else if (typeof update.name === "string" && update.name.length > 0) {
+              m.toolName = update.name;
+              m.nameAuthoritative = true;
+            } else if (
+              kind === "tool_call" &&
+              typeof update.title === "string" &&
+              update.title.length > 0
+            ) {
+              m.toolName = update.title;
+              m.nameAuthoritative = true;
+            }
+          }
+
+          if (m.kind === undefined && typeof update.kind === "string" && update.kind.length > 0) {
+            m.kind = update.kind;
+          }
+
+          if (m.output === undefined) {
+            const output = readToolOutputText(update as SessionUpdate);
+            if (output !== undefined) {
+              m.output = output;
+            }
           }
 
           const ri = update.rawInput;
@@ -414,15 +540,36 @@ export function buildRecallMcpServer(
         const calls: Array<{
           entryId: number;
           tool: string;
+          kind?: string;
           args: Record<string, unknown>;
           status: string;
+          output?: string;
+          outputBytes?: number;
+          outputTruncated?: boolean;
           timestamp?: string;
         }> = [];
+        let outputBudget = OUTPUT_TOTAL_MAX_CHARS;
+        let outputBudgetExhausted = false;
 
         for (const id of order) {
           const m = merged.get(id)!;
+          // The same rule the transcript renderer uses, so a name that is
+          // really an echo of the command becomes its ACP kind here too.
+          m.toolName = normalizeToolName({
+            name: m.toolName,
+            rawInput: m.rawInput,
+            ...(m.kind !== undefined ? { kind: m.kind } : {}),
+          } satisfies MergedToolCall);
 
-          if (tool_name !== undefined && m.toolName.toLowerCase() !== tool_name.toLowerCase()) {
+          // Substring rather than equality: the same shell tool is "Bash"
+          // to claude-acp, "Terminal" in its ACP title, and "bash" to
+          // opencode, so an exact match makes the caller guess which
+          // agent recorded the session.
+          if (hasToolName && !m.toolName.toLowerCase().includes(tool_name!.toLowerCase())) {
+            continue;
+          }
+
+          if (hasKind && (m.kind ?? "").toLowerCase() !== kind_filter!.toLowerCase()) {
             continue;
           }
 
@@ -462,13 +609,30 @@ export function buildRecallMcpServer(
             args.locations = m.locations;
           }
 
-          calls.push({
+          const call: (typeof calls)[number] = {
             entryId: m.entryId,
             tool: m.toolName,
             args,
             status: m.status,
             timestamp: m.timestamp,
-          });
+          };
+          if (m.kind !== undefined) {
+            call.kind = m.kind;
+          }
+          if (include_output && m.output !== undefined) {
+            const full = m.output;
+            const room = Math.min(OUTPUT_PER_CALL_MAX_CHARS, outputBudget);
+            if (room <= 0) {
+              outputBudgetExhausted = true;
+            } else {
+              const kept = full.length <= room ? full : full.slice(0, room - 1) + "…";
+              call.output = kept;
+              call.outputBytes = full.length;
+              call.outputTruncated = kept.length < full.length;
+              outputBudget -= kept.length;
+            }
+          }
+          calls.push(call);
 
           if (calls.length >= limit) {
             break;
@@ -476,7 +640,11 @@ export function buildRecallMcpServer(
         }
 
         const truncated = calls.length >= limit;
-        return mcpJsonResult({ calls, truncated });
+        return mcpJsonResult({
+          calls,
+          truncated,
+          ...(outputBudgetExhausted ? { outputBudgetExhausted } : {}),
+        });
       },
     );
   }

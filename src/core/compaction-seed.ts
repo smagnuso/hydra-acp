@@ -9,6 +9,7 @@
 import { type SessionSynopsis } from "./snapshot.js";
 import {
   type SessionUpdate,
+  mergeToolCalls,
   renderToolCall,
   extractText,
   extractContentText,
@@ -256,6 +257,9 @@ function extractTurns(history: HistoryEntryLike[]): {
 } {
   const closed: ClosedTurn[] = [];
   let currentTurn: ClosedTurn | null = null;
+  // Args arrive on tool_call_update events that this walk skips, so the
+  // merged view is what makes a seeded tool line carry its command.
+  const merged = mergeToolCalls(history);
 
   for (let i = 0; i < history.length; i++) {
     const entry = history[i] as HistoryEntryLike;
@@ -286,7 +290,7 @@ function extractTurns(history: HistoryEntryLike[]): {
         currentTurn.agent += chunk;
       }
     } else if (kind === "tool_call" && currentTurn !== null) {
-      currentTurn.tools.push(renderToolCall(update));
+      currentTurn.tools.push(renderToolCall(update, merged));
     } else if (kind === "turn_complete") {
       if (currentTurn !== null) {
         closed.push(currentTurn);

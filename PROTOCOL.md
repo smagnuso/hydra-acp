@@ -1069,11 +1069,25 @@ Pre-compaction conversation history, exposed so the agent can page back specific
 
 | Tool | Input | Returns | Semantics |
 |---|---|---|---|
-| `search` | `{ query, limit?, include_tool_calls? }` | Match list with snippets | Case-insensitive substring search across pre-compaction entries. |
-| `range` | `{ from_entry, to_entry }` | Verbatim entries | Pull a contiguous slice of the pre-compaction log. |
-| `tool_calls` | `{ tool_name?, limit? }` | Tool-call entries | Enumerate prior tool invocations, optionally filtered by tool name. |
+| `search` | `{ query, limit?, include_tool_calls? }` | Match list with snippets | Case-insensitive substring search across pre-compaction entries. Covers message text, tool arguments (including full shell commands), and recorded tool output. `include_tool_calls: false` excludes both `tool_call` and `tool_call_update` entries. |
+| `range` | `{ from_entry, to_entry }` | Verbatim entries | Pull a contiguous slice of the pre-compaction log. Tool calls render with their merged arguments and an `Output:` line, under the same caps as `tool_calls`, so anything `search` can match is retrievable here. |
+| `tool_calls` | `{ tool_name?, kind?, file_path?, limit?, include_output? }` | Tool-call entries | Enumerate prior tool invocations. At least one of `tool_name`, `kind`, or `file_path` is required. `tool_name` matches case-insensitively by substring; `kind` matches an ACP tool kind (`execute`, `read`, `edit`, `think`, `other`) exactly. Each entry carries `tool`, `kind`, merged `args`, `status`, and (unless `include_output: false`) `output` with `outputBytes` and `outputTruncated`. |
 
 All three return a short "no compacted history yet" payload until the session has been compacted at least once.
+
+**Tool-call reassembly.** A call's arguments do not arrive on the `tool_call` that opens it. Agents send a partial or empty `rawInput` up front and complete it over subsequent `tool_call_update` events, and they rewrite `title` as the call proceeds:
+
+| Agent | Opening `tool_call` | Command arrives | Name source |
+|---|---|---|---|
+| claude-acp | `title: "Terminal"`, `rawInput: {}` | later updates | `_meta.claudeCode.toolName` |
+| opencode | `title: "bash"`, `rawInput: { cwd }` | later updates | opening `title` |
+| opencode (legacy) | `title: <command>`, `rawInput: { command }` | opening event | none sent |
+
+Consumers must therefore merge a call with its updates (union of `rawInput`, later values winning) and resolve the name from the **opening** event only. Taking the newest `title` yields the command text in the tool name's place. `core/history-transcript.ts` exposes `mergeToolCalls` and `normalizeToolName` for this; recall, the transcript renderer, and the compaction seed all go through them. When the resolved name turns out to be an echo of an argument, the ACP `kind` is used instead, which is why `kind` is the portable filter axis and `tool_name` is not.
+
+Recorded output is read from `rawOutput` (a string for claude-acp, `{ output, metadata }` for opencode), preferring claude-acp's structured `_meta.claudeCode.toolResponse` where present so `stderr` stays distinguishable. Blob-spilled output is already rehydrated by the history store before recall sees it. Returned output is capped per call and per response; `outputTruncated` and a top-level `outputBudgetExhausted` report when a cap bit.
+
+Output reaches an agent only through an explicit recall call (`tool_calls`, or `range`, which opts in via `renderTranscript`'s `toolOutput` option). It is deliberately absent from the compaction seed and from synopsis input: a seeded agent has often just changed working directory, and a listing or `git status` captured before the move asserts state that no longer holds, where a command replays harmlessly. Commands are safe to push; results must be pulled.
 
 #### `POST/GET/DELETE /mcp/:name`
 
