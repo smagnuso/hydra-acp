@@ -163,8 +163,18 @@ function hydraArgv(args: string[]): string[] {
  */
 let launcherMode = false;
 
-export function setLauncherMode(on: boolean): void {
+/**
+ * Whether the mode is off because a human said so, rather than merely
+ * unasked-for. Only matters for propagation: with
+ * tui.launcherModeWhenHosted set, "unasked-for" is not inherited by a child
+ * — the child reads the config and turns the mode on — so an opted-out pane
+ * has to say so in the argv or its tabs come up opted back in.
+ */
+let launcherOptOut = false;
+
+export function setLauncherMode(on: boolean, optedOut = false): void {
   launcherMode = on;
+  launcherOptOut = optedOut;
 }
 
 export function launcherModeActive(): boolean {
@@ -173,6 +183,7 @@ export function launcherModeActive(): boolean {
 
 export function __resetLauncherModeForTests(): void {
   launcherMode = false;
+  launcherOptOut = false;
 }
 
 /**
@@ -254,8 +265,17 @@ export async function openInNewTab(spec: OpenSpec): Promise<OpenTabResult> {
   // Propagate the mode, so an index-shaped workspace stays index-shaped no
   // matter which tab spawned which. Opting in at the root is the only place
   // a human should have to think about it.
+  //
+  // An explicit opt-out propagates too, and for the same reason: with
+  // tui.launcherModeWhenHosted set, saying nothing is not saying "off" —
+  // the child would read the config and turn the mode back on. Silence is
+  // still right for the third case (mode off, nobody asked either way),
+  // which is why this isn't just "state the mode": that would put a flag
+  // after --prompt in every argv, and the prompt is deliberately last.
   if (launcherMode) {
     args.push("--terminal-host-launcher");
+  } else if (launcherOptOut) {
+    args.push("--no-terminal-host-launcher");
   }
   try {
     return await host.openTab({

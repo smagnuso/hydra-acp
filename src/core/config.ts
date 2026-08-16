@@ -386,6 +386,20 @@ const TuiConfig = z.object({
   // running. Set false if your terminal renders this obnoxiously or you
   // just don't want it.
   progressIndicator: z.boolean().default(true),
+  // When true, the TUI enters terminal-host launcher mode on its own in any
+  // pane where a supported host (herdr or tmux) is detected, exactly as if
+  // --terminal-host-launcher had been passed. Off by default: the mode
+  // changes what picking a session does, which is too visible a change to
+  // infer from the environment without being asked.
+  //
+  // Named for the condition rather than the mode, because true does not mean
+  // "always on" — in a bare terminal there is nowhere to launch, so the
+  // setting silently does nothing. That asymmetry with the flag is
+  // deliberate: the flag is per-invocation intent and exits 2 when it can't
+  // be honoured; this is ambient and applies to panes where it can't, so it
+  // has to degrade quietly. --no-terminal-host-launcher overrides it for a
+  // single run.
+  launcherModeWhenHosted: z.boolean().default(false),
   // What the unmodified Enter key does in the prompt composer.
   //   "amend" (default) — Enter amends the in-flight turn; Shift+Enter
   //     enqueues. With no turn in flight either key just enqueues,

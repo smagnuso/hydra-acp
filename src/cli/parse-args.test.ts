@@ -82,6 +82,19 @@ describe("parseArgs", () => {
       positional: ["sessions", "import", "file.hydra"],
       flags: { info: true },
     });
+    // Both halves of the launcher-mode pair, because the negation is the
+    // one people type in front of another flag — as a value-taker it would
+    // eat --session and the id would land as a positional.
+    expect(
+      parseArgs(["tui", "--no-terminal-host-launcher", "--session", "s1"]),
+    ).toEqual({
+      positional: ["tui"],
+      flags: { "no-terminal-host-launcher": true, session: "s1" },
+    });
+    expect(parseArgs(["tui", "--terminal-host-launcher", "extra"])).toEqual({
+      positional: ["tui", "extra"],
+      flags: { "terminal-host-launcher": true },
+    });
     expect(
       parseArgs(["sessions", "import", "file.hydra", "--info"]),
     ).toEqual({

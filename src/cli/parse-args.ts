@@ -28,6 +28,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "no-color",
   "no-from-note",
   "no-pager",
+  "no-terminal-host-launcher",
   "no-wait",
   "tools",
   "raw",

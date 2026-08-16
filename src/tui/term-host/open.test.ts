@@ -456,6 +456,27 @@ describe("launcher mode propagation", () => {
   it("adds nothing when the mode is off", async () => {
     await openInNewTab({ kind: "attach", sessionId: "s" });
     expect(tuiArgs()).not.toContain("--terminal-host-launcher");
+    expect(tuiArgs()).not.toContain("--no-terminal-host-launcher");
+  });
+
+  // Silence means "off" only while the config agrees. With
+  // tui.launcherModeWhenHosted set, a tab that inherits no opinion reads
+  // the config and turns the mode on — so the pane that was told to stay
+  // out has to say so in the argv, or its own tabs opt back in.
+  it("propagates an explicit opt-out, so config can't re-enable a child", async () => {
+    setLauncherMode(false, true);
+    await openInNewTab({ kind: "attach", sessionId: "s" });
+    const args = tuiArgs();
+    expect(args).toContain("--no-terminal-host-launcher");
+    expect(args).not.toContain("--terminal-host-launcher");
+  });
+
+  // The opt-out is not the same as the mode: an opted-out pane must not
+  // hand its children the flag that turns the mode on.
+  it("never sends both flags", async () => {
+    setLauncherMode(true, true);
+    await openInNewTab({ kind: "attach", sessionId: "s" });
+    expect(tuiArgs()).not.toContain("--no-terminal-host-launcher");
   });
 
   // The flag goes last-ish, but never between a value flag and its value —
@@ -475,6 +496,7 @@ describe("launcher mode propagation", () => {
       const at = args.indexOf(flag);
       expect(at).toBeGreaterThan(-1);
       expect(args[at + 1]).not.toBe("--terminal-host-launcher");
+      expect(args[at + 1]).not.toBe("--no-terminal-host-launcher");
     }
   });
 });

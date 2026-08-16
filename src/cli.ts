@@ -900,7 +900,14 @@ async function dispatchTui(
   const resume = flags.reattach === true;
   const forceNew = flags.new === true;
   const readonly = flags.readonly === true;
-  const terminalHostLauncher = flags["terminal-host-launcher"] === true;
+  const launcherFlag = flags["terminal-host-launcher"] === true;
+  const launcherOffFlag = flags["no-terminal-host-launcher"] === true;
+  if (launcherFlag && launcherOffFlag) {
+    process.stderr.write(
+      "hydra-acp: --terminal-host-launcher and --no-terminal-host-launcher contradict each other; pass one.\n",
+    );
+    process.exit(2);
+  }
   if (readonly && base.sessionId === undefined) {
     process.stderr.write(
       "hydra-acp: --readonly requires a session id. Pass --session <id-or-url> --readonly, or open the picker and press `v` on a session.\n",
@@ -934,13 +941,14 @@ async function dispatchTui(
     );
     process.exit(2);
   }
+  let terminalHostLauncher = false;
   // Launcher mode is meaningless with nowhere to launch, and failing here
   // is deliberate rather than degrading to a normal TUI. The flag is a
   // statement of intent — a pane that silently ignored it would behave
   // exactly like the confusion the mode exists to remove, and would do so
   // invisibly. Checked before the TUI takes the terminal so the message is
   // readable.
-  if (terminalHostLauncher) {
+  if (launcherFlag) {
     const { launcherModeUnavailable } = await import(
       "./tui/term-host/open.js"
     );
@@ -948,6 +956,20 @@ async function dispatchTui(
     if (why) {
       process.stderr.write(`hydra-acp: --terminal-host-launcher ${why}\n`);
       process.exit(2);
+    }
+    terminalHostLauncher = true;
+  } else if (!launcherOffFlag) {
+    // tui.launcherModeWhenHosted: the same probe, the opposite response.
+    // Ambient config applies to panes that can't honour it, so an
+    // unsupported one just doesn't get the mode. Probed before the config
+    // is read because the probe is a pure env check and the config is a
+    // file, and a bare terminal can't end up in launcher mode either way.
+    const { launcherModeUnavailable } = await import(
+      "./tui/term-host/open.js"
+    );
+    if (launcherModeUnavailable(process.env) === null) {
+      const { loadConfig } = await import("./core/config.js");
+      terminalHostLauncher = (await loadConfig()).tui.launcherModeWhenHosted;
     }
   }
   const { runTui } = await import("./tui/index.js");
@@ -961,6 +983,9 @@ async function dispatchTui(
   };
   if (terminalHostLauncher) {
     tuiOpts.terminalHostLauncher = true;
+  }
+  if (launcherOffFlag) {
+    tuiOpts.terminalHostLauncherOptOut = true;
   }
   if (base.sessionId !== undefined) {
     tuiOpts.sessionId = base.sessionId;
@@ -1185,6 +1210,8 @@ function printHelp(subcommand?: string): void {
         [ENTRY, "  --terminal-host-launcher           TUI: picking a session shows it in ITS OWN herdr/tmux tab (revealing an"],
         [ENTRY, "                                     existing one, else opening a tab) instead of re-pointing this pane. For"],
         [ENTRY, "                                     layouts where each tab IS a session. Inherited by tabs this pane opens."],
+        [ENTRY, "                                     Set tui.launcherModeWhenHosted to get this in every hosted pane."],
+        [ENTRY, "  --no-terminal-host-launcher        Turn that off for one run, overriding tui.launcherModeWhenHosted."],
         [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
         [ENTRY, "  HYDRA_ACP_TARGET_SESSION           Env var equivalent of --session (flag wins)."],
         [ENTRY, "  HYDRA_ACP_SESSION                  Set by the daemon inside each agent to that agent's own"],
