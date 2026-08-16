@@ -147,8 +147,10 @@ lands the work without leaving.
 
 `start` **copies** your uncommitted changes in rather than taking them, so your
 checkout is left exactly as it was, and landing reconciles the two sides rather
-than demanding a clean tree. `discard` keeps the last autosave ref and names it
-on the way out, so even the destructive exit is recoverable.
+than demanding a clean tree. `discard` retires the last autosave to
+`refs/hydra/retired/<label>-<sha>` and names it on the way out, so even the
+destructive exit is recoverable — and keeping it outside the live namespace
+means a later workspace reusing that label can't overwrite it.
 
 **Two sessions can share one workspace, deliberately.** `start <name>` naming a
 workspace a live session is already in *joins* it instead of creating a second

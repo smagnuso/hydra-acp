@@ -63,6 +63,24 @@ export function landingRetainRef(sessionId: string): string {
   return `${NS}/landing/${sessionId}`;
 }
 
+/**
+ * Where a snapshot goes when it outlives the workspace that made it.
+ *
+ * A label is a name, not an identity: it is free again the moment its
+ * workspace is gone, so the same session retrying gets the same label and
+ * the same ref path. A snapshot left in the live namespace is therefore
+ * overwritten by the NEXT workspace of that name on its first turn —
+ * which silently invalidates the recovery command `discard` printed, and
+ * mixes two unrelated workspaces into one reflog.
+ *
+ * Keyed by content, so it cannot collide and cannot be recycled: the same
+ * snapshot retired twice lands on the same name, and two different ones
+ * never share.
+ */
+export function retiredSnapshotRef(label: string, sha: string): string {
+  return `${NS}/retired/${label}-${sha.slice(0, 12)}`;
+}
+
 /** Every anchor for a workspace, for cleanup sweeps. */
 export function allAnchorRefs(label: string): string[] {
   const refs = workspaceAnchorRefs(label);

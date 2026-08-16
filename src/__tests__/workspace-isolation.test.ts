@@ -690,11 +690,57 @@ describe("session isolation end-to-end", () => {
     await expect(fs.access(path.join(repo, "regret.txt"))).rejects.toThrow();
 
     // But the autosave survives, is named in the output, and still holds
-    // the discarded file.
-    const ref = "refs/hydra/workspaces/nope/autosave";
-    expect(msg).toContain(ref);
+    // the discarded file. Retired out of the live namespace, so a later
+    // workspace reusing this label cannot overwrite it.
+    const ref = /refs\/hydra\/retired\/nope-[0-9a-f]+/.exec(msg)?.[0];
+    expect(ref).toBeDefined();
     const shown = await exec("git", ["show", `${ref}:regret.txt`], { cwd: repo });
     expect(shown.stdout).toBe("not wanted\n");
+  });
+
+  it("retires a discarded autosave so a reused label cannot clobber it", async () => {
+    // A label is a name, not an identity: it is free again the moment its
+    // workspace is gone, and the default is derived per session, so "try
+    // again" reuses it. Left in the live namespace, the retained snapshot
+    // is overwritten by the next workspace of that name on its first
+    // turn — and the recovery command `discard` just printed would then
+    // resolve to somebody else's work, with the discarded content
+    // surviving only as an unmarked reflog entry.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const snap = manager as unknown as {
+      runWorkspaceSnapshot(s: typeof session): Promise<void>;
+    };
+
+    await manager.runWorkspaceAction(session.sessionId, "start", "recycled");
+    await fs.writeFile(path.join(session.cwd, "first.txt"), "attempt one\n");
+    await snap.runWorkspaceSnapshot(session);
+    const msg = await manager.runWorkspaceAction(session.sessionId, "discard");
+
+    const retired = /refs\/hydra\/retired\/\S+/.exec(msg)?.[0];
+    expect(retired).toBeDefined();
+    // The live name is vacated, so nothing inherits its reflog.
+    const live = await exec("git", ["for-each-ref", "refs/hydra/workspaces/recycled/"], {
+      cwd: repo,
+    });
+    expect(live.stdout.trim()).toBe("");
+
+    // Same label again — the ordinary retry path.
+    await manager.runWorkspaceAction(session.sessionId, "start", "recycled");
+    expect(session.workspace?.label).toBe("recycled");
+    await fs.writeFile(path.join(session.cwd, "second.txt"), "attempt two\n");
+    await snap.runWorkspaceSnapshot(session);
+
+    // The retired snapshot still holds attempt one, untouched...
+    const shown = await exec("git", ["show", `${retired}:first.txt`], { cwd: repo });
+    expect(shown.stdout).toBe("attempt one\n");
+    // ...and the new workspace's reflog covers only attempt two.
+    const log = await exec(
+      "git",
+      ["reflog", "--format=%H", "refs/hydra/workspaces/recycled/autosave"],
+      { cwd: repo },
+    );
+    expect(log.stdout.trim().split("\n").filter(Boolean)).toHaveLength(1);
   });
 
   it("refuses to discard a workspace someone else is in", async () => {

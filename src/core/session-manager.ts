@@ -40,7 +40,12 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
-import { allAnchorRefs, landingRetainRef, workspaceAnchorRefs } from "./workspace/refs.js";
+import {
+  allAnchorRefs,
+  landingRetainRef,
+  retiredSnapshotRef,
+  workspaceAnchorRefs,
+} from "./workspace/refs.js";
 import {
   captureSourceForLanding,
   releaseSourceCapture,
@@ -2030,18 +2035,17 @@ export class SessionManager {
             `Use \`/hydra workspace detach\` to leave it to them.`,
         );
       }
-      // Read before the removal, since afterwards there is nothing to ask.
-      const autosave = await this.autosaveRefIfPresent(ws);
       session.broadcastWorkspacePhase({ phase: "returning" });
       await this.leaveWorkspace(session, ws, { exit: "discarded" });
+      const retired = await this.retireAutosave(ws);
       const lines = [
         `Discarded ${shortenHomePath(ws.path)} and its branch ${ws.vcs?.branch ?? "(none)"}; ` +
           `returned to ${shortenHomePath(ws.sourceCwd)}.`,
       ];
-      if (autosave !== undefined) {
+      if (retired !== undefined) {
         lines.push(
-          `The last autosave is kept at ${autosave} if you want it back: ` +
-            `git -C ${ws.sourceCwd} checkout ${autosave}`,
+          `The last autosave is kept at ${retired} if you want it back: ` +
+            `git -C ${ws.sourceCwd} checkout ${retired}`,
         );
       }
       return lines.join("\n");
@@ -2058,12 +2062,36 @@ export class SessionManager {
     ].join("\n");
   }
 
-  /** The workspace's autosave ref, if one has actually been written. */
-  private async autosaveRefIfPresent(ws: PersistedWorkspace): Promise<string | undefined> {
+  /**
+   * Move a surviving autosave out of the live namespace, returning its
+   * new name.
+   *
+   * Called when a snapshot outlives its workspace. Left where it is, the
+   * next workspace to take that label overwrites it on its first turn:
+   * the recovery command printed here would then resolve to a DIFFERENT
+   * workspace's content, and one reflog would cover two unrelated lines
+   * of work. A label is only unique among things that exist right now, so
+   * anything meant to outlive its workspace needs a name that does too.
+   *
+   * Deleting the live ref also clears its reflog, so the next workspace of
+   * that name starts with a clean history rather than inheriting one.
+   */
+  private async retireAutosave(ws: PersistedWorkspace): Promise<string | undefined> {
     const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
-    const ref = this.snapshotRefFor(ws.label);
-    const found = await execGit(["rev-parse", "--verify", "--quiet", ref], repoRoot);
-    return found.ok ? ref : undefined;
+    const live = this.snapshotRefFor(ws.label);
+    const found = await execGit(["rev-parse", "--verify", "--quiet", live], repoRoot);
+    const sha = found.out.trim();
+    if (!found.ok || sha.length === 0) {
+      return undefined;
+    }
+    const retired = retiredSnapshotRef(ws.label, sha);
+    const written = await execGit(["update-ref", retired, sha], repoRoot);
+    if (!written.ok) {
+      // Keep the live ref rather than dropping the only copy.
+      return live;
+    }
+    await execGit(["update-ref", "-d", live], repoRoot);
+    return retired;
   }
 
   /**

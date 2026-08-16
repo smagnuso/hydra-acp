@@ -36,6 +36,7 @@ import { invokedBinName } from "../../core/bin-name.js";
 import {
   allAnchorRefs,
   landingRetainRef,
+  retiredSnapshotRef,
   workspaceAnchorRefs,
 } from "../../core/workspace/refs.js";
 import { daemonFetch } from "./_shared.js";
@@ -825,7 +826,11 @@ export async function runWorkspaceRemove(opts: {
     const candidates = [workspaceAnchorRefs(row.label).autosave];
     const autosave = await firstExistingRef(ws, candidates);
     if (discarding && autosave !== undefined) {
-      retained = autosave;
+      // Retire it out of the live namespace. A label is free again the
+      // moment its workspace is gone, so the next workspace of that name
+      // would overwrite this ref on its first turn — leaving the recovery
+      // path printed below pointing at somebody else's work.
+      retained = await retireRef(ws, autosave);
     } else {
       // Nothing was lost, so the ref is only pinning objects. Reap every
       // naming rather than just the one that resolved.
@@ -870,6 +875,28 @@ async function firstExistingRef(
     }
   }
   return undefined;
+}
+
+/**
+ * Move a surviving snapshot to a name that cannot be recycled, returning
+ * it. Falls back to the live name if the move fails, since one reachable
+ * copy beats a tidy namespace.
+ */
+async function retireRef(ws: Workspace, live: string): Promise<string> {
+  const repoRoot = ws.vcs?.repoRoot;
+  if (repoRoot === undefined) {
+    return live;
+  }
+  const sha = (await runGit(["rev-parse", live], repoRoot)).out.trim();
+  if (sha.length === 0) {
+    return live;
+  }
+  const retired = retiredSnapshotRef(ws.label, sha);
+  if (!(await runGit(["update-ref", retired, sha], repoRoot)).ok) {
+    return live;
+  }
+  await runGit(["update-ref", "-d", live], repoRoot);
+  return retired;
 }
 
 /** Whether a ref is present, so we never advertise a recovery that isn't there. */

@@ -501,11 +501,15 @@ describe("workspace remove — on disk", () => {
 
     await runWorkspaceRemove({ target: "sess-auto", force: true });
 
+    // Retired out of the live namespace: a later workspace taking this
+    // label would otherwise overwrite the only copy of what --force just
+    // discarded, invalidating the recovery path printed below.
     const { stdout } = await exec("git", ["for-each-ref", "--format=%(refname)", "refs/hydra/"], {
       cwd: repo,
     });
-    expect(stdout.trim()).toBe("refs/hydra/workspaces/autosave/autosave");
+    expect(stdout.trim()).toMatch(/^refs\/hydra\/retired\/autosave-[0-9a-f]+$/);
     expect(out).toContain("recoverable from the last autosave");
+    expect(out).toContain("refs/hydra/retired/autosave-");
     expect(meta).toContain("sess-auto");
   });
 
