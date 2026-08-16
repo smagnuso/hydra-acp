@@ -383,7 +383,10 @@ describe("workspace remove — inactive", () => {
     const repo = await makeGitRepo();
     await makeMissing(repo, "refs", "sess-refs");
     const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
-    for (const ref of ["refs/hydra/snapshots/sess-refs", "refs/hydra/start/sess-refs"]) {
+    for (const ref of [
+      "refs/hydra/workspaces/refs/autosave",
+      "refs/hydra/workspaces/refs/start",
+    ]) {
       await exec("git", ["update-ref", ref, head], { cwd: repo });
     }
 
@@ -392,7 +395,7 @@ describe("workspace remove — inactive", () => {
     const { stdout } = await exec("git", ["for-each-ref", "--format=%(refname)", "refs/hydra/"], {
       cwd: repo,
     });
-    expect(stdout.trim()).toBe("refs/hydra/snapshots/sess-refs");
+    expect(stdout.trim()).toBe("refs/hydra/workspaces/refs/autosave");
     expect(out).toContain("last autosave");
   });
 
@@ -491,15 +494,17 @@ describe("workspace remove — on disk", () => {
     });
     await fs.writeFile(path.join(dir, "scratch.txt"), "unsaved\n");
     const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
-    await exec("git", ["update-ref", "refs/hydra/snapshots/sess-auto", head], { cwd: repo });
-    await exec("git", ["update-ref", "refs/hydra/start/sess-auto", head], { cwd: repo });
+    await exec("git", ["update-ref", "refs/hydra/workspaces/autosave/autosave", head], {
+      cwd: repo,
+    });
+    await exec("git", ["update-ref", "refs/hydra/workspaces/autosave/start", head], { cwd: repo });
 
     await runWorkspaceRemove({ target: "sess-auto", force: true });
 
     const { stdout } = await exec("git", ["for-each-ref", "--format=%(refname)", "refs/hydra/"], {
       cwd: repo,
     });
-    expect(stdout.trim()).toBe("refs/hydra/snapshots/sess-auto");
+    expect(stdout.trim()).toBe("refs/hydra/workspaces/autosave/autosave");
     expect(out).toContain("recoverable from the last autosave");
     expect(meta).toContain("sess-auto");
   });
@@ -517,7 +522,7 @@ describe("workspace remove — on disk", () => {
       repoRoot: repo,
     });
     const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
-    await exec("git", ["update-ref", "refs/hydra/snapshots/sess-clean", head], { cwd: repo });
+    await exec("git", ["update-ref", "refs/hydra/workspaces/clean/autosave", head], { cwd: repo });
 
     await runWorkspaceRemove({ target: "sess-clean" });
 

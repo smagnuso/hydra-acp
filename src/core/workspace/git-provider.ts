@@ -502,7 +502,18 @@ export class GitProvider implements IsolationProvider {
    */
   async retainSnapshot(ws: Workspace, ref: string, snapshot: SnapshotId): Promise<void> {
     const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
-    await runGit(["update-ref", ref, snapshot], repoRoot, QUERY_TIMEOUT_MS);
+    // --create-reflog, so the ref keeps its previous values. The autosave
+    // is rewritten every turn that changed anything, and without a log
+    // each new one made its predecessor unreachable: exactly one recovery
+    // point, "as of the last turn". With the log, `git reflog <ref>` is a
+    // per-turn history, and its entries keep those objects alive.
+    //
+    // Git will not do this on its own. core.logAllRefUpdates only covers
+    // refs/heads, refs/remotes, refs/notes and HEAD by default, so a ref
+    // deliberately parked outside refs/heads (to stay out of `git branch`
+    // and `git log`) gets no log unless asked. That was an omission
+    // rather than a decision.
+    await runGit(["update-ref", "--create-reflog", ref, snapshot], repoRoot, QUERY_TIMEOUT_MS);
   }
 
   async dropSnapshotRef(ws: Workspace, ref: string): Promise<void> {

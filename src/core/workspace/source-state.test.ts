@@ -1,7 +1,7 @@
 // Replaying the source's divergence when part of it is already there.
 //
 // The case that motivated this: `merge` lands the workspace's work into
-// the source and stays put, so a later `end` measured the source against
+// the source and stays put, so a later `stop` measured the source against
 // the state at `start`, produced a patch describing work the source
 // already had, and reported the resulting apply failure as "your own
 // edits overlap the workspace's changes". Nothing was lost, but a

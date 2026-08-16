@@ -4,8 +4,8 @@
 // File rows and scrollback links resolve paths EAGERLY, when the tool
 // event arrives, and store them absolute. That is right at the time and
 // stays right for the source tree, but a row created inside a workspace
-// holds a path that outlives the workspace: `end` deletes the directory
-// (dead link) and `abandon` keeps it (opens a file whose edits can never
+// holds a path that outlives the workspace: `stop` deletes the directory
+// (dead link) and `detach` keeps it (opens a file whose edits can never
 // land, which is the worse case because it looks like it worked).
 //
 // The discrimination is structural — the workspaces root is deterministic
@@ -91,8 +91,8 @@ describe("workspace-aware open resolution", () => {
     expect(notes).toEqual([]);
   });
 
-  it("opens an abandoned workspace's file, but says edits will not land", () => {
-    // `abandon` keeps the directory, so refusing would block a legitimate
+  it("opens a detached workspace's file, but says edits will not land", () => {
+    // `detach` keeps the directory, so refusing would block a legitimate
     // reason to click (inspecting or salvaging the work). Allow it and be
     // explicit instead.
     const f = path.join(wsRoot, "a.ts");
@@ -102,7 +102,7 @@ describe("workspace-aware open resolution", () => {
   });
 
   it("redirects to the project copy when the workspace is gone", () => {
-    // `end` removed the directory and merged the work, so the same file
+    // `stop` removed the directory and merged the work, so the same file
     // under the current tree is what the row meant.
     const inProject = path.join(project, "a.ts");
     fs.writeFileSync(inProject, "merged");

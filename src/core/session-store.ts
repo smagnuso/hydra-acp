@@ -90,6 +90,18 @@ export const PersistedWorkspace = z.object({
   /** Absolute path of the tree this was derived from. */
   sourceCwd: z.string(),
   label: z.string(),
+  /**
+   * The label the user actually asked for, when it differs from `label`.
+   *
+   * They come apart whenever the requested name was taken: a surviving
+   * `hydra/<name>` branch from an abandoned or removed workspace holds
+   * the name, so provisioning suffixes to `<name>-2`. Without recording
+   * the request, a second session asking for the same name cannot find
+   * the first — it is looking for `stuff` and the live session is in
+   * `stuff-2` — so two sessions that both asked to share one workspace
+   * silently get two.
+   */
+  requestedLabel: z.string().optional(),
   /** Provider kind ("git", "copy", ...). */
   provider: z.string(),
   /** Opaque provider-issued token. Never parse this. */

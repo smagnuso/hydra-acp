@@ -36,7 +36,6 @@ import { invokedBinName } from "../../core/bin-name.js";
 import {
   allAnchorRefs,
   landingRetainRef,
-  legacyAnchorRefs,
   workspaceAnchorRefs,
 } from "../../core/workspace/refs.js";
 import { daemonFetch } from "./_shared.js";
@@ -350,27 +349,19 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
   // in rather than taking it, so the same edits are still sitting here.
   // Capture it instead of refusing, so the reset this enables cannot
   // lose anything and post-start edits get replayed rather than
-  // rejected. Same reconciliation the daemon's `end` performs.
+  // rejected. Same reconciliation the daemon's `stop` performs.
   const capture =
     row.sessionId === undefined
       ? undefined
       : await captureSourceForLanding({
           source,
-          // Label-keyed, then the session-keyed name a workspace made
-          // before the re-key still carries.
-          startSnapshotRef: [
-            workspaceAnchorRefs(row.label).start,
-            legacyAnchorRefs(row.sessionId).start,
-          ],
+          startSnapshotRef: workspaceAnchorRefs(row.label).start,
           // Written by an in-session landing, and it has to win here for
           // the same reason it does there: work a previous landing put
           // into the source is not the user's divergence, and measuring
           // from `start` reports it as an overlap on every landing after
           // the first.
-          baselineRef: [
-            workspaceAnchorRefs(row.label).baseline,
-            legacyAnchorRefs(row.sessionId).baseline,
-          ],
+          baselineRef: workspaceAnchorRefs(row.label).baseline,
           retainRef: landingRetainRef(row.sessionId),
           provider: getProvider(row.provider),
         });
@@ -565,7 +556,7 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
     // unlike an in-session landing, this one commits the workspace's work,
     // so HEAD now describes where the source was left and is the honest
     // base for anything that follows.
-    for (const ref of allAnchorRefs(row.label, row.sessionId)) {
+    for (const ref of allAnchorRefs(row.label)) {
       await runGit(["update-ref", "-d", ref], source);
     }
   }
@@ -650,16 +641,10 @@ async function removeInactive(row: WorkspaceRow): Promise<void> {
   // it is the only copy of whatever was uncommitted, so it stays.
   const provider = getProvider(bound.workspace.provider);
   if (provider !== undefined && row.sessionId !== undefined) {
-    for (const ref of [
-      workspaceAnchorRefs(row.label).start,
-      legacyAnchorRefs(row.sessionId).start,
-    ]) {
-      await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
-    }
-    const autosave = await firstExistingRef(ws, [
-      workspaceAnchorRefs(row.label).autosave,
-      legacyAnchorRefs(row.sessionId).autosave,
-    ]);
+    await provider
+      .dropSnapshotRef(ws, workspaceAnchorRefs(row.label).start)
+      .catch(() => undefined);
+    const autosave = await firstExistingRef(ws, [workspaceAnchorRefs(row.label).autosave]);
     if (autosave !== undefined) {
       notes.push(`kept ${autosave} (last autosave)`);
     }
@@ -834,16 +819,10 @@ export async function runWorkspaceRemove(opts: {
   let retained: string | undefined;
   if (provider !== undefined && bound !== undefined && row.sessionId !== undefined) {
     const ws = toProviderWorkspace(bound.workspace);
-    for (const ref of [
-      workspaceAnchorRefs(row.label).start,
-      legacyAnchorRefs(row.sessionId).start,
-    ]) {
-      await provider.dropSnapshotRef(ws, ref).catch(() => undefined);
-    }
-    const candidates = [
-      workspaceAnchorRefs(row.label).autosave,
-      legacyAnchorRefs(row.sessionId).autosave,
-    ];
+    await provider
+      .dropSnapshotRef(ws, workspaceAnchorRefs(row.label).start)
+      .catch(() => undefined);
+    const candidates = [workspaceAnchorRefs(row.label).autosave];
     const autosave = await firstExistingRef(ws, candidates);
     if (discarding && autosave !== undefined) {
       retained = autosave;

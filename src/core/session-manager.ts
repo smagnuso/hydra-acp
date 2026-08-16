@@ -21,6 +21,7 @@ import {
   firstLine,
   parseModelsList,
   parseModesList,
+  stripHydraSessionPrefix,
   type LoadExistingAgentSession,
   type SpawnReplacementAgentResult,
   type UsageSnapshot,
@@ -39,7 +40,7 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
-import { allAnchorRefs, landingRetainRef, legacyAnchorRefs, workspaceAnchorRefs } from "./workspace/refs.js";
+import { allAnchorRefs, landingRetainRef, workspaceAnchorRefs } from "./workspace/refs.js";
 import {
   captureSourceForLanding,
   releaseSourceCapture,
@@ -1698,14 +1699,8 @@ export class SessionManager {
     // snapshot; the start ref and landing baseline exist only to measure
     // the source's divergence at landing time, so a workspace that is
     // going away leaves all three with no reader.
-    //
-    // Both namings: the anchors are keyed by label now, but a workspace
-    // created before the re-key still has session-keyed ones, and those
-    // pin objects just as effectively.
-    if (sessionId !== undefined) {
-      for (const ref of allAnchorRefs(workspace.label, sessionId)) {
-        await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
-      }
+    for (const ref of allAnchorRefs(workspace.label)) {
+      await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
     }
 
     const status = await provider
@@ -1791,7 +1786,7 @@ export class SessionManager {
    *
    * Preferred over startRefFor when measuring the source's divergence,
    * and the reason is a bug this fixes: `merge` lands the workspace's
-   * work into the source and stays put, so a later `end` found that work
+   * work into the source and stays put, so a later `stop` found that work
    * sitting in the source, diffed it against the state at `start`, and
    * reported the workspace's OWN changes as the user's overlapping
    * edits. Landed content is not divergence. Re-baselining after each
@@ -1883,7 +1878,7 @@ export class SessionManager {
    */
   async runWorkspaceAction(
     sessionId: string,
-    action: "start" | "merge" | "end" | "abandon" | "status",
+    action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
     name?: string,
   ): Promise<string> {
     const session = this.get(sessionId);
@@ -1895,12 +1890,28 @@ export class SessionManager {
       if (ws === undefined) {
         return `Not isolated. Working directly in ${shortenHomePath(session.cwd)}.\nUse \`/hydra workspace start\` to move into an isolated workspace.`;
       }
-      return [
+      const others = this.liveSessionsIn(ws.path, session.sessionId).map((s) =>
+        stripHydraSessionPrefix(s.sessionId),
+      );
+      const lines = [
         `Isolated in ${shortenHomePath(ws.path)}`,
         `  source:   ${shortenHomePath(ws.sourceCwd)}`,
         `  provider: ${ws.provider}${ws.vcs?.branch !== undefined ? ` (${ws.vcs.branch})` : ""}`,
-        `Use \`/hydra workspace end\` to merge and return, or \`abandon\` to return without merging.`,
-      ].join("\n");
+      ];
+      if (others.length > 0) {
+        lines.push(`  shared with: ${others.join(", ")}`);
+      }
+      // The exits mean different things once the workspace is shared, so
+      // the hint cannot be a constant. With a co-tenant still in here
+      // `stop` degrades to `detach`: your edits are already in a tree you
+      // do not solely own and nothing can un-write them, so what happens
+      // to the work is settled by whoever leaves last.
+      lines.push(
+        others.length > 0
+          ? `\`stop\` behaves as \`detach\` while ${others.length === 1 ? "that session is" : "those sessions are"} still here; the work lands when the last one leaves.`
+          : `Use \`/hydra workspace stop\` to merge and return, \`discard\` to throw the work away, or \`detach\` to return and leave it here.`,
+      );
+      return lines.join("\n");
     }
     if (action === "start") {
       return this.startWorkspace(session, name);
@@ -1933,20 +1944,21 @@ export class SessionManager {
         ...landed.warnings,
       ].join("\n");
     }
-    if (action === "end") {
-      // A co-tenant leaving does NOT land the workspace.
+    if (action === "stop") {
+      // Shared workspace: `stop` degrades to `detach`.
       //
-      // `end` is about this session's relationship to the workspace; the
-      // merge is about the workspace's relationship to the source. They
-      // are only fused because they have always coincided. Landing now
-      // would commit whatever a still-working co-tenant has half-written
-      // onto this branch and into the source, so the merge waits until
-      // the tree has no live writer left — which is the last departure.
+      // You cannot finish a shared thing by yourself. `stop` is about
+      // this session's relationship to the workspace; the merge is about
+      // the workspace's relationship to the source, and those are only
+      // fused because they have always coincided. Landing now would
+      // commit whatever a still-working co-tenant has half-written onto
+      // this branch and into the source, so the merge waits until the
+      // tree has no live writer left — which is the last departure.
       const others = this.liveSessionsIn(ws.path, session.sessionId);
       if (others.length > 0) {
         session.broadcastWorkspacePhase({ phase: "returning" });
-        await this.leaveWorkspace(session, ws, { integrated: false });
-        const who = others.map((s) => s.sessionId).join(", ");
+        await this.leaveWorkspace(session, ws, { exit: "detached" });
+        const who = others.map((s) => stripHydraSessionPrefix(s.sessionId)).join(", ");
         const lines = [
           `Left ${shortenHomePath(ws.path)} and returned to ${shortenHomePath(ws.sourceCwd)}.`,
           `Nothing landed yet: ${who} still working there. It lands when the last session leaves.`,
@@ -1963,10 +1975,10 @@ export class SessionManager {
       }
       // Merge BEFORE leaving. If it refuses, the session stays put:
       // returning to the source tree with the work stranded behind is
-      // the one outcome that would surprise, since `end` reads as
+      // the one outcome that would surprise, since `stop` reads as
       // "finish this", not "walk away from it".
       // Progress phases, matching what `start` reports. The merge walks
-      // two trees and the swap respawns an agent, so an `end` on a real
+      // two trees and the swap respawns an agent, so an `stop` on a real
       // repository is long enough that silence reads as a hang.
       session.broadcastWorkspacePhase({ phase: "landing" });
       let landed: { merged: string; warnings: string[] };
@@ -1985,7 +1997,7 @@ export class SessionManager {
       // whole outcome can be stated once, in the order it happened.
       session.broadcastWorkspacePhase({ phase: "returning" });
       try {
-        await this.leaveWorkspace(session, ws, { integrated: true });
+        await this.leaveWorkspace(session, ws, { exit: "landed" });
       } catch (err) {
         // The merge already succeeded. Losing that fact behind a swap
         // failure would leave the user thinking the work is still only
@@ -2000,15 +2012,58 @@ export class SessionManager {
         ...landed.warnings,
       ].join("\n");
     }
-    // abandon
+    if (action === "discard") {
+      // The counterpart of `stop`: leave, and throw the work away.
+      // Without it the only route to "I don't want this" was `detach`
+      // followed by `hydra workspace remove` from a shell, which is two
+      // commands in two places for one intention.
+      //
+      // Refused on a shared workspace rather than degraded. The refcount
+      // would keep the directory alive for the co-tenant, so nothing
+      // would actually be discarded while this said otherwise.
+      const others = this.liveSessionsIn(ws.path, session.sessionId);
+      if (others.length > 0) {
+        throw new Error(
+          `${shortenHomePath(ws.path)} is shared with ${others
+            .map((s) => stripHydraSessionPrefix(s.sessionId))
+            .join(", ")}, so its work is not yours alone to discard. ` +
+            `Use \`/hydra workspace detach\` to leave it to them.`,
+        );
+      }
+      // Read before the removal, since afterwards there is nothing to ask.
+      const autosave = await this.autosaveRefIfPresent(ws);
+      session.broadcastWorkspacePhase({ phase: "returning" });
+      await this.leaveWorkspace(session, ws, { exit: "discarded" });
+      const lines = [
+        `Discarded ${shortenHomePath(ws.path)} and its branch ${ws.vcs?.branch ?? "(none)"}; ` +
+          `returned to ${shortenHomePath(ws.sourceCwd)}.`,
+      ];
+      if (autosave !== undefined) {
+        lines.push(
+          `The last autosave is kept at ${autosave} if you want it back: ` +
+            `git -C ${ws.sourceCwd} checkout ${autosave}`,
+        );
+      }
+      return lines.join("\n");
+    }
+    // detach: step away and leave the workspace running, the least
+    // destructive exit there is.
     session.broadcastWorkspacePhase({ phase: "returning" });
-    await this.leaveWorkspace(session, ws, { integrated: false });
+    await this.leaveWorkspace(session, ws, { exit: "detached" });
     return [
       `Returned to ${shortenHomePath(ws.sourceCwd)} WITHOUT merging.`,
       `The workspace is still at ${shortenHomePath(ws.path)} and its branch ` +
         `${ws.vcs?.branch ?? "(none)"} is intact, so nothing is lost — land it later with ` +
-        `\`hydra workspace merge\`, or drop it with \`hydra workspace remove\`.`,
+        `\`hydra workspace merge\`, or drop it with \`/hydra workspace discard\`.`,
     ].join("\n");
+  }
+
+  /** The workspace's autosave ref, if one has actually been written. */
+  private async autosaveRefIfPresent(ws: PersistedWorkspace): Promise<string | undefined> {
+    const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
+    const ref = this.snapshotRefFor(ws.label);
+    const found = await execGit(["rev-parse", "--verify", "--quiet", ref], repoRoot);
+    return found.ok ? ref : undefined;
   }
 
   /**
@@ -2017,18 +2072,18 @@ export class SessionManager {
    *
    * Every check runs BEFORE anything is written, so a merge that cannot
    * land is a no-op rather than something that half-happened. Shared by
-   * `merge` (stay) and `end` (leave), which must behave identically at
+   * `merge` (stay) and `stop` (leave), which must behave identically at
    * the point of landing.
    *
    * The round trip is meant to be faithful: what was committed comes
    * back committed, what was uncommitted comes back uncommitted. `start`
-   * copied the user's WIP in without asking, so `end` must not hand it
+   * copied the user's WIP in without asking, so `stop` must not hand it
    * back in a form they did not choose — least of all as a commit that
    * turns their untracked files into tracked ones.
    */
   /**
    * Returns the outcome in parts rather than as a finished sentence, so
-   * each caller can say what it did in ONE line. `end` merges and then
+   * each caller can say what it did in ONE line. `stop` merges and then
    * leaves; `merge` stays put. Handing them a pre-punctuated "Merged X
    * into Y." forced them to append a second sentence about the same
    * action, which is how one command came to print three lines.
@@ -2063,11 +2118,11 @@ export class SessionManager {
       // Label-keyed first, then the session-keyed name a workspace
       // created before the re-key still carries. Absent refs resolve to
       // nothing and fall through, so offering both is free.
-      startSnapshotRef: [this.startRefFor(ws.label), legacyAnchorRefs(sessionId).start],
+      startSnapshotRef: this.startRefFor(ws.label),
       // Wins over the start ref once a first landing has run, so work
       // this workspace already put into the source stops counting as the
       // user's divergence on every landing after it.
-      baselineRef: [this.baselineRefFor(ws.label), legacyAnchorRefs(sessionId).baseline],
+      baselineRef: this.baselineRefFor(ws.label),
       retainRef: landingRetainRef(sessionId),
       provider,
     });
@@ -2157,7 +2212,13 @@ export class SessionManager {
         .captureWorkingState(source, `hydra: source state after landing ${ws.label}`)
         .catch(() => undefined);
       if (after !== undefined) {
-        await execGit(["update-ref", this.baselineRefFor(ws.label), after], source);
+        // Reflogged like the others: this one moves on every landing, so
+        // its previous values are the record of where each landing left
+        // the source.
+        await execGit(
+          ["update-ref", "--create-reflog", this.baselineRefFor(ws.label), after],
+          source,
+        );
       }
     }
 
@@ -2182,23 +2243,29 @@ export class SessionManager {
   /**
    * Swap the session back to its source tree and drop the binding.
    *
-   * The two exits differ only in what they leave behind, and both
-   * choices follow from whether the work is safe elsewhere:
+   * The three exits differ only in what they leave behind, and each
+   * choice follows from where the work is safe:
    *
-   *   integrated  → the work is on the source branch, so the workspace
-   *                 is redundant and the snapshot ref is pure GC
-   *                 pressure. Remove both.
-   *   abandoned   → nothing was landed, so the directory and the ref are
-   *                 the only copies. Keep both and say where they are.
-   *
-   * The branch survives either way; it costs nothing and it is what
-   * makes a discarded workspace recoverable.
+   *   landed     → it is on the source branch, so the workspace and its
+   *                refs are redundant. Remove everything.
+   *   detached   → nothing was landed, so the directory, the branch and
+   *                the autosave are the only copies. Keep all of them
+   *                and say where they are.
+   *   discarded  → the work is being thrown away ON PURPOSE, so the
+   *                directory and the branch go — but the autosave stays.
+   *                A slash command has nowhere to put a confirmation
+   *                prompt, so the ref is the confirmation: destructive,
+   *                and still recoverable for as long as gc allows.
    */
   private async leaveWorkspace(
     session: Session,
     ws: PersistedWorkspace,
-    opts: { integrated: boolean },
+    opts: { exit: "landed" | "detached" | "discarded" },
   ): Promise<void> {
+    // Both of these ask "is the directory about to disappear", which is
+    // the only distinction the swap notice and the `left` phase care
+    // about. Discarding and landing look identical from there.
+    const removing = opts.exit !== "detached";
     const provider = getWorkspaceProvider(ws.provider);
     const asWorkspace = {
       path: ws.path,
@@ -2215,12 +2282,19 @@ export class SessionManager {
       workspace: undefined,
       historyLength: history.length,
       artifact: {
-        summary: `Returned to the source tree at ${ws.sourceCwd}${opts.integrated ? " after merging the workspace" : " without merging"}.`,
+        summary:
+          `Returned to the source tree at ${ws.sourceCwd}` +
+          (opts.exit === "landed"
+            ? " after merging the workspace."
+            : opts.exit === "discarded"
+              ? " after discarding the workspace and its work."
+              : " without merging."),
       } as SessionSynopsis,
       // `removed` is the difference between a stale path that fails
-      // loudly and one that silently absorbs work. `end` deletes the
-      // workspace; `abandon` keeps it, which is the dangerous case.
-      left: { path: ws.path, removed: opts.integrated },
+      // loudly and one that silently absorbs work. `stop` and `discard`
+      // delete the workspace; `detach` keeps it, which is the dangerous
+      // case.
+      left: { path: ws.path, removed: removing },
     });
 
     // Clear cwd and the binding in one write. Two writes could strand a
@@ -2239,7 +2313,7 @@ export class SessionManager {
       phase: "left",
       cwd: session.cwd,
       sourceCwd: ws.sourceCwd,
-      integrated: opts.integrated,
+      integrated: opts.exit === "landed",
     });
 
     if (provider === undefined) {
@@ -2275,41 +2349,38 @@ export class SessionManager {
     asWorkspace: Workspace,
     ws: PersistedWorkspace,
     sessionId: string,
-    opts: { integrated: boolean },
+    opts: { exit: "landed" | "detached" | "discarded" },
   ): Promise<void> {
     await provider.unlock(asWorkspace).catch(() => undefined);
-    // The start ref goes on BOTH exits, unlike the autosave ref. It is a
-    // baseline for landing, not a copy of anything: the source kept its
-    // own work when `start` copied it, so nothing here is the last copy
-    // of the user's edits. Leaving it behind on abandon would pin objects
-    // for a session that has no further use for them.
-    for (const ref of [
-      this.startRefFor(ws.label),
-      legacyAnchorRefs(sessionId).start,
-      // Same on both exits, same reasoning: only a landing writes it and
-      // only the next landing reads it, and this session will not have
-      // another one.
-      this.baselineRefFor(ws.label),
-      legacyAnchorRefs(sessionId).baseline,
-    ]) {
+    // The start and baseline refs go on EVERY exit, unlike the autosave.
+    // They are baselines for landing, not copies of anything: the source
+    // kept its own work when `start` copied it, so nothing here is the
+    // last copy of the user's edits, and only the next landing would read
+    // them. Leaving them behind pins objects for a session that will not
+    // have another landing.
+    for (const ref of [this.startRefFor(ws.label), this.baselineRefFor(ws.label)]) {
       await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
     }
-    if (!opts.integrated) {
+    if (opts.exit === "detached") {
       return;
     }
-    for (const ref of [
-      this.snapshotRefFor(ws.label),
-      legacyAnchorRefs(sessionId).autosave,
-    ]) {
-      await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
+    // The autosave is the one ref whose fate differs. After a landing it
+    // is redundant, because the work is on the source branch. After a
+    // DISCARD it is the only surviving copy of what was just thrown
+    // away, and keeping it is what makes an unprompted destructive verb
+    // survivable.
+    if (opts.exit === "landed") {
+      await provider
+        .dropSnapshotRef(asWorkspace, this.snapshotRefFor(ws.label))
+        .catch(() => undefined);
     }
-    // Discard the line too, which is safe only in this exact situation:
-    // the work is merged into the source, and the binding has just been
-    // cleared so nothing can reference it for recovery. Keeping it would
-    // also squat on the label — a session that ends a workspace and
-    // starts another would collide with its own leftover branch.
+    // Discard the line too. Safe on a landing because the work is in the
+    // source; intended on a discard because throwing the line away is
+    // the point. Keeping it would also squat on the label, so a session
+    // that finishes one workspace and starts another would collide with
+    // its own leftover branch.
     //
-    // `abandon` deliberately does not reach this code: there the line is
+    // `detach` deliberately does not reach this code: there the line is
     // the only record of unmerged work.
     await provider
       .removeWorkspace(asWorkspace, { force: true, discardLine: true })
@@ -2363,11 +2434,26 @@ export class SessionManager {
     );
   }
 
-  /** Live sessions isolated in `label`, derived from `sourceCwd`. */
+  /**
+   * Live sessions a request for `label` should join.
+   *
+   * Matches the label a session ASKED FOR as well as the one it got.
+   * They differ whenever the name was already taken by a surviving
+   * branch: asking for `stuff` with `hydra/stuff` still around lands you
+   * in `stuff-2`, and a second session then asking for `stuff` would find
+   * nothing live under that name and provision `stuff-3` — two sessions
+   * that both asked to share, in two separate workspaces. Comparing the
+   * request fixes that without inferring anything from the `-N` spelling,
+   * which a user is entitled to type deliberately.
+   */
   private liveSessionsWithLabel(sourceCwd: string, label: string): Session[] {
     const out: Session[] = [];
     for (const s of this.sessions.values()) {
-      if (s.workspace?.label === label && s.workspace.sourceCwd === sourceCwd) {
+      const ws = s.workspace;
+      if (ws === undefined || ws.sourceCwd !== sourceCwd) {
+        continue;
+      }
+      if (ws.label === label || ws.requestedLabel === label) {
         out.push(s);
       }
     }
@@ -2441,6 +2527,7 @@ export class SessionManager {
           path: ws.path,
           sourceCwd: ws.sourceCwd,
           label: ws.label,
+          ...(ws.requestedLabel !== undefined ? { requestedLabel: ws.requestedLabel } : {}),
           provider: ws.provider,
           ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
@@ -2463,7 +2550,9 @@ export class SessionManager {
         ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
       });
 
-      const sharers = this.liveSessionsIn(ws.path, session.sessionId).map((s) => s.sessionId);
+      const sharers = this.liveSessionsIn(ws.path, session.sessionId).map((s) =>
+        stripHydraSessionPrefix(s.sessionId),
+      );
       const lines = [
         `Joined workspace ${shortenHomePath(ws.path)}`,
         `  source: ${shortenHomePath(ws.sourceCwd)}`,
@@ -2474,7 +2563,7 @@ export class SessionManager {
       lines.push(`  shared with: ${sharers.join(", ")}`);
       lines.push(`  your edits will interleave with that session's`);
       lines.push(
-        `Use \`/hydra workspace end\` to leave; the work lands when the last session leaves.`,
+        `Use \`/hydra workspace stop\` to leave; the work lands when the last session leaves.`,
       );
       return lines.join("\n");
     });
@@ -2505,7 +2594,7 @@ export class SessionManager {
     if (session.workspace !== undefined) {
       throw new Error(
         `already isolated in ${shortenHomePath(session.workspace.path)}. ` +
-          `Use \`/hydra workspace end\` to merge and return first, or \`abandon\` to leave it behind.`,
+          `Use \`/hydra workspace stop\` to merge and return first, or \`detach\` to leave it behind.`,
       );
     }
     const sourceCwd = session.cwd;
@@ -2606,6 +2695,9 @@ export class SessionManager {
           path: ws.path,
           sourceCwd: ws.sourceCwd,
           label: ws.label,
+          // Only when it differs, so the field means "this was renamed"
+          // rather than being noise on every record.
+          ...(label !== undefined && label !== ws.label ? { requestedLabel: label } : {}),
           provider: ws.provider,
           ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
@@ -2652,6 +2744,11 @@ export class SessionManager {
     if (ws.vcs?.branch !== undefined) {
       lines.push(`  branch: ${ws.vcs.branch}`);
     }
+    if (label !== undefined && label !== ws.label) {
+      lines.push(
+        `  note: "${label}" was already taken by a surviving branch, so this is "${ws.label}"`,
+      );
+    }
     if (carried !== undefined) {
       lines.push(
         copied
@@ -2662,7 +2759,7 @@ export class SessionManager {
     if (setup !== undefined) {
       lines.push(`  ${setup}`);
     }
-    lines.push(`Use \`/hydra workspace end\` to merge back and return.`);
+    lines.push(`Use \`/hydra workspace stop\` to merge back and return.`);
     return lines.join("\n");
   }
 
@@ -2679,7 +2776,7 @@ export class SessionManager {
    * competition siblings, which exist precisely to be identical at t=0,
    * that is not a surprise but a wrong answer.
    *
-   * The duplicate this leaves behind is reconciled at `end`, where the
+   * The duplicate this leaves behind is reconciled at `stop`, where the
    * source can be compared against this same snapshot and cleared only
    * once the content is provably preserved on the branch.
    */
@@ -2697,7 +2794,7 @@ export class SessionManager {
     // land untracked. Staging it would put the user's WIP in the index
     // the agent is about to commit from, and the agent's first bare
     // `git commit` would sweep it into a commit nobody asked for —
-    // exactly the outcome `end` goes to trouble to avoid.
+    // exactly the outcome `stop` goes to trouble to avoid.
     return (await execGitStdin(["apply"], ws.path, patch)).ok;
   }
 
@@ -4941,8 +5038,8 @@ export class SessionManager {
    * Live sessions are refused rather than served, because for them
    * clearing the binding is only half the operation: `cwd` IS the
    * workspace, so dropping the binding without moving the agent leaves
-   * it running in a directory nothing points at. `workspace end` /
-   * `abandon` does both, and is the caller the client should be sent to.
+   * it running in a directory nothing points at. `workspace stop` /
+   * `detach` does both, and is the caller the client should be sent to.
    */
   async clearWorkspaceBinding(
     sessionId: string,

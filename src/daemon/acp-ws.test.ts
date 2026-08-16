@@ -122,7 +122,19 @@ describe("makeInstallProgressForwarder", () => {
     const stream = makeControlledStream();
     const connection = new JsonRpcConnection(stream);
     const forward = makeInstallProgressForwarder(connection);
-    const start = Date.now();
+    // The invariant stated directly: a fire-and-forget forwarder returns
+    // nothing. If it ever became async to await notify(), this returns a
+    // Promise and the guard trips regardless of how fast the machine is.
+    expect(
+      forward({
+        source: "binary",
+        phase: "download_progress",
+        agentId: "codex",
+        version: "0.14.0",
+        receivedBytes: 0,
+        totalBytes: 1024,
+      }),
+    ).toBeUndefined();
     for (let i = 0; i < 1000; i++) {
       forward({
         source: "binary",
@@ -133,7 +145,11 @@ describe("makeInstallProgressForwarder", () => {
         totalBytes: 1024 * 1024,
       });
     }
-    expect(Date.now() - start).toBeLessThan(200);
+    // Every event reached the wire rather than queueing behind a send.
+    // Counting is load-proof where the old `< 200ms` bound was not: 1000
+    // iterations under full-suite CPU contention can exceed that with
+    // nothing wrong.
+    expect(stream.sent).toHaveLength(1001);
   });
 });
 

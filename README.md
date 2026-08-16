@@ -140,11 +140,15 @@ sessions. Click a gadget's title to fold it. (With a draft in the composer,
 
 A workspace is a git worktree on its own `hydra/<label>` branch, kept outside
 your tree under `~/.hydra-acp/workspaces/`. `/hydra workspace start` moves a
-running session into one; `end` merges the work back and returns; `abandon`
-returns without merging and leaves the branch intact. `start` **copies** your
-uncommitted changes in rather than taking them, so your checkout is left exactly
-as it was, and landing reconciles the two sides rather than demanding a clean
-tree.
+running session into one, and the exits differ only in what happens to the work:
+`stop` merges it back and returns, `discard` throws it away and returns, and
+`detach` returns leaving the workspace and its branch intact for later. `merge`
+lands the work without leaving.
+
+`start` **copies** your uncommitted changes in rather than taking them, so your
+checkout is left exactly as it was, and landing reconciles the two sides rather
+than demanding a clean tree. `discard` keeps the last autosave ref and names it
+on the way out, so even the destructive exit is recoverable.
 
 **Two sessions can share one workspace, deliberately.** `start <name>` naming a
 workspace a live session is already in *joins* it instead of creating a second
@@ -152,9 +156,9 @@ one beside it — useful for a reviewer reading another session's work in place,
 or a planner running a dependency tree against one checkout. Their edits
 interleave, which is the risk you accept, and no worse than two non-isolated
 sessions in one repo. Joining requires the two trees to already agree, since it
-carries nothing across. `end` from a co-tenant detaches without landing; the
-merge waits for the last session to leave, so nothing commits a tree that
-somebody is still writing to.
+carries nothing across. `stop` from a co-tenant behaves as `detach` — you can't
+finish a shared thing alone — so the merge waits for the last session to leave
+and nothing commits a tree somebody is still writing to.
 
 `hydra workspace` from the shell lists what exists (`active`, `unowned`, and
 `--inactive` for sessions pointing at a directory that's gone), and `merge`,
@@ -419,7 +423,7 @@ conversation log.
 | `/hydra compact [status]` | Compact history now. `status` inspects state without triggering. |
 | `/hydra uncompact` | Roll back the most recent compaction, before any new turns. |
 | `/hydra fork [verbatim]` | Fork into a new session. Default is a synopsis brief; `verbatim` slices at the last completed turn. |
-| `/hydra workspace <start [name] \| merge \| end \| abandon \| status>` | Move this session into an isolated checkout and land the work later. See [isolated workspaces](#isolated-workspaces). |
+| `/hydra workspace <start [name] \| merge \| stop \| detach \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. See [isolated workspaces](#isolated-workspaces). |
 | `/hydra restart` | Restart the agent with a fresh `session/new`, preserving history. Useful when the available models have changed underneath you. |
 | `/hydra kill` | Close this session. The agent dies; the record is kept and can be resumed. |
 

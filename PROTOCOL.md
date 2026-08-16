@@ -413,7 +413,7 @@ Drops the `workspace` field from the record, so an isolated session stops claimi
 
 Cold sessions only. `hydra workspace remove` calls this after the directory is already gone; the branch and the last autosave ref are left in place for recovery.
 
-Response: `204` on success, `400` if `workspace` is anything but `null`, `404` on unknown session, `409` when the session is live — its `cwd` **is** the workspace, so the binding may only be dropped by something that moves the agent too (`workspace end` / `workspace abandon` in the session).
+Response: `204` on success, `400` if `workspace` is anything but `null`, `404` on unknown session, `409` when the session is live — its `cwd` **is** the workspace, so the binding may only be dropped by something that moves the agent too (`workspace stop` / `workspace detach` in the session).
 
 #### `DELETE /v1/sessions/:id`
 

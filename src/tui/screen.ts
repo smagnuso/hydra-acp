@@ -5042,15 +5042,15 @@ export class Screen {
    * moment the tool event arrived. That is correct at the time and stays
    * correct for the source tree, but a row created inside a workspace
    * holds a path that outlives the workspace. After `/hydra workspace
-   * end` the directory is deleted, so the link is dead. After `abandon`
+   * end` the directory is deleted, so the link is dead. After `detach`
    * it survives and is still writable, so clicking it opens a file whose
    * edits can never reach the project — the worse case, because it looks
    * like it worked.
    *
    * The discrimination needs no per-session memory: the workspaces root
    * is deterministic, so "a workspace that is not mine" is a structural
-   * test. Existence then separates the two cases by itself, since `end`
-   * removes the directory and `abandon` does not. Being structural, this
+   * test. Existence then separates the two cases by itself, since `stop`
+   * removes the directory and `detach` does not. Being structural, this
    * also survives a daemon restart and correctly flags another session's
    * workspace.
    *
@@ -5080,7 +5080,7 @@ export class Screen {
     }
 
     if (exists) {
-      // The `abandon` shape. Opening is legitimate — inspecting or
+      // The `detach` shape. Opening is legitimate — inspecting or
       // salvaging abandoned work is a real reason to click — so allow it
       // and say plainly that edits will not land.
       this.notify(
@@ -5090,7 +5090,7 @@ export class Screen {
       return file;
     }
 
-    // The `end` shape: the workspace is gone and its work was merged, so
+    // The `stop` shape: the workspace is gone and its work was merged, so
     // the same file under the current tree is what the row meant. The
     // workspace layout is <root>/<hash>/<label>/<rest>, so `rest` is
     // recoverable even though the hash is not reversible.

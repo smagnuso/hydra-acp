@@ -2513,7 +2513,7 @@ async function runSession(
     // Exit-direction phases. Separate names rather than reusing
     // "swapping" with a direction flag: the indicator text is the whole
     // point of these events, and "moving session into workspace" during
-    // an `end` would say the opposite of what is happening.
+    // an `stop` would say the opposite of what is happening.
     if (phase === "landing") {
       screen.setWorkspaceIndicator("merging workspace back...");
       return;

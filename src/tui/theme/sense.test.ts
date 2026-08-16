@@ -161,10 +161,15 @@ describe("senseTerminalColors", () => {
   // timeout on every start.
   it("settles shortly after a partial answer", async () => {
     const tty = fakeTty("\u001b]11;rgb:0/0/0\u0007");
+    const timeoutMs = 10_000;
     const started = Date.now();
-    const got = await senseTerminalColors(tty.streams, 10_000);
+    const got = await senseTerminalColors(tty.streams, timeoutMs);
     expect(got.background).toEqual(rgb(0, 0, 0));
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // Relative to the timeout, not an absolute figure. The claim is "it
+    // did not sit out the full deadline"; a fixed 1s bound measured the
+    // machine instead, and a loaded one can spend that long on a settle
+    // that is behaving correctly.
+    expect(Date.now() - started).toBeLessThan(timeoutMs / 2);
   });
 
   // Leaving raw mode on, or a listener attached, breaks the keyboard for the real

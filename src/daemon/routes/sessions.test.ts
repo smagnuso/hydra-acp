@@ -283,7 +283,7 @@ describe("session routes: termination broadcasts session_closed", () => {
   it("PATCH /v1/sessions/:id refuses to clear a LIVE session's binding with 409", async () => {
     // cwd is the workspace for a live session, so dropping the binding
     // without moving the agent leaves it running somewhere nothing
-    // points at. `workspace end` / `abandon` does both.
+    // points at. `workspace stop` / `detach` does both.
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -294,7 +294,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       body: JSON.stringify({ workspace: null }),
     });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toMatch(/workspace end/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/workspace stop/);
   });
 
   it("PATCH /v1/sessions/:id rejects a non-null workspace with 400", async () => {
@@ -336,7 +336,6 @@ describe("session routes: termination broadcasts session_closed", () => {
     // expect 202 to come back essentially immediately.
     requestMock.mockImplementationOnce(() => new Promise(() => undefined));
 
-    const t0 = Date.now();
     const res = await fetch(
       `${harness.baseUrl}/v1/sessions/${session.sessionId}`,
       {
@@ -345,11 +344,17 @@ describe("session routes: termination broadcasts session_closed", () => {
         body: JSON.stringify({ regen: true }),
       },
     );
-    const elapsed = Date.now() - t0;
+    // Getting a response AT ALL is the proof. The mocked request never
+    // resolves, so a route that awaited it could not answer — the fetch
+    // would hang until the test timed out.
+    //
+    // This used to also assert the round trip took under a second, which
+    // measured the machine rather than the route: under full-suite load
+    // a local fetch can exceed that while the route is behaving
+    // perfectly, and it flaked. A wall-clock bound was the weaker check
+    // anyway, since it would have passed a route that awaited something
+    // taking 900ms.
     expect(res.status).toBe(202);
-    // Generous bound — what we care about is that we DIDN'T block on
-    // the (intentionally never-resolving) agent request.
-    expect(elapsed).toBeLessThan(1000);
   });
 
   it("PATCH /v1/sessions/:id with { regen: true } accepts cold sessions (schedules background synopsis)", async () => {

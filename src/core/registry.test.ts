@@ -131,11 +131,16 @@ describe("Registry.lastFetchedAt", () => {
   });
 
   it("returns the cache fetchedAt once seeded", () => {
+    const before = Date.now();
     const registry = new Registry(fakeConfig());
     seedCache(registry, FIXTURE);
     const at = registry.lastFetchedAt();
     expect(at).toBeTypeOf("number");
-    expect(Date.now() - at!).toBeLessThan(1000);
+    // Bracketed rather than age-bounded: "stamped during this test" is
+    // the actual claim, and it stays true however long the machine
+    // stalls between these two statements.
+    expect(at!).toBeGreaterThanOrEqual(before);
+    expect(at!).toBeLessThanOrEqual(Date.now());
   });
 });
 

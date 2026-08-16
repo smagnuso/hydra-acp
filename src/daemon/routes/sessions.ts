@@ -373,8 +373,8 @@ export function registerSessionRoutes(
       if (outcome === "live") {
         reply.code(409).send({
           error:
-            "session is live; its cwd is the workspace. Use `workspace end` or " +
-            "`workspace abandon` in the session so the agent moves with the binding.",
+            "session is live; its cwd is the workspace. Use `workspace stop` or " +
+            "`workspace detach` in the session so the agent moves with the binding.",
         });
         return;
       }

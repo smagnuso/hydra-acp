@@ -18,7 +18,7 @@ import { Registry, type RegistryAgent } from "../core/registry.js";
 import { extractHydraMeta } from "../acp/types-hydra-meta.js";
 import { buildHydraSessionMeta } from "../acp/types-session-list.js";
 import { JsonRpcConnection } from "../acp/connection.js";
-import type { AttachedClient } from "../core/session.js";
+import { stripHydraSessionPrefix, type AttachedClient } from "../core/session.js";
 import { makeMockAgent, makeControlledStream } from "./test-utils.js";
 
 function makeClient(): { client: AttachedClient } {
@@ -442,7 +442,7 @@ describe("session isolation end-to-end", () => {
       cwd: repo,
       workspace: { label: "autosave" },
     });
-    const ref = `refs/hydra/snapshots/ws/${session.workspace?.label}`;
+    const ref = `refs/hydra/workspaces/${session.workspace?.label}/autosave`;
 
     await fs.writeFile(path.join(session.cwd, "unsaved.ts"), "export const x = 1;\n");
     // Drive the same hook a completed turn fires.
@@ -480,7 +480,7 @@ describe("session isolation end-to-end", () => {
     // No ref at all: a read-only turn should not pay for a tree walk's
     // worth of objects, and most turns are read-only.
     await expect(
-      exec("git", ["rev-parse", "--verify", "refs/hydra/snapshots/ws/quiet"], {
+      exec("git", ["rev-parse", "--verify", "refs/hydra/workspaces/quiet/autosave"], {
         cwd: repo,
       }),
     ).rejects.toThrow();
@@ -664,6 +664,82 @@ describe("session isolation end-to-end", () => {
     expect(session.cwd).not.toBe(repo);
   });
 
+  it("discards the workspace and its branch, keeping the autosave as the net", async () => {
+    // The counterpart of `stop`. Destructive on purpose, and a slash
+    // command has nowhere to put a confirmation prompt — so the autosave
+    // ref is the confirmation: the work goes, but not irretrievably.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "nope");
+    const wsPath = session.cwd;
+    await fs.writeFile(path.join(wsPath, "regret.txt"), "not wanted\n");
+    await (
+      manager as unknown as { runWorkspaceSnapshot(s: typeof session): Promise<void> }
+    ).runWorkspaceSnapshot(session);
+
+    const msg = await manager.runWorkspaceAction(session.sessionId, "discard");
+
+    expect(msg).toContain("Discarded");
+    expect(session.cwd).toBe(repo);
+    expect(session.workspace).toBeUndefined();
+    // Directory and branch both gone; nothing landed in the source.
+    await expect(fs.access(wsPath)).rejects.toThrow();
+    expect((await exec("git", ["branch", "--list", "hydra/*"], { cwd: repo })).stdout).not.toContain(
+      "hydra/nope",
+    );
+    await expect(fs.access(path.join(repo, "regret.txt"))).rejects.toThrow();
+
+    // But the autosave survives, is named in the output, and still holds
+    // the discarded file.
+    const ref = "refs/hydra/workspaces/nope/autosave";
+    expect(msg).toContain(ref);
+    const shown = await exec("git", ["show", `${ref}:regret.txt`], { cwd: repo });
+    expect(shown.stdout).toBe("not wanted\n");
+  });
+
+  it("refuses to discard a workspace someone else is in", async () => {
+    // The refcount would keep the directory for the co-tenant, so a
+    // degraded discard would report a deletion that did not happen.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "ours");
+    const wsPath = owner.cwd;
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(guest.sessionId, "start", "ours");
+
+    await expect(
+      manager.runWorkspaceAction(guest.sessionId, "discard"),
+    ).rejects.toThrow(/not yours alone to discard/);
+
+    expect(guest.workspace).toBeDefined();
+    await expect(fs.access(wsPath)).resolves.toBeUndefined();
+  });
+
+  it("rejects a verb it does not know, listing the ones it does", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const stream = makeControlledStream();
+    const clientId = "c_unknownverb";
+    await session.attach(
+      { clientId, connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+
+    await session.prompt(clientId, {
+      prompt: [{ type: "text", text: "/hydra workspace end" }],
+    });
+
+    expect(session.workspace).toBeUndefined();
+    const said = stream.sent
+      .map((m) => {
+        const u = (m as { params?: { update?: { content?: { text?: unknown } } } }).params?.update;
+        return typeof u?.content?.text === "string" ? u.content.text : "";
+      })
+      .join("");
+    expect(said).toContain('Unknown workspace verb "end"');
+    expect(said).toContain("start, merge, stop, detach, discard, status");
+  });
+
   it("copies staged work in, but lands it unstaged in the workspace", async () => {
     // Staging it in the workspace would leave the user's WIP sitting in
     // the index the agent commits from, so the agent's first bare
@@ -810,7 +886,7 @@ describe("session isolation end-to-end", () => {
     expect(phases.indexOf("entered")).toBe(phases.length - 1);
 
     seen.length = 0;
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
     const left = seen.find((u) => u.phase === "left");
     expect(left?.cwd).toBe(repo);
   });
@@ -852,7 +928,7 @@ describe("session isolation end-to-end", () => {
     await exec("git", ["commit", "-q", "-m", "agent: ship it"], { cwd: wsPath });
     await fs.writeFile(path.join(wsPath, "loose.ts"), "still working\n");
 
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
 
     // The deliberate commit arrived as a commit.
     const log = await exec("git", ["log", "--oneline", "-3"], { cwd: repo });
@@ -872,7 +948,7 @@ describe("session isolation end-to-end", () => {
   it("keeps working in the source tree while isolated, and lands both sides", async () => {
     // Copy semantics make this the intended workflow, not an edge case:
     // the source stays usable precisely because the workspace did not
-    // take the work. So editing here must not make `end` refuse.
+    // take the work. So editing here must not make `stop` refuse.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await fs.writeFile(path.join(repo, "tracked.txt"), "copied in\n");
@@ -887,7 +963,7 @@ describe("session isolation end-to-end", () => {
     await exec("git", ["add", "theirs.txt"], { cwd: wsPath });
     await exec("git", ["commit", "-q", "-m", "agent: theirs"], { cwd: wsPath });
 
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
 
     // Both survive. The agent's commit is a commit...
     const log = await exec("git", ["log", "--oneline", "-2"], { cwd: repo });
@@ -910,7 +986,7 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "workspace version\n");
     await exec("git", ["commit", "-qam", "agent: my version"], { cwd: wsPath });
 
-    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
+    const msg = await manager.runWorkspaceAction(session.sessionId, "stop");
 
     // The merge still lands, and the clash is reported with a recovery
     // path rather than the source edit being silently dropped.
@@ -931,54 +1007,40 @@ describe("session isolation end-to-end", () => {
 
     // The START ref, not the autosave ref. They were the same name once,
     // which is exactly how the autosave came to clobber this baseline.
-    const ref = `refs/hydra/start/ws/${session.workspace?.label}`;
+    const ref = `refs/hydra/workspaces/${session.workspace?.label}/start`;
     const sha = (await exec("git", ["rev-parse", ref], { cwd: repo })).stdout.trim();
     const shown = await exec("git", ["show", `${sha}:precious.txt`], { cwd: repo });
     expect(shown.stdout).toBe("do not lose me\n");
   });
 
-  it("lands from a session-keyed anchor written before the re-key", async () => {
-    // The anchors moved from refs/hydra/start/<sessionId> to
-    // .../start/ws/<label>, because they describe the workspace's
-    // relationship to its source rather than any session's. A workspace
-    // that existed across that change has only the old name, and it is
-    // the only record of where the source stood when the work began —
-    // so landing has to still find it. Losing it silently would not
-    // fail: it would fall back to HEAD and report the user's own
-    // pre-existing edits as an overlap with the workspace.
+  it("keeps a per-turn history of the autosave in its reflog", async () => {
+    // Each autosave overwrites the ref, and parents on HEAD rather than
+    // on its predecessor, so without a log every new snapshot made the
+    // last one unreachable: exactly one recovery point. Git will not log
+    // a ref outside refs/heads on its own, so `--create-reflog` is what
+    // turns "as of the last turn" into a per-turn history.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
-    // Uncommitted at `start`, so it gets copied into the workspace, and
-    // then edited BY THE AGENT there. That combination is what makes the
-    // anchor load-bearing: measured from the anchor, the copy cancels out
-    // of the diff and only the agent's version lands. Measured from HEAD
-    // instead, the user's version reads as divergence and gets replayed
-    // on top of the agent's, which is the failure this guards.
-    await fs.writeFile(path.join(repo, "mine.txt"), "user version\n");
-    await manager.runWorkspaceAction(session.sessionId, "start", "legacy");
-    const label = session.workspace!.label;
+    await manager.runWorkspaceAction(session.sessionId, "start", "turns");
+    const snap = manager as unknown as {
+      runWorkspaceSnapshot(s: typeof session): Promise<void>;
+    };
 
-    // Rename the anchor to the pre-re-key spelling, leaving nothing at
-    // the new one: exactly the on-disk state of an older workspace.
-    const fresh = `refs/hydra/start/ws/${label}`;
-    const sha = (await exec("git", ["rev-parse", fresh], { cwd: repo })).stdout.trim();
-    await exec("git", ["update-ref", `refs/hydra/start/${session.sessionId}`, sha], { cwd: repo });
-    await exec("git", ["update-ref", "-d", fresh], { cwd: repo });
+    for (const text of ["first\n", "second\n", "third\n"]) {
+      await fs.writeFile(path.join(session.cwd, "tracked.txt"), text);
+      await snap.runWorkspaceSnapshot(session);
+    }
 
-    await fs.writeFile(path.join(session.cwd, "mine.txt"), "agent version\n");
-    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
+    const ref = "refs/hydra/workspaces/turns/autosave";
+    const log = await exec("git", ["reflog", "--format=%H", ref], { cwd: repo });
+    const shas = log.stdout.trim().split("\n").filter((l) => l.length > 0);
+    expect(shas).toHaveLength(3);
 
-    // The agent's version landed, cleanly. Falling back to HEAD would
-    // instead replay the user's copied-in version over it and report an
-    // overlap, so this is the assertion that proves the old anchor was
-    // found rather than merely tolerated.
-    expect(msg).toContain("Merged");
-    expect(msg).not.toMatch(/overlap|could not be replayed/i);
-    expect(await fs.readFile(path.join(repo, "mine.txt"), "utf8")).toBe("agent version\n");
-
-    // And the legacy ref is reaped rather than left pinning objects.
-    const refs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
-    expect(refs.stdout).not.toContain(session.sessionId);
+    // Every intermediate turn is still readable, not just the newest.
+    const contents = await Promise.all(
+      shas.map(async (sha) => (await exec("git", ["show", `${sha}:tracked.txt`], { cwd: repo })).stdout),
+    );
+    expect(contents).toEqual(["third\n", "second\n", "first\n"]);
   });
 
   it("persists cwd and the binding together, and reports status", async () => {
@@ -1010,7 +1072,9 @@ describe("session isolation end-to-end", () => {
     const msg = await manager.runWorkspaceAction(guest.sessionId, "start", "shared");
 
     expect(msg).toContain("Joined workspace");
-    expect(msg).toContain(owner.sessionId);
+    // Named by the short id the rest of the UI uses, not the wire form.
+    expect(msg).toContain(stripHydraSessionPrefix(owner.sessionId));
+    expect(msg).not.toContain("hydra_session_");
     // Same directory, same branch, no second checkout beside it.
     expect(guest.cwd).toBe(wsPath);
     expect(guest.workspace?.label).toBe("shared");
@@ -1019,14 +1083,63 @@ describe("session isolation end-to-end", () => {
     expect(branches.stdout).not.toContain("hydra/shared-2");
   });
 
+  it("joins on the label that was ASKED for, even after a rename", async () => {
+    // Observed: two sessions each told to `start stuff` landed in stuff-2
+    // and stuff-3. A `hydra/stuff` branch from a workspace removed the
+    // day before still held the name, so the first request was suffixed
+    // to stuff-2 — and the second request then looked for a live session
+    // labelled "stuff", found none (the first is "stuff-2"), and
+    // provisioned its own. Both sessions asked to share and neither did.
+    const repo = await makeGitRepo();
+    // The leftover: a branch with no workspace and no session, exactly
+    // what `workspace remove` and `detach` both leave behind.
+    await exec("git", ["branch", "hydra/stuff"], { cwd: repo });
+
+    const first = await manager.create({ agentId: "claude-code", cwd: repo });
+    const firstMsg = await manager.runWorkspaceAction(first.sessionId, "start", "stuff");
+    expect(first.workspace?.label).toBe("stuff-2");
+    // And it says why, so the rename is not a silent surprise.
+    expect(firstMsg).toContain('"stuff" was already taken');
+
+    const second = await manager.create({ agentId: "claude-code", cwd: repo });
+    const secondMsg = await manager.runWorkspaceAction(second.sessionId, "start", "stuff");
+
+    expect(secondMsg).toContain("Joined workspace");
+    expect(second.cwd).toBe(first.cwd);
+    expect(second.workspace?.label).toBe("stuff-2");
+    const branches = await exec("git", ["branch", "--list", "hydra/*"], { cwd: repo });
+    expect(branches.stdout).not.toContain("hydra/stuff-3");
+  });
+
+  it("reports co-tenants in status, and what leaving will actually do", async () => {
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "crowded");
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(guest.sessionId, "start", "crowded");
+
+    const status = await manager.runWorkspaceAction(guest.sessionId, "status");
+    expect(status).toContain("shared with: " + stripHydraSessionPrefix(owner.sessionId));
+    // The stock hint would be wrong here: neither exit lands anything
+    // while somebody else is still in the tree.
+    expect(status).toContain("the work lands when the last one leaves");
+    expect(status).not.toContain("merge and return");
+
+    // And once alone again, it goes back to describing the real choice.
+    await manager.runWorkspaceAction(guest.sessionId, "stop");
+    const solo = await manager.runWorkspaceAction(owner.sessionId, "status");
+    expect(solo).not.toContain("shared with");
+    expect(solo).toContain("merge and return");
+  });
+
   it("still suffixes when the label survives with nobody in it", async () => {
-    // The start-after-abandon case. The name is taken by a branch, not by
+    // The start-after-detach case. The name is taken by a branch, not by
     // a session, and adopting work you just walked away from would be the
     // opposite of what you asked for.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await manager.runWorkspaceAction(session.sessionId, "start", "letgo");
-    await manager.runWorkspaceAction(session.sessionId, "abandon");
+    await manager.runWorkspaceAction(session.sessionId, "detach");
 
     const msg = await manager.runWorkspaceAction(session.sessionId, "start", "letgo");
 
@@ -1046,15 +1159,16 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "shared work\n");
 
     // Guest leaves first: detach, no merge, workspace intact.
-    const left = await manager.runWorkspaceAction(guest.sessionId, "end");
+    const left = await manager.runWorkspaceAction(guest.sessionId, "stop");
     expect(left).toContain("Nothing landed yet");
-    expect(left).toContain(owner.sessionId);
+    expect(left).toContain(stripHydraSessionPrefix(owner.sessionId));
+    expect(left).not.toContain("hydra_session_");
     expect(guest.cwd).toBe(repo);
     await expect(fs.access(wsPath)).resolves.toBeUndefined();
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("original\n");
 
     // Owner leaves last: now it lands and the directory goes.
-    const landed = await manager.runWorkspaceAction(owner.sessionId, "end");
+    const landed = await manager.runWorkspaceAction(owner.sessionId, "stop");
     expect(landed).toContain("Merged");
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("shared work\n");
     await expect(fs.access(wsPath)).rejects.toThrow();
@@ -1133,7 +1247,7 @@ describe("session isolation end-to-end", () => {
     const wsPath = session.cwd;
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "agent work\n");
 
-    const msg = await manager.runWorkspaceAction(session.sessionId, "end");
+    const msg = await manager.runWorkspaceAction(session.sessionId, "stop");
     // One sentence for one action: what merged, where it went, and that
     // the workspace is gone.
     expect(msg).toContain("Merged");
@@ -1154,7 +1268,7 @@ describe("session isolation end-to-end", () => {
     // needs no recovery anchor, and a live ref pins objects forever.
     await expect(fs.access(wsPath)).rejects.toThrow();
     await expect(
-      exec("git", ["rev-parse", "--verify", "refs/hydra/snapshots/ws/quiet"], {
+      exec("git", ["rev-parse", "--verify", "refs/hydra/workspaces/quiet/autosave"], {
         cwd: repo,
       }),
     ).rejects.toThrow();
@@ -1190,7 +1304,7 @@ describe("session isolation end-to-end", () => {
       "none",
     );
 
-    const report = await manager.runWorkspaceAction(session.sessionId, "end");
+    const report = await manager.runWorkspaceAction(session.sessionId, "stop");
     expect(report).toContain("Merged");
     // The agent's work survived: the whole point.
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("agent three\n");
@@ -1212,9 +1326,9 @@ describe("session isolation end-to-end", () => {
     ).runWorkspaceSnapshot(session);
 
     const before = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
-    expect(before.stdout).toContain("refs/hydra/start/ws/refs");
+    expect(before.stdout).toContain("refs/hydra/workspaces/refs/start");
 
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
     const after = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
     expect(after.stdout).not.toContain(session.sessionId);
   });
@@ -1226,7 +1340,7 @@ describe("session isolation end-to-end", () => {
     // context at the moment the user is confirming a clean transition.
     //
     // Naming the swap after its cause fixed the wrong half. The swap is a
-    // STEP inside `workspace start` / `end`, not the outcome of one, and
+    // STEP inside `workspace start` / `stop`, not the outcome of one, and
     // the caller already reports the outcome — so announcing the step too
     // printed three lines for one action, two of them saying "returned".
     // It also fired before startWorkspace had written the cwd/binding
@@ -1257,7 +1371,7 @@ describe("session isolation end-to-end", () => {
     expect(textOf()).not.toMatch(/Moved into|Switched to/);
 
     stream.sent.length = 0;
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
     expect(textOf()).not.toContain("Compaction completed");
     expect(textOf()).not.toMatch(/Returned to|Switched to/);
   });
@@ -1293,7 +1407,7 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent work\n");
 
     stream.sent.length = 0;
-    const result = await manager.runWorkspaceAction(session.sessionId, "end");
+    const result = await manager.runWorkspaceAction(session.sessionId, "stop");
 
     // Nothing streamed: no half-report to be ordered against anything.
     expect(streamedTexts(stream)).toEqual([]);
@@ -1303,7 +1417,7 @@ describe("session isolation end-to-end", () => {
   });
 
   it("does not mistake its own landed work for the user's overlapping edits", async () => {
-    // `merge` lands the work and stays put. A later `end` then measured
+    // `merge` lands the work and stays put. A later `stop` then measured
     // the source against the snapshot taken at `start`, found the work the
     // merge had just put there, and reported the workspace's OWN changes
     // as the user's edits overlapping it. Nothing was lost, but the
@@ -1328,10 +1442,10 @@ describe("session isolation end-to-end", () => {
     // The landing recorded where it left the source, which is what the
     // next one measures against.
     const refs = await exec("git", ["for-each-ref", "refs/hydra/"], { cwd: repo });
-    expect(refs.stdout).toContain(`refs/hydra/baseline/ws/${session.workspace?.label}`);
+    expect(refs.stdout).toContain(`refs/hydra/workspaces/${session.workspace?.label}/baseline`);
 
     stream.sent.length = 0;
-    const streamed = await manager.runWorkspaceAction(session.sessionId, "end");
+    const streamed = await manager.runWorkspaceAction(session.sessionId, "stop");
     expect(streamed).toContain("Merged");
     expect(streamed).not.toContain("WARNING");
 
@@ -1363,7 +1477,7 @@ describe("session isolation end-to-end", () => {
     await fs.writeFile(path.join(session.cwd, "tracked.txt"), "agent second version\n");
 
     stream.sent.length = 0;
-    const streamed = await manager.runWorkspaceAction(session.sessionId, "end");
+    const streamed = await manager.runWorkspaceAction(session.sessionId, "stop");
     expect(streamed).toContain("WARNING");
     expect(streamed).toContain(`refs/hydra/landing/${session.sessionId}`);
 
@@ -1395,7 +1509,7 @@ describe("session isolation end-to-end", () => {
 
     phases.length = 0;
     await fs.writeFile(path.join(session.cwd, "tracked.txt"), "work\n");
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
     // Both legs of the exit are slow enough that silence reads as a hang.
     expect(phases).toContain("landing");
     expect(phases).toContain("returning");
@@ -1482,7 +1596,7 @@ describe("session isolation end-to-end", () => {
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await manager.runWorkspaceAction(session.sessionId, "start", "departing");
     const wsPath = session.cwd;
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
 
     const rewrite = (
       session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
@@ -1509,15 +1623,15 @@ describe("session isolation end-to-end", () => {
     expect(third[0]?.text).toContain("LEFT the isolated workspace");
   });
 
-  it("warns differently after abandon, because the directory still absorbs writes", async () => {
-    // `end` removes the workspace, so a stale path fails loudly. `abandon`
+  it("warns differently after detach, because the directory still absorbs writes", async () => {
+    // `stop` removes the workspace, so a stale path fails loudly. `detach`
     // keeps it, so writes succeed and never land — the silent case, which
     // needs the stronger wording.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await manager.runWorkspaceAction(session.sessionId, "start", "abandoning");
     const wsPath = session.cwd;
-    await manager.runWorkspaceAction(session.sessionId, "abandon");
+    await manager.runWorkspaceAction(session.sessionId, "detach");
 
     const out = (
       session as unknown as { applyWorkspacePromptRewrite(p: unknown[]): unknown[] }
@@ -1546,7 +1660,7 @@ describe("session isolation end-to-end", () => {
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await manager.runWorkspaceAction(session.sessionId, "start", "firstws");
     const firstPath = session.cwd;
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
     await manager.runWorkspaceAction(session.sessionId, "start", "secondws");
 
     const out = (
@@ -1561,7 +1675,7 @@ describe("session isolation end-to-end", () => {
 
   it("can start again after ending, without colliding with its own leftovers", async () => {
     // Regression. The default label is derived from the session id, so
-    // it repeats; `end` used to keep the branch, so the second start hit
+    // it repeats; `stop` used to keep the branch, so the second start hit
     // "fatal: a branch named 'hydra/s-...' already exists". Two right
     // decisions that were wrong together.
     const repo = await makeGitRepo();
@@ -1570,7 +1684,7 @@ describe("session isolation end-to-end", () => {
     await manager.runWorkspaceAction(session.sessionId, "start");
     const first = session.cwd;
     await fs.writeFile(path.join(first, "tracked.txt"), "round one\n");
-    await manager.runWorkspaceAction(session.sessionId, "end");
+    await manager.runWorkspaceAction(session.sessionId, "stop");
 
     // The branch is gone too: merged, unreferenced, and squatting on the
     // label the next start wants.
@@ -1585,13 +1699,13 @@ describe("session isolation end-to-end", () => {
   });
 
   it("picks a free label when a branch legitimately survives", async () => {
-    // `abandon` keeps the branch on purpose, so the name stays taken.
+    // `detach` keeps the branch on purpose, so the name stays taken.
     // Starting again must sidestep rather than fail.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
 
     await manager.runWorkspaceAction(session.sessionId, "start", "reused");
-    await manager.runWorkspaceAction(session.sessionId, "abandon");
+    await manager.runWorkspaceAction(session.sessionId, "detach");
     const kept = await exec("git", ["branch", "--list", "hydra/reused"], { cwd: repo });
     expect(kept.stdout).toContain("hydra/reused");
 
@@ -1611,7 +1725,7 @@ describe("session isolation end-to-end", () => {
       manager as unknown as { runWorkspaceSnapshot(s: typeof session): Promise<void> }
     ).runWorkspaceSnapshot(session);
 
-    const msg = await manager.runWorkspaceAction(session.sessionId, "abandon");
+    const msg = await manager.runWorkspaceAction(session.sessionId, "detach");
     expect(msg).toContain("WITHOUT merging");
 
     expect(session.cwd).toBe(repo);
@@ -1624,7 +1738,7 @@ describe("session isolation end-to-end", () => {
     );
     const ref = await exec(
       "git",
-      ["rev-parse", "refs/hydra/snapshots/ws/nevermind"],
+      ["rev-parse", "refs/hydra/workspaces/nevermind/autosave"],
       { cwd: repo },
     );
     expect(ref.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
@@ -1639,10 +1753,10 @@ describe("session isolation end-to-end", () => {
     // Source diverges underneath.
     await exec("git", ["commit", "-q", "--allow-empty", "-m", "moved on"], { cwd: repo });
 
-    await expect(manager.runWorkspaceAction(session.sessionId, "end")).rejects.toThrow(
+    await expect(manager.runWorkspaceAction(session.sessionId, "stop")).rejects.toThrow(
       /cannot fast-forward/i,
     );
-    // `end` means finish, so a failure must not strand the work by
+    // `stop` means finish, so a failure must not strand the work by
     // returning to the source anyway.
     expect(session.cwd).toBe(wsPath);
     expect(session.workspace).toBeDefined();
@@ -1663,7 +1777,7 @@ describe("session isolation end-to-end", () => {
   it("rejects workspace verbs on a session that is not isolated", async () => {
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
-    for (const verb of ["merge", "end", "abandon"] as const) {
+    for (const verb of ["merge", "stop", "detach"] as const) {
       await expect(manager.runWorkspaceAction(session.sessionId, verb)).rejects.toThrow(
         /not in a workspace/i,
       );

@@ -9,12 +9,10 @@
 // Keyed by workspace LABEL, not by session id, because that is what they
 // actually describe: where the source stood when this line of work
 // began, and how the last landing left it. Both are properties of the
-// workspace. They were session-keyed only because a workspace and a
-// session used to be one-to-one, and that keying breaks as soon as two
-// sessions share a workspace: whichever one happens to land would
-// measure divergence from the moment IT joined rather than from the
-// moment the work started, and mis-classify everything in between as the
-// user's own edits.
+// workspace, and session-keying breaks outright once two sessions share
+// one: whichever happened to land would measure divergence from the
+// moment IT joined rather than from when the work started, and
+// mis-classify everything in between as the user's own edits.
 //
 // A label is unique within its repository, enforced where it is chosen:
 // findFreeLabel rejects a candidate whose `hydra/<label>` branch exists,
@@ -22,10 +20,14 @@
 // are also already ref-safe, since sanitizeLabel restricts them to
 // [A-Za-z0-9._-].
 //
-// The `ws/` segment keeps the new names from colliding with the old
-// session-keyed ones, and makes a migration legible: `git for-each-ref
-// refs/hydra/start/ws/` lists exactly the workspaces that have been
-// anchored since the re-key.
+// Grouped by WORKSPACE first, role second, so everything about one
+// workspace is a single prefix:
+//
+//   git for-each-ref 'refs/hydra/workspaces/stuff-2/**'
+//
+// which is exactly the query you want when recovering work or working
+// out what a workspace left behind. Tearing its refs down is likewise
+// one prefix rather than a list of names.
 
 const NS = "refs/hydra";
 
@@ -39,23 +41,11 @@ export interface WorkspaceAnchorRefs {
 }
 
 export function workspaceAnchorRefs(label: string): WorkspaceAnchorRefs {
+  const base = `${NS}/workspaces/${label}`;
   return {
-    autosave: `${NS}/snapshots/ws/${label}`,
-    start: `${NS}/start/ws/${label}`,
-    baseline: `${NS}/baseline/ws/${label}`,
-  };
-}
-
-/**
- * The pre-re-key names, still read (so a workspace created before the
- * change lands correctly) and still deleted (so nothing is left pinning
- * objects), but never written.
- */
-export function legacyAnchorRefs(sessionId: string): WorkspaceAnchorRefs {
-  return {
-    autosave: `${NS}/snapshots/${sessionId}`,
-    start: `${NS}/start/${sessionId}`,
-    baseline: `${NS}/baseline/${sessionId}`,
+    autosave: `${base}/autosave`,
+    start: `${base}/start`,
+    baseline: `${base}/baseline`,
   };
 }
 
@@ -73,9 +63,8 @@ export function landingRetainRef(sessionId: string): string {
   return `${NS}/landing/${sessionId}`;
 }
 
-/** Every anchor for a workspace, new and legacy, for cleanup sweeps. */
-export function allAnchorRefs(label: string, sessionId: string): string[] {
-  const fresh = workspaceAnchorRefs(label);
-  const legacy = legacyAnchorRefs(sessionId);
-  return [fresh.autosave, fresh.start, fresh.baseline, legacy.autosave, legacy.start, legacy.baseline];
+/** Every anchor for a workspace, for cleanup sweeps. */
+export function allAnchorRefs(label: string): string[] {
+  const refs = workspaceAnchorRefs(label);
+  return [refs.autosave, refs.start, refs.baseline];
 }

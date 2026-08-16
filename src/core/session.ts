@@ -303,7 +303,7 @@ export interface SessionInit {
   workspaceError?: string;
   /** Backs `/hydra workspace`; see Session.workspaceHook. */
   workspaceHook?: (
-    action: "start" | "merge" | "end" | "abandon" | "status",
+    action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
     name?: string,
   ) => Promise<string>;
   // Optional callback used by /sessions to enumerate all daemon sessions.
@@ -865,7 +865,7 @@ export class Session {
   // show the user.
   private workspaceHook:
     | ((
-        action: "start" | "merge" | "end" | "abandon" | "status",
+        action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
         name?: string,
       ) => Promise<string>)
     | undefined;
@@ -2020,7 +2020,7 @@ export class Session {
     // moment they are trying to confirm a clean workspace transition.
     //
     // Workspace moves say nothing here at all. The swap is a step inside
-    // `workspace start` / `end`, not the outcome of one, and it is the
+    // `workspace start` / `stop`, not the outcome of one, and it is the
     // caller that knows the outcome — which branch merged, where the
     // work went, whether the directory survived. Announcing the step too
     // meant three lines for one action, two of them saying "returned".
@@ -2721,7 +2721,7 @@ export class Session {
     const ws = this.workspace;
     if (ws === undefined) {
       // The inverse case: writing into a workspace this session has LEFT.
-      // After `abandon` that directory is still there and still writable,
+      // After `detach` that directory is still there and still writable,
       // so the write succeeds, looks fine, and can never reach the source
       // tree. Silent wasted work is worth as much noise as a breach.
       const former = this.formerWorkspace;
@@ -2765,7 +2765,7 @@ export class Session {
    * so those paths get rewritten to the source tree, and a one-time note
    * says plainly that the workspace is no longer where its work belongs.
    *
-   * Worth doing even though `end` deletes the workspace: after `abandon`
+   * Worth doing even though `stop` deletes the workspace: after `detach`
    * the directory is still there and still writable, so an agent that
    * keeps using it does work that looks successful and never lands. That
    * is the failure this exists to prevent, and it is silent, which is why
@@ -6604,7 +6604,7 @@ export class Session {
     }
     const [verb = "status", ...rest] = remainder.split(/\s+/).filter((s) => s.length > 0);
     const name = rest.join(" ").trim();
-    const known = ["start", "merge", "end", "abandon", "status"];
+    const known = ["start", "merge", "stop", "detach", "discard", "status"];
     if (!known.includes(verb)) {
       this.emitExtensionReply(
         `Unknown workspace verb "${verb}". Use one of: ${known.join(", ")}.`,
@@ -6613,7 +6613,7 @@ export class Session {
     }
     try {
       const message = await this.workspaceHook(
-        verb as "start" | "merge" | "end" | "abandon" | "status",
+        verb as "start" | "merge" | "stop" | "detach" | "discard" | "status",
         name.length > 0 ? name : undefined,
       );
       this.emitExtensionReply(message);

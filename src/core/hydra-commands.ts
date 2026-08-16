@@ -32,9 +32,9 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
   {
     verb: "workspace",
     name: "hydra workspace",
-    argsHint: "<start [name] | merge | end | abandon | status>",
+    argsHint: "<start [name] | merge | stop | detach | discard | status>",
     description:
-      "Move this session into an isolated workspace so its edits cannot collide with other work, then land or discard them. `start` copies your uncommitted changes in and leaves the real tree untouched; `end` merges and returns; `abandon` returns without merging. `start <name>` naming a workspace another live session is already in JOINS it instead of making a second one, so two sessions can share a checkout deliberately: edits interleave, and the work lands when the last of them leaves.",
+      "Move this session into an isolated workspace so its edits cannot collide with other work, then land or discard them. `start` copies your uncommitted changes in and leaves the real tree untouched; `stop` merges and returns; `discard` throws the work away and returns; `detach` returns without merging, leaving the workspace and its branch intact; `merge` lands the work without leaving. `start <name>` naming a workspace another live session is already in JOINS it instead of making a second one, so two sessions can share a checkout deliberately: edits interleave, `stop` behaves as `detach` while anyone else is still there, and the work lands when the last of them leaves.",
   },
   {
     verb: "kill",

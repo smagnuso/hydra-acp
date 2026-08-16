@@ -121,9 +121,9 @@ export interface PreambleContext {
  * workspace path, so its context is full of paths that are no longer
  * where its work belongs. Nothing in the conversation says otherwise.
  *
- * The `abandon` case is the one this exists for. After `end` the
+ * The `detach` case is the one this exists for. After `stop` the
  * workspace is deleted, so a stale path fails loudly with ENOENT and the
- * agent self-corrects. After `abandon` the directory is still there and
+ * agent self-corrects. After `detach` the directory is still there and
  * still writable, so an agent that keeps using it produces work that
  * looks fine and can never land.
  */
