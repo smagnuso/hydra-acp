@@ -49,7 +49,16 @@ function toolCall(
 
 // The three tool-call shapes observed in real sessions. Each agent opens
 // a call and then fills in its arguments over later events, differently.
-function claudeCall(id: string, toolName: string, command: string) {
+// Entries are pushed onto after construction with differently-shaped
+// updates, so the element type has to stay open rather than be inferred
+// from the first literal.
+type Entry = Record<string, unknown>;
+
+function claudeCall(
+  id: string,
+  toolName: string,
+  command: string,
+): Entry[] {
   const meta = { claudeCode: { toolName } };
   return [
     {
@@ -84,7 +93,7 @@ function claudeCall(id: string, toolName: string, command: string) {
   ];
 }
 
-function opencodeCall(id: string, command: string) {
+function opencodeCall(id: string, command: string): Entry[] {
   return [
     {
       method: "session/update",
@@ -130,7 +139,7 @@ function claudeShellWithOutput(id: string, command: string, stdout: string) {
       },
     },
     recordedAt: 3,
-  } as (typeof entries)[number]);
+  });
   return entries;
 }
 
@@ -367,7 +376,7 @@ describe("renderTranscript", () => {
           },
         },
         recordedAt: 3,
-      } as (typeof entries)[number]);
+      });
       const t = renderTranscript(entries, opts);
       expect(t).toContain("Output: file.txt");
     });

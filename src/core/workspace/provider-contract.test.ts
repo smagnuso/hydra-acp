@@ -15,7 +15,11 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { CopyProvider } from "./copy-provider.js";
 import { GitProvider } from "./git-provider.js";
-import { WorkspaceUnsupportedError, type IsolationProvider } from "./provider.js";
+import {
+  WorkspaceUnsupportedError,
+  type IsolationProvider,
+  type Workspace,
+} from "./provider.js";
 
 const exec = promisify(execFile);
 
@@ -208,9 +212,85 @@ describe.each(FIXTURES)("IsolationProvider contract [$kind]", (fixture) => {
     expect(notes.length).toBeGreaterThan(0);
     expect(notes.join(" ")).toContain(source);
   });
+
+  it("reports its own state as lines that name what changed", async () => {
+    const { provider, ws } = await created();
+    const before = (await provider.statusReport(ws)).join("\n");
+    expect(before.length).toBeGreaterThan(0);
+    expect(before).not.toContain("file.txt");
+
+    await fs.writeFile(path.join(ws.path, "file.txt"), "edited by the agent\n");
+    const after = (await provider.statusReport(ws)).join("\n");
+    expect(after).toContain("file.txt");
+  });
 });
 
 describe("git provider specifics", () => {
+  async function gitWorkspace(label: string): Promise<{
+    provider: GitProvider;
+    source: string;
+    ws: Workspace;
+  }> {
+    const provider = new GitProvider();
+    const source = await makeGitSource();
+    const res = await provider.createWorkspace({ sourceCwd: source, label });
+    if (!res.ok) {
+      throw new Error(`createWorkspace failed: ${res.reason}`);
+    }
+    return { provider, source, ws: res.workspace };
+  }
+
+  it("separates staged, unstaged and untracked in its status report", async () => {
+    // The distinction the shared WorkspaceStatus shape cannot carry, which
+    // is why the report is prose. `git add` then edit again leaves ONE
+    // file both staged and unstaged, and both halves are true at once.
+    const { provider, ws } = await gitWorkspace("codes");
+    await fs.writeFile(path.join(ws.path, "file.txt"), "staged\n");
+    await exec("git", ["add", "file.txt"], { cwd: ws.path });
+    await fs.writeFile(path.join(ws.path, "nested", "deep.txt"), "unstaged\n");
+    await fs.writeFile(path.join(ws.path, "fresh.ts"), "export {};\n");
+
+    const report = (await provider.statusReport(ws)).join("\n");
+    expect(report).toMatch(/1 staged/);
+    expect(report).toMatch(/1 unstaged/);
+    expect(report).toMatch(/1 untracked/);
+    expect(report).toContain("M  file.txt");
+    expect(report).toContain(" M nested/deep.txt");
+    expect(report).toContain("?? fresh.ts");
+  });
+
+  it("says it is in sync with the source when neither side has moved", async () => {
+    const { provider, source, ws } = await gitWorkspace("insync");
+    const report = (await provider.statusReport(ws)).join("\n");
+    expect(report).toContain(`in sync with ${source}`);
+  });
+
+  it("counts the source's new commits and names the verb that brings them in", async () => {
+    // The whole point of reporting this: landing is fast-forward-only, so
+    // a source that moved on turns `stop` into a refusal, and today the
+    // only way to find that out is to run `stop` and read the failure.
+    const { provider, ws } = await gitWorkspace("behind");
+    await fs.writeFile(path.join(ws.sourceCwd, "moved-on.txt"), "meanwhile\n");
+    await exec("git", ["add", "-A"], { cwd: ws.sourceCwd });
+    await exec("git", ["commit", "-q", "-m", "source moved on"], { cwd: ws.sourceCwd });
+
+    const report = (await provider.statusReport(ws)).join("\n");
+    expect(report).toContain("1 commit(s) behind");
+    expect(report).toContain("/hydra workspace sync");
+    expect(report).not.toContain("in sync with");
+  });
+
+  it("counts its own commits as not landed yet", async () => {
+    const { provider, ws } = await gitWorkspace("ahead");
+    await fs.writeFile(path.join(ws.path, "agent.ts"), "export {};\n");
+    await exec("git", ["add", "-A"], { cwd: ws.path });
+    await exec("git", ["commit", "-q", "-m", "agent work"], { cwd: ws.path });
+
+    const report = (await provider.statusReport(ws)).join("\n");
+    expect(report).toContain("1 commit(s) recorded here and not landed yet");
+    expect(report).toContain("no uncommitted changes");
+  });
+
   it("declines a directory that is not a repository, with a reason", async () => {
     const provider = new GitProvider();
     const plain = await makePlainSource();

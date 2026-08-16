@@ -85,6 +85,7 @@ import {
   PASTE_END,
   PASTE_START,
   SHOW_CURSOR,
+  writeControl,
 } from "./ansi.js";
 import { paint, type ChromeToken, SGR_RESET } from "./theme/index.js";
 import { decodeBundle } from "../core/bundle.js";
@@ -388,16 +389,16 @@ export async function pickSession(
   // resume — the shell we yielded to during ^Z can leave any of these
   // modes in an unknown state, so we re-assert them before painting.
   const resetPickerTerminalModes = (): void => {
-    process.stdout.write(SGR_RESET);
-    process.stdout.write(KITTY_KBD_POP);
-    process.stdout.write(BRACKETED_PASTE_OFF);
-    process.stdout.write(MODIFY_OTHER_KEYS_OFF);
-    process.stdout.write(FORMAT_OTHER_KEYS_OFF);
-    process.stdout.write(MOUSE_X10_OFF);
-    process.stdout.write(MOUSE_BUTTON_OFF);
-    process.stdout.write(MOUSE_SGR_OFF);
-    process.stdout.write(DECCKM_OFF);
-    process.stdout.write(DECPAM_OFF);
+    writeControl(SGR_RESET);
+    writeControl(KITTY_KBD_POP);
+    writeControl(BRACKETED_PASTE_OFF);
+    writeControl(MODIFY_OTHER_KEYS_OFF);
+    writeControl(FORMAT_OTHER_KEYS_OFF);
+    writeControl(MOUSE_X10_OFF);
+    writeControl(MOUSE_BUTTON_OFF);
+    writeControl(MOUSE_SGR_OFF);
+    writeControl(DECCKM_OFF);
+    writeControl(DECPAM_OFF);
   };
   resetPickerTerminalModes();
 
@@ -2426,8 +2427,8 @@ export async function pickSession(
       term.off("key", dispatch);
       term.off("mouse", onMouse);
       term.off("resize", dispatchResize);
-      process.stdout.write(BRACKETED_PASTE_OFF);
-      process.stdout.write(FOCUS_TRACK_OFF);
+      writeControl(BRACKETED_PASTE_OFF);
+      writeControl(FOCUS_TRACK_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);
@@ -4511,8 +4512,8 @@ export async function pickSession(
         tkStdinHandler = tSetup.onStdin;
         tSetup.stdin.removeListener("data", tSetup.onStdin);
         tSetup.stdin.on("data", rawStdinHandler);
-        process.stdout.write(BRACKETED_PASTE_ON);
-        process.stdout.write(FOCUS_TRACK_ON);
+        writeControl(BRACKETED_PASTE_ON);
+        writeControl(FOCUS_TRACK_ON);
       }
       term.on("key", dispatch);
       term.on("mouse", onMouse);
@@ -4521,8 +4522,8 @@ export async function pickSession(
     // Reverse of installGrab. Used both by cleanup (in resolve path) and
     // by suspend (which then re-runs installGrab on SIGCONT).
     const uninstallGrab = (): void => {
-      process.stdout.write(BRACKETED_PASTE_OFF);
-      process.stdout.write(FOCUS_TRACK_OFF);
+      writeControl(BRACKETED_PASTE_OFF);
+      writeControl(FOCUS_TRACK_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);
@@ -4578,7 +4579,7 @@ export async function pickSession(
         // shell job-control message renders cleanly. Use term.fullscreen
         // so terminal-kit's own state tracking matches the wire.
         term.fullscreen(false);
-        process.stdout.write(`${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
+        writeControl(`${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
         process.once("SIGCONT", onCont);
         process.kill(process.pid, "SIGTSTP");
       };

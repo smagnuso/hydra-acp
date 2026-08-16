@@ -10,7 +10,7 @@
 // prompt in flight opens a synthetic turn so the session stops reporting
 // itself idle while the agent works.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { Session, type AttachedClient } from "./session.js";
+import { Session, armedTaskTtlMs, type AttachedClient } from "./session.js";
 import { HistoryStore } from "./history-store.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { makeControlledStream, makeMockAgent } from "../__tests__/test-utils.js";
@@ -541,6 +541,61 @@ describe("armed background tasks", () => {
     expect(session.armedBackgroundTasks).toHaveLength(0);
   });
 
+  // Verbatim shape of sZNwrE44KnLbCN0u, which showed a false BUSY for 28
+  // minutes: a job backgrounded first, then a Monitor armed to watch it, so
+  // the resumption could only be attributed to the Monitor. Clearing just
+  // the attributed one stranded the job entry until its 30-minute TTL,
+  // because lastBackgroundTask only holds the most recent arming.
+  it("clears a task the resumption could not be attributed to", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        // The job.
+        mock.triggerNotification("session/update", {
+          sessionId: "u_agent",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "toolu_vitest",
+            title: "Terminal",
+            rawInput: {
+              command: "vitest run",
+              description: "Run the full test suite",
+              run_in_background: true,
+            },
+          },
+        });
+        // Then a Monitor watching for it, which overwrites the attribution
+        // slot and makes the job entry unreachable.
+        mock.triggerNotification("session/update", {
+          sessionId: "u_agent",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_monitor",
+            title: "Monitor",
+            _meta: {
+              claudeCode: {
+                toolResponse: { taskId: "bnrcts5np", timeoutMs: 900_000 },
+              },
+            },
+          },
+        });
+        return { stopReason: "end_turn" };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "run the suite in the background" }],
+    });
+    await settleDrain();
+    expect(session.armedBackgroundTasks).toHaveLength(2);
+
+    agentChunk(mock, "suite finished, 4794 passing");
+    expect(session.inUnsolicitedTurn).toBe(true);
+    // Both gone, not just the Monitor.
+    expect(session.armedBackgroundTasks).toEqual([]);
+    expect(session.armedSince).toBeUndefined();
+  });
+
   // Real timers on purpose. Expiry is timer-driven now rather than swept
   // on read, so a task armed before vi.useFakeTimers() has already
   // scheduled a real timeout that advanceTimersByTime will never fire.
@@ -751,6 +806,28 @@ describe("armed background tasks", () => {
     expect(session.armedBackgroundTasks).toHaveLength(0);
   });
 
+  // A backgrounded Bash never sets toolResponse.taskId; its id exists only
+  // in the rawOutput prose. Before that was parsed, such an entry carried no
+  // id and TaskStop could never match it, so this path was dead for the
+  // commonest kind of background task. rawOutput here is verbatim.
+  it("clears a backgrounded Bash via TaskStop, keyed off its rawOutput id", async () => {
+    const { session, mock, client } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_bg",
+      title: "Terminal",
+      status: "completed",
+      rawInput: { command: "vitest run", run_in_background: true },
+      rawOutput:
+        "Command running in background with ID: b17okg6jd. Output is being " +
+        "written to: /tmp/claude-1000/-home-smagnuson/tasks/b17okg6jd.output",
+    });
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Terminal", taskId: "b17okg6jd" },
+    ]);
+    await stopDuringTurn(session, mock, client, "b17okg6jd");
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
   it("ignores a TaskStop for some other task", async () => {
     const { session, mock, client } = await armDuringTurn({
       sessionUpdate: "tool_call_update",
@@ -760,6 +837,22 @@ describe("armed background tasks", () => {
     });
     await stopDuringTurn(session, mock, client, "someone_else");
     expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  // The agent's own timeoutMs answers "how long might this watch run", not
+  // "how long should we keep claiming a wakeup is coming". A job killed by a
+  // bare pkill produces no TaskStop and no notification, so the ceiling is
+  // the only thing that ever clears it.
+  it("caps a long agent timeout, honours a short one, defaults when absent", () => {
+    // An hour was asked for; 15 minutes is the most we honour.
+    expect(armedTaskTtlMs(60 * 60 * 1000)).toBe(15 * 60 * 1000);
+    expect(armedTaskTtlMs(90_000)).toBe(90_000);
+    // No timeout reported (every backgrounded Bash): default, itself capped.
+    expect(armedTaskTtlMs(undefined)).toBe(15 * 60 * 1000);
+    // Junk from the wire falls back rather than producing a NaN deadline.
+    expect(armedTaskTtlMs(0)).toBe(15 * 60 * 1000);
+    expect(armedTaskTtlMs(-5)).toBe(15 * 60 * 1000);
+    expect(armedTaskTtlMs("900000")).toBe(15 * 60 * 1000);
   });
 
   it("does not count ordinary foreground tool calls", async () => {

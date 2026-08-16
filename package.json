@@ -40,6 +40,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
+    "test:quiet": "vitest run --silent",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build && npm test"
   },
   "engines": {

@@ -108,6 +108,7 @@ import {
   SELECTIVE_MOUSE_PROBE,
   SELECTIVE_MOUSE_WHEEL_ONLY,
   SHOW_CURSOR,
+  writeControl,
 } from "./ansi.js";
 
 // Maximum gap, in milliseconds, between two left-button presses on the
@@ -1232,7 +1233,7 @@ export class Screen {
     // row. Without this, a wide-unicode body whose visible width exceeds
     // our wrap budget would bleed onto the row below, and paintRow's
     // sig-based skip can leave that bleed uncleared indefinitely.
-    process.stdout.write(AUTOWRAP_OFF);
+    writeControl(AUTOWRAP_OFF);
     // mouse: "motion" enables wheel + button-press/release + drag
     // motion AND hover-without-button (xterm DEC mode ?1003). The
     // motion stream lets handleMouse update the OS pointer-shape
@@ -1312,7 +1313,7 @@ export class Screen {
     // hand-pointer override. Harmless on terminals that don't support
     // OSC 22.
     if (this.currentPointerShape !== "default") {
-      process.stdout.write(POINTER_SHAPE_DEFAULT);
+      writeControl(POINTER_SHAPE_DEFAULT);
       this.currentPointerShape = "default";
     }
     if (!opts.keepFullscreen) {
@@ -1320,7 +1321,7 @@ export class Screen {
       // Only needed on the way out — the picker doesn't re-enable it,
       // so leaving auto-wrap disabled across the picker round-trip is
       // fine (start() will re-disable on resume anyway).
-      process.stdout.write(AUTOWRAP_ON);
+      writeControl(AUTOWRAP_ON);
     }
     // Clear any progress indicator so the host terminal's taskbar /
     // dock badge doesn't keep pulsing after we exit (or while a picker
@@ -1355,7 +1356,7 @@ export class Screen {
   private installBracketedPaste(): void {
     // Enable bracketed paste — terminals that don't support it ignore
     // the sequence harmlessly.
-    process.stdout.write(BRACKETED_PASTE_ON);
+    writeControl(BRACKETED_PASTE_ON);
     // Enable two key-reporting protocols so modified Enter arrives as
     // a CSI-u sequence (Shift+Enter = \x1b[13;2u). Different terminals
     // support different things:
@@ -1371,10 +1372,10 @@ export class Screen {
     // Shift+Enter just behaves like Enter — the right fallback. We
     // also intercept the legacy CSI 27;…~ format below in case
     // formatOtherKeys=1 is unsupported.
-    process.stdout.write(MODIFY_OTHER_KEYS_ON);
-    process.stdout.write(FORMAT_OTHER_KEYS_ON);
-    process.stdout.write(KITTY_KBD_PUSH);
-    process.stdout.write(FOCUS_TRACK_ON);
+    writeControl(MODIFY_OTHER_KEYS_ON);
+    writeControl(FORMAT_OTHER_KEYS_ON);
+    writeControl(KITTY_KBD_PUSH);
+    writeControl(FOCUS_TRACK_ON);
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
       onStdin: (chunk: Buffer) => void;
@@ -1388,18 +1389,18 @@ export class Screen {
   }
 
   private uninstallBracketedPaste(): void {
-    process.stdout.write(BRACKETED_PASTE_OFF);
-    process.stdout.write(MODIFY_OTHER_KEYS_OFF);
-    process.stdout.write(FORMAT_OTHER_KEYS_OFF);
-    process.stdout.write(KITTY_KBD_POP);
-    process.stdout.write(FOCUS_TRACK_OFF);
+    writeControl(BRACKETED_PASTE_OFF);
+    writeControl(MODIFY_OTHER_KEYS_OFF);
+    writeControl(FORMAT_OTHER_KEYS_OFF);
+    writeControl(KITTY_KBD_POP);
+    writeControl(FOCUS_TRACK_OFF);
     // Force normal cursor key mode (DECCKM off) + numeric keypad mode
     // (DECPAM off). Alt-screen enable enables application cursor mode
     // on iTerm, which makes arrows send \x1bOA. The picker uses
     // terminal-kit's osx-256color config which only recognizes \x1b[A,
     // so without this reset arrows don't reach the picker's key handler.
-    process.stdout.write(DECCKM_OFF);
-    process.stdout.write(DECPAM_OFF);
+    writeControl(DECCKM_OFF);
+    writeControl(DECPAM_OFF);
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
     };
@@ -1424,7 +1425,7 @@ export class Screen {
       return;
     }
     this.selectiveMouseProbing = true;
-    process.stdout.write(SELECTIVE_MOUSE_PROBE);
+    writeControl(SELECTIVE_MOUSE_PROBE);
     // 250ms is comfortably longer than any local terminal's reply
     // latency. After the window we stop accepting probe replies; a
     // late-arriving reply would be passed through as junk, but in
@@ -1442,7 +1443,7 @@ export class Screen {
     }
     this.selectiveMouseProbing = false;
     if (this.selectiveMouseSupported) {
-      process.stdout.write(SELECTIVE_MOUSE_OFF);
+      writeControl(SELECTIVE_MOUSE_OFF);
       this.selectiveMouseSupported = false;
     }
   }
@@ -1515,7 +1516,7 @@ export class Screen {
         this.selectiveMouseSupported = true;
         // Enable wheel-only reporting: bmask 0x18 (wheel up | wheel down),
         // emask 0x1 (press). Matches the worked example in the spec.
-        process.stdout.write(SELECTIVE_MOUSE_WHEEL_ONLY);
+        writeControl(SELECTIVE_MOUSE_WHEEL_ONLY);
         text = text.slice(0, m.index) + text.slice(m.index + m[0].length);
       }
     }
@@ -2384,12 +2385,12 @@ export class Screen {
       return;
     }
     this.lastWindowTitle = clean;
-    process.stdout.write(`\x1b]0;${clean}\x1b\\`);
+    writeControl(`\x1b]0;${clean}\x1b\\`);
   }
 
   clearWindowTitle(): void {
     this.lastWindowTitle = null;
-    process.stdout.write("\x1b]0;\x1b\\");
+    writeControl("\x1b]0;\x1b\\");
   }
 
   // Tell the host terminal which directory the *session* is in, via OSC 7.
@@ -3241,7 +3242,7 @@ export class Screen {
     this.wrapCache.clear();
     this.wrapCacheWidth = 0;
     // Re-assert DECAWM-off in case something turned it back on.
-    process.stdout.write(AUTOWRAP_OFF);
+    writeControl(AUTOWRAP_OFF);
     this.term.clear();
     this.repaint();
   }
@@ -5318,7 +5319,7 @@ export class Screen {
       return;
     }
     this.currentPointerShape = shape;
-    process.stdout.write(
+    writeControl(
       shape === "pointer" ? POINTER_SHAPE_POINTER : POINTER_SHAPE_DEFAULT,
     );
   }
@@ -10173,7 +10174,7 @@ export function emergencyTerminalReset(): void {
     ALT_SCREEN_LEAVE, // leave alternate screen
   ].join("");
   try {
-    process.stdout.write(seq);
+    writeControl(seq);
   } catch {
     // stdout might already be closed — nothing else we can do.
   }

@@ -1804,11 +1804,21 @@ badge cannot stick forever, which means it can read `0` while a wakeup is
 still coming. A single notification can also batch several tasks while only
 one gets attributed to the resulting turn, so the count can overstate.
 
-The daemon clears an entry when it attributes a resumption to it, and when
-the agent cancels the task with `TaskStop` (which reports the id as
-`rawInput.task_id`). It cannot see an agent that kills the underlying
-process some other way: a `pkill` from a plain Bash leaves the watch dead
-with no signal at all, and the entry survives until its TTL.
+The daemon clears **every** entry armed since the last turn boundary when
+the agent resumes, not just the one it can attribute the resumption to.
+Delivery is batched at turn boundaries, so a resumption is good evidence
+that everything pending reported in; clearing only the attributable one
+stranded the rest until their TTL. It also clears an entry the agent cancels
+with `TaskStop`, matched on `rawInput.task_id` against the id harvested at
+arming time (a Monitor reports that in `_meta`; a backgrounded Bash reports
+it only in its `rawOutput` prose, which the daemon parses).
+
+It cannot see an agent that kills the underlying process some other way: a
+`pkill` from a plain Bash leaves the watch dead with no signal at all. For
+that case only the TTL helps, so the window is capped at 15 minutes even
+when the agent named a longer `timeoutMs` of its own. The agent's timeout
+answers "how long might this watch run", which is not the same question as
+"how long should we keep claiming a wakeup is coming".
 
 #### Notification: `hydra-acp/session/armed_tasks_updated`
 

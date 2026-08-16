@@ -100,3 +100,46 @@ export const FOCUS_OUT = "\x1b[O";
 // a single repaint on supporting terminals.
 export const SYNC_BEGIN = "\x1b[?2026h";
 export const SYNC_END = "\x1b[?2026l";
+
+// Every mode sequence above is written through this indirection rather
+// than straight to process.stdout.
+//
+// These bytes mutate state that lives in the TERMINAL, not in our
+// process, so one that escapes during a test outlives the test and lands
+// in the developer's shell. Two that bit us: an unmatched FOCUS_TRACK_ON
+// leaves the terminal reporting every focus change as \x1b[I / \x1b[O
+// into the test runner's stdin, and an unmatched AUTOWRAP_OFF clips
+// every line the runner prints afterwards at the right margin, so a
+// still-running suite looks frozen. The writes bypass the injected
+// `term`, so a Screen or picker built with a mock terminal still reached
+// the real one; vitest.setup.ts swaps in a discarding writer to close
+// that path.
+//
+// Content writes (OSC 0 title, OSC 8 hyperlink, OSC 9;4 progress, OSC 7
+// cwd, OSC 1337) deliberately do NOT go through here: they leave no mode
+// set behind, and several tests assert on them via a process.stdout spy.
+export type ControlWriter = (seq: string) => void;
+
+const stdoutWriter: ControlWriter = (seq) => {
+  process.stdout.write(seq);
+};
+
+let controlWriter: ControlWriter = stdoutWriter;
+
+/**
+ * Swap the sink for mode writes. `null` restores process.stdout.
+ *
+ * Returns the outgoing writer so a caller that captures for the length of
+ * one assertion can put back whatever was installed, rather than assuming
+ * the default. Under vitest what was installed is a discarding writer,
+ * and restoring process.stdout instead would reopen the leak.
+ */
+export function setControlWriter(writer: ControlWriter | null): ControlWriter {
+  const previous = controlWriter;
+  controlWriter = writer ?? stdoutWriter;
+  return previous;
+}
+
+export function writeControl(seq: string): void {
+  controlWriter(seq);
+}

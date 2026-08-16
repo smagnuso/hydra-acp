@@ -439,6 +439,24 @@ const TOOL_LABEL_LIMIT = 128;
 // claims a wakeup is coming when none is.
 const ARMED_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000;
 
+// Hard ceiling on that window, applied even when the agent named a longer
+// timeout of its own.
+//
+// The agent's timeoutMs answers "how long might this watch run", which is
+// not the question. We need "how long should we keep claiming a wakeup is
+// coming", and a job can die without a word: killed by a bare `pkill` from
+// another Bash, which produces no TaskStop and no notification, so nothing
+// ever clears the entry. That happened with a 1-hour Monitor and left the
+// session reading BUSY for the rest of the hour.
+//
+// 15 minutes because measured delays between a turn being released and the
+// agent actually resuming were 0s, 72s, 74s, 147s, 309s and 1157s: five of
+// the six land inside it. The sixth is the cost, along with any genuinely
+// long job (a 30-minute device run clears early), and that cost is a false
+// negative, which merely degrades to the behaviour before any of this
+// existed. A stale entry instead asserts something untrue.
+const ARMED_TASK_MAX_TTL_MS = 15 * 60 * 1000;
+
 // Queue hold (see holdForUnsolicitedTurn). While the agent is mid-way
 // through a turn it started by itself, promoting the next user prompt
 // drops it onto a running agent, which is what produces interleaved
@@ -3227,7 +3245,7 @@ export class Session {
     this.noteBackgroundTaskStopped(update, rawInput, claudeMeta);
     const taskId = typeof claudeMeta?.toolResponse?.taskId === "string"
       ? claudeMeta.toolResponse.taskId
-      : undefined;
+      : extractBackgroundBashTaskId(update.rawOutput);
     const isBackground = taskId !== undefined ||
       (rawInput !== undefined && rawInput.run_in_background === true);
     if (!isBackground) {
@@ -3235,10 +3253,7 @@ export class Session {
     }
     const label = this.toolLabels.get(toolCallId)?.label ?? "background task";
     this.lastBackgroundTask = { toolCallId, label };
-    const timeoutMs = typeof claudeMeta?.toolResponse?.timeoutMs === "number" &&
-        claudeMeta.toolResponse.timeoutMs > 0
-      ? claudeMeta.toolResponse.timeoutMs
-      : ARMED_TASK_DEFAULT_TTL_MS;
+    const timeoutMs = armedTaskTtlMs(claudeMeta?.toolResponse?.timeoutMs);
     // A background tool call arms once and then keeps reporting: the same
     // toolCallId arrives again on every tool_call_update. So preserve the
     // ORIGINAL armedAt across re-arms and move only the deadline.
@@ -3465,11 +3480,24 @@ export class Session {
   private openUnsolicitedTurn(): void {
     const startedAt = Date.now();
     const cause = this.lastBackgroundTask;
-    // The wakeup we attribute this to has now happened, so it stops
-    // counting toward the armed badge. Any others stay until they fire or
-    // expire; a single notification can batch several, but we only get to
-    // attribute one.
-    if (cause && this.armedTasks.delete(cause.toolCallId)) {
+    // Clear every task armed since the last turn boundary, not just the one
+    // we can name.
+    //
+    // Notification delivery is batched and only happens at turn boundaries,
+    // so a resumption is good evidence that everything pending reported in.
+    // Clearing only the attributed one leaves the rest stranded until their
+    // TTL, which is how sZNwrE44KnLbCN0u showed a false BUSY for 28 minutes:
+    // a backgrounded vitest armed at 14:56:06 and a Monitor watching for it
+    // armed at 14:57:27, the resumption was attributed to the Monitor, and
+    // the vitest entry was already unreachable because lastBackgroundTask
+    // only ever holds the most recent arming.
+    //
+    // Deliberately understates rather than overstates: if two genuinely
+    // independent jobs were running and only one finished, the badge goes
+    // quiet early. That degrades to the behaviour before any of this
+    // existed, whereas a stale entry actively claims a wakeup is coming.
+    if (this.armedTasks.size > 0) {
+      this.armedTasks.clear();
       this.onArmedTasksChanged();
     }
     this.unsolicitedTurn = {
@@ -8489,6 +8517,36 @@ const STATE_UPDATE_KINDS = new Set([
   // Ephemeral compaction-phase signals — never conversation history.
   "hydra_compaction",
 ]);
+
+// How long an arming stays counted, given whatever timeout the agent
+// reported. Falls back to the default when it reported none, and clamps to
+// the ceiling either way. See both constants for the reasoning.
+export function armedTaskTtlMs(reportedTimeoutMs: unknown): number {
+  const reported =
+    typeof reportedTimeoutMs === "number" && reportedTimeoutMs > 0
+      ? reportedTimeoutMs
+      : ARMED_TASK_DEFAULT_TTL_MS;
+  return Math.min(reported, ARMED_TASK_MAX_TTL_MS);
+}
+
+// A backgrounded Bash reports its task id only in the tool call's rawOutput
+// prose, never in `_meta.claudeCode.toolResponse.taskId` the way a Monitor
+// does. Without digging it out, such an entry is stored with no id at all,
+// which makes TaskStop clearing silently unreachable for the commonest kind
+// of background task there is.
+//
+// Text-matching a vendor string, so deliberately narrow and fail-soft: a
+// wording change costs the id, not correctness. Verified against 158
+// occurrences in real session history, all of this exact shape.
+function extractBackgroundBashTaskId(rawOutput: unknown): string | undefined {
+  if (typeof rawOutput !== "string") {
+    return undefined;
+  }
+  const m = /Command running in background with ID: ([A-Za-z0-9_-]+)/.exec(
+    rawOutput,
+  );
+  return m?.[1];
+}
 
 // Read the `claudeCode` block out of an update's _meta. A vendor namespace,
 // not ACP: it is the only place claude-acp reports the taskId of a

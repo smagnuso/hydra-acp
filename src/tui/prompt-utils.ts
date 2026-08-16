@@ -34,6 +34,7 @@ import {
   MOUSE_BUTTON_OFF,
   MOUSE_SGR_OFF,
   MOUSE_X10_OFF,
+  writeControl,
 } from "./ansi.js";
 import { paint, SGR_RESET } from "./theme/index.js";
 
@@ -82,16 +83,16 @@ const BR = "┘";
 // picker.ts:105-113 so prompt-utils owns one copy and future prompts
 // import the helper instead of pasting the block.
 export function resetTerminalModes(): void {
-  process.stdout.write(SGR_RESET);
-  process.stdout.write(KITTY_KBD_POP);
-  process.stdout.write(BRACKETED_PASTE_OFF);
-  process.stdout.write(MODIFY_OTHER_KEYS_OFF);
-  process.stdout.write(FORMAT_OTHER_KEYS_OFF);
-  process.stdout.write(MOUSE_X10_OFF);
-  process.stdout.write(MOUSE_BUTTON_OFF);
-  process.stdout.write(MOUSE_SGR_OFF);
-  process.stdout.write(DECCKM_OFF);
-  process.stdout.write(DECPAM_OFF);
+  writeControl(SGR_RESET);
+  writeControl(KITTY_KBD_POP);
+  writeControl(BRACKETED_PASTE_OFF);
+  writeControl(MODIFY_OTHER_KEYS_OFF);
+  writeControl(FORMAT_OTHER_KEYS_OFF);
+  writeControl(MOUSE_X10_OFF);
+  writeControl(MOUSE_BUTTON_OFF);
+  writeControl(MOUSE_SGR_OFF);
+  writeControl(DECCKM_OFF);
+  writeControl(DECPAM_OFF);
 }
 
 export function readTermWidth(term: Terminal): number {

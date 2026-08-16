@@ -2,10 +2,43 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeEach } from "vitest";
+import { setControlWriter } from "./src/tui/ansi.js";
+
+// Terminal-mode escapes are state in the developer's terminal, not in
+// this process, so any that escape a test outlive it. Screen.start() and
+// the picker's grab both write them past the injected mock `term`, so
+// before this the suite left the runner's own terminal with focus
+// reporting on (which then fed \x1b[I / \x1b[O into vitest's stdin) and
+// auto-wrap off (which clipped every line the reporter printed after,
+// making a live run look hung). Discard them wholesale: no test asserts
+// on a mode sequence, and the ones that do assert on OSC content writes
+// (title excepted) still spy on process.stdout directly.
+setControlWriter(() => {});
 
 // Worker-wide root for per-test tmp dirs. Created once at module load
 // and torn down in afterAll so the OS doesn't have to garbage-collect us.
 const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hydra-acp-vitest-"));
+
+// Every `git init` in this suite otherwise copies from the developer's
+// init.templateDir, which makes the tests depend on a directory outside
+// the repo that nothing here controls. That was a real intermittent
+// failure, not a theoretical one: a dotfiles sync rewrites
+// ~/.git_template/hooks with atomic temp+rename, and a `git init` whose
+// readdir sees a temp name that is gone by the stat dies with
+//
+//   fatal: cannot stat template '~/.git_template/hooks/CuqQwGXs'
+//
+// which surfaced as unrelated workspace tests failing in ~25ms, roughly
+// one run in twenty, and never reproducibly. Point git at an empty
+// directory instead: the env var outranks the config, no test asserts on
+// hook contents, and copying nothing makes init marginally faster too.
+//
+// Deliberately narrow. Neutralizing the whole global config
+// (GIT_CONFIG_GLOBAL) would be more hermetic, but it is a much broader
+// change to make on the strength of one diagnosed failure.
+const gitTemplateDir = path.join(workerRoot, "empty-git-template");
+fs.mkdirSync(gitTemplateDir, { recursive: true });
+process.env.GIT_TEMPLATE_DIR = gitTemplateDir;
 
 // Mint a fresh empty HYDRA_ACP_HOME before every test. Doing this
 // globally (instead of in each test's own beforeEach) means tests can't

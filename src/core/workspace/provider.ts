@@ -227,6 +227,21 @@ export interface IsolationProvider {
    * submodule directories re-committed as ordinary files).
    */
   environmentNotes(ws: Workspace): Promise<readonly string[]>;
+
+  /**
+   * Lines describing this workspace's current state, for showing to a
+   * user or an agent.
+   *
+   * Prose, and provider-authored, because the useful detail is exactly
+   * the part that does not generalize: git separates staged from unstaged
+   * and has a source tip to compare against, a copied directory has
+   * neither. status() cannot carry it either: its changedPaths is bare
+   * paths, so the distinction is gone before a caller sees it.
+   *
+   * A caller renders these verbatim and interprets nothing. Same shape
+   * and same reasoning as environmentNotes().
+   */
+  statusReport(ws: Workspace): Promise<readonly string[]>;
 }
 
 /**
@@ -278,6 +293,22 @@ export async function findFreeLabel(
     }
   }
   return undefined;
+}
+
+/**
+ * Cap a list destined for a chat reply, replacing the tail with a count.
+ *
+ * A workspace mid-refactor has hundreds of changed paths, and these
+ * replies are rendered into the agent's context window as well as the
+ * user's screen.
+ */
+export function capLines(items: readonly string[], cap = 10): string[] {
+  if (items.length <= cap) {
+    return [...items];
+  }
+  const kept = items.slice(0, cap);
+  const rest = items.length - cap;
+  return [...kept, `... and ${rest} more`];
 }
 
 /** Filesystem-safe label. Keeps the caller's intent legible in the path. */

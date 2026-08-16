@@ -6,6 +6,7 @@ import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
 import { resolveAmbiguousWide, setAmbiguousWide } from "./screen.js";
+import { setControlWriter } from "./ansi.js";
 import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
   Screen,
@@ -1375,6 +1376,10 @@ describe("Screen lifecycle", () => {
 
 describe("Selective Mouse Reporting probe + wheel", () => {
   // Capture stdout writes while body runs; restore on return.
+  // Captures both sinks, in write order. Mode sequences go through
+  // ansi.ts's control writer (which vitest.setup.ts points at a bit
+  // bucket, so no test can reach the developer's terminal); OSC content
+  // still goes straight to stdout.
   function captureStdout(body: () => void): string {
     const original = process.stdout.write.bind(process.stdout);
     const chunks: string[] = [];
@@ -1384,10 +1389,12 @@ describe("Selective Mouse Reporting probe + wheel", () => {
       );
       return true;
     }) as typeof process.stdout.write;
+    const previousWriter = setControlWriter((seq) => chunks.push(seq));
     try {
       body();
     } finally {
       process.stdout.write = original;
+      setControlWriter(previousWriter);
     }
     return chunks.join("");
   }
@@ -2787,14 +2794,12 @@ describe("Screen block-click routing", () => {
     // permanently inverted pane. The SGR reset has to come first: emitting
     // it after ALT_SCREEN_LEAVE would style the shell's screen instead.
     const writes: string[] = [];
-    const spy = vi
-      .spyOn(process.stdout, "write")
-      .mockImplementation((chunk: unknown) => {
-        writes.push(String(chunk));
-        return true;
-      });
-    emergencyTerminalReset();
-    spy.mockRestore();
+    const previousWriter = setControlWriter((seq) => writes.push(seq));
+    try {
+      emergencyTerminalReset();
+    } finally {
+      setControlWriter(previousWriter);
+    }
     const all = writes.join("");
     expect(all.startsWith("\x1b[0m")).toBe(true);
     expect(all.indexOf("\x1b[0m")).toBeLessThan(all.indexOf("\x1b[?1049l"));
@@ -3903,11 +3908,13 @@ describe("OSC 7 session cwd reporting", () => {
       void rest;
       return true;
     }) as typeof process.stdout.write;
+    const previousWriter = setControlWriter((seq) => chunks.push(seq));
     try {
       fn();
     } finally {
       process.stdout.write = original;
       process.stdout.isTTY = originalIsTTY;
+      setControlWriter(previousWriter);
     }
     return chunks.join("");
   }

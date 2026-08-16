@@ -6,13 +6,13 @@
 // counter flattens nested withSync calls to a single outer bracket so
 // inner leaf paints can stay wrapped without churning the wire.
 
-import { SYNC_BEGIN, SYNC_END } from "./ansi.js";
+import { SYNC_BEGIN, SYNC_END, writeControl } from "./ansi.js";
 
 let depth = 0;
 
 export function beginSync(): void {
   if (depth === 0) {
-    process.stdout.write(SYNC_BEGIN);
+    writeControl(SYNC_BEGIN);
   }
   depth++;
 }
@@ -23,7 +23,7 @@ export function endSync(): void {
   }
   depth--;
   if (depth === 0) {
-    process.stdout.write(SYNC_END);
+    writeControl(SYNC_END);
   }
 }
 

@@ -21,8 +21,10 @@ import * as fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "../json-store.js";
+import { shortenHomePath } from "../paths.js";
 import {
   WorkspaceUnsupportedError,
+  capLines,
   findFreeLabel,
   sanitizeLabel,
   workspaceRootFor,
@@ -298,6 +300,26 @@ export class CopyProvider implements IsolationProvider {
     }
     changed.sort();
     return { clean: changed.length === 0, changedPaths: changed, hasRecordedWork: false };
+  }
+
+  async statusReport(ws: Workspace): Promise<readonly string[]> {
+    const { changedPaths } = await this.status(ws);
+    const lines: string[] =
+      changedPaths.length === 0
+        ? ["no changes since this copy was made"]
+        : [
+            `${changedPaths.length} changed file(s) since this copy was made:`,
+            ...capLines(changedPaths.map((p) => `  ${p}`)),
+          ];
+    // There is no shared history to be behind (sharedHistory: false), so
+    // the source can move without this copy being "out of date" in any
+    // sense this provider can measure. Said out loud, because the absence
+    // of a sync line otherwise reads as "in sync".
+    lines.push(
+      `Not tracking ${shortenHomePath(ws.sourceCwd)}: a copied directory has no shared ` +
+        `history, so there is nothing to be in or out of sync with.`,
+    );
+    return lines;
   }
 
   async environmentNotes(ws: Workspace): Promise<readonly string[]> {

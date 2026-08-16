@@ -255,6 +255,7 @@ let schemeChangeHook: ((scheme: ColorScheme) => void) | null = null;
 let terminalForeground: Color | undefined;
 let backgroundReplyHook: ((color: Color) => void) | null = null;
 import { depthForStream, depthForTerminal } from "./theme/capability.js";
+import { writeControl } from "./ansi.js";
 import {
   installReplyFilter,
   schemeBackground,
@@ -712,6 +713,12 @@ export interface TuiOptions {
   // mode is really a property of the workspace being index-shaped, and
   // anything else drifts the moment a tab is opened from a tab.
   terminalHostLauncher?: boolean;
+  // --no-terminal-host-launcher: the mode is off *because it was refused*,
+  // not merely absent. Distinct from `terminalHostLauncher: false` because
+  // with tui.launcherModeWhenHosted set, a tab this pane opens would read
+  // the config and turn the mode back on; the refusal has to propagate to
+  // stay refused.
+  terminalHostLauncherOptOut?: boolean;
   // Auto-approve every session/request_permission instead of showing
   // the modal. Wire bypass for the user; the CLI prints a stderr
   // warning at startup so it's never silent. Useful for unattended
@@ -1099,7 +1106,10 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   initTerminalHost();
   // Tabs this process opens inherit the mode, so an index-shaped workspace
   // stays index-shaped however deep the tab tree goes.
-  setLauncherMode(opts.terminalHostLauncher === true);
+  setLauncherMode(
+    opts.terminalHostLauncher === true,
+    opts.terminalHostLauncherOptOut === true,
+  );
   // undici (Node's global fetch) records a PerformanceResourceTiming
   // entry for every HTTP request and retains them in the global
   // performance buffer forever. In a long-lived TUI that polls the
@@ -1242,7 +1252,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // terminals that do not implement mode 2031, which is most of them today.
   // Turned off in the teardown path alongside the other terminal modes.
   if (config.tui.themeBackground === undefined) {
-    process.stdout.write(SCHEME_REPORTS_ON);
+    writeControl(SCHEME_REPORTS_ON);
   }
   // Inline spans and syntax colours are baked into text at parse time, where no
   // terminal is in scope. Tell the theme what this one can do so those match
@@ -1892,6 +1902,11 @@ async function runSession(
   // reading "ready" rather than counting idle from its creation.
   let replayedTurnEndSeen = false;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
+  // True between an unsolicited turn_started and its turn_ended. Guards the
+  // pendingTurns increment so a missing turn_ended (daemon restart mid-turn)
+  // can't leave the banner stuck busy, and a duplicate turn_started can't
+  // double-count.
+  let unsolicitedTurnOpen = false;
   // Epoch ms the oldest still-armed background task was armed, or null.
   // Pushed by hydra-acp/session/armed_tasks_updated and seeded from the
   // attach snapshot; drives the composer's "Running Xs" and the sidebar's
@@ -4628,7 +4643,7 @@ async function runSession(
     schemePending.unref?.();
     // The reply comes back through the stdin filter, which calls applyBackground
     // and cancels the timer above.
-    process.stdout.write("\u001b]11;?\u0007");
+    writeControl("\u001b]11;?\u0007");
   };
   schemeChangeHook = onSchemeChange;
   backgroundReplyHook = applyBackground;
@@ -8863,10 +8878,20 @@ async function runSession(
     // under the previous prompt as a second, unexplained block. See
     // PROTOCOL.md "Agent-initiated turns".
     //
-    // Deliberately does not touch pendingTurns or anchor a tools block: the
-    // daemon emits no turn_complete for these, so there is nothing to
-    // balance, and the "tool call with no prompt in front of it" fallback in
-    // recordToolCall already opens the block.
+    // Counted into pendingTurns like any other turn. The daemon already
+    // treats the session as busy here (turnStartedAt is set, the session
+    // list reads BUSY), and without mirroring that the composer and sidebar
+    // fall through to Ready / idle at the exact moment work starts: the
+    // armed task is consumed by this resumption, so the "Running" label
+    // goes away and nothing replaces it.
+    //
+    // Routed through adjustPendingTurns rather than poking the banner
+    // directly so the banner, sidebar, elapsed clock and dispatcher all
+    // move together. Safe to increment because Layer 1 guarantees a
+    // matching turn_ended: on silence, on a real prompt superseding it, and
+    // on session close. The local flag keeps the pairing honest if one goes
+    // missing (a daemon restart mid-turn leaves an unbalanced turn_started
+    // in history), and the turn-boundary drift reconcile mops that up.
     if (event.kind === "turn-started") {
       if (!event.unsolicited) {
         return;
@@ -8875,6 +8900,10 @@ async function runSession(
       closeThought();
       screen.ensureSeparator();
       screen.appendLines(formatEvent(event));
+      if (!unsolicitedTurnOpen) {
+        unsolicitedTurnOpen = true;
+        adjustPendingTurns(1);
+      }
       return;
     }
     if (event.kind === "turn-ended") {
@@ -8889,6 +8918,10 @@ async function runSession(
       if (toolsBlockStartedAt !== null && toolsBlockEndedAt === null) {
         toolsBlockEndedAt = recordedAt ?? Date.now();
         renderToolsBlock();
+      }
+      if (unsolicitedTurnOpen) {
+        unsolicitedTurnOpen = false;
+        adjustPendingTurns(-1);
       }
       return;
     }

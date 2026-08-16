@@ -59,6 +59,26 @@ async function readHistory(sessionId: string): Promise<unknown[]> {
     .map((line) => JSON.parse(line));
 }
 
+/**
+ * The session/prompt calls a mock agent has received, once there is one.
+ *
+ * The seed prompt is dispatched off the attach path rather than awaited by
+ * it, so the assertion needs a deadline. This used to be a flat 50ms
+ * sleep, which held only while this file had spare CPU: on a loaded suite
+ * the dispatch lands later and the caller reads an empty mock. Polling
+ * costs the same when the dispatch is quick, which it usually is.
+ */
+async function waitForPromptCalls(
+  requestMock: ReturnType<typeof vi.fn>,
+): Promise<unknown[][]> {
+  const calls = (): unknown[][] =>
+    requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+  for (let i = 0; i < 200 && calls().length === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return calls();
+}
+
 function turnComplete(messageId: string): {
   method: string;
   params: unknown;
@@ -518,14 +538,10 @@ describe("seedFromFork — unit test", () => {
     await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
 
     // seedFromFork runs asynchronously after attach. Wait for the prompt queue to drain.
-    await new Promise((r) => setTimeout(r, 50));
-
     const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
 
     // Verify a session/prompt was sent (the compaction seed)
-    const promptCalls = requestMock.mock.calls.filter(
-      (c: unknown[]) => c[0] === "session/prompt",
-    );
+    const promptCalls = await waitForPromptCalls(requestMock);
     expect(promptCalls.length).toBeGreaterThan(0);
 
     // Extract the prompt text from the first session/prompt call
@@ -614,10 +630,8 @@ describe("seedFromFork — unit test", () => {
     const { makeControlledStream } = await import("../__tests__/test-utils.js");
     const conn = new JsonRpcConnection(makeControlledStream());
     await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
-    await new Promise((r) => setTimeout(r, 50));
-
     const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
-    const promptCalls = requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+    const promptCalls = await waitForPromptCalls(requestMock);
     expect(promptCalls.length).toBeGreaterThan(0);
     const promptText = (promptCalls[0] as [string, { prompt?: Array<{ text: string }> }])[1]?.prompt?.[0]?.text ?? "";
 
@@ -685,10 +699,8 @@ describe("seedFromFork — unit test", () => {
     const { makeControlledStream } = await import("../__tests__/test-utils.js");
     const conn = new JsonRpcConnection(makeControlledStream());
     await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
-    await new Promise((r) => setTimeout(r, 50));
-
     const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
-    const promptCalls = requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+    const promptCalls = await waitForPromptCalls(requestMock);
     // seedFromFork fired (tail-only) — NOT the skip branch.
     expect(promptCalls.length).toBeGreaterThan(0);
     const promptText = (promptCalls[0] as [string, { prompt?: Array<{ text: string }> }])[1]?.prompt?.[0]?.text ?? "";

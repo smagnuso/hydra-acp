@@ -24,9 +24,11 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { shortenHomePath } from "../paths.js";
 import {
   WorkspaceUnsupportedError,
   asSnapshotId,
+  capLines,
   findFreeLabel,
   sanitizeLabel,
   workspaceRootFor,
@@ -90,16 +92,28 @@ function runGit(
   });
 }
 
+/** One `git status --porcelain` record: its XY code and its path. */
+export interface StatusEntry {
+  /** The two-character XY code, verbatim (" M", "M ", "??", "A ", ...). */
+  readonly code: string;
+  /** Repo-relative. */
+  readonly path: string;
+}
+
 /**
- * Parse `git status --porcelain` (v1) into repo-relative paths.
+ * Parse `git status --porcelain` (v1).
  *
  * Exported for direct testing. The path begins at column 3 and runs to
  * end of line, so it must be sliced rather than split: splitting on
  * whitespace truncates "src/my file.ts" to "file.ts". A rename record
  * carries "ORIG -> NEW"; the post-rename path is the one that exists.
+ *
+ * The XY code is kept rather than discarded because staged-vs-unstaged is
+ * the whole content of a useful status report, and it exists nowhere else:
+ * a second `git status` run would be the only way to recover it.
  */
-export function parseStatusPorcelain(stdout: string): string[] {
-  const out: string[] = [];
+export function parseStatusPorcelain(stdout: string): StatusEntry[] {
+  const out: StatusEntry[] = [];
   for (const rawLine of stdout.split("\n")) {
     const line = rawLine.replace(/\r$/, "");
     if (line.length < 4) {
@@ -107,7 +121,10 @@ export function parseStatusPorcelain(stdout: string): string[] {
     }
     const body = line.slice(3);
     const arrow = body.indexOf(" -> ");
-    out.push(arrow === -1 ? body : body.slice(arrow + 4));
+    out.push({
+      code: line.slice(0, 2),
+      path: arrow === -1 ? body : body.slice(arrow + 4),
+    });
   }
   return out;
 }
@@ -387,7 +404,7 @@ export class GitProvider implements IsolationProvider {
       // reconciliation delete a checkout that may hold real work.
       return { clean: false, changedPaths: [], hasRecordedWork: false };
     }
-    const changedPaths = parseStatusPorcelain(st.stdout);
+    const changedPaths = parseStatusPorcelain(st.stdout).map((e) => e.path);
 
     let hasRecordedWork = false;
     if (ws.snapshot !== undefined) {
@@ -439,6 +456,120 @@ export class GitProvider implements IsolationProvider {
       );
     }
     return notes;
+  }
+
+  async statusReport(ws: Workspace): Promise<readonly string[]> {
+    const lines: string[] = [];
+    const st = await runGit(
+      ["status", "--porcelain", "--untracked-files=all"],
+      ws.path,
+      QUERY_TIMEOUT_MS,
+    );
+    // A failed probe says nothing rather than claiming the tree is clean:
+    // "no uncommitted changes" is the one wrong answer that would make
+    // somebody discard work.
+    if (st.ok) {
+      const entries = parseStatusPorcelain(st.stdout);
+      if (entries.length === 0) {
+        lines.push("no uncommitted changes");
+      } else {
+        // Counted per axis, not per file: "MM" is staged work AND a later
+        // unstaged edit to the same file, and both are true at once. The
+        // printed codes disambiguate, so do not "fix" this into a per-file
+        // tally that has to pick one and hide the other.
+        let staged = 0;
+        let unstaged = 0;
+        let untracked = 0;
+        for (const { code } of entries) {
+          if (code === "??") {
+            untracked += 1;
+            continue;
+          }
+          if (code[0] !== " " && code[0] !== "?") {
+            staged += 1;
+          }
+          if (code[1] !== " " && code[1] !== "?") {
+            unstaged += 1;
+          }
+        }
+        const parts: string[] = [];
+        if (staged > 0) {
+          parts.push(`${staged} staged`);
+        }
+        if (unstaged > 0) {
+          parts.push(`${unstaged} unstaged`);
+        }
+        if (untracked > 0) {
+          parts.push(`${untracked} untracked`);
+        }
+        lines.push(`${parts.join(", ")}:`);
+        lines.push(...capLines(entries.map((e) => `  ${e.code} ${e.path}`)));
+      }
+    }
+    lines.push(...(await this.syncLines(ws)));
+    return lines;
+  }
+
+  /**
+   * How this workspace stands relative to the tree it came from.
+   *
+   * The source tree, NOT a remote: that is what `sync` moves and what
+   * gates landing, so it is the answer that changes what you do next.
+   *
+   * Silence on any failed probe. This is decoration on a status reply;
+   * guessing here would put a wrong ahead/behind count in front of
+   * someone about to decide whether their work is safe.
+   */
+  private async syncLines(ws: Workspace): Promise<string[]> {
+    if (ws.vcs?.branch === undefined) {
+      return [];
+    }
+    const [sourceHead, here] = await Promise.all([
+      runGit(["rev-parse", "HEAD"], ws.sourceCwd, QUERY_TIMEOUT_MS),
+      runGit(["rev-parse", "HEAD"], ws.path, QUERY_TIMEOUT_MS),
+    ]);
+    const source = sourceHead.stdout.trim();
+    const mine = here.stdout.trim();
+    if (!sourceHead.ok || !here.ok || source.length === 0 || mine.length === 0) {
+      return [];
+    }
+    const where = shortenHomePath(ws.sourceCwd);
+    if (source === mine) {
+      return [`in sync with ${where}`];
+    }
+    // One walk for both counts. Left is the source's side, so left is
+    // what this workspace is missing.
+    const counted = await runGit(
+      ["rev-list", "--left-right", "--count", `${source}...${mine}`],
+      ws.path,
+      QUERY_TIMEOUT_MS,
+    );
+    const counts = counted.stdout
+      .trim()
+      .split(/\s+/)
+      .map((n) => Number.parseInt(n, 10));
+    const behind = counts[0];
+    const ahead = counts[1];
+    if (
+      !counted.ok ||
+      behind === undefined ||
+      ahead === undefined ||
+      !Number.isFinite(behind) ||
+      !Number.isFinite(ahead)
+    ) {
+      return [];
+    }
+    const out: string[] = [];
+    if (behind > 0) {
+      out.push(
+        `${behind} commit(s) behind ${where}. \`/hydra workspace sync\` brings them in; ` +
+          `landing is fast-forward-only, so this also unblocks \`stop\`.`,
+      );
+    }
+    if (ahead > 0) {
+      out.push(`${ahead} commit(s) recorded here and not landed yet.`);
+    }
+    return out;
   }
 
   /**

@@ -53,6 +53,7 @@ import {
 } from "./workspace/source-state.js";
 import {
   asSnapshotId,
+  capLines,
   type IsolationProvider,
   type SnapshotId,
   type Workspace,
@@ -2056,6 +2057,24 @@ export class SessionManager {
       if (others.length > 0) {
         lines.push(`  shared with: ${others.join(", ")}`);
       }
+      // What the workspace itself says, which the record cannot answer:
+      // uncommitted work, and whether the source has moved on. Rendered
+      // verbatim, and best-effort: a status command that fails because a
+      // git query did would be worse than one missing a line.
+      const provider = getWorkspaceProvider(ws.provider);
+      const report = await provider
+        ?.statusReport({
+          path: ws.path,
+          sourceCwd: ws.sourceCwd,
+          label: ws.label,
+          provider: ws.provider,
+          ...(ws.snapshot !== undefined ? { snapshot: asSnapshotId(ws.snapshot) } : {}),
+          ...(ws.vcs !== undefined ? { vcs: ws.vcs } : {}),
+        })
+        .catch(() => undefined);
+      for (const line of report ?? []) {
+        lines.push(`  ${line}`);
+      }
       // The exits mean different things once the workspace is shared, so
       // the hint cannot be a constant. With a co-tenant still in here
       // `stop` degrades to `detach`: your edits are already in a tree you
@@ -2857,11 +2876,27 @@ export class SessionManager {
 
     // Snapshot the working tree first, while it is still intact.
     let carried: SnapshotId | undefined;
+    // Kept for the reply: this is the only moment the pre-move state is
+    // observable, and "what came along with me" is the thing you want
+    // named rather than counted. Costs no extra probing, since the status
+    // call below has to run anyway to decide whether to snapshot at all.
+    let carriedPaths: readonly string[] = [];
+    let carriedStaged = false;
+    let sourceProbed = false;
     if (caps.supports.captureWorkingState) {
       const status = await provider
         .status({ path: sourceCwd, sourceCwd, label: "source", provider: provider.kind })
         .catch(() => undefined);
+      sourceProbed = status !== undefined;
       if (status !== undefined && status.changedPaths.length > 0) {
+        carriedPaths = status.changedPaths;
+        // Raw git, like copyCarriedWork below it: this whole block is
+        // git-only in practice (the copy provider reports
+        // captureWorkingState: false). Asking by name rather than by exit
+        // code so a failed probe stays silent instead of claiming
+        // everything was staged.
+        const staged = await execGit(["diff", "--cached", "--name-only"], sourceCwd);
+        carriedStaged = staged.ok && staged.out.trim().length > 0;
         carried = await provider
           .captureWorkingState(sourceCwd, `hydra: work carried into workspace`)
           .catch(() => undefined);
@@ -2992,11 +3027,30 @@ export class SessionManager {
       );
     }
     if (carried !== undefined) {
+      // Named, not counted, and named on BOTH paths. The list is how you
+      // check that what you were mid-way through is actually in here, and
+      // when the copy failed it is how you know what got left behind:
+      // "could not copy your uncommitted work" alone leaves you to guess.
       lines.push(
         copied
-          ? `  copied your uncommitted work in; the source tree is untouched`
-          : `  WARNING: could not copy your uncommitted work; the workspace starts from HEAD`,
+          ? `  carried ${carriedPaths.length} uncommitted file(s) in; the source tree is untouched:`
+          : `  WARNING: could not copy ${carriedPaths.length} uncommitted file(s); the workspace ` +
+              `starts from HEAD. They are untouched in the source tree:`,
       );
+      for (const line of capLines(carriedPaths)) {
+        lines.push(`    ${line}`);
+      }
+      if (copied && carriedStaged) {
+        // Deliberate: copyCarriedWork applies the patch without --index so
+        // the agent's first bare `git commit` cannot sweep up your WIP.
+        // Surprising enough to say out loud, since the files are here but
+        // `git diff --cached` is empty.
+        lines.push(`  staging did not come along; everything above is unstaged here`);
+      }
+    } else if (sourceProbed) {
+      // Silence here reads as "we did not look", which is the one thing it
+      // must not mean: a clean source is why nothing was carried.
+      lines.push(`  source tree was clean; nothing carried in`);
     }
     if (setup !== undefined) {
       lines.push(`  ${setup}`);
