@@ -144,6 +144,32 @@ function makeHarness() {
     );
   };
 
+  // Wait for stdout to satisfy `pred`, the same bounded-poll shape as
+  // waitForRequest.
+  //
+  // Needed because emitSessionUpdate delivers a notification but the
+  // loop handles it asynchronously: a test that emits and then closes
+  // stdin is racing EOF against that handler. Waiting on the OUTCOME
+  // rather than on a duration makes the ordering explicit, and is
+  // stricter than a sleep — the wait itself asserts the notification
+  // produced the output before EOF could end the loop.
+  const waitForStdout = async (
+    pred: (out: string) => boolean,
+    timeoutMs = 1_000,
+  ): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const out = stdout.join("");
+      if (pred(out)) {
+        return out;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for stdout to settle; saw ${JSON.stringify(out)}`);
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
   // Fire a session/update notification at the loop. `update` is the
   // payload that goes inside params.update.
   const emitSessionUpdate = (sessionId: string, update: unknown): void => {
@@ -173,6 +199,7 @@ function makeHarness() {
     stderr,
     respondToRequest,
     waitForRequest,
+    waitForStdout,
     emitSessionUpdate,
     streamCalls,
     baseArgs,
@@ -906,6 +933,12 @@ describe("runCatLoop", () => {
       sessionUpdate: "turn_complete",
       stopReason: "end_turn",
     });
+    // Wait for the flush BEFORE closing stdin. Emitting and immediately
+    // ending raced EOF against the notification handler: when EOF won,
+    // the loop tore down before turn_complete flushed and stdout came
+    // back without the newline. This also sharpens the test — the newline
+    // is now proven to come from turn_complete rather than from teardown.
+    await h.waitForStdout((out) => out.endsWith("\n"));
     h.fakeStdin.end();
     await loopPromise;
 

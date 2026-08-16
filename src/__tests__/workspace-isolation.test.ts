@@ -743,6 +743,143 @@ describe("session isolation end-to-end", () => {
     expect(log.stdout.trim().split("\n").filter(Boolean)).toHaveLength(1);
   });
 
+  it("syncs the source's commits in, leaving a landing possible", async () => {
+    // Explicit sync, run early to integration-test against what you will
+    // land onto. (The landing path syncs by itself now, so this is the
+    // deliberate use rather than the recovery.)
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "drifted");
+    await fs.writeFile(path.join(session.cwd, "agent.txt"), "agent work\n");
+
+    // The source moves on, on a path the workspace never touched.
+    await fs.writeFile(path.join(repo, "theirs.txt"), "landed elsewhere\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "someone else landed"], { cwd: repo });
+
+    const synced = await manager.runWorkspaceAction(session.sessionId, "sync");
+    expect(synced).toContain("1 commit(s)");
+    // The source's commit is present, and the agent's uncommitted work survived.
+    expect(await fs.readFile(path.join(session.cwd, "theirs.txt"), "utf8")).toBe(
+      "landed elsewhere\n",
+    );
+    expect(await fs.readFile(path.join(session.cwd, "agent.txt"), "utf8")).toBe("agent work\n");
+
+    // And now it lands.
+    const landed = await manager.runWorkspaceAction(session.sessionId, "stop");
+    expect(landed).toContain("Merged");
+    expect(await fs.readFile(path.join(repo, "agent.txt"), "utf8")).toBe("agent work\n");
+  });
+
+  it("autosaves after a TYPED sync, because the command is itself a turn", async () => {
+    // No explicit snapshot in the sync path. A typed `/hydra …` runs as a
+    // queue entry, and runQueueEntry ends in broadcastTurnComplete, which
+    // fires the snapshot hook unconditionally — so the autosave follows
+    // from the command being a turn rather than from sync arranging it.
+    // Asserted end-to-end because that is a chain of three assumptions.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const { client } = makeClient();
+    session.attach(client, "full");
+    await manager.runWorkspaceAction(session.sessionId, "start", "snapsync");
+
+    // Uncommitted work, so a snapshot has something to capture at all.
+    await fs.writeFile(path.join(session.cwd, "wip.txt"), "in progress\n");
+    await (
+      manager as unknown as { runWorkspaceSnapshot(s: typeof session): Promise<void> }
+    ).runWorkspaceSnapshot(session);
+    const ref = "refs/hydra/workspaces/snapsync/autosave";
+    const before = (await exec("git", ["rev-parse", ref], { cwd: repo })).stdout.trim();
+
+    // Source moves on, then sync via the typed command.
+    await fs.writeFile(path.join(repo, "theirs.txt"), "landed\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "source moved"], { cwd: repo });
+    await session.prompt(client.clientId, {
+      prompt: [{ type: "text", text: "/hydra workspace sync" }],
+    });
+
+    // The snapshot is fire-and-forget, so wait on the CONDITION rather
+    // than on a duration.
+    let after = before;
+    for (let i = 0; i < 100 && after === before; i += 1) {
+      after = (await exec("git", ["rev-parse", ref], { cwd: repo })).stdout.trim();
+      if (after === before) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    expect(after).not.toBe(before);
+    // And it captured the post-sync tree, not just the old one.
+    const listed = await exec("git", ["ls-tree", "-r", "--name-only", after], { cwd: repo });
+    expect(listed.stdout).toContain("theirs.txt");
+    expect(listed.stdout).toContain("wip.txt");
+  });
+
+  it("reports an already-current workspace instead of making an empty commit", async () => {
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "current");
+    const before = (await exec("git", ["rev-parse", "HEAD"], { cwd: session.cwd })).stdout.trim();
+
+    const msg = await manager.runWorkspaceAction(session.sessionId, "sync");
+
+    expect(msg).toContain("Already up to date");
+    const after = (await exec("git", ["rev-parse", "HEAD"], { cwd: session.cwd })).stdout.trim();
+    expect(after).toBe(before);
+  });
+
+  it("refuses to sync a workspace someone else is in", async () => {
+    // A sync rewrites files under whoever is working in there.
+    const repo = await makeGitRepo();
+    const owner = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(owner.sessionId, "start", "busy");
+    const guest = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(guest.sessionId, "start", "busy");
+
+    await expect(manager.runWorkspaceAction(guest.sessionId, "sync")).rejects.toThrow(
+      /would move files under them/,
+    );
+  });
+
+  it("keeps an explicit sync's conflict in the workspace, to be resolved there", async () => {
+    // Aborting here is what made a genuinely conflicting pair unlandable:
+    // landing needs a sync, so a sync that always aborted left no way to
+    // resolve one from inside hydra at all. A conflicted workspace is also
+    // what a workspace is FOR — fast-forward-only landing exists to keep
+    // conflicts out of the user's tree — and there is an agent sitting in
+    // this one that can do the resolving.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "clash");
+    // Same file, same line, committed on both sides.
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "workspace version\n");
+    await exec("git", ["commit", "-qam", "agent edit"], { cwd: session.cwd });
+    await fs.writeFile(path.join(repo, "tracked.txt"), "source version\n");
+    await exec("git", ["commit", "-qam", "source edit"], { cwd: repo });
+
+    // Reported as an outcome, not thrown: the tree really did change, so
+    // an exception would claim nothing happened.
+    const msg = await manager.runWorkspaceAction(session.sessionId, "sync");
+    expect(msg).toContain("Synced with conflicts");
+    expect(msg).toContain("tracked.txt");
+    expect(msg).toContain("merge --abort");
+
+    // The merge is genuinely in progress, with markers to resolve.
+    const state = await exec("git", ["status", "--porcelain"], { cwd: session.cwd });
+    expect(state.stdout).toContain("UU");
+    const body = await fs.readFile(path.join(session.cwd, "tracked.txt"), "utf8");
+    expect(body).toContain("workspace version");
+    expect(body).toContain("source version");
+
+    // And resolving it makes the landing work.
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "reconciled\n");
+    await exec("git", ["add", "tracked.txt"], { cwd: session.cwd });
+    await exec("git", ["commit", "-qm", "resolve"], { cwd: session.cwd });
+    const landed = await manager.runWorkspaceAction(session.sessionId, "stop");
+    expect(landed).toContain("Merged");
+    expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("reconciled\n");
+  });
+
   it("refuses to discard a workspace someone else is in", async () => {
     // The refcount would keep the directory for the co-tenant, so a
     // degraded discard would report a deletion that did not happen.
@@ -783,7 +920,7 @@ describe("session isolation end-to-end", () => {
       })
       .join("");
     expect(said).toContain('Unknown workspace verb "end"');
-    expect(said).toContain("start, merge, stop, detach, discard, status");
+    expect(said).toContain("start, merge, sync, stop, detach, discard, status");
   });
 
   it("copies staged work in, but lands it unstaged in the workspace", async () => {
@@ -1790,22 +1927,53 @@ describe("session isolation end-to-end", () => {
     expect(ref.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it("refuses to end when the source moved, leaving the session in place", async () => {
+  it("refuses to end when the drift CONFLICTS, leaving the session in place", async () => {
+    // A source that merely moved on no longer refuses — the landing syncs
+    // first, since fast-forward-only is a guarantee about the source and
+    // merging into the workspace preserves it. What still refuses is drift
+    // that genuinely conflicts, and the invariant this test exists for is
+    // unchanged: a failed `stop` must not strand the work by returning to
+    // the source anyway.
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
     await manager.runWorkspaceAction(session.sessionId, "start", "stuck");
     const wsPath = session.cwd;
+    // Same file, same line, committed on both sides.
     await fs.writeFile(path.join(wsPath, "tracked.txt"), "agent work\n");
-    // Source diverges underneath.
-    await exec("git", ["commit", "-q", "--allow-empty", "-m", "moved on"], { cwd: repo });
+    await exec("git", ["commit", "-qam", "agent work"], { cwd: wsPath });
+    await fs.writeFile(path.join(repo, "tracked.txt"), "source work\n");
+    await exec("git", ["commit", "-qam", "moved on, incompatibly"], { cwd: repo });
 
     await expect(manager.runWorkspaceAction(session.sessionId, "stop")).rejects.toThrow(
       /cannot fast-forward/i,
     );
-    // `stop` means finish, so a failure must not strand the work by
-    // returning to the source anyway.
     expect(session.cwd).toBe(wsPath);
     expect(session.workspace).toBeDefined();
+    // The auto-sync aborted, so the workspace is not left half-merged.
+    const state = await exec("git", ["status", "--porcelain"], { cwd: wsPath });
+    expect(state.stdout).not.toContain("UU");
+  });
+
+  it("auto-syncs on the landing path when the source merely moved on", async () => {
+    // The chore this removes: `stop` knew the source had moved, knew a
+    // sync would fix it, and knew a sync fails safely — and still just
+    // told the user to go run one command and come back.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "auto");
+    await fs.writeFile(path.join(session.cwd, "agent.txt"), "agent work\n");
+    await fs.writeFile(path.join(repo, "theirs.txt"), "landed elsewhere\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "someone else landed"], { cwd: repo });
+
+    const msg = await manager.runWorkspaceAction(session.sessionId, "stop");
+
+    expect(msg).toContain("Merged");
+    expect(msg).toContain("synced with the source first");
+    // Both sides present in the source, and the session is back home.
+    expect(await fs.readFile(path.join(repo, "agent.txt"), "utf8")).toBe("agent work\n");
+    expect(await fs.readFile(path.join(repo, "theirs.txt"), "utf8")).toBe("landed elsewhere\n");
+    expect(session.workspace).toBeUndefined();
   });
 
   it("merges without leaving the workspace", async () => {
@@ -1904,6 +2072,36 @@ describe("session isolation end-to-end", () => {
 
     await fs.writeFile(path.join(session.cwd, "note.txt"), "changed\n");
     expect(await fs.readFile(path.join(plain, "note.txt"), "utf8")).toBe("hello\n");
+  });
+
+  it("refuses to sync a copy workspace, rather than failing as a non-repository", async () => {
+    // Sync is raw git in the workspace directory, and a copy workspace is
+    // not a repository — the provider skips `.git` on purpose, so the copy
+    // cannot pretend to have history. Left unguarded, `rev-parse HEAD`
+    // there reports "not a git repository", which is a confusing way to
+    // learn that a feature does not apply.
+    //
+    // And it genuinely does not apply: a sync needs a common base, which
+    // is what `sharedHistory: false` denies. The manifest holds sizes and
+    // mtimes, not content, so a 3-way is not reconstructible either.
+    const plain = await makeTempDir("hydra-iso-copysync-");
+    await fs.writeFile(path.join(plain, "note.txt"), "hello\n");
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: plain,
+      workspace: { label: "nosync", provider: "copy" },
+    });
+    expect(session.workspace?.provider).toBe("copy");
+
+    await expect(manager.runWorkspaceAction(session.sessionId, "sync")).rejects.toThrow(
+      /no history to merge from/,
+    );
+    // Named the provider and offered the thing that does work.
+    await expect(manager.runWorkspaceAction(session.sessionId, "sync")).rejects.toThrow(
+      /workspace merge/,
+    );
+    // Untouched: a refusal is a no-op.
+    expect(await fs.readFile(path.join(session.cwd, "note.txt"), "utf8")).toBe("hello\n");
   });
 
   it("rejects an unknown provider only when isolation is required", async () => {

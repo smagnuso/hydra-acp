@@ -1620,6 +1620,155 @@ export class SessionManager {
   }
 
   /**
+   * Bring the source's committed history into the workspace.
+   *
+   * A workspace is branched at `start` and then drifts: other sessions
+   * land, the user commits, and by the time this one is ready its tests
+   * passed against a source that no longer exists. Two things follow from
+   * that, and this verb addresses both.
+   *
+   * The obvious one is integration: you get to test against what you will
+   * actually land onto. The less obvious one is that drift is otherwise a
+   * DEAD END — landing is `merge --ff-only`, so once the source moves on,
+   * `stop` refuses and offers only "merge it yourself". Syncing restores
+   * fast-forwardability, turning that refusal into a recoverable state.
+   *
+   * Committed history only, deliberately. Copying the source's
+   * uncommitted work in a second time is exactly what makes a landing
+   * report a conflict against its own copy, which is the failure the
+   * start anchor exists to prevent.
+   *
+   * Orthogonal to the anchors: this moves the WORKSPACE, while `start`
+   * and `baseline` describe the source, so the divergence maths is
+   * untouched.
+   */
+  private async syncWorkspaceFromSource(
+    session: Session,
+    ws: PersistedWorkspace,
+    opts: { onConflict: "abort" | "keep" },
+  ): Promise<{ ok: boolean; message: string }> {
+    // A sync rewrites files under whoever is in here. One agent mid-turn
+    // is bad enough; a co-tenant that never asked for it is worse.
+    const others = this.liveSessionsIn(ws.path, session.sessionId);
+    if (others.length > 0) {
+      throw new Error(
+        `${shortenHomePath(ws.path)} is shared with ${others
+          .map((s) => stripHydraSessionPrefix(s.sessionId))
+          .join(", ")}, and a sync would move files under them. Sync it from a session that ` +
+          `has it to itself.`,
+      );
+    }
+    if (!(await session.isQuiescedForSwap())) {
+      throw new Error(
+        "the agent is still working — wait for the current turn to finish, then try again",
+      );
+    }
+
+    // Git-only, and it has to say so rather than find out.
+    //
+    // Everything below is raw git in the workspace directory. A copy
+    // workspace is not a repository at all — the provider skips `.git`
+    // when copying, deliberately, so the copy cannot pretend to have
+    // history — and `rev-parse HEAD` there fails with "not a git
+    // repository", which is a confusing way to learn that a feature does
+    // not apply to you.
+    //
+    // Nor is this an oversight in the copy provider: a sync needs a merge
+    // base, and `sharedHistory: false` says there is nothing to derive one
+    // from. Its manifest records sizes and mtimes, not content, so a
+    // 3-way is not reconstructible either. `merge` and `stop` already
+    // refuse this way, on the branch being absent.
+    //
+    // Keyed on sharedHistory, NOT on supports.integrate: that flag means
+    // "the provider implements an integrate() method", and both providers
+    // say false because landing is done by this class with raw git. It
+    // would reject the git provider too.
+    const provider = getWorkspaceProvider(ws.provider);
+    if (ws.vcs?.branch === undefined || provider?.capabilities().sharedHistory !== true) {
+      throw new Error(
+        `workspace ${ws.label} uses the "${ws.provider}" provider, which has no history to ` +
+          `merge from — a sync needs a common base, and a copied directory has none. ` +
+          `Land its work with \`/hydra workspace merge\` instead, or start a git-backed ` +
+          `workspace if you need to track the source.`,
+      );
+    }
+
+    const sourceHead = (await execGit(["rev-parse", "HEAD"], ws.sourceCwd)).out.trim();
+    const before = (await execGit(["rev-parse", "HEAD"], ws.path)).out.trim();
+    if (sourceHead.length === 0 || before.length === 0) {
+      throw new Error("could not read HEAD of the source or the workspace");
+    }
+    const already = await execGit(["merge-base", "--is-ancestor", sourceHead, before], ws.path);
+    if (already.ok) {
+      return {
+        ok: true,
+        message: `Already up to date with ${shortenHomePath(ws.sourceCwd)} (${sourceHead.slice(0, 8)}).`,
+      };
+    }
+
+    const incoming = (
+      await execGit(["rev-list", "--count", `${before}..${sourceHead}`], ws.path)
+    ).out.trim();
+    const merged = await execGit(
+      ["merge", "--no-edit", "-m", `hydra: sync ${ws.label} with the source`, sourceHead],
+      ws.path,
+    );
+    if (!merged.ok) {
+      // Name the files BEFORE deciding what to do with the merge: an
+      // abort erases the evidence, and "these two disagree" is the whole
+      // content of a useful conflict report.
+      const conflicted = (
+        await execGit(["diff", "--name-only", "--diff-filter=U"], ws.path)
+      ).out
+        .trim()
+        .split("\n")
+        .filter((l) => l.length > 0);
+      const named =
+        conflicted.length > 0
+          ? `\n${conflicted.map((f) => `  ${f}`).join("\n")}`
+          : ` (${merged.err.trim() || merged.out.trim() || "merge failed"})`;
+
+      if (opts.onConflict === "abort") {
+        // The landing path. A `stop` must never hand back a conflicted
+        // tree the user did not ask for, so this is a strict no-op.
+        await execGit(["merge", "--abort"], ws.path).catch(() => undefined);
+        return {
+          ok: false,
+          message: `${conflicted.length} file(s) conflict between the source and this workspace:${named}`,
+        };
+      }
+
+      // Explicit `sync`. The merge is LEFT IN PROGRESS on purpose.
+      //
+      // Aborting here is what made a genuinely conflicting pair
+      // unlandable: landing needs a sync, and a sync that always aborted
+      // meant there was no way to resolve one from inside hydra at all.
+      // A conflicted workspace is also exactly what a workspace is for —
+      // fast-forward-only landing exists to keep conflicts out of the
+      // user's tree and in the sandbox — and there is an agent sitting in
+      // this one that can do the resolving.
+      return {
+        ok: false,
+        message:
+          `Synced with conflicts. ${conflicted.length} file(s) need resolving in ` +
+          `${shortenHomePath(ws.path)}:${named}\n` +
+          `The merge is left in progress deliberately: fix the markers, commit, then ` +
+          `\`/hydra workspace stop\`. To back it out instead: git -C ${ws.path} merge --abort`,
+      };
+    }
+    const touched = (
+      await execGit(["diff", "--name-only", before, "HEAD"], ws.path)
+    ).out.trim();
+    const files = touched.length === 0 ? 0 : touched.split("\n").length;
+    return {
+      ok: true,
+      message:
+        `Synced ${shortenHomePath(ws.path)} with ${shortenHomePath(ws.sourceCwd)}: ` +
+        `${incoming} commit(s), ${files} file(s) changed. Your uncommitted work is untouched.`,
+    };
+  }
+
+  /**
    * Why the workspace's branch could not fast-forward into its source
    * right now, or undefined if it could.
    *
@@ -1646,7 +1795,8 @@ export class SessionManager {
     return (
       `${shortenHomePath(ws.sourceCwd)} has moved on since this workspace was created ` +
       `(it is on ${current.out.trim() || "an unknown branch"}). ` +
-      `Land it by hand with: git -C ${ws.sourceCwd} merge ${branch}`
+      `\`/hydra workspace sync\` brings those commits in here and makes the landing possible ` +
+      `again, or land it by hand with: git -C ${ws.sourceCwd} merge ${branch}`
     );
   }
 
@@ -1883,7 +2033,7 @@ export class SessionManager {
    */
   async runWorkspaceAction(
     sessionId: string,
-    action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
+    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
     name?: string,
   ): Promise<string> {
     const session = this.get(sessionId);
@@ -1926,6 +2076,13 @@ export class SessionManager {
       throw new Error(
         `this session is not in a workspace. Use \`/hydra workspace start\` first.`,
       );
+    }
+    if (action === "sync") {
+      // Explicit: a conflict is left in the workspace to resolve, and
+      // reported as an outcome rather than thrown — the tree really did
+      // change, so an exception (which reads as "nothing happened") would
+      // be a lie.
+      return (await this.syncWorkspaceFromSource(session, ws, { onConflict: "keep" })).message;
     }
     if (action === "merge") {
       session.broadcastWorkspacePhase({ phase: "landing" });
@@ -2156,16 +2313,56 @@ export class SessionManager {
     });
 
     const sourceHead = (await execGit(["rev-parse", "HEAD"], source)).out.trim();
-    const canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+    let canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+    const notes: string[] = [];
     if (!canFf.ok) {
-      const current = (await execGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
-      throw new Error(
-        // Prose gets the short path; the command keeps the absolute one,
-        // so it stays paste-able outside a shell that expands `~`.
-        `cannot fast-forward ${current} in ${shortenHomePath(source)} to ${branch}. ` +
-          `The source has moved on. ` +
-          `Nothing was changed; merge it yourself with: git -C ${source} merge ${branch}`,
-      );
+      // Sync first, rather than making the user do it.
+      //
+      // Landing is fast-forward-only so that the SOURCE can never be left
+      // conflicted and never gains history nobody asked for. That
+      // guarantee is about the source, and merging the source into the
+      // workspace preserves it completely: the reconciliation happens on
+      // the workspace's own branch, which is what it is for, and the
+      // source still fast-forwards.
+      //
+      // Refusing here instead just told the user to run one command and
+      // retry — a chore, for a failure caused by someone else moving the
+      // source. Conservative on conflict though: `onConflict: "abort"`,
+      // because a landing must never hand back a conflicted tree that was
+      // not asked for. Explicit `sync` is where a conflict is allowed to
+      // stay.
+      const live = this.get(sessionId);
+      let why = "";
+      if (live !== undefined) {
+        try {
+          const attempt = await this.syncWorkspaceFromSource(live, ws, { onConflict: "abort" });
+          if (attempt.ok) {
+            notes.push(`\n  synced with the source first: ${attempt.message}`);
+            canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+          } else {
+            why = `\nA sync was attempted first and could not complete: ${attempt.message}`;
+          }
+        } catch (err) {
+          // A guard refused (a co-tenant is in there, the agent is mid
+          // turn, the provider has no history). Say which rather than
+          // swallowing it — the reason is the actionable part.
+          why = `\nA sync was attempted first but was refused: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
+        }
+      }
+      if (!canFf.ok) {
+        const current = (await execGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
+        throw new Error(
+          // Prose gets the short path; the command keeps the absolute one,
+          // so it stays paste-able outside a shell that expands `~`.
+          `cannot fast-forward ${current} in ${shortenHomePath(source)} to ${branch}. ` +
+            `The source has moved on since this workspace was created. Nothing was changed.` +
+            `${why}\n` +
+            `Resolve it in the workspace with \`/hydra workspace sync\` (which leaves the ` +
+            `conflict there to fix), or land it by hand with: git -C ${source} merge ${branch}`,
+        );
+      }
     }
 
     // Capture what the workspace has NOT committed, but do not commit it.
@@ -2264,7 +2461,10 @@ export class SessionManager {
           `${capture.retainedRef} — recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
       );
     }
-    return { merged: `Merged ${branch} into ${shortenHomePath(source)}`, warnings };
+    return {
+      merged: `Merged ${branch} into ${shortenHomePath(source)}${notes.join("")}`,
+      warnings,
+    };
   }
 
 

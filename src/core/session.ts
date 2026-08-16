@@ -303,7 +303,7 @@ export interface SessionInit {
   workspaceError?: string;
   /** Backs `/hydra workspace`; see Session.workspaceHook. */
   workspaceHook?: (
-    action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
+    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
     name?: string,
   ) => Promise<string>;
   // Optional callback used by /sessions to enumerate all daemon sessions.
@@ -865,7 +865,7 @@ export class Session {
   // show the user.
   private workspaceHook:
     | ((
-        action: "start" | "merge" | "stop" | "detach" | "discard" | "status",
+        action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
         name?: string,
       ) => Promise<string>)
     | undefined;
@@ -6604,7 +6604,7 @@ export class Session {
     }
     const [verb = "status", ...rest] = remainder.split(/\s+/).filter((s) => s.length > 0);
     const name = rest.join(" ").trim();
-    const known = ["start", "merge", "stop", "detach", "discard", "status"];
+    const known = ["start", "merge", "sync", "stop", "detach", "discard", "status"];
     if (!known.includes(verb)) {
       this.emitExtensionReply(
         `Unknown workspace verb "${verb}". Use one of: ${known.join(", ")}.`,
@@ -6613,7 +6613,7 @@ export class Session {
     }
     try {
       const message = await this.workspaceHook(
-        verb as "start" | "merge" | "stop" | "detach" | "discard" | "status",
+        verb as "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
         name.length > 0 ? name : undefined,
       );
       this.emitExtensionReply(message);

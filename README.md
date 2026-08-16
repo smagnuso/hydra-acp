@@ -143,7 +143,10 @@ your tree under `~/.hydra-acp/workspaces/`. `/hydra workspace start` moves a
 running session into one, and the exits differ only in what happens to the work:
 `stop` merges it back and returns, `discard` throws it away and returns, and
 `detach` returns leaving the workspace and its branch intact for later. `merge`
-lands the work without leaving.
+lands the work without leaving, and `sync` pulls the source's committed history
+*into* the workspace so you can test against what you'll land onto. Since
+landing is fast-forward-only, `sync` is also the way back once the source has
+moved on and `stop` starts refusing.
 
 `start` **copies** your uncommitted changes in rather than taking them, so your
 checkout is left exactly as it was, and landing reconciles the two sides rather
@@ -425,7 +428,7 @@ conversation log.
 | `/hydra compact [status]` | Compact history now. `status` inspects state without triggering. |
 | `/hydra uncompact` | Roll back the most recent compaction, before any new turns. |
 | `/hydra fork [verbatim]` | Fork into a new session. Default is a synopsis brief; `verbatim` slices at the last completed turn. |
-| `/hydra workspace <start [name] \| merge \| stop \| detach \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. See [isolated workspaces](#isolated-workspaces). |
+| `/hydra workspace <start [name] \| sync \| merge \| stop \| detach \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. See [isolated workspaces](#isolated-workspaces). |
 | `/hydra restart` | Restart the agent with a fresh `session/new`, preserving history. Useful when the available models have changed underneath you. |
 | `/hydra kill` | Close this session. The agent dies; the record is kept and can be resumed. |
 
