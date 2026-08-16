@@ -1734,7 +1734,10 @@ async function runSession(
   // hooks (which fire before the Screen is built on first connect) can
   // call into them safely. Real implementations are assigned later.
   let onReconnect:
-    | ((opts?: { skipInitialize?: boolean }) => Promise<void>)
+    | ((opts?: {
+        skipInitialize?: boolean;
+        beforeReplay?: () => void;
+      }) => Promise<void>)
     | null = null;
   let onDisconnectHook: ((err?: Error) => void) | null = null;
   const stream = new ResilientWsStream({
@@ -2667,24 +2670,29 @@ async function runSession(
           step: "warm-detected",
           sessionId: resolvedSessionId,
         });
-        // Mark the seam before the replay lands. Without it the other
-        // client's turns drop into scrollback indistinguishable from our
-        // own, so the transcript reads as though the user said them.
-        if (screenRef !== null) {
-          screenRef.appendLines([
-            {
-              prefix: "  ",
-              body: "-- session resumed by another client, catching up --",
-              bodyStyle: "muted",
-            },
-          ]);
-        }
         // Same handshake as a transport reconnect (after_message replay
         // anchored on lastSeenMessageId, pendingTurns reconcile, banner
         // repaint), minus the initialize: this socket never dropped and
         // is already initialized.
+        //
+        // The seam line is deferred to beforeReplay so it only paints when
+        // the replay actually carries events. Riding a revival that has
+        // produced nothing yet (the common case: somebody attached but the
+        // agent hasn't spoken) leaves scrollback untouched, and the marker
+        // stays adjacent to the turns it is disclaiming.
         if (onReconnect) {
-          await onReconnect({ skipInitialize: true });
+          await onReconnect({
+            skipInitialize: true,
+            beforeReplay: () => {
+              screenRef?.appendLines([
+                {
+                  prefix: "  ",
+                  body: "-- session resumed by another client, catching up --",
+                  bodyStyle: "muted",
+                },
+              ]);
+            },
+          });
         }
       } catch {
         // Daemon down or unreachable, keep polling. If the WS is also
@@ -9337,7 +9345,10 @@ async function runSession(
   // `skipInitialize` is set by the cold watch, which reuses this whole
   // reattach path on a socket that never dropped and is therefore already
   // initialized.
-  onReconnect = async (opts?: { skipInitialize?: boolean }): Promise<void> => {
+  onReconnect = async (opts?: {
+    skipInitialize?: boolean;
+    beforeReplay?: () => void;
+  }): Promise<void> => {
     const skipInitialize = opts?.skipInitialize === true;
     writeDebugLine({
       src: "reconnect",
@@ -9514,6 +9525,9 @@ async function runSession(
       // Either incremental replay landed cleanly, or we never had a
       // messageId to anchor on (first reconnect of a fresh session) and
       // the daemon returned no replay. Flush whatever showed up.
+      if (buffered.length > 0) {
+        opts?.beforeReplay?.();
+      }
       replayDraining = true;
       try {
         for (const params of buffered) {
@@ -9522,6 +9536,17 @@ async function runSession(
       } finally {
         replayDraining = false;
       }
+    }
+    // Our own reattach already brought the session back (session/attach
+    // cold-resurrects), so the watch has nothing left to ride. Without
+    // this, a daemon restart — which broadcasts session/closed on the way
+    // down and arms the watch, then gets a transport reconnect on the way
+    // up — leaves the poll running to discover a warm session up to
+    // COLD_WATCH_POLL_MS later and announce our own recovery as somebody
+    // else's. A failed attach leaves it armed on purpose: nothing else
+    // retries, so the poll stays the backstop.
+    if (!attachErr) {
+      stopColdWatch();
     }
     // Reconcile pendingTurns against the daemon's authoritative state.
     // The daemon's turnStartedAt is the source of truth: if it's defined
