@@ -368,6 +368,193 @@ describe("session isolation end-to-end: prompts and typed commands", () => {
     expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("reconciled\n");
   });
 
+  it("syncs under uncommitted work on a file the incoming commit touches", async () => {
+    // The condition git refuses to merge under is the NORMAL state of a
+    // workspace: an agent is in there, so it is dirty. A sync that needs a
+    // clean tree is one that works exactly when you do not need it, which
+    // is how a drifted source became a dead end at `stop`.
+    const repo = await makeGitRepo();
+    // Long enough that the two edits do not share diff context. A
+    // three-line file would put them in one hunk, which is a different
+    // test: the restore then needs a 3-way merge and comes back staged.
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    await fs.writeFile(path.join(repo, "shared.txt"), `${lines.join("\n")}\n`);
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "add shared"], { cwd: repo });
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "dirtysync");
+
+    // Mid-task: an uncommitted edit at the top of the file...
+    const agentEdit = [...lines];
+    agentEdit[0] = "line 1, edited by the agent";
+    await fs.writeFile(path.join(session.cwd, "shared.txt"), `${agentEdit.join("\n")}\n`);
+    // ...while the source lands a commit touching the same file at the far
+    // end. Different hunks, but git declines on the FILE, not the overlap.
+    const sourceEdit = [...lines];
+    sourceEdit[19] = "line 20, landed by someone else";
+    await fs.writeFile(path.join(repo, "shared.txt"), `${sourceEdit.join("\n")}\n`);
+    await exec("git", ["commit", "-qam", "someone else landed"], { cwd: repo });
+
+    const both = [...lines];
+    both[0] = agentEdit[0] as string;
+    both[19] = sourceEdit[19] as string;
+    const msg = await manager.runWorkspaceAction(session.sessionId, "sync");
+    expect(msg).toContain("1 commit(s)");
+    expect(msg).toContain("set aside");
+    expect(await fs.readFile(path.join(session.cwd, "shared.txt"), "utf8")).toBe(
+      `${both.join("\n")}\n`,
+    );
+    // Back UNSTAGED, which is how it was being held. Only true because the
+    // replay tries a plain apply before falling back to --3way, which
+    // stages what it applies.
+    const state = await exec("git", ["status", "--porcelain"], { cwd: session.cwd });
+    expect(state.stdout).toMatch(/^ M shared\.txt$/m);
+    // The recovery ref is released once the work is back in the tree.
+    const held = await exec("git", ["for-each-ref", "refs/hydra/sync/"], { cwd: repo });
+    expect(held.stdout.trim()).toBe("");
+
+    const landed = await manager.runWorkspaceAction(session.sessionId, "stop");
+    expect(landed).toContain("Merged");
+    expect(await fs.readFile(path.join(repo, "shared.txt"), "utf8")).toBe(`${both.join("\n")}\n`);
+  });
+
+  it("lands a drifted source from a dirty workspace without a manual sync", async () => {
+    // The reported failure, end to end: `stop` already auto-synced, and the
+    // sync died on the workspace's own uncommitted work — then suggested
+    // the verb that had just failed, and mislabelled the reason as
+    // "0 file(s) conflict".
+    const repo = await makeGitRepo();
+    await fs.writeFile(path.join(repo, "shared.txt"), "top\nmiddle\nbottom\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "add shared"], { cwd: repo });
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "healed");
+
+    await fs.writeFile(path.join(session.cwd, "shared.txt"), "agent top\nmiddle\nbottom\n");
+    await fs.writeFile(path.join(repo, "shared.txt"), "top\nmiddle\nsource bottom\n");
+    await exec("git", ["commit", "-qam", "someone else landed"], { cwd: repo });
+
+    const landed = await manager.runWorkspaceAction(session.sessionId, "stop");
+    expect(landed).toContain("Merged");
+    expect(landed).not.toContain("file(s) conflict");
+    expect(await fs.readFile(path.join(repo, "shared.txt"), "utf8")).toBe(
+      "agent top\nmiddle\nsource bottom\n",
+    );
+  });
+
+  it("puts the work back and names the next action when the histories really conflict", async () => {
+    // A conflict has to be resolved with a merge left in progress, and that
+    // cannot coexist with work held aside for the merge to run at all. So
+    // this one restores instead — which keeps "nothing changed" true, and
+    // is what makes the next step statable.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    await manager.runWorkspaceAction(session.sessionId, "start", "clashdirty");
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "workspace version\n");
+    await exec("git", ["commit", "-qam", "agent edit"], { cwd: session.cwd });
+    await fs.writeFile(path.join(repo, "tracked.txt"), "source version\n");
+    await exec("git", ["commit", "-qam", "source edit"], { cwd: repo });
+    // And the agent has kept editing the same file since committing.
+    await fs.writeFile(path.join(session.cwd, "tracked.txt"), "workspace version, still going\n");
+    const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: session.cwd })).stdout.trim();
+
+    const msg = await manager.runWorkspaceAction(session.sessionId, "sync");
+    expect(msg).toContain("genuinely conflict");
+    expect(msg).toContain("Commit it");
+    // The count that described nothing: printed for any failed merge,
+    // including one git never started.
+    expect(msg).not.toContain("0 file(s) conflict");
+
+    // Nothing changed: work in place, no merge in progress, HEAD unmoved.
+    expect(await fs.readFile(path.join(session.cwd, "tracked.txt"), "utf8")).toBe(
+      "workspace version, still going\n",
+    );
+    const merging = await exec("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], {
+      cwd: session.cwd,
+    })
+      .then(() => true)
+      .catch(() => false);
+    expect(merging).toBe(false);
+    expect((await exec("git", ["rev-parse", "HEAD"], { cwd: session.cwd })).stdout.trim()).toBe(
+      head,
+    );
+    const held = await exec("git", ["for-each-ref", "refs/hydra/sync/"], { cwd: repo });
+    expect(held.stdout.trim()).toBe("");
+
+    // Following the named action gets to the resolvable state, which is
+    // the whole point: the refusal is a step, not a dead end.
+    await exec("git", ["commit", "-qam", "agent commits its wip"], { cwd: session.cwd });
+    const second = await manager.runWorkspaceAction(session.sessionId, "sync");
+    expect(second).toContain("Synced with conflicts");
+    expect(second).toContain("tracked.txt");
+  });
+
+  it("says the source moved on at the turn boundary, once per new tip", async () => {
+    // `status` could always answer this, but nobody runs `status` mid-task,
+    // so the drift was discovered at `stop` — the worst moment, since the
+    // answer there is a refusal.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c_drift", connection: new JsonRpcConnection(stream) } as AttachedClient,
+      "none",
+    );
+    await manager.runWorkspaceAction(session.sessionId, "start", "drifty");
+    const snap = manager as unknown as {
+      runWorkspaceSnapshot(s: typeof session): Promise<void>;
+    };
+    const drifts = (): Array<Record<string, unknown>> =>
+      stream.sent
+        .map(
+          (m) =>
+            (m as { params?: { update?: Record<string, unknown> } }).params?.update ??
+            {},
+        )
+        .filter((u) => u.sessionUpdate === "hydra_workspace" && u.phase === "drift");
+    const said = (): string =>
+      stream.sent
+        .map((m) => {
+          const u = (m as { params?: { update?: { content?: { text?: unknown } } } }).params
+            ?.update;
+          return typeof u?.content?.text === "string" ? u.content.text : "";
+        })
+        .join("");
+
+    // Nothing has moved, and this turn wrote nothing either.
+    await snap.runWorkspaceSnapshot(session);
+    expect(drifts()).toHaveLength(0);
+
+    await fs.writeFile(path.join(repo, "theirs.txt"), "landed\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "source moved"], { cwd: repo });
+
+    // Probed even though this turn changed no file in the workspace: drift
+    // is about the source, not about whether the agent wrote anything.
+    await snap.runWorkspaceSnapshot(session);
+    expect(drifts()).toHaveLength(1);
+    expect(drifts()[0]?.behind).toBe(1);
+    // Plus the prose, so a client that renders no phases still shows it.
+    expect(said()).toContain("/hydra workspace sync");
+
+    // Same tip on the next turn: silence, not a per-turn nag.
+    await snap.runWorkspaceSnapshot(session);
+    expect(drifts()).toHaveLength(1);
+
+    // A further commit is new information.
+    await fs.writeFile(path.join(repo, "more.txt"), "also landed\n");
+    await exec("git", ["add", "-A"], { cwd: repo });
+    await exec("git", ["commit", "-qm", "source moved again"], { cwd: repo });
+    await snap.runWorkspaceSnapshot(session);
+    expect(drifts()).toHaveLength(2);
+    expect(drifts()[1]?.behind).toBe(2);
+
+    // And a sync leaves nothing to say.
+    await manager.runWorkspaceAction(session.sessionId, "sync");
+    await snap.runWorkspaceSnapshot(session);
+    expect(drifts()).toHaveLength(2);
+  });
+
   it("refuses to discard a workspace someone else is in", async () => {
     // The refcount would keep the directory for the co-tenant, so a
     // degraded discard would report a deletion that did not happen.

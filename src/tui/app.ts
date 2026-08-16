@@ -2514,8 +2514,22 @@ async function runSession(
       sourceCwd?: unknown;
       label?: unknown;
       error?: unknown;
+      behind?: unknown;
     };
     const phase = typeof u.phase === "string" ? u.phase : undefined;
+    // Nothing is in progress, so this is not indicator material: the
+    // indicator is cleared by the next phase, and there is no next phase.
+    // The chat line the daemon sends alongside is the copy that persists.
+    if (phase === "drift") {
+      const behind = typeof u.behind === "number" ? u.behind : 0;
+      screen.notify(
+        behind > 0
+          ? `source moved on, ${behind} commit(s) ahead — /hydra workspace sync`
+          : "source moved on — /hydra workspace sync",
+        6000,
+      );
+      return;
+    }
     if (phase === "provisioning") {
       screen.setWorkspaceIndicator("creating workspace...");
       return;

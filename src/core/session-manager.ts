@@ -44,6 +44,7 @@ import {
   allAnchorRefs,
   landingRetainRef,
   retiredSnapshotRef,
+  syncRetainRef,
   workspaceAnchorRefs,
 } from "./workspace/refs.js";
 import {
@@ -398,6 +399,9 @@ export class SessionManager {
   private snapshotInFlight = new Set<string>();
   private snapshotPending = new Set<string>();
   private workspaceSnapshotsDisabled = false;
+  // Source tip a session has already been told about, so the drift notice
+  // fires once per thing to know rather than once per turn.
+  private driftNoticed = new Map<string, string>();
   // Standalone agents spawned by the `authenticate` RPC, keyed by
   // agentId. Kept alive past the RPC so an immediately-following
   // session/new can reuse the now-authenticated channel; auto-pruned
@@ -1724,10 +1728,60 @@ export class SessionManager {
         .trim()
         .split("\n")
         .filter((l) => l.length > 0);
+
+      // Two failures wear one exit code here, and they need opposite
+      // handling. A merge that STARTED and could not reconcile two
+      // histories is a conflict: there are unmerged entries, and the
+      // files are the report. A merge git DECLINED to start leaves no
+      // unmerged entries and no MERGE_HEAD — nothing happened — and the
+      // reason is in its stderr, not in a file list.
+      //
+      // Told apart on both signals rather than on the file list alone,
+      // because a merge already in progress from an earlier sync also
+      // refuses, and reporting that one as "nothing happened" would be
+      // just as wrong in the other direction.
+      const inProgress = (
+        await execGit(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
+      ).ok;
+      if (conflicted.length === 0 && !inProgress) {
+        const retried = await this.syncOverDirtyTree(ws, {
+          provider,
+          before,
+          sourceHead,
+          incoming,
+        });
+        if (retried !== undefined) {
+          return retried;
+        }
+      }
+
       const named =
         conflicted.length > 0
           ? `\n${conflicted.map((f) => `  ${f}`).join("\n")}`
           : ` (${merged.err.trim() || merged.out.trim() || "merge failed"})`;
+
+      if (conflicted.length === 0) {
+        // Not a conflict at all: git declined, or stopped for a reason
+        // that left no unmerged entries. Never printed as "0 file(s)
+        // conflict", which described nothing and sent people looking for
+        // a disagreement that did not exist.
+        //
+        // No `merge --abort` on this path even for the landing, which
+        // otherwise insists on being a no-op. There is nothing of ours
+        // to abort: a MERGE_HEAD here belongs to an EARLIER sync that was
+        // left in progress on purpose, and aborting it would throw away
+        // conflict resolution the agent may already have done.
+        return {
+          ok: false,
+          message:
+            `git would not merge the source into ${shortenHomePath(ws.path)}; ` +
+            `nothing changed.${named}\n` +
+            (inProgress
+              ? `A merge is already in progress there. Finish it — resolve, commit — then ` +
+                `\`/hydra workspace sync\` again.`
+              : `Clear that in the workspace, then \`/hydra workspace sync\` again.`),
+        };
+      }
 
       if (opts.onConflict === "abort") {
         // The landing path. A `stop` must never hand back a conflicted
@@ -1766,6 +1820,142 @@ export class SessionManager {
       message:
         `Synced ${shortenHomePath(ws.path)} with ${shortenHomePath(ws.sourceCwd)}: ` +
         `${incoming} commit(s), ${files} file(s) changed. Your uncommitted work is untouched.`,
+    };
+  }
+
+  /**
+   * Retry a sync that git would not even start, because the workspace has
+   * uncommitted changes to a file the incoming commits want to write.
+   *
+   * This is the ordinary case, not an edge one, and that is the whole
+   * reason this exists. A workspace with an agent in it is dirty as a
+   * matter of course — that is what it is for — so a sync that requires a
+   * clean tree is a sync that works precisely when you do not need it.
+   * The user hits it at `stop`, where the self-healing sync fails, the
+   * refusal suggests the verb that just failed, and the action that would
+   * actually help (commit first) is named nowhere.
+   *
+   * So do what the landing already does to the source tree: set the work
+   * aside as a commit object, merge onto a clean tree, replay the work on
+   * top. `captureWorkingState` mutates nothing, and the ref it is parked
+   * under is what makes the window between the reset and the replay
+   * survivable.
+   *
+   * Returns undefined when this is not the situation after all — the tree
+   * is clean, or the provider cannot snapshot, or the snapshot itself
+   * failed — leaving the caller to report git's refusal as it stands. A
+   * silent no-op is the right fallback: nothing has been touched yet at
+   * any of those exits.
+   */
+  private async syncOverDirtyTree(
+    ws: PersistedWorkspace,
+    ctx: {
+      provider: IsolationProvider | undefined;
+      before: string;
+      sourceHead: string;
+      incoming: string;
+    },
+  ): Promise<{ ok: boolean; message: string } | undefined> {
+    const { provider, before, sourceHead, incoming } = ctx;
+    if (provider?.capabilities().supports.captureWorkingState !== true) {
+      return undefined;
+    }
+    const dirty = await execGit(["status", "--porcelain", "-uall"], ws.path);
+    if (!dirty.ok || dirty.out.trim().length === 0) {
+      return undefined;
+    }
+    const snapshot = await provider
+      .captureWorkingState(ws.path, `hydra: work set aside to sync ${ws.label}`)
+      .catch(() => undefined);
+    if (snapshot === undefined) {
+      return undefined;
+    }
+    // Retained BEFORE anything is reset, and only proceeding if the ref
+    // actually took: for the next few commands this object is the only
+    // copy of the user's work, and an unreachable commit is one `git gc`
+    // away from not being a copy at all.
+    const retainRef = syncRetainRef(ws.label);
+    const retained = await execGit(
+      ["update-ref", "--create-reflog", retainRef, snapshot],
+      ws.path,
+    );
+    if (!retained.ok) {
+      return undefined;
+    }
+    const capture = { clean: false, snapshot, base: before };
+    const recover =
+      `git -C ${ws.path} cherry-pick --no-commit ${retainRef}` +
+      ` # the snapshot's parent is ${before.slice(0, 8)}, so this replays exactly your work`;
+
+    const reset = await execGit(["reset", "--hard", before], ws.path);
+    const cleaned = await execGit(["clean", "-fd"], ws.path);
+    if (!reset.ok || !cleaned.ok) {
+      const back = await replaySourceDivergence({ source: ws.path, capture });
+      return {
+        ok: false,
+        message:
+          `Could not clear ${shortenHomePath(ws.path)} to merge into it, so nothing was ` +
+          `synced. ${
+            back
+              ? "Your uncommitted work is back in place."
+              : `Your uncommitted work is at ${retainRef}: ${recover}`
+          }`,
+      };
+    }
+
+    const merged = await execGit(
+      ["merge", "--no-edit", "-m", `hydra: sync ${ws.label} with the source`, sourceHead],
+      ws.path,
+    );
+    if (!merged.ok) {
+      // A real disagreement between the two histories, now that the tree
+      // is clean and cannot be what git is objecting to.
+      //
+      // Restored rather than left in progress, which is what an explicit
+      // `sync` otherwise does. The two cannot both happen: the work is
+      // held aside precisely so the merge could run, and putting it back
+      // on top of a half-merged tree would mix the user's edits into
+      // conflict markers with no way to tell them apart afterwards.
+      // Restoring keeps the "nothing changed" property, which is what
+      // makes the next step statable.
+      await execGit(["merge", "--abort"], ws.path).catch(() => undefined);
+      const back = await replaySourceDivergence({ source: ws.path, capture });
+      if (back) {
+        await execGit(["update-ref", "-d", retainRef], ws.path).catch(() => undefined);
+      }
+      return {
+        ok: false,
+        message:
+          `The source's commits and this workspace's commits genuinely conflict, and that ` +
+          `has to be resolved with a merge left in progress — which cannot happen while ` +
+          `there is uncommitted work here, since the work has to be set aside for the merge ` +
+          `to run at all.\n` +
+          (back
+            ? `Your uncommitted work is back in place (unstaged) and nothing else changed. ` +
+              `Commit it in ${shortenHomePath(ws.path)}, then \`/hydra workspace sync\` ` +
+              `again to resolve the conflict there.`
+            : `Your uncommitted work could not be put back and is preserved at ${retainRef}. ` +
+              `Recover it with:\n  ${recover}`),
+      };
+    }
+
+    const restored = await replaySourceDivergence({ source: ws.path, capture });
+    const touched = (await execGit(["diff", "--name-only", before, "HEAD"], ws.path)).out.trim();
+    const files = touched.length === 0 ? 0 : touched.split("\n").length;
+    const head = `Synced ${shortenHomePath(ws.path)} with ${shortenHomePath(ws.sourceCwd)}: ${incoming} commit(s), ${files} file(s) changed.`;
+    if (!restored) {
+      return {
+        ok: false,
+        message:
+          `${head}\nYour uncommitted work touches the same lines as the commits that just ` +
+          `arrived, so replaying it left conflict markers where they collide. The whole set ` +
+          `is preserved at ${retainRef} if you would rather start over:\n  ${recover}`,
+      };
+    }
+    await execGit(["update-ref", "-d", retainRef], ws.path).catch(() => undefined);
+    return {
+      ok: true,
+      message: `${head} Your uncommitted work was set aside for the merge and restored on top.`,
     };
   }
 
@@ -1968,7 +2158,8 @@ export class SessionManager {
    * is both cheaper and more useful than replaying a backlog.
    */
   private scheduleWorkspaceSnapshot(session: Session): void {
-    if (session.workspace === undefined || this.workspaceSnapshotsDisabled) {
+    if (session.workspace === undefined) {
+      this.driftNoticed.delete(session.sessionId);
       return;
     }
     if (this.snapshotInFlight.has(session.sessionId)) {
@@ -2006,6 +2197,16 @@ export class SessionManager {
       ...(workspace.vcs !== undefined ? { vcs: workspace.vcs } : {}),
     };
 
+    // Ahead of the change probe, and not behind the snapshot switch:
+    // drift is about the SOURCE moving, which has nothing to do with
+    // whether this turn edited a file or whether the user wants their
+    // work autosaved. Gated the other way round it would be silent for
+    // exactly the sessions that read and think before they write.
+    await this.noticeSourceDrift(session, workspace).catch(() => undefined);
+
+    if (this.workspaceSnapshotsDisabled) {
+      return;
+    }
     const status = await provider.status(asWorkspace).catch(() => undefined);
     if (status !== undefined && status.changedPaths.length === 0) {
       return;
@@ -2019,6 +2220,69 @@ export class SessionManager {
       asWorkspace,
       this.snapshotRefFor(workspace.label),
       snapshot,
+    );
+  }
+
+  /**
+   * Say once, at the turn boundary, that the source has moved on.
+   *
+   * `status` could always answer this; the problem is that nobody runs
+   * `status` in the middle of working. The drift was therefore discovered
+   * at `stop`, which is the worst possible moment: the user is trying to
+   * finish, and the answer is a refusal. Pushing it costs two git queries
+   * on a path that already runs every turn, off the critical path.
+   *
+   * Latched on the source's tip rather than "once per session": a second
+   * batch of commits is new information, and a sync silently makes the
+   * notice true again later. Keeping it keyed by sha means one notice per
+   * distinct thing to know, with no counter to reset and nothing to clear
+   * when the workspace goes away except the map entry.
+   *
+   * Best-effort throughout. A failed git query says nothing rather than
+   * guessing, on the same principle as the status report: a wrong "you
+   * are behind" sends someone to sync for no reason, and a wrong silence
+   * is just the behaviour we had before.
+   */
+  private async noticeSourceDrift(
+    session: Session,
+    workspace: PersistedWorkspace,
+  ): Promise<void> {
+    if (workspace.vcs?.branch === undefined) {
+      return;
+    }
+    if (getWorkspaceProvider(workspace.provider)?.capabilities().sharedHistory !== true) {
+      return;
+    }
+    const sourceHead = (await execGit(["rev-parse", "HEAD"], workspace.sourceCwd)).out.trim();
+    if (sourceHead.length === 0 || this.driftNoticed.get(session.sessionId) === sourceHead) {
+      return;
+    }
+    const contained = await execGit(
+      ["merge-base", "--is-ancestor", sourceHead, "HEAD"],
+      workspace.path,
+    );
+    if (contained.ok) {
+      // Caught up, whether by a sync or because nothing ever moved.
+      // Forgetting the latch here is what lets the NEXT drift speak.
+      this.driftNoticed.delete(session.sessionId);
+      return;
+    }
+    const counted = await execGit(["rev-list", "--count", `HEAD..${sourceHead}`], workspace.path);
+    const behind = Number.parseInt(counted.out.trim(), 10);
+    if (!counted.ok || !Number.isFinite(behind) || behind <= 0) {
+      return;
+    }
+    this.driftNoticed.set(session.sessionId, sourceHead);
+    session.broadcastWorkspacePhase({
+      phase: "drift",
+      label: workspace.label,
+      sourceCwd: workspace.sourceCwd,
+      behind,
+    });
+    session.broadcastSyntheticText(
+      `\n${shortenHomePath(workspace.sourceCwd)} has moved on: ${behind} commit(s) are there ` +
+        `and not in this workspace. Landing is fast-forward-only, so \`/hydra workspace sync\` ` +
+        `now is what keeps \`stop\` from refusing later.\n`,
     );
   }
 
@@ -2376,10 +2640,21 @@ export class SessionManager {
           // Prose gets the short path; the command keeps the absolute one,
           // so it stays paste-able outside a shell that expands `~`.
           `cannot fast-forward ${current} in ${shortenHomePath(source)} to ${branch}. ` +
-            `The source has moved on since this workspace was created. Nothing was changed.` +
+            // "The source is untouched", not "nothing was changed": the
+            // auto-sync below may legitimately have moved the WORKSPACE,
+            // and in the worst case left work parked under a ref it names.
+            // The guarantee this refusal has always been making is about
+            // the user's tree, and that one still holds.
+            `The source has moved on since this workspace was created. The source is untouched.` +
             `${why}\n` +
-            `Resolve it in the workspace with \`/hydra workspace sync\` (which leaves the ` +
-            `conflict there to fix), or land it by hand with: git -C ${source} merge ${branch}`,
+            // Do not follow a failed sync with "try a sync". The attempt
+            // above reports its own next action, and appending a vaguer
+            // suggestion to run the verb that just failed is what made
+            // this refusal read as a dead end.
+            (why.length > 0
+              ? `Or land it by hand with: git -C ${source} merge ${branch}`
+              : `Resolve it in the workspace with \`/hydra workspace sync\` (which leaves the ` +
+                `conflict there to fix), or land it by hand with: git -C ${source} merge ${branch}`),
         );
       }
     }
@@ -3995,6 +4270,7 @@ export class SessionManager {
   private async attachManagerHooks(session: Session): Promise<void> {
     session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
+      this.driftNoticed.delete(session.sessionId);
       this.invalidateListCache();
       // Release the workspace only when the record is going away too.
       // A close WITHOUT deleteRecord is a cold-down, not a deletion: the

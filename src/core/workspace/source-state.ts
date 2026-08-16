@@ -162,13 +162,19 @@ export async function captureSourceForLanding(opts: {
  *
  * Empty in the common case: work copied in at `start` sits in both
  * trees, so it cancels out of `diff(base, snapshot)` and only edits made
- * after isolating remain. Applied without `--index` so modifications
- * land unstaged and new files land untracked, matching how the user was
- * holding them.
+ * after isolating remain.
  *
- * `--3way` because by this point the tree has moved: the merge brought
- * in the agent's commits, so a plain context match is too brittle. A
- * false return is a real overlap between the two sets of edits.
+ * Plain `git apply` is tried first, and that ordering is the point rather
+ * than an optimization: it is atomic (all hunks or none, nothing written
+ * on failure) and it leaves the work exactly as it was being held —
+ * modifications unstaged, new files untracked. `--3way` cannot do that,
+ * because it implies `--index`: reaching for it first hands back a
+ * staged tree the user never had.
+ *
+ * `--3way` second, because by this point the tree may have moved: a
+ * merge brought in the agent's commits, so a plain context match is too
+ * brittle to rely on alone. A false return is a real overlap between the
+ * two sets of edits.
  */
 export async function replaySourceDivergence(opts: {
   source: string;
@@ -183,6 +189,9 @@ export async function replaySourceDivergence(opts: {
     return false;
   }
   if (patch.out.trim().length === 0) {
+    return true;
+  }
+  if (await applyPatch(source, patch.out)) {
     return true;
   }
   // Already applied is a no-op success, not an overlap. A prior `merge`

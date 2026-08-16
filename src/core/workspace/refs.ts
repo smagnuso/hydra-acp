@@ -64,6 +64,25 @@ export function landingRetainRef(sessionId: string): string {
 }
 
 /**
+ * Where a sync parks the workspace's uncommitted work while it merges.
+ *
+ * A merge cannot run under uncommitted changes to a file it wants to
+ * write, and a workspace with an agent in it is dirty as a matter of
+ * course, so the work is set aside and replayed. This ref is what makes
+ * that safe: between the reset and the replay the tree is the only other
+ * copy, and if the replay fails it is the only one left.
+ *
+ * Not an anchor. Anchors describe a workspace and live as long as it
+ * does; this exists for the duration of one merge and is deleted the
+ * moment the work is back, exactly like `landingRetainRef`. Which is
+ * also why it is absent from `allAnchorRefs`: a teardown sweep must not
+ * remove the one copy of work a failed replay left behind.
+ */
+export function syncRetainRef(label: string): string {
+  return `${NS}/sync/${label}`;
+}
+
+/**
  * Where a snapshot goes when it outlives the workspace that made it.
  *
  * A label is a name, not an identity: it is free again the moment its

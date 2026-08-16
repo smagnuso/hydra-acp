@@ -1923,7 +1923,21 @@ Emitted while a session moves into or out of an isolated workspace
 
 // failed — terminal. The move was unwound; the session did not relocate.
 { "sessionUpdate": "hydra_workspace", "phase": "failed", "error": "..." }
+
+// drift — not a phase of a move at all: the SOURCE has gained commits the
+//         workspace does not have. Emitted at a turn boundary, at most once
+//         per distinct source tip, and only for providers with shared
+//         history. `behind` is the commit count.
+{ "sessionUpdate": "hydra_workspace", "phase": "drift",
+  "label": "feature", "sourceCwd": "/home/u/dev/proj", "behind": 3 }
 ```
+
+`drift` carries no cwd and moves nothing, so a client that only tracks
+relocation can ignore it. It exists because landing is fast-forward-only:
+a client that surfaces it lets the user sync while they are still working,
+instead of meeting the same fact as a refusal from `stop`. The daemon also
+emits the equivalent sentence as a synthetic `agent_message_chunk`, so a
+client that handles neither still shows it in the conversation.
 
 **Why a client must handle this.** A session's cwd is otherwise learned
 once, from `session/new` or `session/attach`, and there is no other
