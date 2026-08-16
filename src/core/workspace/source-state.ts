@@ -112,10 +112,31 @@ export async function captureSourceForLanding(opts: {
       break;
     }
   }
+  const dirty = !status.ok || status.out.trim().length > 0;
   if (base.length === 0) {
+    // No anchor resolved. Harmless on a clean source — there is no
+    // divergence to measure, so any base does — but NOT harmless when the
+    // source is dirty, and falling back to HEAD there is actively
+    // misleading.
+    //
+    // `start` COPIES the source's uncommitted work into the workspace, so
+    // an anchor taken at start makes that copy cancel out of the diff and
+    // leaves only genuine post-start edits. Measured from HEAD instead,
+    // the copy reads as the user's own divergence — and the landing then
+    // replays it on top of the very same content arriving from the
+    // workspace, producing a conflict that blames the user for an overlap
+    // they did not create. Refusing is the honest answer: we cannot tell
+    // their edits from our copy.
+    if (dirty) {
+      throw new Error(
+        `${source} has uncommitted changes but this workspace has no start anchor, so its ` +
+          `copy of your work cannot be told apart from edits you made since. Refusing rather ` +
+          `than reporting a conflict that is not yours. Commit or stash the source, then retry.`,
+      );
+    }
     base = (await runGit(["rev-parse", "HEAD"], source)).out.trim();
   }
-  if (status.ok && status.out.trim().length === 0) {
+  if (!dirty) {
     return { clean: true, base };
   }
   if (provider?.capabilities().supports.captureWorkingState !== true) {

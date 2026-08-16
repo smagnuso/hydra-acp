@@ -2699,14 +2699,28 @@ export class SessionManager {
       if (caps.locking) {
         await provider.lock(ws, `session ${session.sessionId}`).catch(() => undefined);
       }
-      // Retain the pre-move snapshot under the session's own ref before
-      // the source is reset. This is the recovery anchor for the window
-      // where the work exists in neither place, so a failure to write it
-      // aborts the move rather than being swallowed: without the ref,
-      // a crash after the reset takes the work with it.
-      if (carried !== undefined) {
-        await provider.retainSnapshot(ws, startRef, carried);
+      // Retain the pre-move snapshot before the source is touched. This
+      // is the recovery anchor for the window where the work exists in
+      // neither place, so a failure to write it aborts the move rather
+      // than being swallowed: without the ref, a crash after the reset
+      // takes the work with it.
+      //
+      // Written UNCONDITIONALLY, even when nothing was carried, because
+      // landing reads this ref to tell the user's later edits apart from
+      // the copy it made. Writing it only when work was carried made
+      // "no start ref" ambiguous between "the source was clean" and
+      // "something went wrong", so landing had to fall back to HEAD — and
+      // with a carried copy that fallback counts the copy as the user's
+      // own divergence, then collides it with the same content arriving
+      // from the workspace. A clean source has nothing to snapshot, so
+      // the base of the workspace (its HEAD) is the honest anchor there.
+      const anchor = carried ?? ws.snapshot;
+      if (anchor === undefined) {
+        throw new Error(
+          `provider "${ws.provider}" gave the workspace no base to anchor landing against`,
+        );
       }
+      await provider.retainSnapshot(ws, startRef, anchor);
 
       // Setup runs the repo's own hooks, which the design doc's example
       // fills with dependency installs. Named separately because it is
