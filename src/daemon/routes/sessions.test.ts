@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AddressInfo } from "node:net";
@@ -257,10 +259,14 @@ describe("session routes: termination broadcasts session_closed", () => {
     const id = session.sessionId;
     const meta = paths.sessionFile(id);
     const before = JSON.parse(fs.readFileSync(meta, "utf8")) as Record<string, unknown>;
+    // Shaped like a real isolated record: `cwd` IS the workspace path.
+    // The fixture used to leave cwd at the source, which made the record
+    // already consistent and hid the bug below.
     fs.writeFileSync(
       meta,
       JSON.stringify({
         ...before,
+        cwd: "/ws/x",
         workspace: { path: "/ws/x", sourceCwd: "/w", label: "x", provider: "git" },
       }),
     );
@@ -275,9 +281,92 @@ describe("session routes: termination broadcasts session_closed", () => {
 
     const after = JSON.parse(fs.readFileSync(meta, "utf8")) as Record<string, unknown>;
     expect(after.workspace).toBeUndefined();
-    // Subtracting one field, not rewriting the session.
+    // cwd comes back WITH the binding. Leaving it at the workspace path
+    // strands the record pointing into a directory that is gone, which
+    // shows up as a raw workspace path in `session list` and as a
+    // resurrect into nowhere — while this command reports the session
+    // will "resume in <source>".
+    expect(after.cwd).toBe("/w");
+    // Subtracting a field and correcting another, not rewriting the session.
     expect(after.sessionId).toBe(before.sessionId);
     expect(after.agentId).toBe(before.agentId);
+  });
+
+  it("PATCH /v1/sessions/:id with { cwd } repairs a cold session's directory", async () => {
+    // For a record whose cwd outlived its directory — a removed
+    // workspace, a moved checkout. Nothing outside the daemon can fix it,
+    // and left alone the session resurrects into nowhere.
+    const moved = fs.mkdtempSync(path.join(os.tmpdir(), "hydra-cwd-"));
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const id = session.sessionId;
+    await session.close({ deleteRecord: false });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: moved }),
+    });
+    expect(res.status).toBe(204);
+
+    const after = JSON.parse(fs.readFileSync(paths.sessionFile(id), "utf8")) as {
+      cwd: string;
+    };
+    expect(after.cwd).toBe(moved);
+    fs.rmSync(moved, { recursive: true, force: true });
+  });
+
+  it("PATCH /v1/sessions/:id rejects a cwd that is not a usable directory", async () => {
+    // Accepting a path that is not there would just move the problem this
+    // repairs, so the endpoint refuses rather than recording it.
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await session.close({ deleteRecord: false });
+
+    for (const [cwd, status] of [
+      ["relative/path", 400],
+      ["/definitely/not/here/at/all", 400],
+    ] as const) {
+      const res = await fetch(`${harness.baseUrl}/v1/sessions/${session.sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+      expect(res.status).toBe(status);
+    }
+  });
+
+  it("PATCH /v1/sessions/:id refuses a cwd change on a live or isolated session", async () => {
+    // Live: the agent was spawned in its cwd and cannot change directory,
+    // so moving it is a swap. Isolated: cwd IS the workspace, and the two
+    // move together.
+    const live = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const liveRes = await fetch(`${harness.baseUrl}/v1/sessions/${live.sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: os.tmpdir() }),
+    });
+    expect(liveRes.status).toBe(409);
+    expect(((await liveRes.json()) as { error: string }).error).toMatch(/workspace start/);
+
+    const bound = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const meta = paths.sessionFile(bound.sessionId);
+    const rec = JSON.parse(fs.readFileSync(meta, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(
+      meta,
+      JSON.stringify({
+        ...rec,
+        cwd: "/ws/y",
+        workspace: { path: "/ws/y", sourceCwd: "/w", label: "y", provider: "git" },
+      }),
+    );
+    await bound.close({ deleteRecord: false });
+
+    const boundRes = await fetch(`${harness.baseUrl}/v1/sessions/${bound.sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: os.tmpdir() }),
+    });
+    expect(boundRes.status).toBe(409);
+    expect(((await boundRes.json()) as { error: string }).error).toMatch(/workspace: null/);
   });
 
   it("PATCH /v1/sessions/:id refuses to clear a LIVE session's binding with 409", async () => {

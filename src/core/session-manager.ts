@@ -3083,6 +3083,24 @@ export class SessionManager {
     const stored = await this.store.list().catch(() => []);
     for (const rec of stored) {
       existing.add(`${rec.agentId}::${rec.upstreamSessionId}`);
+      // RETIRED generations count as known too.
+      //
+      // Every swap — compaction, workspace enter, workspace leave, agent
+      // switch — retires one upstream session and mints another, so a
+      // single hydra session can burn through many. The agent remembers
+      // all of them and session/list reports all of them. Matching only
+      // on the CURRENT id therefore made every superseded generation look
+      // brand new, and sync imported each as its own cold row: no
+      // history, createdAt == updatedAt, cwd wherever that generation
+      // happened to be spawned (a workspace path, for a workspace swap).
+      // One session that had switched workspaces a few times produced six
+      // phantoms.
+      //
+      // The trail needs no new state; appendUpstreamGeneration has been
+      // recording it all along.
+      for (const gen of rec.upstreamGenerations ?? []) {
+        existing.add(`${gen.agentId}::${gen.upstreamSessionId}`);
+      }
     }
 
     // Sessions whose cwd is under hydra's synopsis sandbox are internal
@@ -3714,19 +3732,18 @@ export class SessionManager {
           // session/attach (TUI auto-reconnect off session/closed) can
           // beat the tombstone to disk, see no record + no tombstone,
           // and resurrect from hydraHints alone.
-          const chain = this.tombstones
-            .add({
+          const chain = this.tombstoneAllGenerations(
+            session.sessionId,
+            {
               agentId: session.agentId,
               upstreamSessionId: session.upstreamSessionId,
-              deletedAt: new Date().toISOString(),
               upstreamUpdatedAt: new Date(session.updatedAt).toISOString(),
               cwd: session.cwd,
-              title: session.title,
-              reason: "user",
-              ...(liveInteractive !== undefined
-                ? { interactive: liveInteractive }
-                : {}),
-            })
+              ...(session.title !== undefined ? { title: session.title } : {}),
+              ...(liveInteractive !== undefined ? { interactive: liveInteractive } : {}),
+            },
+            "user",
+          )
             .catch(() => undefined)
             .then(() =>
               this.store.delete(session.sessionId).catch(() => undefined),
@@ -4935,6 +4952,67 @@ export class SessionManager {
     });
   }
 
+  /**
+   * Tombstone every upstream session a hydra session has ever occupied,
+   * not just the one it is on now.
+   *
+   * A session accumulates upstream generations as it swaps — compaction,
+   * workspace enter and leave, agent switch — and the record's
+   * `upstreamGenerations` is the only place that trail is written down.
+   * Deleting the session deletes the trail with it, so tombstoning the
+   * current id alone leaves every retired generation with no record AND
+   * no tombstone. The next `agent sync` sees them in the agent's own
+   * session/list, recognizes nothing, and mints a fresh cold row for
+   * each: no history, createdAt == updatedAt, cwd wherever that
+   * generation was spawned.
+   *
+   * Generations can span agents (an agent switch retires one and mints
+   * another elsewhere), so each is tombstoned under its OWN agentId
+   * rather than the record's current one.
+   */
+  private async tombstoneAllGenerations(
+    sessionId: string,
+    current: {
+      agentId: string;
+      upstreamSessionId: string;
+      upstreamUpdatedAt: string;
+      cwd: string;
+      title?: string;
+      interactive?: boolean;
+    },
+    reason: "user" | "expired",
+  ): Promise<void> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    const pairs = new Map<string, { agentId: string; upstreamSessionId: string }>();
+    for (const gen of record?.upstreamGenerations ?? []) {
+      if (gen.upstreamSessionId) {
+        pairs.set(`${gen.agentId}::${gen.upstreamSessionId}`, {
+          agentId: gen.agentId,
+          upstreamSessionId: gen.upstreamSessionId,
+        });
+      }
+    }
+    pairs.set(`${current.agentId}::${current.upstreamSessionId}`, {
+      agentId: current.agentId,
+      upstreamSessionId: current.upstreamSessionId,
+    });
+    const deletedAt = new Date().toISOString();
+    for (const pair of pairs.values()) {
+      await this.tombstones
+        .add({
+          agentId: pair.agentId,
+          upstreamSessionId: pair.upstreamSessionId,
+          deletedAt,
+          upstreamUpdatedAt: current.upstreamUpdatedAt,
+          cwd: current.cwd,
+          ...(current.title !== undefined ? { title: current.title } : {}),
+          reason,
+          ...(current.interactive !== undefined ? { interactive: current.interactive } : {}),
+        })
+        .catch(() => undefined);
+    }
+  }
+
   async deleteRecord(
     sessionId: string,
     reason: "user" | "expired" = "user",
@@ -4951,20 +5029,18 @@ export class SessionManager {
     if (record.upstreamSessionId) {
       const hist = await historyStatus(sessionId);
       const recordInteractive = effectiveInteractive(record, hist.hasContent);
-      await this.tombstones
-        .add({
+      await this.tombstoneAllGenerations(
+        sessionId,
+        {
           agentId: record.agentId,
           upstreamSessionId: record.upstreamSessionId,
-          deletedAt: new Date().toISOString(),
           upstreamUpdatedAt: record.updatedAt,
           cwd: record.cwd,
-          title: record.title,
-          reason,
-          ...(recordInteractive !== undefined
-            ? { interactive: recordInteractive }
-            : {}),
-        })
-        .catch(() => undefined);
+          ...(record.title !== undefined ? { title: record.title } : {}),
+          ...(recordInteractive !== undefined ? { interactive: recordInteractive } : {}),
+        },
+        reason,
+      );
     }
     // Release the workspace before dropping the record: the record is
     // the only thing that knows a workspace exists, so unlinking it
@@ -5047,11 +5123,71 @@ export class SessionManager {
     if (this.get(sessionId) !== undefined) {
       return "live";
     }
-    if (!(await this.hasRecord(sessionId))) {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    if (!record) {
       return "missing";
     }
-    await this.mutateRecord(sessionId, {}, ["workspace"]);
+    // cwd moves back with the binding, in the same write.
+    //
+    // An isolated record has `cwd` equal to its workspace path, so
+    // dropping only the binding leaves the record pointing into a
+    // directory that is usually gone — which is why this is called at
+    // all. Two visible symptoms: `session list` renders the raw
+    // workspace path (its CWD cell substitutes `workspace.sourceCwd`,
+    // and there is no longer a workspace to read it from), and a
+    // resurrect spawns the agent in a directory that does not exist,
+    // while the command that did this promised the session would "resume
+    // in <source>".
+    //
+    // leaveWorkspace already states the rule for the other direction:
+    // "Clear cwd and the binding in one write. Two writes could strand a
+    // record claiming isolation while sitting in the source tree." Same
+    // pairing, opposite order.
+    const source = record.workspace?.sourceCwd;
+    await this.mutateRecord(sessionId, source !== undefined ? { cwd: source } : {}, ["workspace"]);
     return "cleared";
+  }
+
+  /**
+   * Point a cold session at a different working directory.
+   *
+   * Exists for records whose `cwd` outlived the directory it names — a
+   * workspace that was removed, a checkout that moved. Such a session
+   * resurrects into nowhere, and nothing else can repair it: the fix is a
+   * field on the record, and the daemon is the only writer.
+   *
+   * Cold only, and never while a workspace binding exists. Both refusals
+   * protect the same invariant, stated in leaveWorkspace: cwd and the
+   * binding move together, and `cwd` equals `workspace.path` for as long
+   * as a session is isolated. A live session is refused for a second
+   * reason — its agent process was spawned in its cwd and cannot be told
+   * to change directory, so moving a live session is a swap
+   * (`workspace start` does one), not a field write.
+   *
+   * The target must exist. Pointing a session at a directory that is not
+   * there is the failure this repairs, so accepting one would just move
+   * the problem.
+   */
+  async setCwd(
+    sessionId: string,
+    cwd: string,
+  ): Promise<"set" | "live" | "bound" | "missing" | "not-a-directory"> {
+    if (this.get(sessionId) !== undefined) {
+      return "live";
+    }
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    if (!record) {
+      return "missing";
+    }
+    if (record.workspace !== undefined) {
+      return "bound";
+    }
+    if (!(await this.dirExists(cwd))) {
+      return "not-a-directory";
+    }
+    await this.mutateRecord(sessionId, { cwd });
+    this.invalidateListCache();
+    return "set";
   }
 
   // Set or clear the user-set priority on a session. Mirrors setTitle:

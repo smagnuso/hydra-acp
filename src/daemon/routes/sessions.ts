@@ -356,7 +356,44 @@ export function registerSessionRoutes(
       regen?: unknown;
       priority?: unknown;
       workspace?: unknown;
+      cwd?: unknown;
     };
+    if (body.cwd !== undefined) {
+      // Repairs a record whose cwd outlived its directory (a removed
+      // workspace, a moved checkout), which otherwise resurrects into
+      // nowhere with no way to fix it from outside the daemon.
+      if (typeof body.cwd !== "string" || !path.isAbsolute(body.cwd)) {
+        reply.code(400).send({ error: "cwd must be an absolute path" });
+        return;
+      }
+      const outcome = await manager.setCwd(id, body.cwd);
+      if (outcome === "missing") {
+        reply.code(404).send({ error: "session not found" });
+        return;
+      }
+      if (outcome === "not-a-directory") {
+        reply.code(400).send({ error: `${body.cwd} is not a directory` });
+        return;
+      }
+      if (outcome === "live") {
+        reply.code(409).send({
+          error:
+            "session is live; its agent was spawned in its cwd and cannot change directory. " +
+            "Moving a live session is a swap — use `workspace start` in it.",
+        });
+        return;
+      }
+      if (outcome === "bound") {
+        reply.code(409).send({
+          error:
+            "session is isolated, so its cwd IS its workspace. Clear the binding first " +
+            "(PATCH { workspace: null }) or leave the workspace from inside the session.",
+        });
+        return;
+      }
+      reply.code(204).send();
+      return;
+    }
     if ("workspace" in body) {
       // Clear only. Binding a session to a workspace is a swap of the
       // agent's whole world (cwd, re-seeded transcript, snapshot refs)

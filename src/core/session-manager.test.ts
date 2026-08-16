@@ -3127,6 +3127,98 @@ describe("SessionManager.syncFromAgent", () => {
     expect(synced[0]?.upstreamSessionId).toBe("u_new");
   });
 
+  it("skips upstream sessions a local record has already retired", async () => {
+    // Every swap (compaction, workspace enter/leave, agent switch)
+    // retires one upstream session and mints another, and the agent
+    // remembers all of them. Matching only the CURRENT id made each
+    // superseded generation look new, so sync imported it as its own cold
+    // row: no history, createdAt == updatedAt, and a cwd wherever that
+    // generation was spawned. One session that had moved between
+    // workspaces a few times produced six phantoms in `session list`.
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    const now = new Date().toISOString();
+    await store.write({
+      sessionId: "hydra_session_swapper",
+      cwd: "/projects/a",
+      agentId: "claude-code",
+      upstreamSessionId: "u_current",
+      upstreamGenerations: [
+        { upstreamSessionId: "u_gen1", agentId: "claude-code" },
+        { upstreamSessionId: "u_gen2", agentId: "claude-code" },
+        { upstreamSessionId: "u_current", agentId: "claude-code" },
+      ],
+      createdAt: now,
+      updatedAt: now,
+      attentionFlags: [],
+    });
+
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            { sessionId: "u_current", cwd: "/projects/a" },
+            { sessionId: "u_gen1", cwd: "/ws/one" },
+            { sessionId: "u_gen2", cwd: "/ws/two" },
+            { sessionId: "u_unrelated", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+
+    expect(skipped).toBe(3);
+    expect(synced.map((s) => s.upstreamSessionId)).toEqual(["u_unrelated"]);
+  });
+
+  it("skips upstream sessions retired by a session that was later DELETED", async () => {
+    // The trail lives in the record, so deleting the session deletes it.
+    // Tombstoning only the current id therefore left every retired
+    // generation with no record and no tombstone, and sync reimported
+    // each as its own row — the surviving phantoms after a cleanup, and
+    // the ones hardest to attribute afterwards precisely because their
+    // owner is gone.
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    const now = new Date().toISOString();
+    await store.write({
+      sessionId: "hydra_session_doomed",
+      cwd: "/projects/a",
+      agentId: "claude-code",
+      upstreamSessionId: "u_last",
+      upstreamGenerations: [
+        { upstreamSessionId: "u_first", agentId: "claude-code" },
+        { upstreamSessionId: "u_last", agentId: "claude-code" },
+      ],
+      createdAt: now,
+      updatedAt: now,
+      attentionFlags: [],
+    });
+
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            { sessionId: "u_first", cwd: "/ws/one" },
+            { sessionId: "u_last", cwd: "/projects/a" },
+            { sessionId: "u_other", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+
+    // Delete it: the record and its trail go, tombstones remain.
+    expect(await manager.deleteRecord("hydra_session_doomed")).toBe(true);
+
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+
+    expect(skipped).toBe(2);
+    expect(synced.map((s) => s.upstreamSessionId)).toEqual(["u_other"]);
+  });
+
   it("throws and kills the agent when sessionCapabilities.list is not advertised", async () => {
     const { manager, mock } = makeSyncManager({ pages: [] });
     await expect(manager.syncFromAgent("claude-code")).rejects.toThrow(

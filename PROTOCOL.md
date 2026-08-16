@@ -403,6 +403,16 @@ Picker `T` and `/hydra title` route here. Synopsis runs out-of-band; the new tit
 
 Response: `202` accepted, `404` on unknown session.
 
+**Request body — repair the working directory**
+
+```jsonc
+{ "cwd": "/absolute/path" }
+```
+
+Points a **cold** session at a different directory. Exists for records whose `cwd` outlived the directory it names (a removed workspace, a moved checkout); such a session otherwise resurrects into nowhere and cannot be fixed from outside the daemon. The target must already exist.
+
+Response: `204` on success, `400` if `cwd` is not an absolute path or is not a directory, `404` on unknown session, `409` when the session is **live** (its agent was spawned in its cwd and cannot change directory — moving a live session is a swap, via `workspace start`) or **isolated** (its `cwd` *is* its workspace; clear the binding first, below).
+
 **Request body — clear the workspace binding**
 
 ```jsonc
