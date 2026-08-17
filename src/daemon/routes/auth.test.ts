@@ -52,6 +52,7 @@ function testConfig(): HydraConfig {
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
       launcherModeWhenHosted: false,
+      skipPermissions: false,
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       ambiguousWidth: "narrow",

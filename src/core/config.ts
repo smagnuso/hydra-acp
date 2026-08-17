@@ -400,6 +400,18 @@ const TuiConfig = z.object({
   // has to degrade quietly. --no-terminal-host-launcher overrides it for a
   // single run.
   launcherModeWhenHosted: z.boolean().default(false),
+  // Standing default for --dangerously-skip-permissions on the TUI: every
+  // session/request_permission is auto-approved with allow_once and the
+  // modal never appears. Off by default, and deliberately TUI-only: shim
+  // and cat are spawned by editors and scripts that pass their own argv,
+  // so an ambient config key there would silently disarm paths the user
+  // isn't watching.
+  //
+  // The flag ORs with this rather than overriding it (there is no "off"
+  // value of a boolean flag to override with); pass
+  // --no-dangerously-skip-permissions to get the prompts back for a
+  // single run.
+  skipPermissions: z.boolean().default(false),
   // What the unmodified Enter key does in the prompt composer.
   //   "amend" (default) — Enter amends the in-flight turn; Shift+Enter
   //     enqueues. With no turn in flight either key just enqueues,

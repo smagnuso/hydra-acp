@@ -26,6 +26,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "json",
   "new",
   "no-color",
+  "no-dangerously-skip-permissions",
   "no-from-note",
   "no-pager",
   "no-terminal-host-launcher",

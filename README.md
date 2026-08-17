@@ -279,6 +279,9 @@ hydra-acp --reattach                        # reattach to this terminal's last s
 hydra-acp --new                             # force a fresh session
 hydra-acp --readonly                        # open a session as a transcript viewer (with --session)
 hydra-acp --dangerously-skip-permissions    # auto-approve every tool permission request
+                                            # (tui.skipPermissions makes this the default;
+                                            # --no-dangerously-skip-permissions refuses it
+                                            # for one run)
 
 hydra-acp init [--rotate-token]             # generate the service token
 hydra-acp version [--json]                  # CLI, daemon, and extension/transformer versions
@@ -567,6 +570,8 @@ one is to sit on that row and walk through them. Eighteen ship built in, and
 `tui.mouse` (default `false`) controls whether the TUI captures mouse events. With capture off (the default), plain click-drag selects text via your terminal emulator, but wheel-driven scrollback stops working — use `PgUp` / `PgDn` instead. Set to `true` to enable capture, which lets the scroll wheel drive scrollback at the cost of requiring `shift+drag` to select text.
 
 `tui.defaultEnterAction` (default `"amend"`) controls what the unmodified Enter key does in the prompt composer. With `"amend"` (the default), Enter amends the in-flight turn and `Shift+Enter` enqueues a new prompt; with no turn in flight either key just enqueues, since there's nothing to amend. Set to `"enqueue"` to flip the two: Enter enqueues (sends immediately when idle, queues behind an in-flight turn) and `Shift+Enter` amends.
+
+`tui.skipPermissions` (default `false`) makes `--dangerously-skip-permissions` the standing default for the TUI: every tool permission request is auto-approved (with `allow_once`, so nothing is written to the agent's persisted permission rules) and the modal never appears. The startup banner names the config key so it isn't silent. TUI-only on purpose: `shim`, `launch`, and `cat` are spawned by editors and scripts with their own argv, and an ambient config key there would disarm paths you aren't watching. Pass `--no-dangerously-skip-permissions` to get the prompts back for a single run.
 
 ## Extensions
 

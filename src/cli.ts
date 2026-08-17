@@ -114,14 +114,35 @@ let suppressUpdateNotice = false;
 // each entry point. Once we've printed it the flag stays read-only for
 // the rest of the process — we never auto-clear it across re-dispatch.
 let dangerousNoticePrinted = false;
-function warnIfDangerouslySkipping(active: boolean): void {
+function warnIfDangerouslySkipping(
+  active: boolean,
+  source = "--dangerously-skip-permissions",
+): void {
   if (!active || dangerousNoticePrinted) {
     return;
   }
   dangerousNoticePrinted = true;
   process.stderr.write(
-    "hydra-acp: --dangerously-skip-permissions is set — all tool permission requests will be auto-approved.\n",
+    `hydra-acp: ${source} is set - all tool permission requests will be auto-approved.\n`,
   );
+}
+
+// --no-dangerously-skip-permissions exists to refuse tui.skipPermissions for
+// one run, so pairing it with the positive flag states both halves of a
+// contradiction. Rejected rather than resolved, and rejected before the
+// banner so the run doesn't announce the gate is off on its way to exiting 2.
+function rejectContradictorySkipFlags(
+  flags: Record<string, string | boolean>,
+): void {
+  if (
+    flags["dangerously-skip-permissions"] === true &&
+    flags["no-dangerously-skip-permissions"] === true
+  ) {
+    process.stderr.write(
+      "hydra-acp: --dangerously-skip-permissions and --no-dangerously-skip-permissions contradict each other; pass one.\n",
+    );
+    process.exit(2);
+  }
 }
 
 async function main(): Promise<void> {
@@ -171,6 +192,7 @@ async function main(): Promise<void> {
     const model = resolveOption(flags, "model");
     suppressUpdateNotice = true;
     const dangerous = flags["dangerously-skip-permissions"] === true;
+    rejectContradictorySkipFlags(flags);
     warnIfDangerouslySkipping(dangerous);
     const shimOpts: Parameters<typeof runShim>[0] = {
       agentId,
@@ -238,6 +260,7 @@ async function main(): Promise<void> {
   const model = resolveOption(flags, "model");
   const dangerouslySkipPermissions =
     flags["dangerously-skip-permissions"] === true;
+  rejectContradictorySkipFlags(flags);
   warnIfDangerouslySkipping(dangerouslySkipPermissions);
   // `--session <value>` (or HYDRA_ACP_TARGET_SESSION env var) accepts either a
   // bare session id or a hydra:// URL pointing at any daemon. URL
@@ -985,6 +1008,22 @@ async function dispatchTui(
       terminalHostLauncher = (await loadConfig()).tui.launcherModeWhenHosted;
     }
   }
+  // tui.skipPermissions is the standing default for
+  // --dangerously-skip-permissions. Read only when the flag didn't already
+  // arm it and the run didn't explicitly refuse it, so the config file is
+  // untouched on the common paths. The banner names the config key rather
+  // than the flag, since that's what the user has to edit to turn it off.
+  let dangerouslySkipPermissions = base.dangerouslySkipPermissions === true;
+  if (
+    !dangerouslySkipPermissions &&
+    flags["no-dangerously-skip-permissions"] !== true
+  ) {
+    const { loadConfig } = await import("./core/config.js");
+    if ((await loadConfig()).tui.skipPermissions) {
+      dangerouslySkipPermissions = true;
+      warnIfDangerouslySkipping(true, "tui.skipPermissions");
+    }
+  }
   const { runTui } = await import("./tui/index.js");
   const tuiOpts: Parameters<typeof runTui>[0] = {
     resume,
@@ -1021,7 +1060,7 @@ async function dispatchTui(
   if (base.target !== undefined) {
     tuiOpts.target = base.target;
   }
-  if (base.dangerouslySkipPermissions === true) {
+  if (dangerouslySkipPermissions) {
     tuiOpts.dangerouslySkipPermissions = true;
   }
   // Debug: replay the attached session's recorded history at its
@@ -1226,6 +1265,8 @@ function printHelp(subcommand?: string): void {
         [ENTRY, "                                     Set tui.launcherModeWhenHosted to get this in every hosted pane."],
         [ENTRY, "  --no-terminal-host-launcher        Turn that off for one run, overriding tui.launcherModeWhenHosted."],
         [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
+        [ENTRY, "                                     Set tui.skipPermissions to get this on every TUI run."],
+        [ENTRY, "  --no-dangerously-skip-permissions  Turn that off for one run, overriding tui.skipPermissions."],
         [ENTRY, "  HYDRA_ACP_TARGET_SESSION           Env var equivalent of --session (flag wins)."],
         [ENTRY, "  HYDRA_ACP_SESSION                  Set by the daemon inside each agent to that agent's own"],
         [ENTRY, "                                     session id. Read by cat as the default --from-session."],

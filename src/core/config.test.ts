@@ -39,6 +39,22 @@ describe("defaultConfig", () => {
   it("leaves tui.sessionColumns unset by default", () => {
     expect(defaultConfig().tui.sessionColumns).toBeUndefined();
   });
+
+  it("leaves tui.skipPermissions off by default (the gate stays armed)", () => {
+    expect(defaultConfig().tui.skipPermissions).toBe(false);
+  });
+});
+
+describe("tui.skipPermissions schema", () => {
+  it("parses an explicit true", () => {
+    expect(HydraConfig.parse({ tui: { skipPermissions: true } }).tui.skipPermissions).toBe(true);
+  });
+
+  it("rejects a non-boolean", () => {
+    expect(() =>
+      HydraConfig.parse({ tui: { skipPermissions: "yes" } }),
+    ).toThrow();
+  });
 });
 
 describe("tui.sessionColumns schema", () => {
