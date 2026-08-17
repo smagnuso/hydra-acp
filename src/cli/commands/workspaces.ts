@@ -1004,6 +1004,57 @@ export async function runWorkspaceList(
   }
 }
 
+/**
+ * Put a workspace back to the state it was created in.
+ *
+ * Dispatched to the daemon rather than performed here, which is the
+ * opposite of how `merge` and `remove` in this file work, and deliberately
+ * so. Those operate on workspaces whose session is gone, where reading
+ * records off disk is the point. Cleaning rewrites a tree an agent is
+ * living in, so all three of its guards (agent quiesced, no co-tenant, the
+ * per-workspace slot) are properties of the live session, and the reply is
+ * how the agent learns its files no longer exist. Reimplementing that out
+ * here would produce something that looks like the verb and is not.
+ */
+export async function runWorkspaceClean(opts: {
+  target?: string;
+  deep?: boolean;
+}): Promise<void> {
+  const row = await resolveTarget(opts.target);
+  if (row.sessionId === undefined) {
+    throw new Error(
+      `${shortenHomePath(row.path)} has no session bound to it, so there is no agent to clean ` +
+        `around. Use \`${invokedBinName()} workspace remove\` to take it away instead.`,
+    );
+  }
+  const id = encodeURIComponent(row.sessionId);
+  let res;
+  try {
+    res = await daemonFetch(`/v1/sessions/${id}/workspace/clean`, {
+      method: "POST",
+      body: { deep: opts.deep === true },
+      rethrowNetworkError: true,
+    });
+  } catch (err) {
+    throw new Error(
+      `could not reach the daemon, and only it may clean a workspace a live session is in: ` +
+        `${(err as Error).message}`,
+    );
+  }
+  if (!res.ok) {
+    const detail =
+      res.body !== null && typeof res.body === "object" && "error" in res.body
+        ? String((res.body as { error?: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+  const report =
+    res.body !== null && typeof res.body === "object" && "report" in res.body
+      ? String((res.body as { report?: unknown }).report)
+      : "Cleaned.";
+  process.stdout.write(`${report}\n`);
+}
+
 export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise<void> {
   const rows = await collectWorkspaces();
   const unowned = rows.filter((r) => r.state === "unowned");

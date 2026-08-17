@@ -457,6 +457,32 @@ Broadcast a `session/request_permission` to a session's attached user-facing cli
 - `SessionNotFound` (-32004) when the target session is unknown.
 - `PermissionDenied` (-32008) when the session has no attached clients to vote.
 
+#### `POST /v1/sessions/:id/workspace/clean`
+
+Puts a live session's workspace back to the state it was created in: the tree resets to the workspace's recorded base, untracked files are removed, and nested trees (submodules) are re-populated and reset. Equivalent to `/hydra workspace clean` inside the session, and to what `workspace start --clean` would have produced. The session stays in the workspace and its branch survives; commits made in the workspace are discarded.
+
+**Request body**
+
+```jsonc
+{ "deep": false }   // optional; default false
+```
+
+`deep` also removes ignored files (`node_modules`, a carried `.env`) and then re-applies the repo's `carry` list and re-runs `postCreate`. The end state is the same either way; `deep` rebuilds what the default preserves.
+
+**Response: `202 Accepted`**
+
+```jsonc
+{ "report": "Cleaned ~/.hydra-acp/workspaces/<hash>/feature back to ..." }
+```
+
+The body carries the same multi-line report the slash command prints, including the recovery refs for what was discarded. There is no other way to obtain those, so a caller should surface it rather than discard it.
+
+**Live sessions only.** `409` when the session is cold. Every guard that makes this safe belongs to the live session: the agent must be quiesced because its working tree is about to be rewritten underneath it, the workspace must have no co-tenant session, and the returned report is the only thing that tells the agent its files are gone. A cold `clean` would be a different and more dangerous operation wearing the same name; use `hydra workspace remove` for a workspace whose session has gone.
+
+Also `409` when a guard refuses (agent mid-turn, workspace shared, provider records no base state to return to), `400` when `deep` is not a boolean, and `404` for an unknown session.
+
+**Landing anchor.** This rewrites the workspace's start anchor to its base commit and records `workspace.clean: true`. That is load-bearing rather than bookkeeping: a workspace created *with* the source's uncommitted work carried in has that work as its anchor, and landing excludes the anchor from the patch it replays. Cleaning deletes the workspace's copy, so an un-rewritten anchor would make the next landing restore the user's pre-start work from neither the merge nor the replay. See [Workspace isolation](#workspace-isolation).
+
 #### `GET /v1/sessions/:id/diff`
 
 Reconstructed per-file diff for a session — the same aggregation `hydra session diff --json` runs client-side, but server-side so other consumers (e.g. the planner's verified-diff audit) can fetch a ready-made shape with a single HTTP call instead of pulling the full export and redoing the walk. The diff is drawn from the session's recorded `tool_call` / `tool_call_update` edit payloads (canonical `content[].type:"diff"`, Claude `Edit`/`Write`/`MultiEdit` raw inputs); no git, no filesystem read of the workspace. Deletes aren't representable today and won't appear.
@@ -1289,7 +1315,8 @@ request field, which has a different shape):
   "label":     "feature-x",
   "provider":  "git",
   "snapshot":  "<opaque>",
-  "vcs":       { "kind": "git", "branch": "hydra/feature-x" }
+  "vcs":       { "kind": "git", "branch": "hydra/feature-x" },
+  "clean":     true
 }
 ```
 
@@ -1301,6 +1328,25 @@ relating the two by string prefix is wrong. `vcs` is provider-specific and may
 be absent entirely (a non-VCS provider has no branch), so readers must tolerate
 that rather than depend on it. `snapshot` is opaque: never parse it, and never
 assume it is a hash.
+
+`clean` is present and `true` when no uncommitted work was copied in, so the
+workspace's landing anchor is a plain base commit rather than a snapshot of the
+source's working state. It is set by `workspace start --clean`, by any start over
+an already-clean source, by `workspace clean`, and on every workspace created at
+`session/new` (that path never copies uncommitted work). Clients need it to
+explain a landing conflict correctly: on a clean workspace the source's *entire*
+working state is being replayed for the first time, whereas otherwise an overlap
+means two edits to the same lines.
+
+**Nested trees.** A workspace populates its submodules on creation, so an agent
+never meets an empty submodule directory, and work inside a submodule is carried
+in and landed back like any other work. This needs handling that the superproject
+cannot express: a superproject snapshot records a submodule as a *gitlink*, never
+as content, so uncommitted work inside one is invisible to it while still showing
+in its status as a single modified path. A worktree's submodules also get their
+own object store, so commits that exist only in the source's copy are unreachable
+from the workspace's until fetched. Clients should not attempt to reconstruct
+submodule state from a session's superproject diff.
 
 **Failure is open by default.** A directory that is not a repository, a
 repository with no commits, or a missing provider all fall back to running in
@@ -1897,8 +1943,9 @@ Attached clients receive `session/update` notifications as compaction progresses
 
 ### session/update — workspace lifecycle
 
-Emitted while a session moves into or out of an isolated workspace
-(`/hydra workspace start|end|abandon`). `update.sessionUpdate` is
+Emitted while a session moves into or out of an isolated workspace, or has its
+workspace reset underneath it (`/hydra workspace start|merge|sync|stop|detach|clean|discard`).
+`update.sessionUpdate` is
 `"hydra_workspace"` for every phase. Ephemeral: never written to
 `history.jsonl`, so replaying clients do not see it.
 
@@ -1911,6 +1958,11 @@ Emitted while a session moves into or out of an isolated workspace
 
 // swapping — the agent process is being replaced in the new directory
 { "sessionUpdate": "hydra_workspace", "phase": "swapping" }
+
+// cleaning: the workspace's tree is being reset to its base under a
+//           session that STAYS in it. Followed by `entered` with an
+//           unchanged cwd, since nothing relocated.
+{ "sessionUpdate": "hydra_workspace", "phase": "cleaning", "label": "feature" }
 
 // entered — terminal. The session now lives at `cwd`.
 { "sessionUpdate": "hydra_workspace", "phase": "entered",

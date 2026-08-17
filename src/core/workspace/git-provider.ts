@@ -37,6 +37,7 @@ import {
   type CreateWorkspaceResult,
   type IntegrateResult,
   type IsolationProvider,
+  type NestedTreesResult,
   type PathChange,
   type SnapshotId,
   type Workspace,
@@ -55,6 +56,12 @@ const BRANCH_NAMESPACE = "hydra";
 // legitimately take a while on a large repo.
 const QUERY_TIMEOUT_MS = 5_000;
 const MUTATE_TIMEOUT_MS = 120_000;
+// Submodule init is in a different class again: it can clone from a
+// remote, once per submodule, recursively. 120s is a plausible time for
+// ONE of them on a cold cache, so reusing MUTATE_TIMEOUT_MS here would
+// kill the operation partway through and leave half-populated
+// directories, which is worse than either finishing or not starting.
+const NESTED_TIMEOUT_MS = 900_000;
 
 interface GitResult {
   ok: boolean;
@@ -156,8 +163,96 @@ export class GitProvider implements IsolationProvider {
         // in the repository, so the checkout can be rebuilt with its
         // recorded work intact.
         rematerialize: true,
+        // `git worktree add` does not populate submodules.
+        nestedTrees: true,
       },
     };
+  }
+
+  /**
+   * Populate (and optionally reset) the workspace's submodules.
+   *
+   * Gated on `.gitmodules` so a repo without submodules pays one stat
+   * rather than a `git submodule` invocation, which matters because this
+   * runs on every workspace creation.
+   *
+   * Ordering inside the reset case is deliberate. `update --force` puts
+   * each submodule's checkout back on its recorded commit, then the
+   * `foreach` pair clears anything in the working tree that survived
+   * that: `update` moves HEAD, it does not clean up after local edits or
+   * untracked files. Running the foreach first would just let `update`
+   * re-dirty nothing, but it would also skip submodules that were not
+   * populated yet, which is exactly the set `update --init` is there to
+   * create.
+   */
+  async materializeNested(
+    ws: Workspace,
+    opts?: { discardLocal?: boolean; purgeIgnored?: boolean },
+  ): Promise<NestedTreesResult> {
+    const hasSubmodules = await pathExists(path.join(ws.path, ".gitmodules"));
+    if (!hasSubmodules) {
+      return { ok: true, count: 0 };
+    }
+
+    const init = await runGit(
+      [
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+        ...(opts?.discardLocal === true ? ["--force"] : []),
+      ],
+      ws.path,
+      NESTED_TIMEOUT_MS,
+    );
+    if (!init.ok) {
+      return {
+        ok: false,
+        count: 0,
+        reason: init.stderr.trim() || "git submodule update --init failed",
+      };
+    }
+
+    if (opts?.discardLocal === true) {
+      const reset = await runGit(
+        ["submodule", "foreach", "--recursive", "git", "reset", "--hard"],
+        ws.path,
+        NESTED_TIMEOUT_MS,
+      );
+      if (!reset.ok) {
+        return {
+          ok: false,
+          count: 0,
+          reason: reset.stderr.trim() || "could not reset submodules",
+        };
+      }
+      const cleanArgs = opts.purgeIgnored === true ? "-ffdx" : "-fd";
+      const cleaned = await runGit(
+        ["submodule", "foreach", "--recursive", "git", "clean", cleanArgs],
+        ws.path,
+        NESTED_TIMEOUT_MS,
+      );
+      if (!cleaned.ok) {
+        return {
+          ok: false,
+          count: 0,
+          reason: cleaned.stderr.trim() || "could not clean submodules",
+        };
+      }
+    }
+
+    // Counted after the fact from what is actually initialized, rather
+    // than from `.gitmodules`, so the number describes the result instead
+    // of the intent.
+    const listed = await runGit(
+      ["submodule", "status", "--recursive"],
+      ws.path,
+      QUERY_TIMEOUT_MS,
+    );
+    const count = listed.ok
+      ? listed.stdout.split("\n").filter((l) => l.trim().length > 0).length
+      : 0;
+    return { ok: true, count };
   }
 
   /**
@@ -446,13 +541,22 @@ export class GitProvider implements IsolationProvider {
 
     // Only mention submodules when the repository actually has them.
     // Unconditional caveats are noise, and this text is paid per session.
+    //
+    // What this note used to say is now false: workspaces initialize
+    // their submodules (see materializeNested), so the agent no longer
+    // meets empty directories and no longer needs telling to populate
+    // them. The corruption warning stays, because that hazard was never
+    // about emptiness: it is about the instinct to fix a submodule that
+    // looks wrong by committing its contents into the superproject, and a
+    // populated submodule can still look wrong (detached HEAD, a commit
+    // the source branch does not reference).
     const hasSubmodules = await fs
       .access(path.join(ws.path, ".gitmodules"))
       .then(() => true)
       .catch(() => false);
     if (hasSubmodules) {
       notes.push(
-        "Submodules are NOT initialized in a new worktree, so their directories are empty. Run `git submodule update --init` if you need them. Do not re-add submodule contents as ordinary tracked files: that silently corrupts the integration back to the source branch.",
+        "Submodules here are initialized and checked out at the commits this tree records, which means each sits on a detached HEAD. That is normal and does not need repairing. Never re-add a submodule's contents as ordinary tracked files in the superproject: that silently corrupts the integration back to the source branch.",
       );
     }
     return notes;

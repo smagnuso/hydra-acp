@@ -65,6 +65,15 @@ import {
   runWorkspaceHook,
   type WorkspaceRepoConfig,
 } from "./workspace/setup.js";
+import {
+  applyNestedCarry,
+  captureNested,
+  enumerateNested,
+  expandChangedPaths,
+  landNested,
+  type NestedCarry,
+  type NestedState,
+} from "./workspace/nested.js";
 import { execFile as execFileCb } from "node:child_process";
 
 // Minimal git runner for the workspace-move path. Errors are returned,
@@ -819,6 +828,13 @@ export class SessionManager {
     // no session; the reason is surfaced so the gap is visible.
     const repoConfig = await readWorkspaceRepoConfig(ws.sourceCwd).catch((): WorkspaceRepoConfig => ({}));
     let setupError: string | undefined;
+    // Before carry and postCreate, both of which can reach into a nested
+    // tree. Nothing was carried on this path, so there is no superproject
+    // state that has to land first.
+    const nestedNote = await this.materializeNestedTrees(ws);
+    if (nestedNote !== undefined) {
+      this.logger?.info?.(`session workspace: ${nestedNote} in ${ws.path}`);
+    }
     if (repoConfig.carry !== undefined && repoConfig.carry.length > 0) {
       const carried = await applyCarry(ws.sourceCwd, ws.path, repoConfig.carry).catch(
         () => undefined,
@@ -844,6 +860,24 @@ export class SessionManager {
       }
     }
 
+    // Anchor the landing, which this path did not do at all.
+    //
+    // Isolation at session/new never copies the source's uncommitted work
+    // (unlike mid-session `start`), so this is a clean workspace by
+    // construction and its anchor is the base commit. Without the ref
+    // there is no anchor to resolve, and landing into a source that is
+    // merely dirty refuses outright rather than falling back to HEAD,
+    // because it cannot tell a copy it might have made from the user's
+    // own edits. Written here, it can: there was no copy.
+    //
+    // Best-effort. A missing anchor costs a refusal at landing time,
+    // which is strictly better than failing session creation over it.
+    if (ws.snapshot !== undefined) {
+      await provider
+        .retainSnapshot(ws, this.startRefFor(ws.label), ws.snapshot)
+        .catch(() => undefined);
+    }
+
     return {
       cwd: ws.path,
       workspace: {
@@ -853,6 +887,7 @@ export class SessionManager {
         provider: ws.provider,
         ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
         ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+        clean: true,
       },
       // Isolation succeeded; setup did not. Reported through the same
       // channel so a client sees "you are isolated but the environment
@@ -980,8 +1015,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
-      workspaceHook: (action, name) =>
-        this.runWorkspaceAction(session.sessionId, action, name),
+      workspaceHook: (action, name, opts) =>
+        this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
@@ -1310,8 +1345,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
-      workspaceHook: (action, name) =>
-        this.runWorkspaceAction(session.sessionId, action, name),
+      workspaceHook: (action, name, opts) =>
+        this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
@@ -1438,8 +1473,8 @@ export class SessionManager {
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
-      workspaceHook: (action, name) =>
-        this.runWorkspaceAction(session.sessionId, action, name),
+      workspaceHook: (action, name, opts) =>
+        this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
@@ -1671,7 +1706,7 @@ export class SessionManager {
     }
     if (!(await session.isQuiescedForSwap())) {
       throw new Error(
-        "the agent is still working — wait for the current turn to finish, then try again",
+        "the agent is still working; wait for the current turn to finish, then try again",
       );
     }
 
@@ -2304,8 +2339,9 @@ export class SessionManager {
    */
   async runWorkspaceAction(
     sessionId: string,
-    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
+    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "clean" | "status",
     name?: string,
+    opts?: { clean?: boolean; deep?: boolean },
   ): Promise<string> {
     const session = this.get(sessionId);
     if (session === undefined) {
@@ -2353,12 +2389,12 @@ export class SessionManager {
       lines.push(
         others.length > 0
           ? `\`stop\` behaves as \`detach\` while ${others.length === 1 ? "that session is" : "those sessions are"} still here; the work lands when the last one leaves.`
-          : `Use \`/hydra workspace stop\` to merge and return, \`discard\` to throw the work away, or \`detach\` to return and leave it here.`,
+          : `Use \`/hydra workspace stop\` to merge and return, \`discard\` to throw the work away, \`detach\` to return and leave it here, or \`clean\` to wipe it and keep working here.`,
       );
       return lines.join("\n");
     }
     if (action === "start") {
-      return this.startWorkspace(session, name);
+      return this.startWorkspace(session, name, { clean: opts?.clean === true });
     }
     const ws = session.workspace;
     if (ws === undefined) {
@@ -2372,6 +2408,9 @@ export class SessionManager {
       // change, so an exception (which reads as "nothing happened") would
       // be a lie.
       return (await this.syncWorkspaceFromSource(session, ws, { onConflict: "keep" })).message;
+    }
+    if (action === "clean") {
+      return await this.cleanWorkspace(session, ws, { deep: opts?.deep === true });
     }
     if (action === "merge") {
       session.broadcastWorkspacePhase({ phase: "landing" });
@@ -2541,6 +2580,216 @@ export class SessionManager {
   }
 
   /**
+   * Put a workspace back to the state it was created in, without leaving
+   * it.
+   *
+   * This is `discard` minus the departure: same destruction, but the
+   * directory, the branch and the session's binding all survive, so the
+   * agent keeps working in the same place with a clean tree. Nothing else
+   * covered that. `discard` returns you to the source, `detach` preserves
+   * everything, and `sync` moves the workspace forward rather than back.
+   *
+   * Shaped like `sync` rather than like `discard`, because it belongs to
+   * the same category: it rewrites files under an agent that STAYS. Hence
+   * the same two guards (no co-tenant, agent quiesced) and the same
+   * contract that the returned message is how the agent learns its tree
+   * changed. That last part is not a nicety: the agent's context is full
+   * of files it wrote which no longer exist, and it will keep referring
+   * to them confidently unless the reply says otherwise.
+   *
+   * Target is the workspace's recorded BASE, not its current HEAD. That
+   * makes the result identical to what `start --clean` produces, which is
+   * the whole justification for the two sharing a name. It also means
+   * commits the agent made are dropped, so the recovery paths below are
+   * load-bearing rather than courtesy.
+   */
+  private async cleanWorkspace(
+    session: Session,
+    ws: PersistedWorkspace,
+    opts: { deep: boolean },
+  ): Promise<string> {
+    // One slot per workspace, held across the whole operation. A join
+    // arriving mid-reset would land a second session in a directory whose
+    // contents are being rewritten under it.
+    return await this.enqueueKeyed(this.workspaceQueues, ws.path, async () => {
+      const others = this.liveSessionsIn(ws.path, session.sessionId);
+      if (others.length > 0) {
+        throw new Error(
+          `${shortenHomePath(ws.path)} is shared with ${others
+            .map((s) => stripHydraSessionPrefix(s.sessionId))
+            .join(", ")}, and a clean would destroy their work too. ` +
+            `Clean it from a session that has it to itself.`,
+        );
+      }
+      if (!(await session.isQuiescedForSwap())) {
+        throw new Error(
+          "the agent is still working; wait for the current turn to finish, then try again",
+        );
+      }
+
+      const provider = getWorkspaceProvider(ws.provider);
+      if (provider === undefined) {
+        throw new Error(`no provider "${ws.provider}" available to clean this workspace`);
+      }
+      // Same reasoning as sync: everything below is raw git in the
+      // workspace, and a provider with no shared history has no recorded
+      // base to return to. Said up front rather than discovered as a "not
+      // a git repository" error three commands later.
+      if (ws.snapshot === undefined || provider.capabilities().sharedHistory !== true) {
+        throw new Error(
+          `workspace ${ws.label} uses the "${ws.provider}" provider, which records no base ` +
+            `state to return to, so there is nothing to clean back to. Use ` +
+            `\`/hydra workspace discard\` to throw it away instead.`,
+        );
+      }
+
+      const asWorkspace = {
+        path: ws.path,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        provider: ws.provider,
+        snapshot: asSnapshotId(ws.snapshot),
+        ...(ws.vcs !== undefined ? { vcs: ws.vcs } : {}),
+      };
+
+      // Everything that describes what is about to be destroyed is read
+      // BEFORE the first write, because afterwards it is unrecoverable and
+      // the reply is the only place it is ever named.
+      const dirty = await execGit(["status", "--porcelain", "-uall"], ws.path);
+      const dirtyCount = dirty.ok
+        ? dirty.out
+            .trim()
+            .split("\n")
+            .filter((l) => l.trim().length > 0).length
+        : 0;
+      const aheadRaw = await execGit(
+        ["rev-list", "--count", `${ws.snapshot}..HEAD`],
+        ws.path,
+      );
+      const ahead = aheadRaw.ok ? Number.parseInt(aheadRaw.out.trim(), 10) : 0;
+      const tipBefore = (await execGit(["rev-parse", "HEAD"], ws.path)).out.trim();
+
+      // The autosave becomes a recovery point before anything is
+      // destroyed, not after. Retired rather than left in place because a
+      // later turn would overwrite it, and the command printed below has
+      // to keep resolving to the state this clean threw away.
+      const retired = await this.retireAutosave(ws);
+
+      session.broadcastWorkspacePhase({ phase: "cleaning", label: ws.label });
+
+      const reset = await execGit(["reset", "--hard", ws.snapshot], ws.path);
+      if (!reset.ok) {
+        throw new Error(
+          `could not reset ${shortenHomePath(ws.path)} to its base: ` +
+            `${reset.err.trim() || "unknown error"}. Nothing was changed.`,
+        );
+      }
+      // -fd normally, -ffdx under deep. Preserving ignored files is what
+      // makes the plain form both fast and correct: node_modules and a
+      // carried .env are part of what `start` produced, so keeping them
+      // IS returning to the created state rather than a shortcut. Deep
+      // rebuilds them instead, which is the same target reached the
+      // expensive way.
+      const cleaned = await execGit(["clean", opts.deep ? "-ffdx" : "-fd"], ws.path);
+      if (!cleaned.ok) {
+        throw new Error(
+          `reset ${shortenHomePath(ws.path)} but could not remove untracked files: ` +
+            `${cleaned.err.trim() || "unknown error"}`,
+        );
+      }
+
+      // Neither reset nor clean reaches inside a nested tree (verified on
+      // git 2.43), so without this the verb leaves exactly the mess it
+      // was asked to remove.
+      const nestedNote = await this.materializeNestedTrees(ws, {
+        discardLocal: true,
+        purgeIgnored: opts.deep,
+      });
+
+      // Only deep needs setup re-run: -ffdx removed the carried config
+      // files and whatever postCreate installed, and a workspace missing
+      // both is not the state `start` produced.
+      const setupNote = opts.deep
+        ? await this.applyWorkspaceSetup(ws, session.sessionId)
+        : undefined;
+
+      // Re-anchor the landing, and record that this is now a clean
+      // workspace.
+      //
+      // Load-bearing, not bookkeeping. A workspace started WITH the
+      // source's uncommitted work has that work as its anchor, and
+      // landing excludes the anchor from the patch it replays because the
+      // anchor is the base of the diff. That is safe only while the
+      // workspace still holds a copy for the merge to bring back. This
+      // verb just deleted that copy, so leaving the anchor alone would
+      // make the next landing reset the source and restore neither: the
+      // user's pre-start work would be gone from both trees at once.
+      //
+      // Pointed at the base commit, the same landing computes the
+      // source's whole working state and puts it back.
+      await provider
+        .retainSnapshot(asWorkspace, this.startRefFor(ws.label), asSnapshotId(ws.snapshot))
+        .catch(() => undefined);
+      const rebound: PersistedWorkspace = { ...ws, clean: true };
+      session.workspace = rebound;
+      await this.mutateRecord(session.sessionId, { workspace: rebound });
+      this.invalidateListCache();
+
+      session.broadcastWorkspacePhase({
+        phase: "entered",
+        cwd: session.cwd,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+        ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+      });
+
+      const lines = [
+        `Cleaned ${shortenHomePath(ws.path)} back to the state it was created in.`,
+      ];
+      // Counted, not named: unlike `start`, the files are already gone by
+      // the time this is read, so a list is something to mourn rather
+      // than something to check. The recovery ref is the actionable part.
+      if (dirtyCount > 0 || ahead > 0) {
+        const parts: string[] = [];
+        if (dirtyCount > 0) {
+          parts.push(`${dirtyCount} uncommitted change(s)`);
+        }
+        if (ahead > 0) {
+          parts.push(`${ahead} commit(s)`);
+        }
+        lines.push(`  discarded ${parts.join(" and ")}`);
+      } else {
+        lines.push(`  nothing to discard; it was already at its base`);
+      }
+      if (nestedNote !== undefined) {
+        lines.push(`  ${nestedNote}`);
+      }
+      if (setupNote !== undefined) {
+        lines.push(`  ${setupNote}`);
+      }
+      // Two independent recovery paths, both named, because they cover
+      // different things: the autosave holds the last turn's UNCOMMITTED
+      // state, and the branch reflog holds the commits. Neither is a
+      // superset of the other.
+      if (retired !== undefined) {
+        lines.push(
+          `  last autosave kept at ${retired}: git -C ${ws.sourceCwd} checkout ${retired}`,
+        );
+      }
+      if (ahead > 0 && tipBefore.length > 0) {
+        lines.push(
+          `  discarded commits are still at ${tipBefore.slice(0, 12)} ` +
+            `(and in the reflog for ${ws.vcs?.branch ?? "this branch"})`,
+        );
+      }
+      lines.push(
+        `Your uncommitted work in ${shortenHomePath(ws.sourceCwd)} was never touched by this.`,
+      );
+      return lines.join("\n");
+    });
+  }
+
+  /**
    * Fast-forward the source onto the workspace's branch and replay
    * whatever the workspace had left uncommitted.
    *
@@ -2665,6 +2914,22 @@ export class SessionManager {
       }
     }
 
+    // The workspace's uncommitted work inside nested trees, captured
+    // before the merge for the same reason as everything else here: after
+    // it, this function starts writing.
+    //
+    // Separate from `pending` below because the superproject capture
+    // cannot express it. `captureWorkingState` on the workspace records a
+    // gitlink per submodule, so an agent that edited files inside one
+    // produces nothing in that snapshot and its work would be dropped by
+    // a landing that reported success.
+    const nestedPending =
+      provider?.capabilities().supports.nestedTrees === true
+        ? await captureNested(ws.path, await enumerateNested(ws.path)).catch(
+            (): NestedCarry[] => [],
+          )
+        : [];
+
     // Capture what the workspace has NOT committed, but do not commit it.
     // Work the agent chose to commit should arrive as commits; work it
     // left uncommitted — including the user's own WIP that was copied in
@@ -2722,6 +2987,19 @@ export class SessionManager {
       await releaseSourceCapture({ source, capture });
     }
 
+    // Nested trees last, because the fast-forward above moved their
+    // gitlinks without moving their checkouts. Left here, the source
+    // reports every bumped submodule as modified, sitting on the old
+    // commit, possibly without the objects for the new one. See
+    // workspace/nested.ts.
+    const nestedLanded =
+      provider?.capabilities().supports.nestedTrees === true
+        ? await landNested(source, ws.path, nestedPending).catch(() => ({
+            landed: [] as string[],
+            skipped: [] as { path: string; reason: string }[],
+          }))
+        : { landed: [] as string[], skipped: [] as { path: string; reason: string }[] };
+
     // Re-baseline: record how this landing left the source, so the NEXT
     // one measures divergence from here instead of from `start`. Written
     // even when a replay failed, because the question it answers is
@@ -2755,10 +3033,38 @@ export class SessionManager {
       );
     }
     if (!divergenceOk) {
+      // Two different failures wear the same shape here, and the
+      // difference decides what the user does next.
+      //
+      // With work carried in, the overlap is genuinely two edits to the
+      // same lines: one set arrived via the branch, the other stayed in
+      // the source, and somebody has to choose.
+      //
+      // On a `clean` workspace nothing was ever copied, so this is the
+      // FIRST time the source's working state has met the agent's work.
+      // The whole working state is in that patch, not just edits made
+      // since, so the overlap is likely rather than exceptional and the
+      // amount at risk is larger. Saying "your own edits overlap" without
+      // that context invites the reader to look for a small conflict.
       warnings.push(
-        `  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
-          `changes and could not be replayed on top. They are preserved at ` +
-          `${capture.retainedRef} — recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
+        ws.clean === true
+          ? `  WARNING: this workspace started clean, so your uncommitted work was never ` +
+              `copied in. The whole of it is being replayed now and it overlaps what the ` +
+              `agent changed. All of it is preserved at ${capture.retainedRef}; recover ` +
+              `with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`
+          : `  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
+              `changes and could not be replayed on top. They are preserved at ` +
+              `${capture.retainedRef}; recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
+      );
+    }
+    // Named individually rather than counted, because each one is a
+    // separate thing the user has to go and finish by hand, and the
+    // reason differs per submodule.
+    for (const skip of nestedLanded.skipped) {
+      warnings.push(
+        `  WARNING: submodule ${skip.path} was NOT reconciled: ${skip.reason}. ` +
+          `The superproject now records a different commit for it, so ` +
+          `${shortenHomePath(source)} will report it as modified until you resolve that.`,
       );
     }
     return {
@@ -3118,7 +3424,11 @@ export class SessionManager {
    * object and we point a ref at it BEFORE the workspace is populated, so
    * a crash in the middle leaves the pre-start state recoverable.
    */
-  private async startWorkspace(session: Session, label?: string): Promise<string> {
+  private async startWorkspace(
+    session: Session,
+    label?: string,
+    opts?: { clean?: boolean },
+  ): Promise<string> {
     if (session.workspace !== undefined) {
       throw new Error(
         `already isolated in ${shortenHomePath(session.workspace.path)}. ` +
@@ -3136,7 +3446,7 @@ export class SessionManager {
     // is a mess someone has to clean up.
     if (!(await session.isQuiescedForSwap())) {
       throw new Error(
-        "the agent is still working — wait for the current turn to finish, then try again",
+        "the agent is still working; wait for the current turn to finish, then try again",
       );
     }
     const caps = provider.capabilities();
@@ -3164,13 +3474,39 @@ export class SessionManager {
     let carriedPaths: readonly string[] = [];
     let carriedStaged = false;
     let sourceProbed = false;
+    // What `--clean` deliberately left where it was. Probed even though
+    // nothing is being copied, because "started clean" and "the source
+    // had nothing to bring" produce the same empty carry and must not
+    // produce the same reply: the first leaves work behind that the user
+    // needs to know is still there.
+    let leftBehind: readonly string[] = [];
+    // Work inside submodules, which the superproject's snapshot cannot
+    // express at all: it records a gitlink, not content. Captured
+    // separately and replayed after the workspace's own submodules are
+    // populated. See workspace/nested.ts.
+    let nestedCarries: readonly NestedCarry[] = [];
+    const wantClean = opts?.clean === true;
     if (caps.supports.captureWorkingState) {
       const status = await provider
         .status({ path: sourceCwd, sourceCwd, label: "source", provider: provider.kind })
         .catch(() => undefined);
       sourceProbed = status !== undefined;
-      if (status !== undefined && status.changedPaths.length > 0) {
-        carriedPaths = status.changedPaths;
+      // Enumerated before either branch, because both need it: the carry
+      // path to capture the work, and `--clean` to report accurately what
+      // it is leaving behind. A dirty submodule shows up in the
+      // superproject's status as the bare path `sub`, so without this both
+      // lists would report thirty edits as one file.
+      const nestedStates =
+        caps.supports.nestedTrees && status !== undefined && status.changedPaths.length > 0
+          ? await enumerateNested(sourceCwd).catch((): NestedState[] => [])
+          : [];
+      if (status !== undefined && status.changedPaths.length > 0 && wantClean) {
+        leftBehind = expandChangedPaths(status.changedPaths, nestedStates);
+      } else if (status !== undefined && status.changedPaths.length > 0) {
+        carriedPaths = expandChangedPaths(status.changedPaths, nestedStates);
+        nestedCarries = await captureNested(sourceCwd, nestedStates).catch(
+          (): NestedCarry[] => [],
+        );
         // Raw git, like copyCarriedWork below it: this whole block is
         // git-only in practice (the copy provider reports
         // captureWorkingState: false). Asking by name rather than by exit
@@ -3211,15 +3547,18 @@ export class SessionManager {
     const startRef = this.startRefFor(ws.label);
     let setup: string | undefined;
     let copied = false;
+    // Named in the reply when a nested tree could not be reproduced. A
+    // bare "could not copy" would send the user looking through the
+    // superproject, where nothing is wrong.
+    let nestedFailures: readonly { path: string; reason: string }[] = [];
     try {
       if (caps.locking) {
         await provider.lock(ws, `session ${session.sessionId}`).catch(() => undefined);
       }
-      // Retain the pre-move snapshot before the source is touched. This
-      // is the recovery anchor for the window where the work exists in
-      // neither place, so a failure to write it aborts the move rather
-      // than being swallowed: without the ref, a crash after the reset
-      // takes the work with it.
+      // Retain the pre-move snapshot before anything else runs. A
+      // failure to write it aborts the move rather than being swallowed:
+      // it is the only record of where the source stood when this line of
+      // work began, and landing cannot measure divergence without it.
       //
       // Written UNCONDITIONALLY, even when nothing was carried, because
       // landing reads this ref to tell the user's later edits apart from
@@ -3230,6 +3569,15 @@ export class SessionManager {
       // own divergence, then collides it with the same content arriving
       // from the workspace. A clean source has nothing to snapshot, so
       // the base of the workspace (its HEAD) is the honest anchor there.
+      //
+      // `--clean` reaches the same fallback from the other direction, and
+      // it MUST: with no copy in the workspace, the source's work comes
+      // back through neither the merge nor the replay if the anchor is a
+      // working-state snapshot, because a snapshot anchor is the base of
+      // `diff(base, now)` and so excludes itself. The landing's
+      // `reset --hard` would then be the only thing that ran against it.
+      // Anchored at the base commit, that same diff carries the whole
+      // working state and the replay puts it back.
       const anchor = carried ?? ws.snapshot;
       if (anchor === undefined) {
         throw new Error(
@@ -3242,8 +3590,49 @@ export class SessionManager {
       // fills with dependency installs. Named separately because it is
       // the phase most likely to be the slow one.
       session.broadcastWorkspacePhase({ phase: "setup" });
-      setup = await this.applyWorkspaceSetup(ws, session.sessionId);
+
+      // Carried work FIRST, then nested trees, then repo setup.
+      //
+      // Against carry-the-config-files: applyCarry only copies a file
+      // that is absent, so running it first would put `.env` in place and
+      // then the working-state patch, which may CREATE that same
+      // untracked file, fails on "already exists" and takes the whole
+      // patch down with it. Copied first, the user's own version is the
+      // one that is present and applyCarry skips it, which is the right
+      // precedence anyway.
+      //
+      // Against nested trees: which commit each submodule should sit at
+      // is part of what was carried, so populating them before the
+      // superproject's state has arrived puts them on the wrong commits.
       copied = carried !== undefined ? await this.copyCarriedWork(ws, carried, sourceCwd) : true;
+      const nestedNote = await this.materializeNestedTrees(ws);
+      // After population, because this moves each nested tree from the
+      // commit the workspace materialized to the one the source has, then
+      // replays its working tree on top. Reversed, the patch would be
+      // applied to a tree sitting on a different commit and fail on
+      // context.
+      if (nestedCarries.length > 0) {
+        const nestedResult = await applyNestedCarry(ws.path, sourceCwd, nestedCarries).catch(
+          (err: unknown) => ({
+            applied: [] as string[],
+            failed: nestedCarries.map((c) => ({
+              path: c.relPath,
+              reason: err instanceof Error ? err.message : String(err),
+            })),
+          }),
+        );
+        // Folded into `copied` rather than reported apart: from the user's
+        // side "did my uncommitted work come along" is one question, and
+        // work inside a submodule is not a lesser kind of work.
+        if (nestedResult.failed.length > 0) {
+          copied = false;
+          nestedFailures = nestedResult.failed;
+        }
+      }
+      setup = await this.applyWorkspaceSetup(ws, session.sessionId);
+      if (nestedNote !== undefined) {
+        setup = setup === undefined ? nestedNote : `${nestedNote}; ${setup}`;
+      }
 
       session.broadcastWorkspacePhase({ phase: "swapping" });
       const history = await this.histories.load(session.sessionId).catch(() => []);
@@ -3259,6 +3648,10 @@ export class SessionManager {
           provider: ws.provider,
           ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
+          // The consequence, not the flag: what landing needs to know is
+          // that the anchor is a base commit, and a start over a clean
+          // source produces that too without anyone passing `--clean`.
+          ...(carried === undefined ? { clean: true } : {}),
         },
         historyLength: history.length,
         artifact: {
@@ -3328,6 +3721,21 @@ export class SessionManager {
         // `git diff --cached` is empty.
         lines.push(`  staging did not come along; everything above is unstaged here`);
       }
+      for (const failure of nestedFailures) {
+        lines.push(`    submodule ${failure.path}: ${failure.reason}`);
+      }
+    } else if (leftBehind.length > 0) {
+      // Named rather than counted, same reasoning as the carry list, and
+      // for a sharper reason: these are the files you are about to NOT
+      // have. A count cannot tell you whether the one you were mid-way
+      // through is among them.
+      lines.push(
+        `  started clean: ${leftBehind.length} uncommitted file(s) stayed in the source ` +
+          `and did NOT come along:`,
+      );
+      for (const line of capLines(leftBehind)) {
+        lines.push(`    ${line}`);
+      }
     } else if (sourceProbed) {
       // Silence here reads as "we did not look", which is the one thing it
       // must not mean: a clean source is why nothing was carried.
@@ -3367,6 +3775,14 @@ export class SessionManager {
     if (patch === undefined) {
       return false;
     }
+    // Nothing at the superproject level is a success, not a failure, and
+    // the distinction is load-bearing now that submodules are carried
+    // separately: a source whose ONLY dirt is inside a submodule yields an
+    // empty superproject patch, and reporting that as "could not copy your
+    // uncommitted work" was wrong about work that did in fact arrive.
+    if (patch.length === 0) {
+      return true;
+    }
     // Applied WITHOUT --index, so the copy lands unstaged and new files
     // land untracked. Staging it would put the user's WIP in the index
     // the agent is about to commit from, and the agent's first bare
@@ -3377,6 +3793,20 @@ export class SessionManager {
 
   // The working-state snapshot as a patch against HEAD. Undefined when
   // there is nothing to move or the diff cannot be produced.
+  //
+  // Submodules are excluded with `--ignore-submodules=all` rather than
+  // left in and filtered out afterwards. A gitlink hunk in this patch is
+  // not merely useless, it is harmful: `git apply` exits 0 on one, leaves
+  // the submodule's HEAD exactly where it was, and tries to `rmdir` the
+  // submodule directory on the way past (verified on git 2.43, which
+  // declines only because the directory is non-empty). So the recorded
+  // commit never moves, nothing reports a problem, and an UNPOPULATED
+  // submodule directory is one successful rmdir away from vanishing.
+  //
+  // Submodule state is carried explicitly instead: see
+  // carryNestedWork, which aligns each submodule's checkout and replays
+  // its working tree from inside the submodule, where a patch means what
+  // it says.
   private async patchFromSnapshot(
     repoRoot: string,
     snapshot: SnapshotId,
@@ -3385,11 +3815,17 @@ export class SessionManager {
     if (!head.ok) {
       return undefined;
     }
-    const patch = await execGit(["diff", "--binary", head.out.trim(), snapshot], repoRoot);
-    if (!patch.ok || patch.out.trim().length === 0) {
+    const patch = await execGit(
+      ["diff", "--binary", "--ignore-submodules=all", head.out.trim(), snapshot],
+      repoRoot,
+    );
+    // Undefined means "could not produce a diff"; empty string means
+    // "there is genuinely nothing here". Callers act differently on the
+    // two, so they must not share a return value.
+    if (!patch.ok) {
       return undefined;
     }
-    return patch.out;
+    return patch.out.trim().length === 0 ? "" : patch.out;
   }
 
   /**
@@ -3413,6 +3849,49 @@ export class SessionManager {
     }
     await provider.removeWorkspace(ws, { force: true }).catch(() => undefined);
     return undefined;
+  }
+
+  /**
+   * Populate the workspace's nested trees, as its own step.
+   *
+   * Split out of applyWorkspaceSetup rather than folded into it because
+   * the correct position differs from both of that method's halves.
+   * Submodules must be populated BEFORE a `carry` entry that names a path
+   * inside one and before a postCreate that compiles their sources, but
+   * AFTER the superproject's carried work has landed, since which commit
+   * each submodule should sit at is part of what was carried.
+   *
+   * Returns a note for the setup line, or undefined when there was
+   * nothing to do. Never throws: an unpopulated submodule is a degraded
+   * workspace, not a failed one.
+   */
+  private async materializeNestedTrees(
+    ws: { path: string; sourceCwd: string; label: string; provider?: string },
+    opts?: { discardLocal?: boolean; purgeIgnored?: boolean },
+  ): Promise<string | undefined> {
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider?.capabilities().supports.nestedTrees !== true) {
+      return undefined;
+    }
+    const nested = await provider
+      .materializeNested(
+        {
+          path: ws.path,
+          sourceCwd: ws.sourceCwd,
+          label: ws.label,
+          provider: provider.kind,
+        },
+        opts,
+      )
+      .catch((err: unknown) => ({
+        ok: false as const,
+        count: 0,
+        reason: err instanceof Error ? err.message : String(err),
+      }));
+    if (!nested.ok) {
+      return `nested trees FAILED: ${nested.reason ?? "unknown"}`;
+    }
+    return nested.count > 0 ? `populated ${nested.count} nested tree(s)` : undefined;
   }
 
   private async applyWorkspaceSetup(

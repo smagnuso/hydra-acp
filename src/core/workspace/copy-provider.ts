@@ -33,6 +33,7 @@ import {
   type CreateWorkspaceResult,
   type IntegrateResult,
   type IsolationProvider,
+  type NestedTreesResult,
   type PathChange,
   type SnapshotId,
   type Workspace,
@@ -125,8 +126,21 @@ export class CopyProvider implements IsolationProvider {
         // deleted there is nothing to rebuild from. A session isolated
         // this way must fall back to a fresh workspace from its source.
         rematerialize: false,
+        // Not applicable rather than missing: a copy reproduces whatever
+        // was in the source, including the contents of any nested tree,
+        // so there is nothing left unpopulated to go back and fill in.
+        nestedTrees: false,
       },
     };
+  }
+
+  // Declared unsupported above, so this is the "nothing to do" answer
+  // rather than a refusal. Callers run it unconditionally on every
+  // workspace creation, and making them branch on the capability first
+  // would put a provider check at a call site that has no other reason
+  // to know which provider it has.
+  async materializeNested(): Promise<NestedTreesResult> {
+    return { ok: true, count: 0 };
   }
 
   // No retention concept, so nothing to keep and nothing to release.

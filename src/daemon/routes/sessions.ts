@@ -921,6 +921,51 @@ export function registerSessionRoutes(
     }
   });
 
+  // Put a live session's workspace back to the state it was created in.
+  //
+  // Live sessions only, and deliberately so. Every guard that makes this
+  // safe is a property of the live session: the agent has to be quiesced
+  // (its tree is about to be rewritten underneath it), a co-tenant has to
+  // be absent, and the reply is how the agent learns its files are gone.
+  // None of that exists for a cold record, and a cold `clean` that skipped
+  // those guards would be a different, more dangerous operation wearing
+  // the same name. `409` for cold, matching PATCH's stance that anything
+  // moving a session's tree belongs inside the session.
+  //
+  // 202 rather than 204: the body carries the same report the slash
+  // command prints, including the recovery refs, which a caller has no
+  // other way to obtain.
+  app.post("/v1/sessions/:id/workspace/clean", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const body = (request.body ?? {}) as { deep?: unknown };
+    if (body.deep !== undefined && typeof body.deep !== "boolean") {
+      reply.code(400).send({ error: "deep must be a boolean" });
+      return;
+    }
+    if (!(await manager.hasRecord(id))) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    if (manager.get(id) === undefined) {
+      reply.code(409).send({
+        error:
+          "session is not live. Cleaning rewrites the workspace under a running agent, so it " +
+          "is only available inside a live session (`/hydra workspace clean`). For a cold " +
+          "workspace use `hydra workspace remove` instead.",
+      });
+      return;
+    }
+    try {
+      const report = await manager.runWorkspaceAction(id, "clean", undefined, {
+        deep: body.deep === true,
+      });
+      reply.code(202).send({ report });
+    } catch (err) {
+      reply.code(409).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // Tail a session's recorded conversation as NDJSON (one entry per
   // line). One-shot by default; ?follow=1 keeps the connection open
   // and streams new entries as they're broadcast — useful for

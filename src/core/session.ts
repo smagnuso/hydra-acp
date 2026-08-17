@@ -171,6 +171,27 @@ export interface UsageSnapshot {
   cumulativeCost?: number;
 }
 
+/**
+ * Verbs accepted by `/hydra workspace`.
+ *
+ * One list, exported, because it is duplicated three ways otherwise: the
+ * hook signature here, the runtime guard in runWorkspaceCommand, and
+ * SessionManager's dispatch. A verb added to two of the three is a verb
+ * that either type-checks and is rejected at runtime, or is accepted and
+ * dispatches nowhere.
+ */
+export const WORKSPACE_VERBS = [
+  "start",
+  "merge",
+  "sync",
+  "stop",
+  "detach",
+  "discard",
+  "clean",
+  "status",
+] as const;
+export type WorkspaceVerb = (typeof WORKSPACE_VERBS)[number];
+
 export interface SessionInit {
   cwd: string;
   agentId: string;
@@ -303,8 +324,9 @@ export interface SessionInit {
   workspaceError?: string;
   /** Backs `/hydra workspace`; see Session.workspaceHook. */
   workspaceHook?: (
-    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
+    action: WorkspaceVerb,
     name?: string,
+    opts?: { clean?: boolean; deep?: boolean },
   ) => Promise<string>;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
@@ -893,8 +915,9 @@ export class Session {
   // show the user.
   private workspaceHook:
     | ((
-        action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
+        action: WorkspaceVerb,
         name?: string,
+        opts?: { clean?: boolean; deep?: boolean },
       ) => Promise<string>)
     | undefined;
   // Whether the orientation preamble has ridden a prompt yet. Drives
@@ -6659,18 +6682,48 @@ export class Session {
       return { stopReason: "end_turn" };
     }
     const [verb = "status", ...rest] = remainder.split(/\s+/).filter((s) => s.length > 0);
-    const name = rest.join(" ").trim();
-    const known = ["start", "merge", "sync", "stop", "detach", "discard", "status"];
-    if (!known.includes(verb)) {
+    if (!(WORKSPACE_VERBS as readonly string[]).includes(verb)) {
       this.emitExtensionReply(
-        `Unknown workspace verb "${verb}". Use one of: ${known.join(", ")}.`,
+        `Unknown workspace verb "${verb}". Use one of: ${WORKSPACE_VERBS.join(", ")}.`,
       );
       return { stopReason: "end_turn" };
     }
+    // Flags split out of the name rather than parsed positionally, because
+    // a label is free-form and may legitimately be several words. An
+    // unrecognized `--flag` is REFUSED rather than folded into the label:
+    // silently naming a workspace "--clen" is how a typo turns a
+    // deliberate choice into its opposite with a plausible-looking reply.
+    const flags = rest.filter((token) => token.startsWith("--"));
+    const unknown = flags.filter((f) => f !== "--clean" && f !== "--deep");
+    if (unknown.length > 0) {
+      this.emitExtensionReply(
+        `Unknown workspace flag(s) ${unknown.join(", ")}. Supported: --clean (start), --deep (clean).`,
+      );
+      return { stopReason: "end_turn" };
+    }
+    const opts = {
+      clean: flags.includes("--clean"),
+      deep: flags.includes("--deep"),
+    };
+    // Refused rather than ignored, for the same reason: a flag that reads
+    // as accepted and does nothing is worse than one that is rejected.
+    if (opts.clean && verb !== "start") {
+      this.emitExtensionReply(`--clean applies to \`start\`, not to \`${verb}\`.`);
+      return { stopReason: "end_turn" };
+    }
+    if (opts.deep && verb !== "clean") {
+      this.emitExtensionReply(`--deep applies to \`clean\`, not to \`${verb}\`.`);
+      return { stopReason: "end_turn" };
+    }
+    const name = rest
+      .filter((token) => !token.startsWith("--"))
+      .join(" ")
+      .trim();
     try {
       const message = await this.workspaceHook(
-        verb as "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "status",
+        verb as WorkspaceVerb,
         name.length > 0 ? name : undefined,
+        opts,
       );
       this.emitExtensionReply(message);
     } catch (err) {

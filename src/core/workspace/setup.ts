@@ -220,6 +220,13 @@ export async function runWorkspaceHook(
         resolve({ ok: true });
       },
     );
+    // A hook that ignores stdin and exits immediately closes the pipe
+    // before this write lands, and an unhandled EPIPE on that socket
+    // surfaces as a process-level error rather than a failed hook. The
+    // daemon is long-lived, so that is not survivable noise. Swallowed
+    // here: the payload is also passed as environment, and a hook that
+    // exited before reading stdin has already decided it does not want it.
+    child.stdin?.on("error", () => undefined);
     child.stdin?.end(payload);
   });
 }

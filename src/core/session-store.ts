@@ -108,6 +108,25 @@ export const PersistedWorkspace = z.object({
   snapshot: z.string().optional(),
   /** Provider-specific display detail; absent for providers without one. */
   vcs: z.record(z.string(), z.string()).optional(),
+  /**
+   * True when no uncommitted work was copied in at creation, so the
+   * landing anchor is a plain base commit rather than a working-state
+   * snapshot.
+   *
+   * Recorded rather than inferred, for two reasons. Landing reads the
+   * anchor ref and cannot tell the two apart from its value: both are
+   * commits. And the distinction changes what a failed replay MEANS.
+   * With work carried in, an overlap is two edits to the same lines;
+   * without it, the source's whole working state is being replayed for
+   * the first time, and the message has to say so or the user cannot
+   * tell which of their edits are at risk.
+   *
+   * Set by `start --clean` and by any start over a clean source, since
+   * both leave the anchor at the base. `clean` flips it to true on a
+   * workspace that started with work carried in, because that verb
+   * rewrites the anchor to match.
+   */
+  clean: z.boolean().optional(),
 });
 export type PersistedWorkspace = z.infer<typeof PersistedWorkspace>;
 

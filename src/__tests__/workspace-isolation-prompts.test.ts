@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { SessionManager } from "../core/session-manager.js";
 import { JsonRpcConnection } from "../acp/connection.js";
-import { type AttachedClient } from "../core/session.js";
+import { WORKSPACE_VERBS, type AttachedClient } from "../core/session.js";
 import { makeControlledStream } from "./test-utils.js";
 import {
   drainSnapshots,
@@ -595,6 +595,11 @@ describe("session isolation end-to-end: prompts and typed commands", () => {
       })
       .join("");
     expect(said).toContain('Unknown workspace verb "end"');
-    expect(said).toContain("start, merge, sync, stop, detach, discard, status");
+    // Asserted against the exported list rather than a literal, so adding
+    // a verb does not require editing a string here to keep a test that is
+    // really about the refusal path passing.
+    for (const verb of WORKSPACE_VERBS) {
+      expect(said).toContain(verb);
+    }
   });
 });

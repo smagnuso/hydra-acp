@@ -93,7 +93,24 @@ export interface Capabilities {
     readonly environmentNotes: boolean;
     /** Can a deleted workspace be rebuilt from retained state? */
     readonly rematerialize: boolean;
+    /**
+     * Does this provider reference trees it does not populate when a
+     * workspace is created (git submodules, svn externals, a Perforce
+     * client that maps another depot path)?
+     *
+     * False means "not applicable", not "unsupported": a copy provider
+     * copies whatever was there, so there is nothing left to populate.
+     */
+    readonly nestedTrees: boolean;
   };
+}
+
+export interface NestedTreesResult {
+  readonly ok: boolean;
+  /** How many nested trees were acted on. Zero is the common case. */
+  readonly count: number;
+  /** Present when ok is false. */
+  readonly reason?: string;
 }
 
 export interface WorkspaceStatus {
@@ -221,10 +238,41 @@ export interface IsolationProvider {
   unlock(ws: Workspace): Promise<void>;
 
   /**
+   * Populate trees the workspace references but did not materialize.
+   *
+   * A `git worktree` leaves submodule directories EMPTY, which is an
+   * artifact of how worktrees are made rather than anything the caller
+   * asked for. Left that way, a workspace in a submodule repo cannot
+   * build, and the agent is one plausible-looking `git add` away from
+   * re-committing the empty directories as ordinary files. So this is
+   * part of making a workspace usable, alongside carry and postCreate,
+   * not an optional extra.
+   *
+   * Expensive: potentially a full fetch per nested tree. Callers run it
+   * in the setup phase where slowness is expected and reported, and
+   * providers that declare `supports.nestedTrees: false` return a
+   * zero-count success rather than throwing, because "nothing to do" is
+   * the common answer even for providers that CAN do it.
+   *
+   * `discardLocal` additionally returns already-populated nested trees to
+   * their recorded state, discarding changes inside them. Needed because
+   * the operations that clear a tree do not reach inside a nested one:
+   * neither `reset --hard` nor `clean -fd` touches a submodule's working
+   * tree (verified on git 2.43), so a caller that skips this leaves
+   * exactly the mess it was asked to remove.
+   *
+   * `purgeIgnored` extends that to ignored files inside nested trees, for
+   * the deep variant that intends to rebuild rather than preserve them.
+   */
+  materializeNested(
+    ws: Workspace,
+    opts?: { discardLocal?: boolean; purgeIgnored?: boolean },
+  ): Promise<NestedTreesResult>;
+
+  /**
    * Agent-facing caveats about this workspace, conditional on inspected
    * state. Exists so an agent meeting an artifact of isolation does not
-   * try to repair it (the destructive case being a worktree's empty
-   * submodule directories re-committed as ordinary files).
+   * try to repair it.
    */
   environmentNotes(ws: Workspace): Promise<readonly string[]>;
 

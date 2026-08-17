@@ -34,6 +34,7 @@ import {
 } from "./cli/commands/sessions.js";
 import {
   runWorkspaceApply,
+  runWorkspaceClean,
   runWorkspaceList,
   runWorkspaceMerge,
   runWorkspacePrune,
@@ -438,6 +439,18 @@ async function main(): Promise<void> {
         await runWorkspacePrune({ force: flags.force === true });
         return;
       }
+      if (sub === "clean") {
+        try {
+          await runWorkspaceClean({
+            ...(positional[2] !== undefined ? { target: positional[2] } : {}),
+            deep: flags.deep === true,
+          });
+        } catch (err) {
+          process.stderr.write(`${(err as Error).message}\n`);
+          process.exit(1);
+        }
+        return;
+      }
       // merge / apply both land work in the workspace's RECORDED source
       // tree, never in the directory you happen to be standing in. cwd
       // only helps pick which workspace you meant.
@@ -483,8 +496,8 @@ async function main(): Promise<void> {
       }
       process.stderr.write(
         `Unknown workspace subcommand: ${sub}\n` +
-          `Usage: hydra workspace [list|prune|merge|apply|remove] [<session>] ` +
-          `[--json] [--inactive] [--force] [-m <msg>] [--into <path>] [--remove]\n`,
+          `Usage: hydra workspace [list|prune|merge|apply|clean|remove] [<session>] ` +
+          `[--json] [--inactive] [--force] [--deep] [-m <msg>] [--into <path>] [--remove]\n`,
       );
       process.exit(2);
       return;
