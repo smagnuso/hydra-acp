@@ -1532,7 +1532,8 @@ export class SessionManager {
     this.logger?.info(
       `reaping orphaned non-interactive session ${sessionId} (agent killed, cold record kept)`,
     );
-    await session.close({ deleteRecord: false }).catch(() => undefined);
+    await session.close({ deleteRecord: false, by: "reap-orphaned" })
+      .catch(() => undefined);
   }
 
   // Resolve a recorded cwd for resurrect: use it if it still exists,
@@ -5764,7 +5765,8 @@ export class SessionManager {
       // the overwrite below has something to atomically replace.
       const live = this.sessions.get(existing.sessionId);
       if (live) {
-        await live.close({ deleteRecord: false }).catch(() => undefined);
+        await live.close({ deleteRecord: false, by: "bundle-import-overwrite" })
+          .catch(() => undefined);
       }
       await this.writeImportedRecord({
         sessionId: existing.sessionId,
@@ -6813,7 +6815,7 @@ export class SessionManager {
     // flushSynopsis, so the cold records still pick up their final
     // synopsis but it doesn't block per-session kill.
     await Promise.allSettled(
-      sessions.map((s) => s.close({ deleteRecord: false })),
+      sessions.map((s) => s.close({ deleteRecord: false, by: "daemon-shutdown" })),
     );
     this.sessions.clear();
   }

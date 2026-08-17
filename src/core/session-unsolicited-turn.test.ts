@@ -544,8 +544,10 @@ describe("armed background tasks", () => {
     });
     // Idle, but not finished.
     expect(session.turnStartedAt).toBeUndefined();
+    // toolCallId is published so a client can annotate the very tool block
+    // that armed this, rather than guessing which one it belongs to.
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "gibbon rebuild" },
+      { toolCallId: "toolu_bg", label: "gibbon rebuild" },
     ]);
   });
 
@@ -594,7 +596,7 @@ describe("armed background tasks", () => {
     await settleDrain();
 
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Terminal", taskId: "bg_1" },
+      { toolCallId: "toolu_mixed", label: "Terminal", taskId: "bg_1" },
     ]);
   });
 
@@ -608,7 +610,7 @@ describe("armed background tasks", () => {
       },
     });
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Monitor", taskId: "bgzem17m0" },
+      { toolCallId: "toolu_mon", label: "Monitor", taskId: "bgzem17m0" },
     ]);
   });
 
@@ -679,7 +681,7 @@ describe("armed background tasks", () => {
     // Monitor. The Monitor itself stays: it fires per occurrence, so its
     // notification says the watch is alive, not that it is finished.
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Monitor", taskId: "bnrcts5np" },
+      { toolCallId: "toolu_monitor", label: "Monitor", taskId: "bnrcts5np" },
     ]);
     expect(session.armedSince).toBeDefined();
   });
@@ -721,7 +723,7 @@ describe("armed background tasks", () => {
     agentChunk(mock, "elapsed_steps=120");
     expect(session.inUnsolicitedTurn).toBe(true);
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Monitor", taskId: "b4atttz8a" },
+      { toolCallId: "toolu_mon", label: "Monitor", taskId: "b4atttz8a" },
     ]);
 
     // A duplicate arming update, which is how the tool call's own seven
@@ -733,7 +735,7 @@ describe("armed background tasks", () => {
       update: monitorArming,
     });
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Monitor", taskId: "b4atttz8a" },
+      { toolCallId: "toolu_mon", label: "Monitor", taskId: "b4atttz8a" },
     ]);
     expect(session.armedSince).toBe(armedAt);
   });
@@ -1014,7 +1016,7 @@ describe("armed background tasks", () => {
         "written to: /tmp/claude-1000/-home-smagnuson/tasks/b17okg6jd.output",
     });
     expect(session.armedBackgroundTasks).toEqual([
-      { label: "Terminal", taskId: "b17okg6jd" },
+      { toolCallId: "toolu_bg", label: "Terminal", taskId: "b17okg6jd" },
     ]);
     await stopDuringTurn(session, mock, client, "b17okg6jd");
     expect(session.armedBackgroundTasks).toHaveLength(0);

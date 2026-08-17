@@ -161,6 +161,34 @@ Before trusting a capture:
   `src/cli/commands/workspaces.ts` reads records straight off disk on
   purpose (diagnosis has to work with the daemon down); that asymmetry is
   deliberate. Read locally, write through the daemon.
+- **`usage_update` is broadcast but never recorded.** `STATE_UPDATE_KINDS`
+  (`core/session.ts`) filters it out of `recordAndBroadcast`, and the daemon
+  writes its own snapshot at each turn boundary instead. So a signal that
+  rides `usage_update` reaches attached clients but is **invisible in
+  `history.jsonl`**. Do not conclude a wire field is absent because history
+  lacks it — attach a WS observer instead (`examples/client-observe.mjs`).
+  This is a live trap: the same reasoning produced a confidently wrong
+  conclusion mid-investigation, because the only `usage_update` rows on disk
+  are hydra's own and they carry no agent `_meta`.
+- **The agent-initiated turn boundary is `_meta["_claude/origin"]`, and it
+  is authoritative.** claude-acp stamps every SDK `result` it forwards with
+  the lane that produced it. A `kind` in {`task-notification`, `peer`,
+  `coordinator`, `observer`, `observer-activity`} means the model finished
+  something it started on its own, and ends the turn. `kind: "human"` rides
+  the same carrier for the user's own turns and must **never** be read as
+  one, or every agent-initiated turn closes the instant any user turn ends.
+  Mirrors `AUTONOMOUS_RESULT_ORIGINS` upstream; unknown kinds fall to the
+  user lane, matching that adapter's fail-open default. There is deliberately
+  no timer fallback — see `autonomousTurnTerminal`.
+- **`Session.cancel()` must close an open `unsolicitedTurn`.** An
+  agent-initiated turn has no `session/prompt` to settle, so nothing
+  downstream will ever close it: the agent interrupts its query but owes no
+  response, and no `turn_complete` is due. Without that explicit close, `^C`
+  is a **guaranteed no-op for every turn the agent starts by itself** —
+  measured as the agent publishing its terminal at T+2s, a cancel at T+5s
+  doing nothing, and the turn surviving to T+92s. The TUI cannot compensate:
+  its escalation ladder lives inside `turnInFlight`, which is null for any
+  turn this client did not originate.
 
 ## Updating this file
 

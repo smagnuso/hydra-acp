@@ -400,6 +400,14 @@ export interface SessionInit {
 
 export interface CloseOptions {
   deleteRecord?: boolean;
+  // Who asked, for the log line in doClose. Closing is the most destructive
+  // thing the daemon does — it kills the agent mid-turn and the session comes
+  // back on a fresh process with a synthesized takeover transcript — and it
+  // used to log neither a caller nor a consequence. Diagnosing one incident
+  // meant identifying the caller by elimination across the eight call sites,
+  // and getting it wrong first. Every call site should name itself; a client
+  // request should pass its clientId.
+  by?: string;
 }
 
 const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
@@ -3369,8 +3377,16 @@ export class Session {
   //
   // This is the third session state, distinct from both "working" and
   // "done": idle right now, but a wakeup is queued.
-  get armedBackgroundTasks(): Array<{ label: string; taskId?: string }> {
-    return [...this.armedTasks.values()].map((t) => ({
+  // `toolCallId` is the tool call that armed the watch, which is also the
+  // identity of the tool block a client already rendered for it. Without it
+  // no client can join an armed entry back to that block, so a UI cannot
+  // annotate "this Monitor is still watching" on the call that started it.
+  // It costs nothing to publish: the map is already keyed by it.
+  get armedBackgroundTasks(): Array<
+    { toolCallId: string; label: string; taskId?: string }
+  > {
+    return [...this.armedTasks.entries()].map(([toolCallId, t]) => ({
+      toolCallId,
       label: t.label,
       ...(t.taskId !== undefined ? { taskId: t.taskId } : {}),
     }));
@@ -4714,9 +4730,23 @@ export class Session {
   }
 
   private async doClose(opts: CloseOptions): Promise<void> {
+    // Report what is about to be destroyed, not just that a close happened.
+    // A close landing mid-turn is the case that loses work: the agent is
+    // killed, the turn never settles, and whatever the agent had buffered is
+    // dropped by the resurrect path on the next attach.
+    const midTurn = this.turnStartedAt !== undefined;
     this.logger?.info(
-      `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false}`,
+      `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false} ` +
+        `by=${opts.by ?? "unknown"} midTurn=${midTurn} ` +
+        `unsolicitedTurn=${this.unsolicitedTurn !== undefined} ` +
+        `queued=${this.promptQueue.length} awaitingPermission=${this.hasPermissionFlag}`,
     );
+    if (midTurn) {
+      this.logger?.warn(
+        `session ${this.sessionId} closed mid-turn by=${opts.by ?? "unknown"}; ` +
+          `the in-flight turn will not settle and the agent is being killed`,
+      );
+    }
     this.cancelIdleTimer();
     for (const claim of this.pendingClaims.values()) {
       clearTimeout(claim.timer);
@@ -6579,7 +6609,7 @@ export class Session {
     // Agent dies immediately. The cold record's synopsis is regenerated
     // out-of-band by the synopsis coordinator (scheduled via the
     // SessionManager onClose hook) — no LLM call blocks the kill.
-    await this.close({ deleteRecord: false });
+    await this.close({ deleteRecord: false, by: "/hydra kill" });
     return { stopReason: "end_turn" };
   }
 
@@ -6852,7 +6882,7 @@ export class Session {
     }
     this.lastCancelAt = 0;
     this.forceCancelling = true;
-    await this.close({ deleteRecord: false });
+    await this.close({ deleteRecord: false, by: "force-cancel" });
     return { stopReason: "cancelled" };
   }
 

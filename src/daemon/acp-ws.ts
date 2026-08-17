@@ -1044,7 +1044,10 @@ export function registerAcpWsEndpoint(
           params.sessionId;
         const live = deps.manager.get(id);
         if (live) {
-          await live.close({ deleteRecord: true });
+          await live.close({
+            deleteRecord: true,
+            by: `session/delete ${state.clientId}`,
+          });
           await deps.manager.waitForDeletion(id);
           // Safety net for the agent.onExit race — see DELETE /v1/sessions/:id.
           if (await deps.manager.hasRecord(id)) {
@@ -1086,7 +1089,11 @@ export function registerAcpWsEndpoint(
           params.sessionId;
         const live = deps.manager.get(id);
         if (live) {
-          await live.close({ deleteRecord: false });
+          await live.close({
+            deleteRecord: false,
+            by: `session/close ${state.clientId}` +
+              (state.processIdentity ? ` (${state.processIdentity.name})` : ""),
+          });
           return {};
         }
         // Idempotent when the session exists in history but isn't live:
@@ -1216,7 +1223,10 @@ export function registerAcpWsEndpoint(
         }
         const child = deps.manager.get(childSessionId);
         if (child) {
-          await child.close({ deleteRecord: false });
+          await child.close({
+            deleteRecord: false,
+            by: `child_session/close ${state.clientId}`,
+          });
         }
         return { ok: true };
       });
@@ -1459,7 +1469,8 @@ export function registerAcpWsEndpoint(
         // session/new — without depending on hydra's `_meta`.
         ({ entries: replay } = await session.attach(client, "full"));
       } catch (err) {
-        await session.close({ deleteRecord: false }).catch(() => undefined);
+        await session.close({ deleteRecord: false, by: "session/new attach-failed" })
+          .catch(() => undefined);
         throw err;
       }
       state.attached.set(session.sessionId, {

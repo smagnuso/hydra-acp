@@ -1945,9 +1945,20 @@ armed, a one-shot is discharged by a resumption, or one is cancelled via
   "sessionId": "<id>",
   "count":     1,
   "since":     1717012800000,   // absent when count is 0
-  "tasks":     [ { "label": "device run", "taskId": "bgzem17m0" } ]
+  "tasks":     [ {
+    "toolCallId": "toolu_01YH6jTseLAcJS",   // the tool call that armed it
+    "label":      "device run",
+    "taskId":     "bgzem17m0"               // absent until an update carries it
+  } ]
 }
 ```
+
+`toolCallId` is the identity of the tool call that armed the watch, which is
+also the identity of the tool-call block a client has already rendered for it.
+It is the only key that joins an armed entry back to that block, so a client
+that wants to annotate "this watch is still running" on the call that started
+it needs this field. Exact, not inferred: the daemon's armed set is keyed on
+it, read straight off the arming update.
 
 `since` is when the *oldest still-armed* task was armed. Clients clock a
 "running" readout from it, because the useful question is how long the job
@@ -1956,8 +1967,7 @@ has been going, not how long the user has been idle since the turn ended.
 Pushed rather than polled on purpose: the transition that matters most is
 the task going away while nobody is looking. An idle session gets no other
 traffic, so a client that only learned the count at attach time would keep
-claiming a job was running long after it finished. For the same reason
-expiry is timer-driven in the daemon rather than evaluated on read.
+claiming a job was running long after it finished.
 
 Deduplicated on the rendered state: several updates for one tool call all
 carry the arming signal (a real `Monitor` sent seven), and re-arming an

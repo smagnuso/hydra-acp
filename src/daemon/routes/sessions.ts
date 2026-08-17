@@ -267,7 +267,8 @@ export function registerSessionRoutes(
       // regenerated out-of-band by the synopsis coordinator (scheduled
       // by SessionManager's onClose hook). 202 returns to the caller as
       // soon as the close starts; the actual agent teardown takes <1s.
-      void session.close({ deleteRecord: false }).catch(() => undefined);
+      void session.close({ deleteRecord: false, by: "REST POST /kill" })
+        .catch(() => undefined);
       reply.code(202).send();
       return;
     }
@@ -472,7 +473,7 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);
     if (session) {
-      await session.close({ deleteRecord: true });
+      await session.close({ deleteRecord: true, by: "REST DELETE /v1/sessions" });
       await manager.waitForDeletion(id);
       // Safety net: if the live close raced an earlier markClosed (e.g.
       // agent.onExit fired before our DELETE landed), the deleteRecord
