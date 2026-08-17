@@ -4167,6 +4167,31 @@ async function runSession(
       .notify("session/cancel", { sessionId: resolvedSessionId })
       .catch(() => undefined);
   };
+  // Escalation for a turn this TUI did not start. Reached only once the agent
+  // has explicitly told us the cancel failed: hydra-acp/cancel_failed arms
+  // forceStopArmed and tells the user in as many words to "Cancel again to
+  // force-stop". Before this existed that promise was broken — the second ^C
+  // re-sent the same rejected session/cancel. Driven entirely by that
+  // notification, never by a deadline.
+  const forceStopRemoteTurn = (): void => {
+    forceStopArmed = false;
+    if (screenRef !== null) {
+      screenRef.appendLines([
+        {
+          prefix: "⚠ ",
+          prefixStyle: "tool-status-fail",
+          body:
+            "force-stopping agent — turn aborted; resumes on your next message…",
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
+    }
+    conn
+      .request("hydra-acp/session/force_cancel", {
+        sessionId: resolvedSessionId,
+      })
+      .catch(() => undefined);
+  };
   // Optimistically reflect a just-issued cancel: drop the busy banner and
   // OS progress pulse now rather than waiting for the cancelled turn to
   // settle. Only when this is the sole outstanding turn — a peer/amend turn
@@ -4193,7 +4218,11 @@ async function runSession(
       return;
     }
     if (pendingTurns > 0) {
-      cancelRemoteTurn();
+      if (forceStopArmed) {
+        forceStopRemoteTurn();
+      } else {
+        cancelRemoteTurn();
+      }
       markCancelling();
       return;
     }

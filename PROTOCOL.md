@@ -1680,31 +1680,34 @@ daemon waits for it to settle first.
   "sessionId":  "<id>",
   "messageId":  "<id>",
   "reason":     "agent_resumed",
-  "cause":      { "toolCallId": "toolu_…", "label": "gibbon rebuild" },  // optional
-  "holdCapMs":  180000
+  "cause":      { "toolCallId": "toolu_…", "label": "gibbon rebuild" }  // optional
 }
 
 // released
 {
   "sessionId": "<id>",
   "messageId": "<id>",
-  "reason":    "quiet" | "cap" | "turn_ended" | "cancelled" | "closing",
+  "reason":    "turn_ended" | "cancelled" | "closing",
   "heldMs":    3200
 }
 ```
 
-- `quiet`: the agent stopped emitting for 45s. The normal exit. The window
-  has to clear a *thinking* pause, not just an idle one: `claude-acp`
-  forwards no thought chunks, so a model that stops to reason is
-  indistinguishable on the wire from one that has finished. Measured
-  inter-event gaps inside real agent-initiated turns run p95 12.7s / p99
-  38.8s.
-- `cap`: `holdCapMs` elapsed with the agent still going. The prompt is
-  dispatched anyway; responses may interleave. Logged as a warning. This is
-  a safety net against the daemon's turn tracking wedging open, not a
-  "taking too long" timeout.
-- `turn_ended`: the unsolicited turn closed while we waited.
+- `turn_ended`: the agent-initiated turn closed. The normal exit, and the
+  only one that means the prompt is about to be dispatched.
 - `cancelled` / `closing`: the entry or the session went away.
+
+**The hold has no upper bound.** It ends when the turn ends, which the agent
+reports (see [agent-initiated turns](#agent-initiated-turns)). Two earlier
+exits, a 45s `quiet` guess and a 180s `cap`, have been removed. The cap was
+actively harmful: it dispatched a prompt into a turn that was demonstrably
+still running, the agent folded that prompt into the running turn and never
+returned its `session/prompt` response, and the session reported BUSY for 12
+minutes until the user killed the agent by hand.
+
+An agent that never reports the end of a turn it started therefore holds the
+prompt indefinitely. That is the intended failure: the entry stays in the
+queue and stays cancellable, `session/cancel` closes the turn and releases it,
+and the alternative is the response-losing collision above.
 
 A `held` is always followed by exactly one `released`. `released` does **not**
 mean the entry started: `removed{started}` still follows separately, and a
@@ -1797,13 +1800,14 @@ inference sound: a conforming agent can never trigger it.
     "sessionUpdate": "turn_ended",
     "messageId": "m_…",
     "startedMessageId": "m_…",   // the turn_started this closes
-    "durationMs": 94000,
+    "durationMs": 2100,
     "_meta": { "hydra-acp": {
       "unsolicited": true,
-      // idle       — the agent went quiet and we called it over
-      // superseded — a real prompt took over
+      // completed  — the agent reported the turn finished (the normal case)
+      // cancelled  — session/cancel ended it
+      // superseded — a prompt took over without waiting on the hold
       // closed     — the session shut down
-      "reason": "idle"
+      "reason": "completed"
     } }
   }
 }
@@ -1816,12 +1820,37 @@ know them ignores them (`render-update` maps unknown `sessionUpdate` values to
 a no-op) and is unaffected. Aware clients should treat the pair as a turn
 boundary and may label it with `cause`.
 
-**The close is a guess.** The agent gives no end signal, so hydra closes the
-turn after a fixed silence window (90s). That is deliberately shorter than the
-longest legitimate mid-turn silence — a tool can run for half an hour emitting
-nothing — because a wrong close is cheap: later activity simply opens a fresh
-`turn_started`. Consumers must tolerate a single logical stretch of agent work
-arriving as several `turn_started`/`turn_ended` pairs.
+**The close is observed, not guessed.** `claude-acp` emits a `usage_update` at
+every SDK `result` and stamps it with the lane that produced it:
+
+```jsonc
+{ "sessionUpdate": "usage_update", "used": 421066,
+  "_meta": { "_claude/origin": { "kind": "task-notification" } } }
+```
+
+`kind` in `{task-notification, peer, coordinator, observer,
+observer-activity}` means the model finished something it started on its own,
+so that notification **is** the end of the agent-initiated turn, timed exactly
+and naming why it began. `kind: "human"` rides the same carrier for the user's
+own turns and must never be read as one. Mirrors `AUTONOMOUS_RESULT_ORIGINS`
+in `claude-agent-acp`; an unknown kind is treated as the user lane, matching
+that adapter's own fail-open default.
+
+Note that `usage_update` is a state-kind and so is **not** written to
+`history.jsonl`. It is broadcast to attached clients, which is where this
+signal is observable.
+
+This replaced a 90-second silence deadline, and there is deliberately **no
+timer fallback**. Measured live: the signal lands within ~2s of the agent
+actually finishing, while the deadline held a session BUSY for 89 further
+seconds — a turn recorded as 93.0s whose real work took 3.5s. An agent that
+starts turns without reporting their end leaves the turn open until it is
+cancelled, which is the honest outcome; inventing a duration for it is what
+produced the "random turn end/starts" this section used to describe.
+
+Empirically this path is `claude-acp`-only: across 1291 recorded sessions,
+agent-initiated turns appear in 6, all of them `claude-acp`. `opencode` has
+produced none in 615 sessions.
 
 **Gating.** Detection is armed only after the session's first `turn_complete`,
 since the failure mode is the agent *resuming* after a turn ended. While an
@@ -1842,69 +1871,74 @@ turn in flight, since the session is not finished with you. Note this makes
 armed-but-idle session is dispatched immediately rather than queued. Clients
 that need the distinction should read `busy` and `armedTasks` separately.
 
-The count is **best-effort and must not be relied on**. Notification
-delivery waits for a turn boundary, so a task can fire long after its
-nominal timeout (the trace has one armed with `timeoutMs: 3600000` delivered
-3h51m later, batched with three others). Entries are expired on a TTL so the
-badge cannot stick forever, which means it can read `0` while a wakeup is
-still coming. A single notification can also batch several tasks while only
-one gets attributed to the resulting turn, so the count can overstate.
+The count is **best-effort and must not be relied on**, and it errs toward
+overstating. A single notification can batch several tasks while only one gets
+attributed to the resulting turn. Notification delivery also waits for a turn
+boundary, so a task can fire long after its nominal timeout (the trace has one
+armed with `timeoutMs: 3600000` delivered 3h51m later, batched with three
+others).
+
+**Entries never expire on a clock.** They leave the set only on a signal from
+the agent. The agent's reported `timeoutMs` is not read at all: it answers "how
+long might this watch run", which is not the question. Three ceilings used to
+live here (a 30-minute default, a 15-minute one-shot cap, a 60-minute repeating
+cap) and each was a guess at a duration the daemon cannot observe. They failed
+in both directions: a legitimate 45-minute device watch went dark 15 minutes in
+while still reporting normally, and a watch killed by a bare `pkill` claimed a
+wakeup for the rest of the hour.
+
+The consequence, stated plainly: **a watch that dies without a word leaves its
+entry counted for the life of the session.** `claude-acp` could close this gap
+cheaply — it already maintains the exact live set internally
+(`session.liveBackgroundTasks`, reconciled from `task_started` /
+`task_notification` / `task_updated` against `background_tasks_changed`, a
+level signal with REPLACE semantics) and forwards none of it to the client.
 
 **One-shot versus repeating armings.** How an entry leaves the set depends
 on how often the underlying tool fires, and the two kinds behave differently:
 
-| | fires | cleared by a resumption | TTL ceiling |
+| | fires | cleared by a resumption | cleared by `TaskStop` |
 |---|---|---|---|
-| backgrounded `Bash` (`run_in_background`) | once, on exit | yes | 15 min |
-| `Monitor` | once per occurrence, until its command exits or its timeout lapses | **no** | 60 min |
+| backgrounded `Bash` (`run_in_background`) | once, on exit | yes | yes |
+| `Monitor` | once per occurrence, until its command exits | **no** | yes |
 
 For a **one-shot**, the daemon clears **every** such entry armed since the
 last turn boundary when the agent resumes, not just the one it can attribute
 the resumption to. Delivery is batched at turn boundaries, so a resumption is
 good evidence that everything pending reported in; clearing only the
-attributable one stranded the rest until their TTL.
+attributable one stranded the rest indefinitely.
 
 For a **repeating** watch that reasoning does not hold: its notification says
 the watch is alive, not that it is finished. Clearing one on its first firing
 left every later firing with nothing armed, so a session with six live
 watches reported `armedTasks: 0`. A repeating entry therefore leaves only via
-`TaskStop` or its TTL. `persistent` does **not** identify these — a
-`persistent: false` Monitor fires repeatedly too; the tool kind does.
+`TaskStop`. `persistent` does **not** identify these: a `persistent: false`
+Monitor fires repeatedly too; the tool kind does.
 
 Either kind is cleared when the agent cancels it with `TaskStop`, matched on
 `rawInput.task_id` against the id harvested at arming time (a Monitor reports
 that in `_meta.claudeCode.toolResponse.taskId`; a backgrounded Bash reports
 it only in its `rawOutput` prose, which the daemon parses).
 
-The daemon cannot see an agent that kills the underlying process some other
-way: a `pkill` from a plain Bash leaves the watch dead with no signal at all.
-For that case only the TTL helps, hence the ceilings above, applied even when
-the agent named a longer `timeoutMs` of its own. The agent's timeout answers
-"how long might this watch run", which is not the same question as "how long
-should we keep claiming a wakeup is coming".
+**Two cases the daemon genuinely cannot see**, and it now reports them as
+unknown rather than guessing:
 
-The ceilings differ because they bound different things. A one-shot has other
-exits, so 15 minutes is a cheap backstop. For a repeating watch the TTL is
-nearly the only exit, and it is a **lifetime** bound that nothing renews: a
-Monitor's tool call returns within seconds of arming (its final
-`status: "completed"` means the tool returned, **not** that the watch ended)
-and the watch's later events arrive as ordinary agent activity, never as
-another `tool_call_update` for that `toolCallId`. So the entry is armed
-exactly once. 60 minutes is `Monitor`'s own maximum `timeout_ms`, and a
-non-persistent watch cannot outlive the timeout it named, which makes
-honouring that timeout the tightest bound available; a persistent one names
-no timeout at all, takes a 30-minute default, and that default is the only
-thing keeping it mortal.
+- A watch killed some other way. A `pkill` from a plain Bash leaves it dead
+  with no signal at all: no `TaskStop`, no notification.
+- A watch whose command simply exits. `Monitor`'s tool call returns within
+  seconds of arming, and its final `status: "completed"` means the *tool*
+  returned, **not** that the watch ended. Later firings arrive as ordinary
+  agent activity, never as another `tool_call_update` for that `toolCallId`,
+  so the entry is armed exactly once and nothing ever revisits it.
 
-The cost of the longer ceiling is a watch whose command exits early: nothing
-reports that, so the entry stays counted until its timeout lapses. This is
-the same best-effort caveat as above, with a wider window than a one-shot's.
+In both cases the entry stays counted. That is the deliberate cost of not
+inventing an expiry, and it is the same best-effort caveat as above.
 
 #### Notification: `hydra-acp/session/armed_tasks_updated`
 
 Daemon to every attached client, whenever the armed set changes: a task is
-armed, a one-shot is discharged by a resumption, one is cancelled via
-`TaskStop`, or one expires.
+armed, a one-shot is discharged by a resumption, or one is cancelled via
+`TaskStop`.
 
 ```jsonc
 {
@@ -2100,7 +2134,11 @@ Cancel any ongoing work for a session and free daemon-side resources, but keep t
 
 Semantics slot between the neighbouring lifecycle verbs:
 
-- `session/cancel` — abort the current turn, keep the session hot.
+- `session/cancel` — abort the current turn, keep the session hot. Ends an
+  [agent-initiated turn](#agent-initiated-turns) too: that turn has no
+  `session/prompt` to settle, so nothing else would ever close it, and before
+  this was wired up `^C` was a guaranteed no-op for the entire class of turns
+  the agent starts by itself. Emits `turn_ended` with `reason: "cancelled"`.
 - `session/close` — kill the upstream agent and free session state, keep the record so a later `session/resume` can rehydrate it.
 - `session/delete` — do everything close does plus remove the record from `session/list`.
 

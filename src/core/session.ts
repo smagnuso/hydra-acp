@@ -436,18 +436,54 @@ interface TransformerClaim {
 // targets a turn from minutes ago.
 const RECENTLY_TERMINAL_LIMIT = 64;
 
-// How long the agent may go silent inside an unsolicited turn before we
-// declare it over. See noteAgentActivity for what an unsolicited turn is.
+// Lanes claude-acp attributes a turn to when the model acted on its own
+// rather than on a user prompt. Mirrors AUTONOMOUS_RESULT_ORIGINS in
+// claude-agent-acp's acp-agent.js. A kind absent from this set is treated
+// as the user lane, matching claude-acp's own fail-open default: it would
+// rather misattribute an autonomous result to the user than strand a user
+// turn.
+const AUTONOMOUS_TURN_ORIGINS = new Set([
+  "task-notification",
+  "peer",
+  "coordinator",
+  "observer",
+  "observer-activity",
+]);
+
+// True for the notification that authoritatively ends an agent-initiated
+// turn. claude-acp emits a usage_update at every SDK `result` and stamps it
+// with the lane that produced it under _meta["_claude/origin"], so an
+// autonomous lane here means "the turn the model started by itself is over",
+// timed exactly and naming why it began.
 //
-// There is no correct value: the agent gives us no end signal, and a tool
-// can legitimately run for half an hour without emitting anything. Measured
-// inter-event gaps inside real turns are p50 0.7s / p95 11s / p99 30s (the
-// p99 is claude-acp's heartbeat for long-running tools) with a 28-minute
-// outlier. 90s clears the heartbeat and the p99 comfortably; the outliers
-// just close the turn early, and later activity opens a fresh one. Guessing
-// short is deliberate — a spurious extra turn boundary costs one separator
-// in the transcript, while guessing long leaves the session pinned BUSY.
-const UNSOLICITED_TURN_IDLE_MS = 90_000;
+// This replaced a 90-second silence deadline. That deadline rested on the
+// premise that the agent gives us no end signal, which is false: measured
+// live, the signal lands within ~2s of the agent actually finishing, while
+// the deadline held sessions BUSY for 89 further seconds (a 93.0s turn whose
+// real work took 3.5s). There is deliberately no timer fallback. An agent
+// that starts turns without publishing their end is violating the
+// request/response contract, and the honest response is to leave the turn
+// open and let the user cancel it, not to invent a duration for it.
+export function autonomousTurnTerminal(params: unknown): boolean {
+  const update = (params as { update?: Record<string, unknown> } | undefined)
+    ?.update;
+  if (!update || typeof update !== "object") {
+    return false;
+  }
+  if (update.sessionUpdate !== "usage_update") {
+    return false;
+  }
+  const meta = update._meta;
+  if (!meta || typeof meta !== "object") {
+    return false;
+  }
+  const origin = (meta as Record<string, unknown>)["_claude/origin"];
+  if (!origin || typeof origin !== "object") {
+    return false;
+  }
+  const kind = (origin as { kind?: unknown }).kind;
+  return typeof kind === "string" && AUTONOMOUS_TURN_ORIGINS.has(kind);
+}
 
 // Cap on the agent-authored label naming what woke an unsolicited turn.
 // Renders as a single header line, so anything longer is already unreadable.
@@ -459,93 +495,43 @@ const BACKGROUND_TASK_LABEL_MAX = 120;
 // just stops a long session accumulating one entry per tool call forever.
 const TOOL_LABEL_LIMIT = 128;
 
-// How long an armed background task counts toward the "this session may
-// wake itself up" badge when the agent gave no timeout of its own (a
-// backgrounded Bash reports none; a Monitor reports timeoutMs).
+// An armed background task counts toward the "this session may wake itself
+// up" badge until something authoritative discharges it: the resumption it
+// causes (one-shots only, see openUnsolicitedTurn) or an explicit TaskStop.
 //
-// Any value here is a hint, not a guarantee. Delivery waits for a turn
-// boundary, so a task can fire long after its nominal timeout: the trace
-// has one armed with timeoutMs=3600000 that was delivered 3h51m later,
-// batched with three others. Erring short is the safer direction: a badge
-// that clears early degrades to today's behaviour, whereas one that sticks
-// claims a wakeup is coming when none is.
-const ARMED_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000;
-
-// Hard ceiling on that window for a ONE-SHOT arming (a backgrounded Bash),
-// applied even when the agent named a longer timeout of its own.
+// There is deliberately no expiry. Three ceilings used to live here — a
+// 30-minute default, a 15-minute one-shot cap, a 60-minute repeating cap —
+// and each was a guess at a duration hydra cannot observe. They failed in
+// both directions: too short and a legitimate 45-minute device watch went
+// dark mid-run while still reporting normally; too long and a watch killed
+// by a bare `pkill` (no TaskStop, no notification) claimed a wakeup was
+// coming for the rest of the hour.
 //
-// The agent's timeoutMs answers "how long might this watch run", which is
-// not the question. We need "how long should we keep claiming a wakeup is
-// coming", and a job can die without a word: killed by a bare `pkill` from
-// another Bash, which produces no TaskStop and no notification, so nothing
-// ever clears the entry. That happened with a 1-hour Monitor and left the
-// session reading BUSY for the rest of the hour.
+// claude-acp knows the answer exactly and keeps it private. It maintains
+// `session.liveBackgroundTasks` from task_started / task_notification /
+// task_updated, reconciled against background_tasks_changed (a level signal
+// with REPLACE semantics), and forwards none of it to the client. Until that
+// set is published, the honest position is to report what the agent told us
+// and not invent an end for it.
 //
-// 15 minutes because measured delays between a turn being released and the
-// agent actually resuming were 0s, 72s, 74s, 147s, 309s and 1157s: five of
-// the six land inside it. The sixth is the cost, along with any genuinely
-// long job (a 30-minute device run clears early), and that cost is a false
-// negative, which merely degrades to the behaviour before any of this
-// existed. A stale entry instead asserts something untrue.
-//
-// Safe to keep short precisely because a one-shot has other exits: it fires
-// once, on exit, and a resumption discharges it (see openUnsolicitedTurn).
-// The ceiling is the backstop for the killed-without-a-word case only.
-const ARMED_TASK_MAX_TTL_MS = 15 * 60 * 1000;
-
-// The same ceiling for a REPEATING arming (a Monitor), which needs a much
-// longer one because it has fewer exits: it fires once per occurrence and
-// stays live afterwards, so a resumption cannot discharge it and the TTL is
-// its only exit besides TaskStop. Under the one-shot ceiling a legitimate
-// 45-minute device-perf watch went dark 15 minutes in while still reporting
-// normally, which is the same false-idle symptom from the other direction.
-//
-// This is a LIFETIME bound, not a silence budget: nothing renews it. A
-// Monitor's whole tool call finishes within seconds of arming — the trace
-// shows seven updates in ~2s ending in status "completed", which is the tool
-// RETURNING, not the watch ending — and the watch's later events arrive as
-// plain agent activity, never as another tool_call_update for that
-// toolCallId. So the entry is armed exactly once and expiresAt never moves.
-//
-// An hour because it is Monitor's own maximum timeout_ms. A non-persistent
-// watch cannot outlive the timeout it named, so honouring that timeout is
-// the tightest bound available. The cost is a watch whose command exits
-// early: nothing reports that, so the entry stays counted until the timeout
-// lapses. A persistent watch names no timeout at all and falls back to the
-// default above, which is the only thing keeping it mortal.
-const ARMED_TASK_REPEATING_MAX_TTL_MS = 60 * 60 * 1000;
+// Residual cost, stated plainly: a watch that dies without a word leaves its
+// entry counted for the life of the session.
 
 // Queue hold (see holdForUnsolicitedTurn). While the agent is mid-way
 // through a turn it started by itself, promoting the next user prompt
 // drops it onto a running agent, which is what produces interleaved
 // answers and a prompt that never appears to finish.
 //
-// Two bounds, because we cannot see when the agent is done.
+// The hold has no deadline of its own: it ends when the turn ends, which
+// the agent tells us (see autonomousTurnTerminal). The two estimates that
+// used to live here, a 45s "probably finished" guess and a 180s cap, are
+// gone. The cap was actively harmful — it dispatched a prompt into a turn
+// that was still running and lost the response.
 //
-// QUIET is the optimistic "probably finished" call, deliberately shorter
-// than the 90s the turn itself needs to lapse, because 90s is far too long
-// to sit on a prompt the user just typed.
-//
-// It must nonetheless clear a *thinking* pause. claude-acp forwards no
-// thought chunks, so a model that stops to reason looks identical to one
-// that has finished. Measured inter-event gaps inside real unsolicited
-// turns run p95 12.7s / p99 38.8s, and the trace that motivated this work
-// has a 25s thinking gap right where the user's prompt landed, and a 20s
-// window would have released 5s early and reproduced the very collision
-// this exists to prevent. 45s clears the p99.
-//
-// CAP is a safety net against our own turn tracking wedging open, not a
-// "the agent is taking too long" timeout: an agent still streaming at the
-// cap genuinely is busy, and dispatching into it is the bad outcome we're
-// avoiding. Generous, and the entry stays cancellable throughout.
-const UNSOLICITED_HOLD_QUIET_MS = 45_000;
-const UNSOLICITED_HOLD_CAP_MS = 180_000;
-
-// Longest the hold sleeps before re-examining its exit conditions. The
-// deadlines above are computed exactly, so this only bounds how long we
-// stay parked after something *else* changes: a cancel, an amend, or the
-// turn closing. Without it the drain loop would sit on a 45s timer holding
-// the queue shut for an entry that was cancelled a moment after it started
+// Longest the hold sleeps before re-examining its exit conditions. This
+// bounds how long we stay parked after something *else* changes: a cancel,
+// an amend, or the turn closing. Without it the drain loop would hold the
+// queue shut for an entry that was cancelled a moment after it started
 // waiting.
 const UNSOLICITED_HOLD_POLL_MS = 1_000;
 
@@ -783,13 +769,14 @@ export class Session {
   // Drives the mid-turn elapsed counter delivered to fresh attachers.
   private promptStartedAt: number | undefined;
   // Set while the agent is taking a turn nobody asked for. See
-  // noteAgentActivity. `timer` is the silence deadline; `cause` is the
-  // background task we believe woke it, for client labelling.
+  // noteAgentActivity. `cause` is the background task we believe woke it,
+  // for client labelling. There is no timer: the turn ends when the agent
+  // says it has (autonomousTurnTerminal), when a prompt supersedes it, or
+  // when it is cancelled.
   private unsolicitedTurn:
     | {
       messageId: string;
       startedAt: number;
-      timer: ReturnType<typeof setTimeout> | undefined;
       cause: { toolCallId: string; label: string } | undefined;
     }
     | undefined;
@@ -806,22 +793,22 @@ export class Session {
   >();
   // Background tasks the agent has armed and that we have not yet seen it
   // wake up for, keyed by toolCallId. Drives the "may wake itself up"
-  // signal on the session list. Best-effort by nature; see
-  // ARMED_TASK_DEFAULT_TTL_MS.
+  // signal on the session list. Entries leave only on an authoritative
+  // signal, never on a clock — see the armed-task comment above armedTasks'
+  // discharge sites.
   private armedTasks = new Map<
     string,
     {
       label: string;
       taskId?: string;
       // A repeating watch (Monitor) rather than a one-shot (backgrounded
-      // Bash). Governs both which TTL ceiling applies and whether a
-      // resumption discharges the entry. See isRepeatingArming.
+      // Bash). Governs whether a resumption discharges the entry: a one-shot
+      // fires once so its resumption proves it is done, a repeating watch
+      // stays live afterwards. See isRepeatingArming.
       repeating: boolean;
       armedAt: number;
-      expiresAt: number;
     }
   >();
-  private armedExpiryTimer: ReturnType<typeof setTimeout> | undefined;
   // Last {count, since} pushed to clients, so a mutation that doesn't move
   // the rendered state (re-arming a task already counted) stays silent.
   private lastArmedBroadcast: { count: number; since: number | undefined } |
@@ -833,10 +820,6 @@ export class Session {
   // agent, a seed replay). Resets across a daemon restart, which only
   // costs detection until the session's next turn ends.
   private sawTurnComplete = false;
-  // Wall-clock of the last turn-content update the agent sent, whether or
-  // not a prompt was in flight. Drives the queue hold's quiet check, which
-  // needs "is the agent still talking" independent of whose turn it is.
-  private lastAgentActivityAt = 0;
   // Counts appends since the last compaction. When it hits compactEvery
   // we ask the history store to trim the file to the most recent
   // historyMaxEntries. Keeps file growth bounded without per-append
@@ -3285,21 +3268,26 @@ export class Session {
     if (this.closing || this.closed) {
       return;
     }
-    // State-shaped updates (model, mode, usage, advertised commands) say
-    // nothing about whether a turn is running — the agent emits them
-    // outside turns routinely.
+    // Deliberately ahead of the state-update filter below, which would drop
+    // it: usage_update is the carrier claude-acp stamps the origin onto, and
+    // an autonomous origin is the authoritative end of the turn.
+    if (autonomousTurnTerminal(envelope)) {
+      this.closeUnsolicitedTurn("completed");
+      return;
+    }
+    // State-shaped updates (model, mode, advertised commands) say nothing
+    // about whether a turn is running — the agent emits them outside turns
+    // routinely.
     if (isStateUpdate("session/update", envelope)) {
       return;
     }
     this.noteBackgroundTaskArming(envelope);
-    this.lastAgentActivityAt = Date.now();
     if (this.unsolicitedTurn !== undefined) {
-      // Still going: push the silence deadline out. Deliberately ahead of
-      // the promptInFlight check: during a queue hold promptInFlight is
-      // set while the unsolicited turn is still the thing producing this
-      // output, and letting it lapse there would flip the session to idle
-      // mid-work and release the hold early.
-      this.armUnsolicitedTurnTimer();
+      // Already tracked. Its end arrives as the autonomous terminal handled
+      // above, so activity inside it needs nothing from us. Deliberately
+      // ahead of the promptInFlight check: during a queue hold promptInFlight
+      // is set while the unsolicited turn is still the thing producing this
+      // output, and a second turn must not be opened for it.
       return;
     }
     if (this.promptInFlight || !this.sawTurnComplete) {
@@ -3348,8 +3336,7 @@ export class Session {
     // started, which is what clients clock their "running Xs" readout
     // from (see armedSince). Overwriting it on every update reset that
     // clock, so a task that had been running for minutes read as though
-    // it had just begun. expiresAt asks whether the job is still alive,
-    // and an update is precisely the evidence that renews it.
+    // it had just begun.
     //
     // It also made the armed-tasks broadcast fire per update rather than
     // per change: the dedup key in onArmedTasksChanged includes
@@ -3367,16 +3354,11 @@ export class Session {
     // the first place, so isRepeatingArming already answers true on its own.
     const repeating = isRepeatingArming(update.title, claudeMeta, rawInput) ||
       existing?.repeating === true;
-    const ttlMs = armedTaskTtlMs(
-      claudeMeta?.toolResponse?.timeoutMs,
-      repeating,
-    );
     this.armedTasks.set(toolCallId, {
       label,
       ...(knownTaskId !== undefined ? { taskId: knownTaskId } : {}),
       repeating,
       armedAt: existing?.armedAt ?? now,
-      expiresAt: now + ttlMs,
     });
     this.onArmedTasksChanged();
   }
@@ -3408,16 +3390,9 @@ export class Session {
     return oldest;
   }
 
-  // Called after any mutation of armedTasks. Re-arms the expiry timer and
-  // tells attached clients, but only when the derived state they render
-  // actually moved.
-  //
-  // Expiry is timer-driven rather than swept on read because the state is
-  // now pushed, not polled: a session sitting idle for an hour has nobody
-  // reading the getter, and "the job you were told about has expired" is
-  // exactly the transition a user who walked away needs to see.
+  // Called after any mutation of armedTasks. Tells attached clients, but
+  // only when the derived state they render actually moved.
   private onArmedTasksChanged(): void {
-    this.scheduleArmedExpiry();
     const count = this.armedTasks.size;
     const since = this.armedSince;
     if (count === this.lastArmedBroadcast?.count &&
@@ -3436,53 +3411,17 @@ export class Session {
     });
   }
 
-  private scheduleArmedExpiry(): void {
-    if (this.armedExpiryTimer !== undefined) {
-      clearTimeout(this.armedExpiryTimer);
-      this.armedExpiryTimer = undefined;
-    }
-    let soonest: number | undefined;
-    for (const task of this.armedTasks.values()) {
-      if (soonest === undefined || task.expiresAt < soonest) {
-        soonest = task.expiresAt;
-      }
-    }
-    if (soonest === undefined || this.closed) {
-      return;
-    }
-    this.armedExpiryTimer = setTimeout(
-      () => {
-        this.armedExpiryTimer = undefined;
-        const now = Date.now();
-        let dropped = false;
-        for (const [id, task] of this.armedTasks) {
-          if (task.expiresAt <= now) {
-            this.armedTasks.delete(id);
-            dropped = true;
-          }
-        }
-        if (dropped) {
-          this.onArmedTasksChanged();
-        } else {
-          this.scheduleArmedExpiry();
-        }
-      },
-      Math.max(0, soonest - Date.now()),
-    );
-    if (typeof this.armedExpiryTimer.unref === "function") {
-      this.armedExpiryTimer.unref();
-    }
-  }
-
   // The agent explicitly cancelled a background task, so stop counting it
   // toward the armed badge. TaskStop reports the id it killed as
   // rawInput.task_id, matching the taskId harvested at arming time.
   //
-  // Only a partial answer to stale entries: an agent that kills the
-  // underlying process some other way (observed: `pkill` from a plain
-  // Bash) leaves the watch dead with no in-band signal at all, and the
-  // entry survives until its TTL. There is no fix for that from outside
-  // the agent, which is why the count is documented as best-effort.
+  // The only in-band way a repeating watch can leave the set, and only a
+  // partial answer to stale entries: an agent that kills the underlying
+  // process some other way (observed: `pkill` from a plain Bash) leaves the
+  // watch dead with no signal at all, and the entry then survives for the
+  // life of the session. There is no fix for that from outside the agent —
+  // claude-acp holds the authoritative live set and does not publish it —
+  // which is why the count is documented as best-effort.
   private noteBackgroundTaskStopped(
     update: Record<string, unknown>,
     rawInput: Record<string, unknown> | undefined,
@@ -3583,8 +3522,8 @@ export class Session {
     //
     // For a one-shot, notification delivery is batched and only happens at
     // turn boundaries, so a resumption is good evidence that everything
-    // pending reported in. Clearing only the attributed one leaves the rest
-    // stranded until their TTL, which is how sZNwrE44KnLbCN0u showed a false
+    // pending reported in. Clearing only the attributed one strands the rest
+    // permanently, which is how sZNwrE44KnLbCN0u showed a false
     // BUSY for 28 minutes: a backgrounded vitest armed at 14:56:06 and a
     // Monitor watching for it armed at 14:57:27, the resumption was
     // attributed to the Monitor, and the vitest entry was already
@@ -3596,8 +3535,7 @@ export class Session {
     // that the watch is ALIVE, not that it is done. Clearing it on the first
     // firing is what made VHvFZxwYjpsF3scF report armedTasks: 0 with six
     // watches plainly running — each later firing found nothing armed, so
-    // the badge never came back. A repeating entry leaves only via TaskStop
-    // or its TTL, which each firing renews.
+    // the badge never came back. A repeating entry leaves only via TaskStop.
     //
     // `persistent` is not the discriminator: all six of those were
     // persistent: false and every one of them fired repeatedly. The tool
@@ -3618,12 +3556,12 @@ export class Session {
     if (discharged) {
       this.onArmedTasksChanged();
     }
-    this.unsolicitedTurn = {
+    const turn = {
       messageId: generateMessageId(),
       startedAt,
-      timer: undefined,
       cause,
     };
+    this.unsolicitedTurn = turn;
     this.promptStartedAt = startedAt;
     this.logger?.info(
       `session ${this.sessionId} agent resumed with no prompt in flight` +
@@ -3637,11 +3575,10 @@ export class Session {
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "turn_started",
-        messageId: this.unsolicitedTurn.messageId,
+        messageId: turn.messageId,
         _meta: { "hydra-acp": meta },
       },
     });
-    this.armUnsolicitedTurnTimer();
   }
 
   // Hold a user prompt at the head of the queue while the agent is mid-way
@@ -3672,10 +3609,22 @@ export class Session {
       messageId: entry.messageId,
       reason: "agent_resumed",
       ...(cause ? { cause } : {}),
-      holdCapMs: UNSOLICITED_HOLD_CAP_MS,
     });
-    let released: "quiet" | "cap" | "turn_ended" | "cancelled" | "closing" =
-      "quiet";
+    // The hold ends when the turn does, and nothing else. There used to be a
+    // 45s quiet deadline and a 180s cap here; the cap in particular was what
+    // dispatched a prompt into a demonstrably-running agent turn and lost its
+    // session/prompt response, wedging a session BUSY for 12 minutes until
+    // the user cancelled by hand. With closeUnsolicitedTurn now driven by the
+    // agent's own terminal signal, there is nothing left to estimate: the
+    // turn's end is observed, not predicted.
+    //
+    // Consequently there is no upper bound on the hold. An agent that never
+    // publishes the end of a turn it started holds the prompt indefinitely,
+    // which is the correct failure: the entry stays cancellable throughout
+    // (it is deliberately still IN promptQueue), Session.cancel closes the
+    // turn, and the alternative — injecting into a live turn — is the
+    // corruption we are avoiding.
+    let released: "turn_ended" | "cancelled" | "closing" = "turn_ended";
     for (;;) {
       if (this.closing || this.closed) {
         released = "closing";
@@ -3689,25 +3638,10 @@ export class Session {
         released = "turn_ended";
         break;
       }
-      const now = Date.now();
-      const capLeft = UNSOLICITED_HOLD_CAP_MS - (now - holdStartedAt);
-      if (capLeft <= 0) {
-        released = "cap";
-        break;
-      }
-      const quietLeft = UNSOLICITED_HOLD_QUIET_MS -
-        (now - this.lastAgentActivityAt);
-      if (quietLeft <= 0) {
-        released = "quiet";
-        break;
-      }
-      // Agent output arriving meanwhile pushes lastAgentActivityAt out and
-      // the next pass recomputes from it, so the deadlines need no waking.
-      // The poll bound is what lets a cancel or a closing turn be noticed
-      // promptly instead of at the next deadline.
-      const nap = Math.min(capLeft, quietLeft, UNSOLICITED_HOLD_POLL_MS);
+      // Poll only so a cancel or a closing session is noticed promptly. It
+      // bounds latency on state we already hold, not the agent's turn.
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, nap);
+        const timer = setTimeout(resolve, UNSOLICITED_HOLD_POLL_MS);
         if (typeof timer.unref === "function") {
           timer.unref();
         }
@@ -3719,45 +3653,21 @@ export class Session {
       reason: released,
       heldMs: Date.now() - holdStartedAt,
     });
-    if (released === "cap") {
-      this.logger?.warn(
-        `session ${this.sessionId} dispatching a prompt into a still-running ` +
-          `agent turn after ${UNSOLICITED_HOLD_CAP_MS}ms; responses may interleave`,
-      );
-    }
   }
 
-  private armUnsolicitedTurnTimer(): void {
-    const turn = this.unsolicitedTurn;
-    if (turn === undefined) {
-      return;
-    }
-    if (turn.timer !== undefined) {
-      clearTimeout(turn.timer);
-    }
-    turn.timer = setTimeout(() => {
-      this.closeUnsolicitedTurn("idle");
-    }, UNSOLICITED_TURN_IDLE_MS);
-    // Never hold the process open on a speculative deadline.
-    if (typeof turn.timer.unref === "function") {
-      turn.timer.unref();
-    }
-  }
-
-  // Close an open unsolicited turn. Called on the silence deadline, when a
-  // real prompt takes over, and from markClosed so history is never left
-  // with a dangling turn_started.
+  // Close an open unsolicited turn. Called on the agent's own terminal
+  // signal, on cancel, when a real prompt takes over, and from markClosed so
+  // history is never left with a dangling turn_started.
   //
-  // `reason` distinguishes the silence deadline (our guess that the agent
-  // finished) from a takeover; clients that care can tell "we think it
-  // stopped" from "something else started".
-  private closeUnsolicitedTurn(reason: "idle" | "superseded" | "closed"): void {
+  // `reason` tells clients which of those it was. "completed" is the only one
+  // that means the agent said it finished; the rest are hydra or the user
+  // ending the turn from outside.
+  private closeUnsolicitedTurn(
+    reason: "completed" | "cancelled" | "superseded" | "closed",
+  ): void {
     const turn = this.unsolicitedTurn;
     if (turn === undefined) {
       return;
-    }
-    if (turn.timer !== undefined) {
-      clearTimeout(turn.timer);
     }
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
@@ -4276,6 +4186,19 @@ export class Session {
     ) {
       this.cancelExtensionDispatch(this.currentEntry.messageId, "cancelled");
     }
+    // An agent-initiated turn has no prompt in flight, so nothing downstream
+    // will ever close it on our behalf: the agent interrupts its query but
+    // has no session/prompt to answer, and no turn_complete is owed. Close it
+    // here or ^C is a guaranteed no-op for the entire class of turns the
+    // agent starts by itself.
+    //
+    // Measured before this existed: agent published its terminal at T+2s,
+    // cancel sent at T+5s, turn stayed open until the silence deadline at
+    // T+92s with zero agent output in between. The keystroke did nothing.
+    //
+    // Ordered before the agent dispatch so clients see the turn end
+    // immediately rather than after the chain walk.
+    this.closeUnsolicitedTurn("cancelled");
     // Walk the request-side transformer chain with tailKind=notification:
     // transformers that declared "request:session/cancel" intercept get
     // a chance to observe (continue), suppress (stop), or do async
@@ -7405,10 +7328,6 @@ export class Session {
     // history never ends on a turn_started with no turn_ended after it.
     // Must precede the closing/closed flags for the broadcast to go out.
     this.closeUnsolicitedTurn("closed");
-    if (this.armedExpiryTimer !== undefined) {
-      clearTimeout(this.armedExpiryTimer);
-      this.armedExpiryTimer = undefined;
-    }
     const deleteRecord = opts.deleteRecord || this.deleteRecordIntent;
     opts = { deleteRecord };
     this.closing = true;
@@ -8667,29 +8586,9 @@ const STATE_UPDATE_KINDS = new Set([
   "hydra_compaction",
 ]);
 
-// How long an arming stays counted, given whatever timeout the agent
-// reported. Falls back to the default when it reported none, and clamps to
-// the ceiling for its kind either way. See all three constants for the
-// reasoning; the short version is that a repeating watch has fewer ways to
-// leave the set, so cutting it short shows a live job as idle.
-export function armedTaskTtlMs(
-  reportedTimeoutMs: unknown,
-  repeating = false,
-): number {
-  const reported =
-    typeof reportedTimeoutMs === "number" && reportedTimeoutMs > 0
-      ? reportedTimeoutMs
-      : ARMED_TASK_DEFAULT_TTL_MS;
-  const ceiling = repeating
-    ? ARMED_TASK_REPEATING_MAX_TTL_MS
-    : ARMED_TASK_MAX_TTL_MS;
-  return Math.min(reported, ceiling);
-}
-
 // Whether an arming is a repeating watch (a Monitor) rather than a one-shot
-// (a backgrounded Bash). Decides both which ceiling above applies and
-// whether a resumption discharges the entry, so getting it wrong is a
-// visible false-idle either way.
+// (a backgrounded Bash). Decides whether a resumption discharges the entry,
+// so getting it wrong is a visible false-idle either way.
 //
 // run_in_background vetoes first because it is the one unambiguous
 // one-shot signal: it is a Bash parameter, Monitor has no such option, and

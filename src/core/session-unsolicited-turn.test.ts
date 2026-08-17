@@ -12,7 +12,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   Session,
-  armedTaskTtlMs,
   isRepeatingArming,
   type AttachedClient,
 } from "./session.js";
@@ -89,6 +88,35 @@ function agentChunk(
       content: { type: "text", text },
     },
   });
+}
+
+// The notification that authoritatively ends a cycle: claude-acp emits a
+// usage_update at every SDK `result` and stamps it with the lane that
+// produced it. An autonomous kind is "the model finished something it
+// started on its own".
+//
+// Shape verified on the live wire against claude-acp 0.69.0 /
+// claude-agent-sdk 0.3.232:
+//   _meta={"_claude/origin":{"kind":"task-notification"}}
+function autonomousTerminal(
+  mock: ReturnType<typeof makeMockAgent>,
+  kind = "task-notification",
+): void {
+  mock.triggerNotification("session/update", {
+    sessionId: "u_agent",
+    update: {
+      sessionUpdate: "usage_update",
+      used: 4321,
+      _meta: { "_claude/origin": { kind } },
+    },
+  });
+}
+
+// The same carrier for a turn the user asked for. Observed as
+// {"kind":"human"} on every user turn's terminal, and it must never end an
+// agent-initiated turn.
+function humanTerminal(mock: ReturnType<typeof makeMockAgent>): void {
+  autonomousTerminal(mock, "human");
 }
 
 function updatesOfKind(
@@ -200,67 +228,115 @@ describe("unsolicited turn detection", () => {
 });
 
 describe("unsolicited turn lifecycle", () => {
-  it("closes after the silence deadline and reopens on later activity", async () => {
+  // No fake timers anywhere in this suite, deliberately: nothing about an
+  // unsolicited turn's lifetime is time-based any more. It ends when the
+  // agent says it has.
+  it("closes on the agent's terminal signal, and reopens on later activity", async () => {
     const { session, mock, sent } = await makeSessionAfterOneTurn();
-    vi.useFakeTimers();
 
     agentChunk(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
 
-    // Activity keeps pushing the deadline out.
-    vi.advanceTimersByTime(60_000);
+    // Content alone never ends it, however much of it arrives. The old
+    // silence deadline made this a race against the clock; now it isn't one.
     agentChunk(mock, "still going");
-    vi.advanceTimersByTime(60_000);
+    agentChunk(mock, "and more");
     expect(session.inUnsolicitedTurn).toBe(true);
 
-    vi.advanceTimersByTime(31_000);
+    autonomousTerminal(mock);
     expect(session.inUnsolicitedTurn).toBe(false);
     expect(session.turnStartedAt).toBeUndefined();
 
     const ended = updatesOfKind(sent, "turn_ended");
     expect(ended).toHaveLength(1);
-    expect(hydraMeta(ended[0]!).reason).toBe("idle");
+    expect(hydraMeta(ended[0]!).reason).toBe("completed");
     expect(hydraMeta(ended[0]!).unsolicited).toBe(true);
     expect(ended[0]!.startedMessageId).toBe(
       updatesOfKind(sent, "turn_started")[0]!.messageId,
     );
 
-    // A closed-too-early guess is self-healing: more content opens a fresh
-    // turn rather than being swallowed.
-    agentChunk(mock, "actually not done");
+    // A second background task wakes it again: fresh turn, not a resumption
+    // of the closed one.
+    agentChunk(mock, "woken again");
     expect(session.inUnsolicitedTurn).toBe(true);
     expect(updatesOfKind(sent, "turn_started")).toHaveLength(2);
   });
 
+  it("does not end on a user-lane terminal", async () => {
+    const { session, mock, sent } = await makeSessionAfterOneTurn();
+    agentChunk(mock);
+    expect(session.inUnsolicitedTurn).toBe(true);
+
+    // {"kind":"human"} terminates the user's own turns and rides the same
+    // carrier. Treating it as an end signal would close every agent-initiated
+    // turn the moment any user turn finished.
+    humanTerminal(mock);
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(updatesOfKind(sent, "turn_ended")).toHaveLength(0);
+
+    autonomousTerminal(mock);
+    expect(session.inUnsolicitedTurn).toBe(false);
+  });
+
+  it("ignores a usage_update carrying no origin at all", async () => {
+    const { session, mock } = await makeSessionAfterOneTurn();
+    agentChunk(mock);
+    // Older claude-acp builds, and hydra's own per-boundary snapshots, send
+    // usage_update with no _claude/origin. Those must not end the turn.
+    mock.triggerNotification("session/update", {
+      sessionId: "u_agent",
+      update: { sessionUpdate: "usage_update", used: 99 },
+    });
+    expect(session.inUnsolicitedTurn).toBe(true);
+  });
+
   it("never emits turn_complete, so clients' turn accounting is untouched", async () => {
     const { session, mock, sent } = await makeSessionAfterOneTurn();
-    vi.useFakeTimers();
     agentChunk(mock);
-    vi.advanceTimersByTime(120_000);
+    autonomousTerminal(mock);
     expect(session.inUnsolicitedTurn).toBe(false);
     expect(updatesOfKind(sent, "turn_complete")).toHaveLength(0);
   });
 
-  it("a requested prompt supersedes an open unsolicited turn", async () => {
+  it("is ended by cancel, so ^C is not a no-op on an agent-initiated turn", async () => {
     const { session, mock, client, sent } = await makeSessionAfterOneTurn();
-    vi.useFakeTimers();
+    agentChunk(mock);
+    expect(session.inUnsolicitedTurn).toBe(true);
+
+    // Measured before this worked: the agent published its terminal at T+2s,
+    // the cancel landed at T+5s, and the turn stayed open until the silence
+    // deadline at T+92s. The keystroke did nothing at all.
+    await session.cancel(client.clientId);
+
+    expect(session.inUnsolicitedTurn).toBe(false);
+    expect(session.turnStartedAt).toBeUndefined();
+    const ended = updatesOfKind(sent, "turn_ended");
+    expect(ended).toHaveLength(1);
+    expect(hydraMeta(ended[0]!).reason).toBe("cancelled");
+  });
+
+  it("orders turn_ended before the prompt that was waiting on it", async () => {
+    const { session, mock, client, sent } = await makeSessionAfterOneTurn();
 
     agentChunk(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
 
-    // The prompt is held behind the running turn first (see the queue-hold
-    // suite); let the quiet window lapse so it gets dispatched.
+    // The prompt is held behind the running turn (see the queue-hold suite)
+    // and released by the agent's terminal, not by a deadline.
     const done = session.prompt(client.clientId, {
       sessionId: "sess_u",
       prompt: [{ type: "text", text: "hello" }],
     });
-    await vi.advanceTimersByTimeAsync(50_000);
+    await new Promise((r) => setImmediate(r));
+    autonomousTerminal(mock);
     await done;
 
     expect(session.inUnsolicitedTurn).toBe(false);
     const ended = updatesOfKind(sent, "turn_ended");
     expect(ended).toHaveLength(1);
-    expect(hydraMeta(ended[0]!).reason).toBe("superseded");
+    // "completed", not "superseded": the agent finished it, the prompt just
+    // happened to be waiting. Nothing was cut short.
+    expect(hydraMeta(ended[0]!).reason).toBe("completed");
 
     // turn_ended must land before prompt_received, so no client ever sees
     // two turns open at once.
@@ -323,7 +399,7 @@ describe("queue hold during an unsolicited turn", () => {
     return { session, mock, client, wire: stream.sent };
   }
 
-  it("holds a prompt until the agent goes quiet, then dispatches it", async () => {
+  it("holds a prompt until the agent publishes its terminal, then dispatches", async () => {
     const { session, mock, client, wire } = await setup();
     vi.useFakeTimers();
     agentChunk(mock);
@@ -336,58 +412,61 @@ describe("queue hold during an unsolicited turn", () => {
     const held = queueEvents(wire, "hydra-acp/prompt_queue/held");
     expect(held).toHaveLength(1);
     expect(held[0]!.reason).toBe("agent_resumed");
-    // Still waiting: the agent hasn't been quiet long enough.
     expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
 
-    // A long thinking pause must not release: claude-acp forwards no
-    // thought chunks, so silence here is indistinguishable from finishing.
-    await vi.advanceTimersByTimeAsync(40_000);
-    agentChunk(mock, "back from thinking");
-    await vi.advanceTimersByTimeAsync(40_000);
+    // Time alone changes nothing now. This used to release at 45s of quiet,
+    // which meant a thinking pause could be mistaken for the end of the turn.
+    await vi.advanceTimersByTimeAsync(300_000);
     expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
 
-    await vi.advanceTimersByTimeAsync(6_000);
+    autonomousTerminal(mock);
+    await vi.advanceTimersByTimeAsync(1_000);
     await done;
     const released = queueEvents(wire, "hydra-acp/prompt_queue/released");
     expect(released).toHaveLength(1);
-    expect(released[0]!.reason).toBe("quiet");
+    expect(released[0]!.reason).toBe("turn_ended");
   });
 
-  it("gives up and dispatches at the cap when the agent never stops", async () => {
+  it("never dispatches into a turn that is still running", async () => {
     const { session, mock, client, wire } = await setup();
     vi.useFakeTimers();
     agentChunk(mock);
 
-    const done = session.prompt(client.clientId, {
+    void session.prompt(client.clientId, {
       sessionId: "sess_u",
       prompt: [{ type: "text", text: "held one" }],
     });
-    // A chatty agent: never quiet for 20s, so only the cap can end this.
-    for (let i = 0; i < 20; i++) {
+    // A chatty agent that never publishes a terminal. There used to be a
+    // 180s cap here that gave up and dispatched anyway; in production that
+    // injected a prompt into a live turn and its session/prompt response was
+    // never returned, wedging the session BUSY for 12 minutes until the user
+    // killed it by hand. Holding forever is the correct failure: the entry
+    // stays cancellable, and cancel closes the turn.
+    for (let i = 0; i < 40; i++) {
       await vi.advanceTimersByTimeAsync(10_000);
       agentChunk(mock, `chunk ${i}`);
     }
-    await done;
-    const released = queueEvents(wire, "hydra-acp/prompt_queue/released");
-    expect(released).toHaveLength(1);
-    expect(released[0]!.reason).toBe("cap");
-    expect(released[0]!.heldMs as number).toBeGreaterThanOrEqual(180_000);
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
+    expect(session.inUnsolicitedTurn).toBe(true);
   });
 
-  it("releases early when the turn closes on its own", async () => {
+  it("releases when the turn is cancelled out from under it", async () => {
     const { session, mock, client, wire } = await setup();
     vi.useFakeTimers();
     agentChunk(mock);
-    // Silence closes the unsolicited turn at 90s, but the quiet window is
-    // shorter, so this releases on quiet well before that.
     const done = session.prompt(client.clientId, {
       sessionId: "sess_u",
       prompt: [{ type: "text", text: "held one" }],
     });
-    await vi.advanceTimersByTimeAsync(50_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(queueEvents(wire, "hydra-acp/prompt_queue/released")).toHaveLength(0);
+
+    // The escape hatch for an agent that never publishes a terminal.
+    await session.cancel(client.clientId);
+    await vi.advanceTimersByTimeAsync(1_000);
     await done;
     expect(queueEvents(wire, "hydra-acp/prompt_queue/released")[0]!.reason)
-      .toBe("quiet");
+      .toBe("turn_ended");
     expect(session.inUnsolicitedTurn).toBe(false);
   });
 
@@ -549,8 +628,8 @@ describe("armed background tasks", () => {
   // Verbatim shape of sZNwrE44KnLbCN0u, which showed a false BUSY for 28
   // minutes: a job backgrounded first, then a Monitor armed to watch it, so
   // the resumption could only be attributed to the Monitor. Clearing just
-  // the attributed one stranded the job entry until its 30-minute TTL,
-  // because lastBackgroundTask only holds the most recent arming.
+  // the attributed one would strand the job entry permanently, because
+  // lastBackgroundTask only holds the most recent arming.
   it("clears a task the resumption could not be attributed to", async () => {
     const { session, mock, client } = await makeSessionAfterOneTurn();
     (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
@@ -659,46 +738,38 @@ describe("armed background tasks", () => {
     expect(session.armedSince).toBe(armedAt);
   });
 
-  // Surviving a resumption must not mean immortal. With the resumption exit
-  // gone the TTL is a repeating watch's only exit besides TaskStop, and it is
-  // a lifetime rather than a silence budget since nothing re-arms the entry.
-  // It bounds both a watch killed by a bare `pkill`, which reports nothing at
-  // all, and one whose command simply exits early. Real timers, per the note
-  // below.
-  it("ages out a repeating watch on its own timeout", async () => {
+  // A repeating watch has no expiry at all now. It leaves the set only on an
+  // authoritative signal (TaskStop), never on a clock. The three ceilings
+  // that used to bound it were guesses at a duration hydra cannot observe,
+  // and they failed in both directions: a real 45-minute device watch went
+  // dark 15 minutes in, while a watch killed by a bare `pkill` kept claiming
+  // a wakeup for the rest of the hour.
+  // Real timers on purpose, and a short reported timeoutMs, so this exercises
+  // the real path. Fake timers could not prove absence here: a timer armed
+  // before vi.useFakeTimers() is never advanced by it, so the assertion would
+  // hold whether or not an expiry still existed.
+  it("does not age out a repeating watch, however long it runs", async () => {
     const { session, mock } = await armDuringTurn({
       sessionUpdate: "tool_call_update",
       toolCallId: "toolu_mon",
       title: "Monitor",
       _meta: {
-        claudeCode: { toolName: "Monitor", toolResponse: { taskId: "t1", timeoutMs: 50 } },
+        claudeCode: {
+          toolName: "Monitor",
+          toolResponse: { taskId: "t1", timeoutMs: 50 },
+        },
       },
     });
-    agentChunk(mock, "one event, then killed from outside");
+    agentChunk(mock, "one event");
     expect(session.armedBackgroundTasks).toHaveLength(1);
-    await new Promise((r) => setTimeout(r, 120));
-    expect(session.armedBackgroundTasks).toHaveLength(0);
-    expect(session.armedSince).toBeUndefined();
-  });
+    const armedAt = session.armedSince;
 
-  // The one-shot ceiling silently shortened real 45- and 60-minute
-  // device-perf watches to 15, so the badge went dark mid-run even once
-  // clearing was fixed. The repeating ceiling is a lifetime bound: a
-  // non-persistent watch cannot outlive the timeout it named, so honouring
-  // that timeout is the tightest bound available.
-  it("gives a repeating watch a longer ceiling than a one-shot", () => {
-    // A real 45-minute watch, honoured as asked rather than cut to 15.
-    expect(armedTaskTtlMs(45 * 60 * 1000, true)).toBe(45 * 60 * 1000);
-    expect(armedTaskTtlMs(45 * 60 * 1000)).toBe(15 * 60 * 1000);
-    // Monitor's own maximum timeout_ms, so every non-persistent watch fits.
-    expect(armedTaskTtlMs(60 * 60 * 1000, true)).toBe(60 * 60 * 1000);
-    // Bounded past that, and a persistent watch reports no timeout at all
-    // and takes the default: long, but still mortal.
-    expect(armedTaskTtlMs(3 * 60 * 60 * 1000, true)).toBe(60 * 60 * 1000);
-    expect(armedTaskTtlMs(undefined, true)).toBe(30 * 60 * 1000);
-    // A short one is still honoured, and junk still falls back.
-    expect(armedTaskTtlMs(90_000, true)).toBe(90_000);
-    expect(armedTaskTtlMs("900000", true)).toBe(30 * 60 * 1000);
+    // Well past the 50ms the agent named. This is the exact assertion the
+    // old expiry test made, inverted.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    // The "running Xs" clock still reads from the original arming.
+    expect(session.armedSince).toBe(armedAt);
   });
 
   it("tells a repeating watch from a one-shot", () => {
@@ -733,24 +804,7 @@ describe("armed background tasks", () => {
       .toBe(false);
   });
 
-  // Real timers on purpose. Expiry is timer-driven now rather than swept
-  // on read, so a task armed before vi.useFakeTimers() has already
-  // scheduled a real timeout that advanceTimersByTime will never fire.
-  // A short real timeoutMs exercises the actual path in ~80ms.
-  it("expires on the agent's own timeout so the badge can't stick", async () => {
-    const { session } = await armDuringTurn({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "toolu_mon",
-      title: "Monitor",
-      _meta: { claudeCode: { toolResponse: { taskId: "t1", timeoutMs: 50 } } },
-    });
-    expect(session.armedBackgroundTasks).toHaveLength(1);
-    await new Promise((r) => setTimeout(r, 120));
-    expect(session.armedBackgroundTasks).toHaveLength(0);
-    expect(session.armedSince).toBeUndefined();
-  });
-
-  it("pushes armed_tasks_updated on arm and again on expiry", async () => {
+  it("pushes armed_tasks_updated on arm and again when it is discharged", async () => {
     const { session, mock } = makeSession();
     const stream = makeControlledStream();
     const client: AttachedClient = {
@@ -780,7 +834,8 @@ describe("armed background tasks", () => {
       prompt: [{ type: "text", text: "start it" }],
     });
     await settleDrain();
-    await new Promise((r) => setTimeout(r, 120));
+    // Discharged by the agent saying so, not by a clock running out.
+    await stopDuringTurn(session, mock, client, "t1");
 
     const pushes = stream.sent
       .filter(
@@ -976,20 +1031,23 @@ describe("armed background tasks", () => {
     expect(session.armedBackgroundTasks).toHaveLength(1);
   });
 
-  // The agent's own timeoutMs answers "how long might this watch run", not
-  // "how long should we keep claiming a wakeup is coming". A job killed by a
-  // bare pkill produces no TaskStop and no notification, so the ceiling is
-  // the only thing that ever clears it.
-  it("caps a long agent timeout, honours a short one, defaults when absent", () => {
-    // An hour was asked for; 15 minutes is the most we honour.
-    expect(armedTaskTtlMs(60 * 60 * 1000)).toBe(15 * 60 * 1000);
-    expect(armedTaskTtlMs(90_000)).toBe(90_000);
-    // No timeout reported (every backgrounded Bash): default, itself capped.
-    expect(armedTaskTtlMs(undefined)).toBe(15 * 60 * 1000);
-    // Junk from the wire falls back rather than producing a NaN deadline.
-    expect(armedTaskTtlMs(0)).toBe(15 * 60 * 1000);
-    expect(armedTaskTtlMs(-5)).toBe(15 * 60 * 1000);
-    expect(armedTaskTtlMs("900000")).toBe(15 * 60 * 1000);
+  // The agent's timeoutMs answers "how long might this watch run", which was
+  // never the question hydra needed answered, so it is no longer read at all.
+  // A one-shot's exits are the resumption it causes and TaskStop; nothing
+  // else, and no clock.
+  it("ignores the agent's reported timeout entirely", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_bg2",
+      title: "Terminal",
+      rawInput: { command: "sleep 1", run_in_background: true },
+      _meta: {
+        claudeCode: { toolResponse: { taskId: "bg_ttl", timeoutMs: 50 } },
+      },
+    });
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(session.armedBackgroundTasks).toHaveLength(1);
   });
 
   it("does not count ordinary foreground tool calls", async () => {
