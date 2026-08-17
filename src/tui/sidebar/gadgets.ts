@@ -8,6 +8,7 @@
 //     the memo cache in registry.ts doesn't churn on invisible changes.
 //   - render() must not exceed ctx.width cells per row.
 
+import type { PlanEntry } from "../../core/render-update.js";
 import type { ChromeActionTarget } from "../chrome-action.js";
 import type { FormattedLine } from "../format.js";
 import { RUNNING_TOOL_CAP } from "./running-tools.js";
@@ -390,6 +391,25 @@ export const queueGadget: Gadget = {
   ],
 };
 
+// Display order for the todo column: in progress, then unfinished, then
+// finished. Plan order puts the completed entries at the top, so the first
+// page (the only one visible without clicking) filled up with work the agent
+// is already done with while the active entry sat on page 2.
+// Anything not explicitly completed or in progress ranks as unfinished,
+// matching how the row's glyph and style treat an unknown status.
+function planRank(status: string | undefined): number {
+  if (status === "in_progress") {
+    return 0;
+  }
+  return status === "completed" ? 2 : 1;
+}
+
+// Sort is stable, so the agent's own ordering still shows through inside
+// each group.
+function planDisplayOrder(plan: readonly PlanEntry[]): PlanEntry[] {
+  return [...plan].sort((a, b) => planRank(a.status) - planRank(b.status));
+}
+
 export const todoGadget: Gadget = {
   id: "todo",
   title: "todo",
@@ -404,7 +424,7 @@ export const todoGadget: Gadget = {
     const lines: SidebarLine[] = [];
     // Every entry, not a window: the column scrolls under the wheel, so
     // truncating here would hide entries the user has no way to reach.
-    for (const entry of s.plan) {
+    for (const entry of planDisplayOrder(s.plan)) {
       const glyph =
         entry.status === "completed" ? "✓" : entry.status === "in_progress" ? "▸" : "·";
       const style =

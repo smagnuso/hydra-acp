@@ -287,6 +287,46 @@ describe("files gadget", () => {
   });
 });
 
+describe("todo gadget", () => {
+  // Page 1 is the only page visible without clicking, so the actionable
+  // entries have to be the ones at the top: in plan order the completed ones
+  // pile up there and push the active entry onto page 2.
+  it("orders in-progress, then unfinished, then completed", () => {
+    const lines = todoGadget.render(
+      snap({
+        plan: [
+          { content: "done a", status: "completed" },
+          { content: "done b", status: "completed" },
+          { content: "active", status: "in_progress" },
+          { content: "todo a", status: "pending" },
+          { content: "no status" },
+        ],
+      }),
+      ctx(),
+    );
+    expect(lines.map((l) => l.body)).toEqual([
+      "▸ active",
+      "· todo a",
+      "· no status",
+      "✓ done a",
+      "✓ done b",
+    ]);
+  });
+
+  it("keeps plan order within a status group", () => {
+    const lines = todoGadget.render(
+      snap({
+        plan: [
+          { content: "second", status: "pending" },
+          { content: "first", status: "pending" },
+        ],
+      }),
+      ctx(),
+    );
+    expect(lines.map((l) => l.body)).toEqual(["· second", "· first"]);
+  });
+});
+
 describe("openPath targets", () => {
   it("marks edited-file rows with the absolute path to open", () => {
     const lines = filesGadget.render(
