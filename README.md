@@ -150,10 +150,27 @@ moved on and `stop` starts refusing.
 
 `start` **copies** your uncommitted changes in rather than taking them, so your
 checkout is left exactly as it was, and landing reconciles the two sides rather
-than demanding a clean tree. `discard` retires the last autosave to
-`refs/hydra/retired/<label>-<sha>` and names it on the way out, so even the
-destructive exit is recoverable — and keeping it outside the live namespace
-means a later workspace reusing that label can't overwrite it.
+than demanding a clean tree. It names every file that came along, and
+`start --clean` opts out and names what it left behind instead, for when the
+work in your tree is unrelated to what you're about to ask for. `discard`
+retires the last autosave to `refs/hydra/retired/<label>-<sha>` and names it on
+the way out, so even the destructive exit is recoverable, and keeping it
+outside the live namespace means a later workspace reusing that label can't
+overwrite it.
+
+`clean` is the exit that isn't one: it throws away everything done in the
+workspace and leaves you in it, landing on exactly the state `start --clean`
+would have produced. Installed dependencies and carried config files survive
+(they're part of what `start` built, not part of the work being discarded);
+`--deep` rebuilds them instead. Because it deletes the workspace's copy of your
+carried work, it also re-anchors the landing so the copy still in your own tree
+can't be lost by a later `stop`.
+
+Submodules are populated on creation, and work inside one is carried in and
+landed back like any other work. That needs handling the superproject can't
+express: a container records a submodule as a pointer, not as content, so
+uncommitted work inside one is invisible to its snapshot while still showing in
+its status as a single modified path.
 
 **Two sessions can share one workspace, deliberately.** `start <name>` naming a
 workspace a live session is already in *joins* it instead of creating a second
@@ -164,10 +181,6 @@ sessions in one repo. Joining requires the two trees to already agree, since it
 carries nothing across. `stop` from a co-tenant behaves as `detach` — you can't
 finish a shared thing alone — so the merge waits for the last session to leave
 and nothing commits a tree somebody is still writing to.
-
-`hydra workspace` from the shell lists what exists (`active`, `unowned`, and
-`--inactive` for sessions pointing at a directory that's gone), and `merge`,
-`remove` and `prune` land or reclaim them from outside a session.
 
 ### From your editor
 
@@ -318,6 +331,43 @@ hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]
                                             # working directory; --info prints the bundle's
                                             # meta without importing
 
+# hydra-acp workspace [list] [--json] [--inactive]
+                                            # what exists: `active` (directory + a session
+                                            # record), `unowned` (directory, no record, so
+                                            # reclaimable), and with --inactive, `inactive`
+                                            # (a record pointing at a directory that is gone,
+                                            # so rebuildable). Reads the filesystem, not the
+                                            # daemon, so it still answers when the daemon is down
+hydra-acp workspace merge [<session>] [-m <msg>] [--into <path>] [--remove]
+                                            # land a workspace's work into its recorded source
+                                            # tree, fast-forward only. Records anything still
+                                            # uncommitted there first (-m names that), replays
+                                            # your own post-start edits on top, and keeps the
+                                            # workspace unless --remove. --into overrides the
+                                            # destination
+hydra-acp workspace apply [<session>] [--into <path>]
+                                            # same landing, but as staged changes you commit
+                                            # yourself: nothing is recorded on the workspace's
+                                            # branch and nothing is merged
+hydra-acp workspace clean [<session>] [--deep]
+                                            # throw away everything done in a live session's
+                                            # workspace and leave the session in it, putting it
+                                            # back exactly as `start --clean` would have made it.
+                                            # Keeps installed dependencies and carried config
+                                            # files; --deep rebuilds those too. Live sessions
+                                            # only: every guard that makes it safe belongs to
+                                            # the running session
+hydra-acp workspace remove|rm [<session>] [--force]
+                                            # take a named workspace away. Refuses while it
+                                            # holds uncommitted work or a live session is in it;
+                                            # --force overrides both. The branch and the last
+                                            # autosave are left behind for recovery
+hydra-acp workspace prune [--force]         # sweep `unowned` workspaces in bulk. Skips any
+                                            # holding uncommitted work unless --force, and
+                                            # reclaims each through its provider so no stale
+                                            # worktree registration or branch is left pointing
+                                            # at a path that no longer exists
+
 hydra-acp extension [list]                 # list configured extensions and live state
 hydra-acp extension add <name>             # add to config (--command, --args, --env, --disabled)
 hydra-acp extension remove <name>          # remove from config
@@ -428,7 +478,7 @@ conversation log.
 | `/hydra compact [status]` | Compact history now. `status` inspects state without triggering. |
 | `/hydra uncompact` | Roll back the most recent compaction, before any new turns. |
 | `/hydra fork [verbatim]` | Fork into a new session. Default is a synopsis brief; `verbatim` slices at the last completed turn. |
-| `/hydra workspace <start [name] \| sync \| merge \| stop \| detach \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. See [isolated workspaces](#isolated-workspaces). |
+| `/hydra workspace <start [name] [--clean] \| sync \| merge \| stop \| detach \| clean [--deep] \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. `start --clean` leaves your uncommitted changes behind instead of copying them in; `clean` wipes the workspace and stays in it. See [isolated workspaces](#isolated-workspaces). |
 | `/hydra restart` | Restart the agent with a fresh `session/new`, preserving history. Useful when the available models have changed underneath you. |
 | `/hydra kill` | Close this session. The agent dies; the record is kept and can be resumed. |
 
