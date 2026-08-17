@@ -1850,27 +1850,61 @@ badge cannot stick forever, which means it can read `0` while a wakeup is
 still coming. A single notification can also batch several tasks while only
 one gets attributed to the resulting turn, so the count can overstate.
 
-The daemon clears **every** entry armed since the last turn boundary when
-the agent resumes, not just the one it can attribute the resumption to.
-Delivery is batched at turn boundaries, so a resumption is good evidence
-that everything pending reported in; clearing only the attributable one
-stranded the rest until their TTL. It also clears an entry the agent cancels
-with `TaskStop`, matched on `rawInput.task_id` against the id harvested at
-arming time (a Monitor reports that in `_meta`; a backgrounded Bash reports
+**One-shot versus repeating armings.** How an entry leaves the set depends
+on how often the underlying tool fires, and the two kinds behave differently:
+
+| | fires | cleared by a resumption | TTL ceiling |
+|---|---|---|---|
+| backgrounded `Bash` (`run_in_background`) | once, on exit | yes | 15 min |
+| `Monitor` | once per occurrence, until its command exits or its timeout lapses | **no** | 60 min |
+
+For a **one-shot**, the daemon clears **every** such entry armed since the
+last turn boundary when the agent resumes, not just the one it can attribute
+the resumption to. Delivery is batched at turn boundaries, so a resumption is
+good evidence that everything pending reported in; clearing only the
+attributable one stranded the rest until their TTL.
+
+For a **repeating** watch that reasoning does not hold: its notification says
+the watch is alive, not that it is finished. Clearing one on its first firing
+left every later firing with nothing armed, so a session with six live
+watches reported `armedTasks: 0`. A repeating entry therefore leaves only via
+`TaskStop` or its TTL. `persistent` does **not** identify these — a
+`persistent: false` Monitor fires repeatedly too; the tool kind does.
+
+Either kind is cleared when the agent cancels it with `TaskStop`, matched on
+`rawInput.task_id` against the id harvested at arming time (a Monitor reports
+that in `_meta.claudeCode.toolResponse.taskId`; a backgrounded Bash reports
 it only in its `rawOutput` prose, which the daemon parses).
 
-It cannot see an agent that kills the underlying process some other way: a
-`pkill` from a plain Bash leaves the watch dead with no signal at all. For
-that case only the TTL helps, so the window is capped at 15 minutes even
-when the agent named a longer `timeoutMs` of its own. The agent's timeout
-answers "how long might this watch run", which is not the same question as
-"how long should we keep claiming a wakeup is coming".
+The daemon cannot see an agent that kills the underlying process some other
+way: a `pkill` from a plain Bash leaves the watch dead with no signal at all.
+For that case only the TTL helps, hence the ceilings above, applied even when
+the agent named a longer `timeoutMs` of its own. The agent's timeout answers
+"how long might this watch run", which is not the same question as "how long
+should we keep claiming a wakeup is coming".
+
+The ceilings differ because they bound different things. A one-shot has other
+exits, so 15 minutes is a cheap backstop. For a repeating watch the TTL is
+nearly the only exit, and it is a **lifetime** bound that nothing renews: a
+Monitor's tool call returns within seconds of arming (its final
+`status: "completed"` means the tool returned, **not** that the watch ended)
+and the watch's later events arrive as ordinary agent activity, never as
+another `tool_call_update` for that `toolCallId`. So the entry is armed
+exactly once. 60 minutes is `Monitor`'s own maximum `timeout_ms`, and a
+non-persistent watch cannot outlive the timeout it named, which makes
+honouring that timeout the tightest bound available; a persistent one names
+no timeout at all, takes a 30-minute default, and that default is the only
+thing keeping it mortal.
+
+The cost of the longer ceiling is a watch whose command exits early: nothing
+reports that, so the entry stays counted until its timeout lapses. This is
+the same best-effort caveat as above, with a wider window than a one-shot's.
 
 #### Notification: `hydra-acp/session/armed_tasks_updated`
 
 Daemon to every attached client, whenever the armed set changes: a task is
-armed, one is attributed to a resumption, one is cancelled via `TaskStop`,
-or one expires.
+armed, a one-shot is discharged by a resumption, one is cancelled via
+`TaskStop`, or one expires.
 
 ```jsonc
 {

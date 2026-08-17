@@ -470,8 +470,8 @@ const TOOL_LABEL_LIMIT = 128;
 // claims a wakeup is coming when none is.
 const ARMED_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000;
 
-// Hard ceiling on that window, applied even when the agent named a longer
-// timeout of its own.
+// Hard ceiling on that window for a ONE-SHOT arming (a backgrounded Bash),
+// applied even when the agent named a longer timeout of its own.
 //
 // The agent's timeoutMs answers "how long might this watch run", which is
 // not the question. We need "how long should we keep claiming a wakeup is
@@ -486,7 +486,33 @@ const ARMED_TASK_DEFAULT_TTL_MS = 30 * 60 * 1000;
 // long job (a 30-minute device run clears early), and that cost is a false
 // negative, which merely degrades to the behaviour before any of this
 // existed. A stale entry instead asserts something untrue.
+//
+// Safe to keep short precisely because a one-shot has other exits: it fires
+// once, on exit, and a resumption discharges it (see openUnsolicitedTurn).
+// The ceiling is the backstop for the killed-without-a-word case only.
 const ARMED_TASK_MAX_TTL_MS = 15 * 60 * 1000;
+
+// The same ceiling for a REPEATING arming (a Monitor), which needs a much
+// longer one because it has fewer exits: it fires once per occurrence and
+// stays live afterwards, so a resumption cannot discharge it and the TTL is
+// its only exit besides TaskStop. Under the one-shot ceiling a legitimate
+// 45-minute device-perf watch went dark 15 minutes in while still reporting
+// normally, which is the same false-idle symptom from the other direction.
+//
+// This is a LIFETIME bound, not a silence budget: nothing renews it. A
+// Monitor's whole tool call finishes within seconds of arming — the trace
+// shows seven updates in ~2s ending in status "completed", which is the tool
+// RETURNING, not the watch ending — and the watch's later events arrive as
+// plain agent activity, never as another tool_call_update for that
+// toolCallId. So the entry is armed exactly once and expiresAt never moves.
+//
+// An hour because it is Monitor's own maximum timeout_ms. A non-persistent
+// watch cannot outlive the timeout it named, so honouring that timeout is
+// the tightest bound available. The cost is a watch whose command exits
+// early: nothing reports that, so the entry stays counted until the timeout
+// lapses. A persistent watch names no timeout at all and falls back to the
+// default above, which is the only thing keeping it mortal.
+const ARMED_TASK_REPEATING_MAX_TTL_MS = 60 * 60 * 1000;
 
 // Queue hold (see holdForUnsolicitedTurn). While the agent is mid-way
 // through a turn it started by itself, promoting the next user prompt
@@ -783,7 +809,16 @@ export class Session {
   // ARMED_TASK_DEFAULT_TTL_MS.
   private armedTasks = new Map<
     string,
-    { label: string; taskId?: string; armedAt: number; expiresAt: number }
+    {
+      label: string;
+      taskId?: string;
+      // A repeating watch (Monitor) rather than a one-shot (backgrounded
+      // Bash). Governs both which TTL ceiling applies and whether a
+      // resumption discharges the entry. See isRepeatingArming.
+      repeating: boolean;
+      armedAt: number;
+      expiresAt: number;
+    }
   >();
   private armedExpiryTimer: ReturnType<typeof setTimeout> | undefined;
   // Last {count, since} pushed to clients, so a mutation that doesn't move
@@ -3304,7 +3339,6 @@ export class Session {
     }
     const label = this.toolLabels.get(toolCallId)?.label ?? "background task";
     this.lastBackgroundTask = { toolCallId, label };
-    const timeoutMs = armedTaskTtlMs(claudeMeta?.toolResponse?.timeoutMs);
     // A background tool call arms once and then keeps reporting: the same
     // toolCallId arrives again on every tool_call_update. So preserve the
     // ORIGINAL armedAt across re-arms and move only the deadline.
@@ -3325,11 +3359,23 @@ export class Session {
     // A later update may be the one that carries the task id, and an
     // earlier one that had it must not be erased by a later one without.
     const knownTaskId = taskId ?? existing?.taskId;
+    // Sticky, so no re-arm can demote a repeating watch to a one-shot and
+    // hand the next resumption the right to clear it. Belt-and-braces
+    // today: the sparse late update that carries neither title nor toolName
+    // still carries toolResponse.taskId, which is what armed the entry in
+    // the first place, so isRepeatingArming already answers true on its own.
+    const repeating = isRepeatingArming(update.title, claudeMeta, rawInput) ||
+      existing?.repeating === true;
+    const ttlMs = armedTaskTtlMs(
+      claudeMeta?.toolResponse?.timeoutMs,
+      repeating,
+    );
     this.armedTasks.set(toolCallId, {
       label,
       ...(knownTaskId !== undefined ? { taskId: knownTaskId } : {}),
+      repeating,
       armedAt: existing?.armedAt ?? now,
-      expiresAt: now + timeoutMs,
+      expiresAt: now + ttlMs,
     });
     this.onArmedTasksChanged();
   }
@@ -3531,24 +3577,44 @@ export class Session {
   private openUnsolicitedTurn(): void {
     const startedAt = Date.now();
     const cause = this.lastBackgroundTask;
-    // Clear every task armed since the last turn boundary, not just the one
-    // we can name.
+    // Clear every ONE-SHOT task armed since the last turn boundary, not just
+    // the one we can name — but leave repeating watches alone.
     //
-    // Notification delivery is batched and only happens at turn boundaries,
-    // so a resumption is good evidence that everything pending reported in.
-    // Clearing only the attributed one leaves the rest stranded until their
-    // TTL, which is how sZNwrE44KnLbCN0u showed a false BUSY for 28 minutes:
-    // a backgrounded vitest armed at 14:56:06 and a Monitor watching for it
-    // armed at 14:57:27, the resumption was attributed to the Monitor, and
-    // the vitest entry was already unreachable because lastBackgroundTask
-    // only ever holds the most recent arming.
+    // For a one-shot, notification delivery is batched and only happens at
+    // turn boundaries, so a resumption is good evidence that everything
+    // pending reported in. Clearing only the attributed one leaves the rest
+    // stranded until their TTL, which is how sZNwrE44KnLbCN0u showed a false
+    // BUSY for 28 minutes: a backgrounded vitest armed at 14:56:06 and a
+    // Monitor watching for it armed at 14:57:27, the resumption was
+    // attributed to the Monitor, and the vitest entry was already
+    // unreachable because lastBackgroundTask only ever holds the most recent
+    // arming.
     //
-    // Deliberately understates rather than overstates: if two genuinely
+    // That reasoning does not extend to a Monitor, which fires once per
+    // occurrence and keeps watching afterwards: its notification is evidence
+    // that the watch is ALIVE, not that it is done. Clearing it on the first
+    // firing is what made VHvFZxwYjpsF3scF report armedTasks: 0 with six
+    // watches plainly running — each later firing found nothing armed, so
+    // the badge never came back. A repeating entry leaves only via TaskStop
+    // or its TTL, which each firing renews.
+    //
+    // `persistent` is not the discriminator: all six of those were
+    // persistent: false and every one of them fired repeatedly. The tool
+    // kind is (see isRepeatingArming).
+    //
+    // Still deliberately understates for one-shots: if two genuinely
     // independent jobs were running and only one finished, the badge goes
     // quiet early. That degrades to the behaviour before any of this
     // existed, whereas a stale entry actively claims a wakeup is coming.
-    if (this.armedTasks.size > 0) {
-      this.armedTasks.clear();
+    let discharged = false;
+    for (const [id, task] of this.armedTasks) {
+      if (task.repeating) {
+        continue;
+      }
+      this.armedTasks.delete(id);
+      discharged = true;
+    }
+    if (discharged) {
       this.onArmedTasksChanged();
     }
     this.unsolicitedTurn = {
@@ -8602,13 +8668,46 @@ const STATE_UPDATE_KINDS = new Set([
 
 // How long an arming stays counted, given whatever timeout the agent
 // reported. Falls back to the default when it reported none, and clamps to
-// the ceiling either way. See both constants for the reasoning.
-export function armedTaskTtlMs(reportedTimeoutMs: unknown): number {
+// the ceiling for its kind either way. See all three constants for the
+// reasoning; the short version is that a repeating watch has fewer ways to
+// leave the set, so cutting it short shows a live job as idle.
+export function armedTaskTtlMs(
+  reportedTimeoutMs: unknown,
+  repeating = false,
+): number {
   const reported =
     typeof reportedTimeoutMs === "number" && reportedTimeoutMs > 0
       ? reportedTimeoutMs
       : ARMED_TASK_DEFAULT_TTL_MS;
-  return Math.min(reported, ARMED_TASK_MAX_TTL_MS);
+  const ceiling = repeating
+    ? ARMED_TASK_REPEATING_MAX_TTL_MS
+    : ARMED_TASK_MAX_TTL_MS;
+  return Math.min(reported, ceiling);
+}
+
+// Whether an arming is a repeating watch (a Monitor) rather than a one-shot
+// (a backgrounded Bash). Decides both which ceiling above applies and
+// whether a resumption discharges the entry, so getting it wrong is a
+// visible false-idle either way.
+//
+// run_in_background vetoes first because it is the one unambiguous
+// one-shot signal: it is a Bash parameter, Monitor has no such option, and
+// a Bash reports its task id only in rawOutput prose, never in
+// toolResponse.taskId. Tool identity is the primary positive signal since
+// repeating-ness is a property of the tool, with the toolResponse.taskId
+// shape as a fallback for the sparse late update that carries neither a
+// title nor a toolName.
+export function isRepeatingArming(
+  title: unknown,
+  claudeMeta: { toolName?: unknown; toolResponse?: { taskId?: unknown } } |
+    undefined,
+  rawInput: Record<string, unknown> | undefined,
+): boolean {
+  if (rawInput?.run_in_background === true) {
+    return false;
+  }
+  return claudeMeta?.toolName === "Monitor" || title === "Monitor" ||
+    typeof claudeMeta?.toolResponse?.taskId === "string";
 }
 
 // A backgrounded Bash reports its task id only in the tool call's rawOutput

@@ -10,7 +10,12 @@
 // prompt in flight opens a synthetic turn so the session stops reporting
 // itself idle while the agent works.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { Session, armedTaskTtlMs, type AttachedClient } from "./session.js";
+import {
+  Session,
+  armedTaskTtlMs,
+  isRepeatingArming,
+  type AttachedClient,
+} from "./session.js";
 import { HistoryStore } from "./history-store.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { makeControlledStream, makeMockAgent } from "../__tests__/test-utils.js";
@@ -591,9 +596,141 @@ describe("armed background tasks", () => {
 
     agentChunk(mock, "suite finished, 4794 passing");
     expect(session.inUnsolicitedTurn).toBe(true);
-    // Both gone, not just the Monitor.
-    expect(session.armedBackgroundTasks).toEqual([]);
+    // The one-shot goes, even though the resumption was attributed to the
+    // Monitor. The Monitor itself stays: it fires per occurrence, so its
+    // notification says the watch is alive, not that it is finished.
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Monitor", taskId: "bnrcts5np" },
+    ]);
+    expect(session.armedSince).toBeDefined();
+  });
+
+  // Verbatim shape of VHvFZxwYjpsF3scF, which reported armedTasks: 0 while
+  // six Monitors were plainly running.
+  //
+  // Clearing on the first firing is PERMANENT for a Monitor, because nothing
+  // ever re-arms it: the whole tool call finishes within ~2s of arming (seven
+  // updates ending in status "completed", which is the tool returning, not
+  // the watch ending), and the watch's later events arrive as plain agent
+  // activity with no further tool_call_update for that toolCallId. So every
+  // later firing found an empty set and the badge never came back.
+  //
+  // Note persistent: false on a watch that fired repeatedly — all six were,
+  // so persistent is not the discriminator. The tool kind is.
+  it("keeps a repeating watch armed across the resumption it causes", async () => {
+    const monitorArming = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: {
+        claudeCode: {
+          toolName: "Monitor",
+          toolResponse: {
+            taskId: "b4atttz8a",
+            timeoutMs: 2_700_000,
+            persistent: false,
+          },
+        },
+      },
+    };
+    const { session, mock } = await armDuringTurn(monitorArming);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    const armedAt = session.armedSince;
+    expect(armedAt).toBeDefined();
+
+    // First event: the watch reports progress, which wakes the session.
+    agentChunk(mock, "elapsed_steps=120");
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Monitor", taskId: "b4atttz8a" },
+    ]);
+
+    // A duplicate arming update, which is how the tool call's own seven
+    // updates arrive, must not restart the "running Xs" clock either: it
+    // reads from armedSince, so resetting it would show a watch that had
+    // been going for minutes as though it had just begun.
+    mock.triggerNotification("session/update", {
+      sessionId: "u_agent",
+      update: monitorArming,
+    });
+    expect(session.armedBackgroundTasks).toEqual([
+      { label: "Monitor", taskId: "b4atttz8a" },
+    ]);
+    expect(session.armedSince).toBe(armedAt);
+  });
+
+  // Surviving a resumption must not mean immortal. With the resumption exit
+  // gone the TTL is a repeating watch's only exit besides TaskStop, and it is
+  // a lifetime rather than a silence budget since nothing re-arms the entry.
+  // It bounds both a watch killed by a bare `pkill`, which reports nothing at
+  // all, and one whose command simply exits early. Real timers, per the note
+  // below.
+  it("ages out a repeating watch on its own timeout", async () => {
+    const { session, mock } = await armDuringTurn({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "toolu_mon",
+      title: "Monitor",
+      _meta: {
+        claudeCode: { toolName: "Monitor", toolResponse: { taskId: "t1", timeoutMs: 50 } },
+      },
+    });
+    agentChunk(mock, "one event, then killed from outside");
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(session.armedBackgroundTasks).toHaveLength(0);
     expect(session.armedSince).toBeUndefined();
+  });
+
+  // The one-shot ceiling silently shortened real 45- and 60-minute
+  // device-perf watches to 15, so the badge went dark mid-run even once
+  // clearing was fixed. The repeating ceiling is a lifetime bound: a
+  // non-persistent watch cannot outlive the timeout it named, so honouring
+  // that timeout is the tightest bound available.
+  it("gives a repeating watch a longer ceiling than a one-shot", () => {
+    // A real 45-minute watch, honoured as asked rather than cut to 15.
+    expect(armedTaskTtlMs(45 * 60 * 1000, true)).toBe(45 * 60 * 1000);
+    expect(armedTaskTtlMs(45 * 60 * 1000)).toBe(15 * 60 * 1000);
+    // Monitor's own maximum timeout_ms, so every non-persistent watch fits.
+    expect(armedTaskTtlMs(60 * 60 * 1000, true)).toBe(60 * 60 * 1000);
+    // Bounded past that, and a persistent watch reports no timeout at all
+    // and takes the default: long, but still mortal.
+    expect(armedTaskTtlMs(3 * 60 * 60 * 1000, true)).toBe(60 * 60 * 1000);
+    expect(armedTaskTtlMs(undefined, true)).toBe(30 * 60 * 1000);
+    // A short one is still honoured, and junk still falls back.
+    expect(armedTaskTtlMs(90_000, true)).toBe(90_000);
+    expect(armedTaskTtlMs("900000", true)).toBe(30 * 60 * 1000);
+  });
+
+  it("tells a repeating watch from a one-shot", () => {
+    // A real Monitor: tool identity, plus the toolResponse.taskId shape.
+    expect(isRepeatingArming(
+      "Monitor",
+      { toolName: "Monitor", toolResponse: { taskId: "b4atttz8a" } },
+      {},
+    )).toBe(true);
+    // Its late sparse update, carrying neither a title nor a toolName.
+    expect(isRepeatingArming(
+      undefined,
+      { toolResponse: { taskId: "b4atttz8a" } },
+      undefined,
+    )).toBe(true);
+    // A real backgrounded Bash, whose id lives in rawOutput prose and never
+    // in toolResponse.
+    expect(isRepeatingArming(
+      "Terminal",
+      { toolName: "Bash" },
+      { command: "vitest run", run_in_background: true },
+    )).toBe(false);
+    // run_in_background vetoes, so the mixed fixture above reads as the
+    // one-shot it is rather than acquiring a Monitor's exits.
+    expect(isRepeatingArming(
+      "Terminal",
+      { toolResponse: { taskId: "bg_1" } },
+      { command: "ninja", run_in_background: true },
+    )).toBe(false);
+    // An ordinary foreground call is neither, though nothing arms it anyway.
+    expect(isRepeatingArming("Terminal", undefined, { command: "ls" }))
+      .toBe(false);
   });
 
   // Real timers on purpose. Expiry is timer-driven now rather than swept
