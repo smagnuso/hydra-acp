@@ -5,6 +5,8 @@ import {
   resolveToolsClick,
   resolveOpenFileCommand,
   _buildToolsLines,
+  _planBlockAction,
+  _planFingerprint,
   TOOL_ROW_MAX_WRAP_ROWS,
 } from "./app.js";
 
@@ -463,5 +465,116 @@ describe("resolveOpenFileCommand", () => {
 
   it("does not treat an empty-string EDITOR as configured", () => {
     expect(resolveOpenFileCommand(undefined, { EDITOR: "" })).toBeFalsy();
+  });
+});
+
+describe("_planFingerprint", () => {
+  it("matches for a verbatim re-send", () => {
+    const entries = [
+      { content: "read the code", status: "completed" },
+      { content: "write the fix", status: "pending" },
+    ];
+    expect(_planFingerprint(entries)).toBe(_planFingerprint([...entries]));
+  });
+
+  it("differs when an entry's status changes", () => {
+    expect(_planFingerprint([{ content: "a", status: "pending" }])).not.toBe(
+      _planFingerprint([{ content: "a", status: "completed" }]),
+    );
+  });
+
+  it("differs when an entry's content changes", () => {
+    expect(_planFingerprint([{ content: "a", status: "pending" }])).not.toBe(
+      _planFingerprint([{ content: "b", status: "pending" }]),
+    );
+  });
+
+  it("differs when entries are reordered", () => {
+    const a = { content: "a", status: "completed" };
+    const b = { content: "b", status: "pending" };
+    expect(_planFingerprint([a, b])).not.toBe(_planFingerprint([b, a]));
+  });
+
+  it("differs when an entry is added", () => {
+    expect(_planFingerprint([{ content: "a" }])).not.toBe(
+      _planFingerprint([{ content: "a" }, { content: "b" }]),
+    );
+  });
+
+  it("treats a missing status as pending", () => {
+    expect(_planFingerprint([{ content: "a" }])).toBe(
+      _planFingerprint([{ content: "a", status: "pending" }]),
+    );
+  });
+
+  it("ignores priority, which the plan block doesn't render", () => {
+    expect(_planFingerprint([{ content: "a", priority: "high" }])).toBe(
+      _planFingerprint([{ content: "a", priority: "low" }]),
+    );
+  });
+
+  it("cannot be forged by entry text spanning the delimiter", () => {
+    expect(
+      _planFingerprint([{ content: "a" }, { content: "b" }]),
+    ).not.toBe(_planFingerprint([{ content: "pending apending b" }]));
+  });
+});
+
+describe("_planBlockAction", () => {
+  const fingerprint = "fp-1";
+
+  it("splices while the key is still live in this turn", () => {
+    expect(
+      _planBlockAction({
+        stale: false,
+        hasKey: true,
+        prevFingerprint: "anything-else",
+        fingerprint,
+      }),
+    ).toBe("splice");
+  });
+
+  it("adopts a past turn's block for an unchanged plan", () => {
+    expect(
+      _planBlockAction({
+        stale: true,
+        hasKey: true,
+        prevFingerprint: fingerprint,
+        fingerprint,
+      }),
+    ).toBe("splice");
+  });
+
+  it("starts fresh when the plan changed", () => {
+    expect(
+      _planBlockAction({
+        stale: true,
+        hasKey: true,
+        prevFingerprint: "fp-0",
+        fingerprint,
+      }),
+    ).toBe("fresh");
+  });
+
+  it("starts fresh when the block is gone from scrollback", () => {
+    expect(
+      _planBlockAction({
+        stale: true,
+        hasKey: false,
+        prevFingerprint: fingerprint,
+        fingerprint,
+      }),
+    ).toBe("fresh");
+  });
+
+  it("starts fresh for the first plan of the session", () => {
+    expect(
+      _planBlockAction({
+        stale: true,
+        hasKey: false,
+        prevFingerprint: null,
+        fingerprint,
+      }),
+    ).toBe("fresh");
   });
 });

@@ -981,6 +981,37 @@ export function resolveToolsClick(
   return { toolCallId };
 }
 
+// Stable identity for a plan snapshot, used to tell "the agent re-sent the
+// same list" from "the plan actually moved". Order is significant: reordering
+// entries is a real change the user should see as a new block. Control-char
+// delimiters so no arrangement of entry text can forge another list's
+// fingerprint.
+export function _planFingerprint(entries: PlanEntry[]): string {
+  return entries
+    .map((e) => `${e.status ?? "pending"}\u0000${e.content}`)
+    .join("\u0001");
+}
+
+// What to do with the keyed "plan" block when the first plan event of a new
+// turn arrives. "splice" re-uses the block painted in an earlier turn (which
+// sticky then floats down to the tail of the current turn); "fresh" starts a
+// new one below, leaving the old block frozen where it was.
+export function _planBlockAction(args: {
+  stale: boolean;
+  hasKey: boolean;
+  prevFingerprint: string | null;
+  fingerprint: string;
+}): "splice" | "fresh" {
+  const { stale, hasKey, prevFingerprint, fingerprint } = args;
+  if (!stale) {
+    return "splice";
+  }
+  if (!hasKey || prevFingerprint !== fingerprint) {
+    return "fresh";
+  }
+  return "splice";
+}
+
 let crashLoggingInstalled = false;
 // Installed before any TUI work so a crash in the pre-screen window —
 // the picker, the new-session agent prompt, the daemon handshake — lands
@@ -3616,8 +3647,9 @@ async function runSession(
   // the plan stays wherever it was first emitted (often near the top of
   // the turn, above all subsequent tool calls / agent text), forcing the
   // user to scroll up to see the current entries. The screen floats the
-  // sticky block back to the tail on every append/upsert; turn-end
-  // clearKey("plan") freezes the previous turn's plan in place.
+  // sticky block back to the tail on every append/upsert; each turn
+  // boundary disarms it again, and renderPlanBlock re-arms when the next
+  // plan event lands.
   screen.setStickyBottomKey("plan");
 
   // Slash-command completion. Built-ins listed here are TUI-only verbs
@@ -7195,8 +7227,18 @@ async function runSession(
   // Last plan snapshot seen this turn, retained so turn-complete with a
   // non-success stopReason can re-render the keyed "plan" block in its
   // stopped state (header red, in-progress entries dimmed) before the
-  // splice point is cleared.
+  // splice point goes stale.
   let lastPlanEvent: Extract<RenderEvent, { kind: "plan" }> | null = null;
+  // Fingerprint of the plan currently painted under the "plan" key, kept
+  // across turn boundaries on purpose: it's what lets the next turn tell a
+  // verbatim re-send (adopt the existing block) from a real update (start a
+  // new one). Agents that re-emit an unchanged plan every turn used to
+  // produce one identical block per turn.
+  let planFingerprint: string | null = null;
+  // True when the "plan" key is still tracked but the block it points at was
+  // painted in an earlier turn. Set at each turn boundary in place of the
+  // clearKey that used to happen there.
+  let planKeyStale = false;
   // Per-block expand override for the live plan, set by clicking it. true =
   // expanded, false = collapsed, null = follow the global ^O Plan setting.
   // Plans don't persist across turns, so this only ever affects the live
@@ -7225,6 +7267,25 @@ async function runSession(
   // what keeps the transcript from silently losing the block. See
   // sidebar/todos.ts for the wire shapes.
   const renderPlanBlock = (event: Extract<RenderEvent, { kind: "plan" }>): void => {
+    const fingerprint = _planFingerprint(event.entries);
+    if (planKeyStale) {
+      // First plan event of a new turn. An unchanged list adopts the block
+      // painted earlier (sticky below then floats it to the tail of this
+      // turn, so there's still exactly one plan block); anything else
+      // forgets the key so this event appends a new block and leaves the
+      // old one frozen where it was.
+      planKeyStale = false;
+      const action = _planBlockAction({
+        stale: true,
+        hasKey: screen.hasKey("plan"),
+        prevFingerprint: planFingerprint,
+        fingerprint,
+      });
+      if (action === "fresh") {
+        screen.clearKey("plan");
+      }
+    }
+    planFingerprint = fingerprint;
     const lines = formatEvent(event, planFormatOptions());
     if (lines.length > 0) {
       // Leading blank stays part of the keyed block so it floats with the
@@ -7440,7 +7501,8 @@ async function runSession(
   };
 
   // Capture the just-frozen tools block so a later click can re-render it.
-  // Called at each freeze site right before clearKey wipes the live state.
+  // Called at each freeze site right before the turn-boundary reset wipes
+  // the live state.
   const snapshotToolsBlock = (): void => {
     if (toolsBlockStartedAt === null) {
       return;
@@ -8786,14 +8848,18 @@ async function runSession(
       // blip, daemon restart) — leaving the prompt recorded without a
       // matching turn_complete. When that unbalanced seed history is
       // replayed at attach, the previous turn's plan keyed block stays
-      // anchored mid-scrollback. The next turn's plan event would then
-      // splice into that stale anchor far above the viewport, so clear
-      // it here. The tools block uses a per-turn key (bumped in
-      // startToolsBlock), so the next turn anchors fresh regardless — we
-      // snapshot it (for click-to-expand) but keep its keyedBlocks entry
-      // so a click can still re-render it in place.
+      // anchored mid-scrollback, so we mark the key stale rather than
+      // keeping it live, and disarm sticky below. renderPlanBlock only
+      // splices into that old anchor for a verbatim re-send, and re-arms
+      // sticky when it does, which floats the block down to the tail
+      // instead of leaving it spliced far above the viewport. The tools
+      // block uses a per-turn key (bumped in startToolsBlock), so the next
+      // turn anchors fresh regardless — we snapshot it (for
+      // click-to-expand) but keep its keyedBlocks entry so a click can
+      // still re-render it in place.
       snapshotToolsBlock();
-      screen.clearKey("plan");
+      planKeyStale = true;
+      screen.setStickyBottomKey(null);
       lastPlanEvent = null;
       planOverride = null;
       toolStates.clear();
@@ -9011,8 +9077,9 @@ async function runSession(
       // Repaint the plan one last time with stopped=true when the turn
       // ended on a non-success reason (cancelled, refused, max_tokens, …).
       // Header flips to red and any in_progress rows dim — so a cancelled
-      // plan stops looking like it's still busy. Must happen before
-      // clearKey so the upsert lands on the existing scrollback block.
+      // plan stops looking like it's still busy. Must happen before the
+      // key goes stale so the upsert lands on the existing scrollback
+      // block.
       if (
         lastPlanEvent !== null &&
         effectiveStopReason !== undefined &&
@@ -9032,13 +9099,14 @@ async function runSession(
       }
       lastPlanEvent = null;
       planOverride = null;
-      screen.clearKey("plan");
-      // Re-arm the sticky float for the next turn. If this turn's plan
-      // completed, the in-turn handler set the sticky key to null to let
-      // post-completion content append below — that needs to flip back
-      // to "plan" before the next turn so a fresh plan event there
-      // anchors to the bottom of its turn.
-      screen.setStickyBottomKey("plan");
+      // The block stays keyed but now belongs to a past turn, so the next
+      // plan event can adopt it if the agent re-sends the same list.
+      // Sticky goes off until then: with the key still live, an armed
+      // sticky would drag this turn's plan down past the next turn's
+      // prompt echo and tool rows before we know the agent still cares
+      // about it. renderPlanBlock re-arms on the next plan event.
+      planKeyStale = true;
+      screen.setStickyBottomKey(null);
       // Freeze the tools block (header switches from live "Xs" to
       // "took Xs"). The next turn uses a fresh per-turn key, so we keep
       // this block's keyedBlocks entry — a click can then re-render it in
