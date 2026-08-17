@@ -107,7 +107,7 @@ describe("workspace prune", () => {
     // Directory goes; the commits are the durable artifact and stay.
     await expect(fs.access(dir)).rejects.toThrow();
     expect(await branches(repo)).toContain("hydra/haswork");
-    expect(out).toContain("commit(s) not in HEAD");
+    expect(out).toContain("commit(s) not in the source");
   });
 
   it("keeps an unowned workspace holding uncommitted work unless forced", async () => {
@@ -181,6 +181,12 @@ async function bindSession(
         sourceCwd: ws.sourceCwd,
         label: ws.label,
         provider: "git",
+        // `line` is the handle callers pass back to the provider; `vcs` is
+        // display detail nothing outside the provider reads. Both are
+        // written here because both are written by the daemon, and a
+        // fixture that omits `line` tests a record shape production never
+        // produces.
+        line: ws.branch,
         vcs: { kind: "git", branch: ws.branch, repoRoot: ws.repoRoot },
       },
     }),
@@ -346,7 +352,7 @@ describe("workspace remove — inactive", () => {
 
     expect(await bindingOf(meta)).toBeUndefined();
     expect(await branches(repo)).toContain("hydra/work");
-    expect(out).toContain("1 commit(s) not in HEAD");
+    expect(out).toContain("1 commit(s) not in the source");
   });
 
   it("keeps the commits under --force too", async () => {
@@ -558,7 +564,7 @@ describe("workspace remove — on disk", () => {
     await runWorkspaceRemove({ target: "unownedwork" });
 
     expect(await branches(repo)).toContain("hydra/unownedwork");
-    expect(out).toContain("commit(s) not in HEAD");
+    expect(out).toContain("commit(s) not in the source");
   });
 });
 

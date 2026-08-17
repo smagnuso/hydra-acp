@@ -18,12 +18,11 @@
 // matters because it is the provider, recovered that way, that knows
 // how to tear one down completely.
 
-import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { paths } from "../../core/paths.js";
 import { readJsonSafe } from "../../core/json-store.js";
-import { getProvider } from "../../core/workspace/registry.js";
+import { getProvider, providerKinds } from "../../core/workspace/registry.js";
 import { shortenHomePath } from "../../core/paths.js";
 import { asSnapshotId, type Workspace } from "../../core/workspace/provider.js";
 import {
@@ -49,6 +48,7 @@ interface Binding {
     label: string;
     provider: string;
     snapshot?: string;
+    line?: string;
     vcs?: Record<string, string>;
   };
 }
@@ -136,7 +136,24 @@ function toProviderWorkspace(b: Binding["workspace"]): Workspace {
     label: b.label,
     provider: b.provider,
     ...(b.snapshot !== undefined ? { snapshot: asSnapshotId(b.snapshot) } : {}),
+    ...(b.line !== undefined ? { line: b.line } : {}),
     ...(b.vcs !== undefined ? { vcs: b.vcs } : {}),
+  };
+}
+
+/**
+ * A row is per WORKSPACE and may have no binding behind it at all (an
+ * unowned directory), so it carries less than a record does. That is enough
+ * for the provider: it needs somewhere to put refs and something to
+ * integrate from, and both are on the row.
+ */
+function rowWorkspace(row: WorkspaceRow): Workspace {
+  return {
+    path: row.path,
+    sourceCwd: row.sourceCwd,
+    label: row.label,
+    provider: row.provider,
+    ...(row.branch !== undefined ? { line: row.branch, vcs: { branch: row.branch } } : {}),
   };
 }
 
@@ -166,9 +183,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
         state: "active",
         sessionId: bound.sessionId,
         sessionIds: claims.map((c) => c.sessionId),
-        ...(bound.workspace.vcs?.branch !== undefined
-          ? { branch: bound.workspace.vcs.branch }
-          : {}),
+        ...(bound.workspace.line !== undefined ? { branch: bound.workspace.line } : {}),
       });
       continue;
     }
@@ -182,7 +197,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
       label: attributed?.label ?? path.basename(dir),
       provider: attributed?.provider ?? "(unknown)",
       state: "unowned",
-      ...(attributed?.vcs?.branch !== undefined ? { branch: attributed.vcs.branch } : {}),
+      ...(attributed?.line !== undefined ? { branch: attributed.line } : {}),
     });
   }
 
@@ -199,7 +214,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
       state: "inactive",
       sessionId: b.sessionId,
       sessionIds: claims.map((c) => c.sessionId),
-      ...(b.workspace.vcs?.branch !== undefined ? { branch: b.workspace.vcs.branch } : {}),
+      ...(b.workspace.line !== undefined ? { branch: b.workspace.line } : {}),
     });
   }
 
@@ -233,51 +248,29 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
   return rows;
 }
 
-function runGit(args: string[], cwd: string): Promise<{ ok: boolean; out: string; err: string }> {
-  return new Promise((resolve) => {
-    execFile("git", args, { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }, (e, o, s) => {
-      resolve({ ok: !e, out: o ?? "", err: s ?? "" });
-    });
-  });
-}
-
 /**
  * Recover a workspace's identity from the directory itself, for use when
  * no session record points at it.
  *
- * The path is a dead end — a hash and a label — but the directory is
- * not: a git worktree names its parent repo in `.git`, and a copy
- * workspace records its source in the manifest sidecar. That is enough
- * to hand an unowned workspace back to its provider, which matters because the
- * provider is what knows how to delete one safely. Returns undefined
- * only when the directory belongs to neither shipped provider.
+ * The path is a dead end (a hash and a label), but the directory is not,
+ * because each provider leaves its own breadcrumb in one. Asking every
+ * registered provider in turn is what keeps the formats of those
+ * breadcrumbs out of this file: it used to know that a git worktree names
+ * its repository in `.git` and that a copy workspace records its source in a
+ * manifest sidecar, which is knowledge that belongs to whichever provider
+ * writes it.
+ *
+ * Order is registration order and does not matter: a directory recognized
+ * by two providers would be a bug in one of them, not an ambiguity here.
  */
 async function attributeUnowned(dir: string): Promise<Workspace | undefined> {
-  const common = await runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
-  if (common.ok && common.out.trim().length > 0) {
-    const gitDir = common.out.trim();
-    const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], dir);
-    return {
-      path: dir,
-      sourceCwd: path.dirname(gitDir),
-      label: path.basename(dir),
-      provider: "git",
-      vcs: {
-        repoRoot: path.dirname(gitDir),
-        ...(branch.ok && branch.out.trim().length > 0 ? { branch: branch.out.trim() } : {}),
-      },
-    };
-  }
-  const manifest = await readJsonSafe<{ sourceCwd?: string; label?: string }>(
-    `${dir}.manifest.json`,
-  );
-  if (manifest?.sourceCwd !== undefined) {
-    return {
-      path: dir,
-      sourceCwd: manifest.sourceCwd,
-      label: manifest.label ?? path.basename(dir),
-      provider: "copy",
-    };
+  for (const kind of providerKinds()) {
+    const attributed = await getProvider(kind)
+      ?.attributeOrphan(dir)
+      .catch(() => undefined);
+    if (attributed !== undefined) {
+      return attributed;
+    }
   }
   return undefined;
 }
@@ -346,6 +339,7 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
   if (!exists) {
     throw new Error(`source tree ${shortenHomePath(source)} no longer exists`);
   }
+  const provider = getProvider(row.provider);
   // A dirty source is the NORMAL case: `start` copies the user's work
   // in rather than taking it, so the same edits are still sitting here.
   // Capture it instead of refusing, so the reset this enables cannot
@@ -356,6 +350,7 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
       ? undefined
       : await captureSourceForLanding({
           source,
+          ws: rowWorkspace(row),
           startSnapshotRef: workspaceAnchorRefs(row.label).start,
           // Written by an in-session landing, and it has to win here for
           // the same reason it does there: work a previous landing put
@@ -370,17 +365,19 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
     // No session owns this workspace, so there is no start snapshot to
     // measure against and no way to tell the copy from the user's own
     // work. Refusing is the only safe answer left.
-    const dirty = await runGit(["status", "--porcelain", "-uall"], source);
-    if (dirty.ok && dirty.out.trim().length > 0) {
+    const dirty = await provider
+      ?.status({ ...rowWorkspace(row), path: source })
+      .catch(() => undefined);
+    if (dirty !== undefined && dirty.changedPaths.length > 0) {
       throw new Error(
         `${shortenHomePath(source)} has uncommitted changes; commit or stash them first so a ` +
           `partially-applied result cannot be confused with your own work`,
       );
     }
   }
-  const branch = row.branch ?? "";
+  const branch = rowWorkspace(row).line ?? "";
   if (branch.length === 0) {
-    throw new Error(`workspace ${row.label} has no branch to merge from`);
+    throw new Error(`workspace ${row.label} has no line of work to land from`);
   }
   return { source, branch, base: "", capture };
 }
@@ -393,13 +390,21 @@ async function preflight(row: WorkspaceRow, into: string | undefined): Promise<T
  * possible moment, after every check that could still refuse, so a
  * command that fails has not touched the tree.
  */
-async function clearForLanding(source: string, capture: SourceCapture | undefined): Promise<void> {
+async function clearForLanding(
+  source: string,
+  row: WorkspaceRow,
+  capture: SourceCapture | undefined,
+): Promise<void> {
   if (capture === undefined || capture.clean) {
     return;
   }
-  const reset = await runGit(["reset", "--hard", "HEAD"], source);
-  const cleaned = await runGit(["clean", "-fd"], source);
-  if (!reset.ok || !cleaned.ok) {
+  const provider = getProvider(row.provider);
+  const at = await provider?.currentState(source);
+  const cleared =
+    provider === undefined || at === undefined
+      ? { ok: false, reason: "no provider available to clear the source tree" }
+      : await provider.resetTo(source, at);
+  if (!cleared.ok) {
     throw new Error(
       `could not clear ${shortenHomePath(source)} for the merge; your work is preserved at ` +
         `${capture.retainedRef}. Nothing was landed.`,
@@ -410,13 +415,15 @@ async function clearForLanding(source: string, capture: SourceCapture | undefine
 /** Put the source's own post-start edits back, and report if they clash. */
 async function replayAfterLanding(
   source: string,
+  row: WorkspaceRow,
   capture: SourceCapture | undefined,
 ): Promise<void> {
   if (capture === undefined) {
     return;
   }
-  if (await replaySourceDivergence({ source, capture })) {
-    await releaseSourceCapture({ source, capture });
+  const provider = getProvider(row.provider);
+  if (await replaySourceDivergence({ source, capture, provider })) {
+    await releaseSourceCapture({ source, ws: rowWorkspace(row), capture, provider });
     return;
   }
   process.stdout.write(
@@ -445,10 +452,16 @@ export async function runWorkspaceMerge(opts: {
   // The test is whether the source's current tip is an ancestor of the
   // branch: if the source moved on, it is not, and no amount of
   // committing here will make the fast-forward legal.
-  const sourceHead = (await runGit(["rev-parse", "HEAD"], source)).out.trim();
-  const canFf = await runGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
-  if (!canFf.ok) {
-    const current = (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
+  const provider = getProvider(row.provider);
+  if (provider === undefined) {
+    throw new Error(`no provider "${row.provider}" available to land this workspace`);
+  }
+  const sourceHead = await provider.currentState(source);
+  if (sourceHead === undefined) {
+    throw new Error(`could not read the state of ${shortenHomePath(source)}`);
+  }
+  if (!(await provider.contains(source, { state: sourceHead, within: branch }))) {
+    const current = (await provider.currentLineName(source)) ?? "the source";
     throw new Error(
       `cannot fast-forward ${current} in ${shortenHomePath(source)} to ${branch}.\n` +
         `The source has moved since this workspace was created, or is on a different branch.\n` +
@@ -456,38 +469,37 @@ export async function runWorkspaceMerge(opts: {
     );
   }
 
-  // Commit anything outstanding in the workspace: a merge needs commits,
-  // and the agent's work is usually sitting uncommitted.
-  const wsDirty = await runGit(["status", "--porcelain", "--untracked-files=all"], row.path);
-  if (wsDirty.ok && wsDirty.out.trim().length > 0) {
-    const staged = await runGit(["add", "-A"], row.path);
-    if (!staged.ok) {
-      throw new Error(`could not stage workspace changes: ${staged.err.trim()}`);
-    }
+  // Record anything outstanding in the workspace: landing brings recorded
+  // states across, and the agent's work is usually sitting loose.
+  const wsDirty = await provider.status(rowWorkspace(row)).catch(() => undefined);
+  if (wsDirty !== undefined && wsDirty.changedPaths.length > 0) {
     const msg = opts.message ?? `hydra: work from ${row.label}`;
-    const committed = await runGit(["commit", "-m", msg], row.path);
-    if (!committed.ok) {
-      throw new Error(`could not commit workspace changes: ${committed.err.trim()}`);
+    try {
+      await provider.record(rowWorkspace(row), msg);
+    } catch (err) {
+      throw new Error(
+        `could not record workspace changes: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    process.stdout.write(`committed workspace changes on ${branch}\n`);
+    process.stdout.write(`recorded workspace changes on ${branch}\n`);
   }
 
-  await clearForLanding(source, capture);
+  await clearForLanding(source, row, capture);
 
-  const currentBranch = (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
-  const merged = await runGit(["merge", "--ff-only", branch], source);
+  const currentBranch = (await provider.currentLineName(source)) ?? "the source";
+  const merged = await provider.integrate({ into: source, from: branch, fastForwardOnly: true });
   if (!merged.ok) {
-    // Name both branches. The usual cause is that the source moved on
-    // since the workspace was created, and the useful thing to say is
-    // which two things failed to line up.
+    // Name both lines. The usual cause is that the source moved on since
+    // the workspace was created, and the useful thing to say is which two
+    // things failed to line up.
     throw new Error(
       `cannot fast-forward ${currentBranch} in ${shortenHomePath(source)} to ${branch}.\n` +
         `The source has moved since this workspace was created, or is on a different branch.\n` +
         `Merge it yourself with:  git -C ${source} merge ${branch}\n` +
-        (merged.err.trim() ? `git said: ${merged.err.trim()}\n` : ""),
+        (merged.reason !== undefined ? `the provider said: ${merged.reason}\n` : ""),
     );
   }
-  await replayAfterLanding(source, capture);
+  await replayAfterLanding(source, row, capture);
   process.stdout.write(
     `merged ${branch} into ${currentBranch} at ${shortenHomePath(source)}\n`,
   );
@@ -520,28 +532,23 @@ export async function runWorkspaceApply(opts: {
   // untracked files are still included. Both trees share the object
   // store, so the resulting commit is readable from the source repo.
   const snapshot = await provider.captureWorkingState(row.path, `hydra: apply from ${row.label}`);
-  const diff = await runGit(["diff", "--binary", base, snapshot], source);
-  if (!diff.ok) {
-    throw new Error(`could not compute the change set: ${diff.err.trim()}`);
+  const delta = await provider.captureDelta(source, asSnapshotId(base), snapshot);
+  if (delta === undefined) {
+    throw new Error("could not compute the change set");
   }
-  if (diff.out.trim().length === 0) {
+  if (delta.trim().length === 0) {
     process.stdout.write("Nothing to apply: the workspace matches its base.\n");
     return;
   }
-  await clearForLanding(source, capture);
-  const applied = await new Promise<{ ok: boolean; err: string }>((resolve) => {
-    const child = execFile(
-      "git",
-      ["apply", "--index", "-"],
-      { cwd: source, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
-      (e, _o, s) => resolve({ ok: !e, err: s ?? "" }),
-    );
-    child.stdin?.end(diff.out);
-  });
+  await clearForLanding(source, row, capture);
+  // Staged, unlike the other replays: `apply` exists to hand you the
+  // workspace's changes to review and commit yourself, so they arrive
+  // marked for the next commit rather than loose.
+  const applied = await provider.applyDelta(source, delta, { stage: true });
   if (!applied.ok) {
-    throw new Error(`could not apply the change set: ${applied.err.trim()}`);
+    throw new Error(`could not apply the change set: ${applied.reason ?? "unknown error"}`);
   }
-  await replayAfterLanding(source, capture);
+  await replayAfterLanding(source, row, capture);
   process.stdout.write(
     `applied ${row.label} into ${shortenHomePath(source)} as staged changes (not committed)\n`,
   );
@@ -557,8 +564,11 @@ async function afterLand(row: WorkspaceRow, source: string, remove: boolean): Pr
     // unlike an in-session landing, this one commits the workspace's work,
     // so HEAD now describes where the source was left and is the honest
     // base for anything that follows.
+    const provider = getProvider(row.provider);
     for (const ref of allAnchorRefs(row.label)) {
-      await runGit(["update-ref", "-d", ref], source);
+      await provider
+        ?.dropSnapshotRef({ ...rowWorkspace(row), path: source }, ref)
+        .catch(() => undefined);
     }
   }
   if (!remove) {
@@ -618,17 +628,15 @@ async function removeInactive(row: WorkspaceRow): Promise<void> {
   await clearBinding(bound);
 
   const ws = toProviderWorkspace(bound.workspace);
-  const branch = ws.vcs?.branch;
-  const repoRoot = ws.vcs?.repoRoot;
+  const provider = getProvider(ws.provider);
+  const line = ws.line;
   const notes: string[] = [];
 
-  // Before the branch: git refuses to delete a branch it still believes
-  // is checked out somewhere, and the registration still points here.
-  if (repoRoot !== undefined) {
-    await runGit(["worktree", "prune"], repoRoot);
-  }
-  if (branch !== undefined && !branch.startsWith("hydra/")) {
-    notes.push(`kept ${branch} (not hydra's to delete)`);
+  // Before the line: a provider refuses to discard one it still believes
+  // is materialized somewhere, and its bookkeeping still points here.
+  await provider?.pruneStale(ws).catch(() => undefined);
+  if (line !== undefined && provider !== undefined && !provider.ownsLine(line)) {
+    notes.push(`kept ${line} (not hydra's to delete)`);
   } else {
     const held = await reclaimBranch(ws);
     if (held !== undefined) {
@@ -640,7 +648,6 @@ async function removeInactive(row: WorkspaceRow): Promise<void> {
   // Nothing can be landed from a checkout that is gone, so it is pure
   // GC root now. The autosave is the opposite: with the directory gone
   // it is the only copy of whatever was uncommitted, so it stays.
-  const provider = getProvider(bound.workspace.provider);
   if (provider !== undefined && row.sessionId !== undefined) {
     await provider
       .dropSnapshotRef(ws, workspaceAnchorRefs(row.label).start)
@@ -766,15 +773,15 @@ export async function runWorkspaceRemove(opts: {
           `Land them with \`hydra workspace merge ${want}\`, or pass --force to discard them.`,
       );
     }
-    // A live session holds a hydra lock on its workspace. Removing it
-    // would yank the working directory out from under a running agent.
+    // A held workspace means a session is live in it. Removing it would
+    // yank the working directory out from under a running agent.
     const bindings = await readBindings();
     const bound = bindings.find((b) => b.workspace.path === row.path);
     if (bound !== undefined) {
       const provider = getProvider(bound.workspace.provider);
       const listed = await provider?.listWorkspaces(bound.workspace.sourceCwd).catch(() => []);
       const live = listed?.find((w) => w.path === row.path);
-      if (live?.vcs?.locked?.startsWith("hydra-acp:") === true) {
+      if (live?.heldByUs === true) {
         throw new Error(
           `${shortenHomePath(row.path)} is locked, which means a session is live in it. ` +
             `Close that session first, or pass --force if you know it is gone.`,
@@ -883,29 +890,32 @@ async function firstExistingRef(
  * copy beats a tidy namespace.
  */
 async function retireRef(ws: Workspace, live: string): Promise<string> {
-  const repoRoot = ws.vcs?.repoRoot;
-  if (repoRoot === undefined) {
+  const provider = getProvider(ws.provider);
+  if (provider === undefined) {
     return live;
   }
-  const sha = (await runGit(["rev-parse", live], repoRoot)).out.trim();
-  if (sha.length === 0) {
+  const sha = await provider.resolveRetained(ws, live).catch(() => undefined);
+  if (sha === undefined) {
     return live;
   }
   const retired = retiredSnapshotRef(ws.label, sha);
-  if (!(await runGit(["update-ref", retired, sha], repoRoot)).ok) {
+  const written = await provider
+    .retainSnapshot(ws, retired, sha)
+    .then(() => true)
+    .catch(() => false);
+  if (!written) {
     return live;
   }
-  await runGit(["update-ref", "-d", live], repoRoot);
+  await provider.dropSnapshotRef(ws, live).catch(() => undefined);
   return retired;
 }
 
-/** Whether a ref is present, so we never advertise a recovery that isn't there. */
+/** Whether a retained handle is present, so we never advertise a recovery that isn't there. */
 async function refExists(ws: Workspace, ref: string): Promise<boolean> {
-  const repoRoot = ws.vcs?.repoRoot;
-  if (repoRoot === undefined) {
-    return false;
-  }
-  return (await runGit(["rev-parse", "--verify", "--quiet", ref], repoRoot)).ok;
+  const found = await getProvider(ws.provider)
+    ?.resolveRetained(ws, ref)
+    .catch(() => undefined);
+  return found !== undefined;
 }
 
 /**
@@ -1129,20 +1139,27 @@ export async function runWorkspacePrune(opts: { force?: boolean } = {}): Promise
  * nothing to keep or nothing to do.
  */
 async function reclaimBranch(ws: Workspace): Promise<string | undefined> {
-  const branch = ws.vcs?.branch;
-  const repoRoot = ws.vcs?.repoRoot;
-  // Only ever our own namespace — a workspace checked out on a user's
-  // branch must not have that branch deleted out from under them.
-  if (branch === undefined || repoRoot === undefined || !branch.startsWith("hydra/")) {
+  const line = ws.line;
+  const provider = getProvider(ws.provider);
+  // Only ever a line this provider created: a workspace sitting on the
+  // user's own line must not have it deleted out from under them. Asked of
+  // the provider rather than pattern-matched, since the namespace is its
+  // invention.
+  if (line === undefined || provider === undefined || !provider.ownsLine(line)) {
     return undefined;
   }
-  const ahead = await runGit(["rev-list", "--count", `HEAD..${branch}`], repoRoot);
-  if (!ahead.ok) {
-    return `branch ${branch} kept (could not compare it to HEAD)`;
+  // Asked BEFORE discarding, because afterwards the count is unobtainable
+  // and it is the whole measure of what would have been lost.
+  const spread = await provider.divergence(ws.sourceCwd, "HEAD", line).catch(() => undefined);
+  if (spread === undefined) {
+    return `branch ${line} kept (could not compare it to the source)`;
   }
-  if (Number.parseInt(ahead.out.trim(), 10) > 0) {
-    return `branch ${branch} kept — it has ${ahead.out.trim()} commit(s) not in HEAD`;
+  if (spread.behind > 0) {
+    return `branch ${line} kept: it has ${spread.behind} commit(s) not in the source`;
   }
-  const deleted = await runGit(["branch", "-D", branch], repoRoot);
-  return deleted.ok ? undefined : `branch ${branch} kept (delete failed)`;
+  const discarded = await provider.discardLine(ws, line).catch(() => ({
+    ok: false as const,
+    dropped: 0,
+  }));
+  return discarded.ok ? undefined : `branch ${line} kept (delete failed)`;
 }

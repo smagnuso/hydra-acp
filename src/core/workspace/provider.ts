@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { hydraHome } from "../paths.js";
 
 declare const snapshotBrand: unique symbol;
+declare const deltaBrand: unique symbol;
 
 /**
  * An opaque, provider-issued token naming a recorded state. Never
@@ -49,6 +50,27 @@ export function asSnapshotId(raw: string): SnapshotId {
   return raw as SnapshotId;
 }
 
+/**
+ * An opaque, provider-issued representation of the difference between two
+ * states, transferable between two materializations of one project.
+ *
+ * Branded for the same reason SnapshotId is, and the discipline matters
+ * more here because the git form is a text patch and therefore *looks*
+ * inspectable. A caller that greps it, counts its hunks, or edits it has
+ * assumed a format no other provider owes them: a copy provider's delta is
+ * a file manifest, and a server-backed one may be an opaque server handle.
+ *
+ * Deltas are not durable. A provider may express one relative to states
+ * that only exist locally, so persisting one and replaying it later is
+ * unsupported; retain a snapshot instead.
+ */
+export type StateDelta = string & { readonly [deltaBrand]: true };
+
+/** Re-brand a delta across a serialization boundary. Rare by design. */
+export function asStateDelta(raw: string): StateDelta {
+  return raw as StateDelta;
+}
+
 export interface Workspace {
   /** Absolute path. Becomes the session's effective cwd. */
   readonly path: string;
@@ -60,9 +82,49 @@ export interface Workspace {
   /** State it was created from, when the provider records one. */
   readonly snapshot?: SnapshotId;
   /**
-   * Provider-specific display detail (git puts branch/base here). Readers
-   * MUST tolerate absence: a copy provider emits nothing, and a client
-   * that depends on this is a client that breaks on the second provider.
+   * True when the provider is holding this workspace on hydra's behalf, as
+   * observed by listWorkspaces.
+   *
+   * A held workspace means a session is live in it, so removing it would
+   * pull the directory out from under a running agent. Reported as a boolean
+   * rather than left for callers to recognize, because "held by us" versus
+   * "held by a human" is a distinction encoded in the provider's own lock
+   * format: callers were testing the lock reason against a hydra-specific
+   * prefix, which is that format spelled out in a file that should not know
+   * the provider has one.
+   *
+   * Absent when the provider does not lock, and absent on workspaces that
+   * did not come from listWorkspaces.
+   */
+  readonly heldByUs?: boolean;
+
+  /**
+   * Handle for this workspace's own line of work, when the provider keeps
+   * one.
+   *
+   * Pass it back to integrate(). Do not PARSE it: no caller may split it,
+   * match a prefix against it, or infer a namespace from it. Ask ownsLine()
+   * instead of testing for one. Displaying it IS fine: every plausible
+   * provider names its lines something a human can read, and requiring a
+   * currentLineName round-trip to obtain the very same string just to print
+   * it is what made callers reach for `vcs.branch` instead, which is the
+   * leak this field exists to close.
+   *
+   * Absent for providers with no notion of a line, which is exactly why
+   * landing has to check for it rather than assume it.
+   */
+  readonly line?: string;
+  /**
+   * Provider-specific display detail (git puts branch/base/repoRoot here).
+   *
+   * Render it, do not read it. Nothing outside the owning provider may
+   * index a key out of this map: the keys are that provider's vocabulary,
+   * so a caller reading `vcs.branch` has hardcoded git, and a caller
+   * reading `vcs.repoRoot` has hardcoded git's idea of where refs live.
+   * Both were real, and both are why `line` and the Workspace-shaped ref
+   * operations exist.
+   *
+   * Readers MUST tolerate absence: a copy provider emits nothing.
    */
   readonly vcs?: Readonly<Record<string, string>>;
 }
@@ -118,6 +180,17 @@ export interface WorkspaceStatus {
   /** Repo-relative paths. Never absolute: see the path-identity design. */
   readonly changedPaths: readonly string[];
   readonly hasRecordedWork: boolean;
+  /**
+   * True when some change is marked for inclusion in the next recorded
+   * state, as distinct from merely present in the tree.
+   *
+   * Exists because carrying work between materializations deliberately does
+   * NOT preserve that marking, and the difference is invisible otherwise:
+   * the files arrive, and the caller has to be able to say that the marking
+   * did not. Absent for providers with no such concept, which is not the
+   * same as false.
+   */
+  readonly hasStagedWork?: boolean;
 }
 
 export interface PathChange {
@@ -157,8 +230,28 @@ export type CreateWorkspaceResult =
   | { ok: false; reason: string };
 
 export type IntegrateResult =
-  | { ok: true; snapshot: SnapshotId }
-  | { ok: false; conflicts: readonly string[] };
+  | {
+      ok: true;
+      snapshot: SnapshotId;
+      /** Nothing to do: the work was already present. */
+      alreadyUpToDate?: boolean;
+    }
+  | {
+      ok: false;
+      /** Paths the provider could not reconcile. Empty when it declined. */
+      conflicts: readonly string[];
+      /**
+       * True when the integration never started, so nothing was written.
+       *
+       * Load-bearing for callers that retry: a declined integration can be
+       * followed by a different strategy, while a conflicted one has left
+       * state behind that must be resolved or abandoned first. Telling them
+       * apart on the conflict list alone is wrong, because an integration
+       * already in progress from an earlier attempt also refuses.
+       */
+      declined?: boolean;
+      reason?: string;
+    };
 
 /** Thrown by operations a provider declares unsupported in capabilities(). */
 export class WorkspaceUnsupportedError extends Error {
@@ -170,9 +263,209 @@ export class WorkspaceUnsupportedError extends Error {
   }
 }
 
+/** Outcome of reproducing a delta somewhere. */
+export interface DeltaOutcome {
+  readonly ok: boolean;
+  /**
+   * True when the delta's content was already present, so nothing was
+   * written. Distinct from ok: both mean "the target now has this
+   * content", but only this one means the call was a no-op.
+   */
+  readonly alreadyPresent?: boolean;
+  readonly reason?: string;
+}
+
+/** How two states stand relative to one another. */
+export interface Divergence {
+  /** States present in the second and missing from the first. */
+  readonly behind: number;
+  /** States present in the first and missing from the second. */
+  readonly ahead: number;
+}
+
+export interface ResetOutcome {
+  readonly ok: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * One nested tree's state, as some materialization currently has it.
+ *
+ * `recorded` is what the containing tree says this nested tree should be
+ * at; `actual` is where it is. They differ when the nested tree has been
+ * advanced locally, which is uncommitted work in the sense that matters:
+ * present in the user's tree, absent from the containing tree's recorded
+ * state.
+ */
+export interface NestedState {
+  /** Path relative to the containing tree's root. */
+  readonly relPath: string;
+  readonly actual: SnapshotId;
+  readonly recorded?: SnapshotId;
+  /** Paths changed inside it, relative to the nested tree. */
+  readonly changedPaths: readonly string[];
+}
+
+/** A nested tree's state plus the delta needed to reproduce its contents. */
+export interface NestedCapture extends NestedState {
+  readonly delta?: StateDelta;
+}
+
+export interface NestedOutcome {
+  readonly applied: readonly string[];
+  readonly failed: readonly { path: string; reason: string }[];
+}
+
 export interface IsolationProvider {
   readonly kind: string;
   capabilities(): Capabilities;
+
+  // ---------------------------------------------------------------------
+  // State inspection.
+  //
+  // These exist so callers can reason about where a tree stands without
+  // naming a git concept. Every one of them returns undefined rather than
+  // throwing when it cannot answer, because the callers are decision
+  // points ("can this land?", "has the source moved?") that must degrade
+  // to silence rather than take a session down.
+  // ---------------------------------------------------------------------
+
+  /** The state a materialization currently sits at. */
+  currentState(root: string): Promise<SnapshotId | undefined>;
+  /**
+   * Stable identity of a state's CONTENT, for equality tests.
+   *
+   * Separate from the snapshot id because two different recorded states
+   * can hold identical content, and "are these two trees the same?" is a
+   * question about content. Comparing snapshot ids answers a different
+   * question and answers it wrongly: the join check depends on this.
+   */
+  contentId(root: string, state: SnapshotId): Promise<string | undefined>;
+  /**
+   * Display name of the line a materialization is on. Messages only.
+   *
+   * Explicitly not an identifier: a provider may have no concept of a
+   * named line, and callers must not branch on its value.
+   */
+  currentLineName(root: string): Promise<string | undefined>;
+  /** The root of the project containing `somePath`, if it is in one. */
+  resolveRoot(somePath: string): Promise<string | undefined>;
+  /**
+   * What a retained handle currently points at, if it exists.
+   *
+   * Takes a Workspace rather than a path, matching retainSnapshot and
+   * dropSnapshotRef. Where retained handles physically live is the
+   * provider's business: git keeps them in the repository shared by every
+   * worktree, which is neither the workspace directory nor necessarily the
+   * source directory. Handing callers a `root` parameter made six of them
+   * reach into `vcs.repoRoot` to compute it.
+   */
+  resolveRetained(ws: Workspace, ref: string): Promise<SnapshotId | undefined>;
+
+  /** True when `state` is already contained within `within`. */
+  contains(root: string, opts: { state: string; within: string }): Promise<boolean>;
+  /** How far apart two states are, or undefined when it cannot be measured. */
+  divergence(root: string, from: string, to: string): Promise<Divergence | undefined>;
+  /** Paths that differ between two states. */
+  changedPathsBetween(
+    root: string,
+    from: string,
+    to: string,
+  ): Promise<readonly string[]>;
+
+  // ---------------------------------------------------------------------
+  // Deltas: moving uncommitted content between materializations.
+  // ---------------------------------------------------------------------
+
+  /** Capture the difference between two states as a transferable delta. */
+  captureDelta(
+    root: string,
+    from: SnapshotId,
+    to: SnapshotId,
+  ): Promise<StateDelta | undefined>;
+  /**
+   * Reproduce a delta in a materialization.
+   *
+   * `stage` records the content as part of the next snapshot rather than
+   * leaving it loose. Default false, and callers should keep it that way
+   * for anything derived from a user's in-progress work: staged content is
+   * swept into whatever the agent records next, which is precisely the
+   * outcome the copy-not-move design exists to avoid.
+   *
+   * `tolerant` lets the provider reconcile a delta that does not apply
+   * cleanly, and to report `alreadyPresent` instead of failing when the
+   * content is already there.
+   */
+  applyDelta(
+    root: string,
+    delta: StateDelta,
+    opts?: { stage?: boolean; tolerant?: boolean },
+  ): Promise<DeltaOutcome>;
+
+  // ---------------------------------------------------------------------
+  // Mutation.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Return a materialization to a recorded state, discarding what is not
+   * in it.
+   *
+   * `purgeIgnored` extends that to files the project ignores. Off by
+   * default: those are usually the expensive-to-rebuild ones (installed
+   * dependencies, local configuration) and they are part of what made the
+   * materialization usable rather than part of the work being discarded.
+   */
+  resetTo(
+    root: string,
+    state: SnapshotId,
+    opts?: { purgeIgnored?: boolean },
+  ): Promise<ResetOutcome>;
+
+  /** True when an integration is half-finished and awaiting resolution. */
+  integrationInProgress(root: string): Promise<boolean>;
+  /** Abandon a half-finished integration, restoring the prior state. */
+  abortIntegration(root: string): Promise<void>;
+  /** Paths an in-progress integration could not reconcile. */
+  conflictedPaths(root: string): Promise<readonly string[]>;
+
+  // ---------------------------------------------------------------------
+  // Nested trees.
+  // ---------------------------------------------------------------------
+
+  /** Enumerate nested trees and how each one stands. */
+  listNested(root: string): Promise<readonly NestedState[]>;
+  /** Capture whatever each nested tree holds that its container does not. */
+  captureNested(
+    root: string,
+    states: readonly NestedState[],
+  ): Promise<readonly NestedCapture[]>;
+  /**
+   * Reproduce captured nested state in a materialization, aligning each
+   * nested tree before replaying its contents.
+   *
+   * `from` is the materialization the captures came from, because a
+   * provider may need to reach it: nested trees are not guaranteed to
+   * share storage with their container's other materializations, so a
+   * state that exists in one may be unreachable from another.
+   */
+  reproduceNested(
+    root: string,
+    from: string,
+    captures: readonly NestedCapture[],
+  ): Promise<NestedOutcome>;
+  /**
+   * Bring a container's nested trees into line after an integration moved
+   * what it records for them, then replay `captures` on top.
+   *
+   * Distinct from reproduceNested because the safety rule inverts: this
+   * one must refuse a nested tree holding its own uncommitted work, since
+   * the target is the user's tree rather than a fresh workspace.
+   */
+  integrateNested(
+    root: string,
+    from: string,
+    captures: readonly NestedCapture[],
+  ): Promise<NestedOutcome>;
 
   createWorkspace(opts: CreateWorkspaceOptions): Promise<CreateWorkspaceResult>;
   /**
@@ -210,6 +503,61 @@ export interface IsolationProvider {
   rematerialize(ws: Workspace): Promise<CreateWorkspaceResult>;
   /** What the provider itself believes exists, for reconciling against our records. */
   listWorkspaces(sourceCwd: string): Promise<readonly Workspace[]>;
+
+  /**
+   * Recover a workspace's identity from the directory itself, when no
+   * record points at it any more.
+   *
+   * The path is a dead end: a hash and a label, sharing no prefix with the
+   * source. The DIRECTORY is not, because a provider leaves its own
+   * breadcrumb in one. Asking each provider in turn is how an unowned
+   * directory gets handed back to the thing that knows how to tear it down
+   * completely, which a bare recursive delete does not: it would leave the
+   * provider's own bookkeeping pointing at a path that no longer exists.
+   *
+   * Returns undefined when this provider does not recognize the directory,
+   * which is the normal answer for all but one of them.
+   */
+  attributeOrphan(dir: string): Promise<Workspace | undefined>;
+
+  /**
+   * Discard a line of work that has no materialization left.
+   *
+   * Distinct from removeWorkspace's `discardLine`, which tears down a
+   * directory and its line together. This is the leftover case: a line
+   * whose checkout is already gone, squatting on a label the next workspace
+   * of that name will want.
+   *
+   * Reports how many recorded states went with it, because that is the only
+   * measure of what is being thrown away and the caller has to be able to
+   * say so before it happens.
+   */
+  discardLine(
+    ws: Workspace,
+    line: string,
+  ): Promise<{ ok: boolean; dropped: number; reason?: string }>;
+
+  /**
+   * Whether a line is this provider's own to discard, rather than one the
+   * user made.
+   *
+   * Asked rather than pattern-matched, because the naming convention is the
+   * provider's: it chose the namespace when it created the workspace, so it
+   * is the only thing that can recognize it. Callers were testing
+   * `branch.startsWith("hydra/")`, which is git's namespace spelled out in
+   * a file that should not know git has namespaces.
+   */
+  ownsLine(line: string): boolean;
+
+  /**
+   * Drop provider bookkeeping for materializations that no longer exist.
+   *
+   * Needed because removing a directory from underneath a provider (a
+   * reaper, a disk cleanup, an `rm -rf`) leaves a registry entry pointing
+   * nowhere, and that stale entry makes the provider refuse to create a new
+   * workspace at the same path. A no-op for providers that keep no registry.
+   */
+  pruneStale(ws: Workspace): Promise<void>;
   status(ws: Workspace): Promise<WorkspaceStatus>;
 
   captureWorkingState(sourceCwd: string, message: string): Promise<SnapshotId>;
@@ -232,7 +580,35 @@ export interface IsolationProvider {
   dropSnapshotRef(ws: Workspace, ref: string): Promise<void>;
   record(ws: Workspace, message: string): Promise<SnapshotId>;
   changedPaths(ws: Workspace, since: SnapshotId): Promise<readonly PathChange[]>;
-  integrate(opts: { from: SnapshotId; into: Workspace }): Promise<IntegrateResult>;
+  /**
+   * Bring work from one state or line into a materialization.
+   *
+   * Takes paths and opaque handles rather than a Workspace, because the
+   * receiving side is usually the SOURCE tree: landing integrates the
+   * workspace's line into the project, which is the opposite direction from
+   * what a Workspace-shaped parameter suggests. Sync runs the same
+   * operation the other way, and sharing one method is what keeps the two
+   * from drifting apart.
+   *
+   * `fastForwardOnly` refuses unless the receiving tree can simply advance.
+   * Callers landing into a user's tree should set it: it is what guarantees
+   * that tree is never left holding a conflict it did not ask for, and
+   * never gains a merge record nobody chose to create.
+   */
+  integrate(opts: {
+    /** Materialization receiving the work. */
+    into: string;
+    /** Opaque state or line handle being integrated. */
+    from: string;
+    fastForwardOnly?: boolean;
+    /** Description for the integration record, when one is created. */
+    message?: string;
+    /**
+     * What to do when reconciliation fails. "abort" restores the receiving
+     * tree; "keep" leaves the conflict there to resolve by hand.
+     */
+    onConflict?: "abort" | "keep";
+  }): Promise<IntegrateResult>;
 
   lock(ws: Workspace, reason: string): Promise<void>;
   unlock(ws: Workspace): Promise<void>;
@@ -357,6 +733,47 @@ export function capLines(items: readonly string[], cap = 10): string[] {
   const kept = items.slice(0, cap);
   const rest = items.length - cap;
   return [...kept, `... and ${rest} more`];
+}
+
+/** True when a nested tree holds anything its container does not already have. */
+export function nestedHasWork(state: NestedState): boolean {
+  return (
+    state.changedPaths.length > 0 ||
+    (state.recorded !== undefined && state.recorded !== state.actual)
+  );
+}
+
+/** Per-file paths inside nested trees, for a human-facing list. */
+function nestedReportPaths(states: readonly NestedState[]): string[] {
+  const out: string[] = [];
+  for (const state of states) {
+    if (state.changedPaths.length === 0) {
+      out.push(`${state.relPath} (nested tree advanced to ${state.actual.slice(0, 8)})`);
+      continue;
+    }
+    for (const p of state.changedPaths) {
+      out.push(`${state.relPath}/${p}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Replace a container's one-line-per-nested-tree view with real per-file
+ * detail.
+ *
+ * A container reports a nested tree holding thirty edits as the single path
+ * `sub`, so a caller counting its changed paths reports "1 file". Both the
+ * carried list and the left-behind list get read to check whether a
+ * specific piece of work moved, which that count cannot answer.
+ */
+export function expandChangedPaths(
+  containerPaths: readonly string[],
+  states: readonly NestedState[],
+): string[] {
+  const roots = new Set(states.map((s) => s.relPath));
+  const kept = containerPaths.filter((p) => !roots.has(p.replace(/\/$/, "")));
+  return [...kept, ...nestedReportPaths(states.filter(nestedHasWork))];
 }
 
 /** Filesystem-safe label. Keeps the caller's intent legible in the path. */

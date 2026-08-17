@@ -54,8 +54,12 @@ import {
 } from "./workspace/source-state.js";
 import {
   asSnapshotId,
+  asStateDelta,
   capLines,
+  expandChangedPaths,
   type IsolationProvider,
+  type NestedCapture,
+  type NestedState,
   type SnapshotId,
   type Workspace,
 } from "./workspace/provider.js";
@@ -65,46 +69,11 @@ import {
   runWorkspaceHook,
   type WorkspaceRepoConfig,
 } from "./workspace/setup.js";
-import {
-  applyNestedCarry,
-  captureNested,
-  enumerateNested,
-  expandChangedPaths,
-  landNested,
-  type NestedCarry,
-  type NestedState,
-} from "./workspace/nested.js";
-import { execFile as execFileCb } from "node:child_process";
-
-// Minimal git runner for the workspace-move path. Errors are returned,
-// not thrown: every caller here has a meaningful fallback and none of
-// them should take the session down.
-function execGit(
-  args: string[],
-  cwd: string,
-): Promise<{ ok: boolean; out: string; err: string }> {
-  return new Promise((resolve) => {
-    execFileCb("git", args, { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 }, (e, o, s) => {
-      resolve({ ok: !e, out: o ?? "", err: s ?? "" });
-    });
-  });
-}
-
-function execGitStdin(
-  args: string[],
-  cwd: string,
-  stdin: string,
-): Promise<{ ok: boolean; err: string }> {
-  return new Promise((resolve) => {
-    const child = execFileCb(
-      "git",
-      args,
-      { cwd, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
-      (e, _o, s) => resolve({ ok: !e, err: s ?? "" }),
-    );
-    child.stdin?.end(stdin);
-  });
-}
+// No git runner here, deliberately. Every version-control operation this
+// file needs goes through IsolationProvider, so the answer to "which VCS
+// is this" is asked in exactly one place. Two local runners used to live
+// here and grew to forty-odd call sites, which is how that knowledge
+// leaked out of the provider and into the session layer.
 import {
   TombstoneStore,
   shouldResurrectFromUpstream,
@@ -886,6 +855,7 @@ export class SessionManager {
         label: ws.label,
         provider: ws.provider,
         ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+        ...(ws.line !== undefined ? { line: ws.line } : {}),
         ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
         clean: true,
       },
@@ -1730,7 +1700,7 @@ export class SessionManager {
     // say false because landing is done by this class with raw git. It
     // would reject the git provider too.
     const provider = getWorkspaceProvider(ws.provider);
-    if (ws.vcs?.branch === undefined || provider?.capabilities().sharedHistory !== true) {
+    if (ws.line === undefined || provider?.capabilities().sharedHistory !== true) {
       throw new Error(
         `workspace ${ws.label} uses the "${ws.provider}" provider, which has no history to ` +
           `merge from — a sync needs a common base, and a copied directory has none. ` +
@@ -1739,51 +1709,42 @@ export class SessionManager {
       );
     }
 
-    const sourceHead = (await execGit(["rev-parse", "HEAD"], ws.sourceCwd)).out.trim();
-    const before = (await execGit(["rev-parse", "HEAD"], ws.path)).out.trim();
-    if (sourceHead.length === 0 || before.length === 0) {
-      throw new Error("could not read HEAD of the source or the workspace");
+    const [sourceHead, before] = await Promise.all([
+      provider.currentState(ws.sourceCwd),
+      provider.currentState(ws.path),
+    ]);
+    if (sourceHead === undefined || before === undefined) {
+      throw new Error("could not read the state of the source or the workspace");
     }
-    const already = await execGit(["merge-base", "--is-ancestor", sourceHead, before], ws.path);
-    if (already.ok) {
+    if (await provider.contains(ws.path, { state: sourceHead, within: before })) {
       return {
         ok: true,
         message: `Already up to date with ${shortenHomePath(ws.sourceCwd)} (${sourceHead.slice(0, 8)}).`,
       };
     }
 
-    const incoming = (
-      await execGit(["rev-list", "--count", `${before}..${sourceHead}`], ws.path)
-    ).out.trim();
-    const merged = await execGit(
-      ["merge", "--no-edit", "-m", `hydra: sync ${ws.label} with the source`, sourceHead],
-      ws.path,
-    );
+    const spread = await provider.divergence(ws.path, before, sourceHead);
+    const incoming = String(spread?.behind ?? 0);
+    const merged = await provider.integrate({
+      into: ws.path,
+      from: sourceHead,
+      message: `hydra: sync ${ws.label} with the source`,
+    });
     if (!merged.ok) {
-      // Name the files BEFORE deciding what to do with the merge: an
-      // abort erases the evidence, and "these two disagree" is the whole
-      // content of a useful conflict report.
-      const conflicted = (
-        await execGit(["diff", "--name-only", "--diff-filter=U"], ws.path)
-      ).out
-        .trim()
-        .split("\n")
-        .filter((l) => l.length > 0);
+      // The provider names the conflicting paths BEFORE deciding what to do
+      // with a half-finished integration, because abandoning it erases the
+      // evidence and "these two disagree" is the whole content of a useful
+      // report.
+      const conflicted = merged.conflicts;
 
-      // Two failures wear one exit code here, and they need opposite
-      // handling. A merge that STARTED and could not reconcile two
-      // histories is a conflict: there are unmerged entries, and the
-      // files are the report. A merge git DECLINED to start leaves no
-      // unmerged entries and no MERGE_HEAD — nothing happened — and the
-      // reason is in its stderr, not in a file list.
-      //
-      // Told apart on both signals rather than on the file list alone,
-      // because a merge already in progress from an earlier sync also
-      // refuses, and reporting that one as "nothing happened" would be
-      // just as wrong in the other direction.
-      const inProgress = (
-        await execGit(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
-      ).ok;
+      // Two failures wear one shape here and need opposite handling. An
+      // integration that STARTED and could not reconcile is a conflict, and
+      // the files are the report. One that was DECLINED means nothing
+      // happened, and the reason is prose rather than a file list. The
+      // provider distinguishes them, because an integration already in
+      // progress from an earlier sync also refuses and reporting THAT as
+      // "nothing happened" would be just as wrong in the other direction.
+      const inProgress = await provider.integrationInProgress(ws.path);
       if (conflicted.length === 0 && !inProgress) {
         const retried = await this.syncOverDirtyTree(ws, {
           provider,
@@ -1799,7 +1760,7 @@ export class SessionManager {
       const named =
         conflicted.length > 0
           ? `\n${conflicted.map((f) => `  ${f}`).join("\n")}`
-          : ` (${merged.err.trim() || merged.out.trim() || "merge failed"})`;
+          : ` (${merged.reason ?? "the integration failed"})`;
 
       if (conflicted.length === 0) {
         // Not a conflict at all: git declined, or stopped for a reason
@@ -1815,7 +1776,7 @@ export class SessionManager {
         return {
           ok: false,
           message:
-            `git would not merge the source into ${shortenHomePath(ws.path)}; ` +
+            `the source could not be merged into ${shortenHomePath(ws.path)}; ` +
             `nothing changed.${named}\n` +
             (inProgress
               ? `A merge is already in progress there. Finish it — resolve, commit — then ` +
@@ -1827,7 +1788,7 @@ export class SessionManager {
       if (opts.onConflict === "abort") {
         // The landing path. A `stop` must never hand back a conflicted
         // tree the user did not ask for, so this is a strict no-op.
-        await execGit(["merge", "--abort"], ws.path).catch(() => undefined);
+        await provider.abortIntegration(ws.path).catch(() => undefined);
         return {
           ok: false,
           message: `${conflicted.length} file(s) conflict between the source and this workspace:${named}`,
@@ -1852,10 +1813,7 @@ export class SessionManager {
           `\`/hydra workspace stop\`. To back it out instead: git -C ${ws.path} merge --abort`,
       };
     }
-    const touched = (
-      await execGit(["diff", "--name-only", before, "HEAD"], ws.path)
-    ).out.trim();
-    const files = touched.length === 0 ? 0 : touched.split("\n").length;
+    const files = (await provider.changedPathsBetween(ws.path, before, merged.snapshot)).length;
     return {
       ok: true,
       message:
@@ -1901,8 +1859,9 @@ export class SessionManager {
     if (provider?.capabilities().supports.captureWorkingState !== true) {
       return undefined;
     }
-    const dirty = await execGit(["status", "--porcelain", "-uall"], ws.path);
-    if (!dirty.ok || dirty.out.trim().length === 0) {
+    const asWs = this.asWorkspace(ws);
+    const dirty = await provider.status(asWs).catch(() => undefined);
+    if (dirty === undefined || dirty.changedPaths.length === 0) {
       return undefined;
     }
     const snapshot = await provider
@@ -1911,16 +1870,16 @@ export class SessionManager {
     if (snapshot === undefined) {
       return undefined;
     }
-    // Retained BEFORE anything is reset, and only proceeding if the ref
-    // actually took: for the next few commands this object is the only
-    // copy of the user's work, and an unreachable commit is one `git gc`
-    // away from not being a copy at all.
+    // Retained BEFORE anything is reset, and only proceeding if it
+    // actually took: for the next few steps this snapshot is the only copy
+    // of the user's work, and an unretained one is one collection pass away
+    // from not being a copy at all.
     const retainRef = syncRetainRef(ws.label);
-    const retained = await execGit(
-      ["update-ref", "--create-reflog", retainRef, snapshot],
-      ws.path,
-    );
-    if (!retained.ok) {
+    const retained = await provider
+      .retainSnapshot(asWs, retainRef, snapshot)
+      .then(() => provider.resolveRetained(asWs, retainRef))
+      .catch(() => undefined);
+    if (retained === undefined) {
       return undefined;
     }
     const capture = { clean: false, snapshot, base: before };
@@ -1928,10 +1887,9 @@ export class SessionManager {
       `git -C ${ws.path} cherry-pick --no-commit ${retainRef}` +
       ` # the snapshot's parent is ${before.slice(0, 8)}, so this replays exactly your work`;
 
-    const reset = await execGit(["reset", "--hard", before], ws.path);
-    const cleaned = await execGit(["clean", "-fd"], ws.path);
-    if (!reset.ok || !cleaned.ok) {
-      const back = await replaySourceDivergence({ source: ws.path, capture });
+    const cleared = await provider.resetTo(ws.path, asSnapshotId(before));
+    if (!cleared.ok) {
+      const back = await replaySourceDivergence({ source: ws.path, capture, provider });
       return {
         ok: false,
         message:
@@ -1944,13 +1902,14 @@ export class SessionManager {
       };
     }
 
-    const merged = await execGit(
-      ["merge", "--no-edit", "-m", `hydra: sync ${ws.label} with the source`, sourceHead],
-      ws.path,
-    );
+    const merged = await provider.integrate({
+      into: ws.path,
+      from: sourceHead,
+      message: `hydra: sync ${ws.label} with the source`,
+    });
     if (!merged.ok) {
       // A real disagreement between the two histories, now that the tree
-      // is clean and cannot be what git is objecting to.
+      // is clean and cannot be what the provider is objecting to.
       //
       // Restored rather than left in progress, which is what an explicit
       // `sync` otherwise does. The two cannot both happen: the work is
@@ -1959,10 +1918,10 @@ export class SessionManager {
       // conflict markers with no way to tell them apart afterwards.
       // Restoring keeps the "nothing changed" property, which is what
       // makes the next step statable.
-      await execGit(["merge", "--abort"], ws.path).catch(() => undefined);
-      const back = await replaySourceDivergence({ source: ws.path, capture });
+      await provider.abortIntegration(ws.path).catch(() => undefined);
+      const back = await replaySourceDivergence({ source: ws.path, capture, provider });
       if (back) {
-        await execGit(["update-ref", "-d", retainRef], ws.path).catch(() => undefined);
+        await provider.dropSnapshotRef(asWs, retainRef).catch(() => undefined);
       }
       return {
         ok: false,
@@ -1980,9 +1939,12 @@ export class SessionManager {
       };
     }
 
-    const restored = await replaySourceDivergence({ source: ws.path, capture });
-    const touched = (await execGit(["diff", "--name-only", before, "HEAD"], ws.path)).out.trim();
-    const files = touched.length === 0 ? 0 : touched.split("\n").length;
+    const restored = await replaySourceDivergence({ source: ws.path, capture, provider });
+    const after = await provider.currentState(ws.path);
+    const files =
+      after === undefined
+        ? 0
+        : (await provider.changedPathsBetween(ws.path, before, after)).length;
     const head = `Synced ${shortenHomePath(ws.path)} with ${shortenHomePath(ws.sourceCwd)}: ${incoming} commit(s), ${files} file(s) changed.`;
     if (!restored) {
       return {
@@ -1993,7 +1955,7 @@ export class SessionManager {
           `is preserved at ${retainRef} if you would rather start over:\n  ${recover}`,
       };
     }
-    await execGit(["update-ref", "-d", retainRef], ws.path).catch(() => undefined);
+    await provider.dropSnapshotRef(asWs, retainRef).catch(() => undefined);
     return {
       ok: true,
       message: `${head} Your uncommitted work was set aside for the merge and restored on top.`,
@@ -2008,25 +1970,26 @@ export class SessionManager {
    * the authoritative check still runs at landing time.
    */
   private async fastForwardBlocked(ws: PersistedWorkspace): Promise<string | undefined> {
-    const branch = ws.vcs?.branch;
+    const asWs = this.asWorkspace(ws);
+    const branch = asWs.line;
     if (branch === undefined) {
-      return "the workspace has no branch to merge from";
+      return "the workspace has no line of work to land from";
     }
-    const head = await execGit(["rev-parse", "HEAD"], ws.sourceCwd);
-    if (!head.ok || head.out.trim().length === 0) {
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider === undefined) {
       return undefined;
     }
-    const ancestor = await execGit(
-      ["merge-base", "--is-ancestor", head.out.trim(), branch],
-      ws.sourceCwd,
-    );
-    if (ancestor.ok) {
+    const head = await provider.currentState(ws.sourceCwd);
+    if (head === undefined) {
       return undefined;
     }
-    const current = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], ws.sourceCwd);
+    if (await provider.contains(ws.sourceCwd, { state: head, within: branch })) {
+      return undefined;
+    }
+    const current = await provider.currentLineName(ws.sourceCwd);
     return (
       `${shortenHomePath(ws.sourceCwd)} has moved on since this workspace was created ` +
-      `(it is on ${current.out.trim() || "an unknown branch"}). ` +
+      `(it is on ${current ?? "an unknown branch"}). ` +
       `\`/hydra workspace sync\` brings those commits in here and makes the landing possible ` +
       `again, or land it by hand with: git -C ${ws.sourceCwd} merge ${branch}`
     );
@@ -2288,29 +2251,31 @@ export class SessionManager {
     session: Session,
     workspace: PersistedWorkspace,
   ): Promise<void> {
-    if (workspace.vcs?.branch === undefined) {
+    const asWs = this.asWorkspace(workspace);
+    if (asWs.line === undefined) {
       return;
     }
-    if (getWorkspaceProvider(workspace.provider)?.capabilities().sharedHistory !== true) {
+    const provider = getWorkspaceProvider(workspace.provider);
+    if (provider === undefined || !provider.capabilities().sharedHistory) {
       return;
     }
-    const sourceHead = (await execGit(["rev-parse", "HEAD"], workspace.sourceCwd)).out.trim();
-    if (sourceHead.length === 0 || this.driftNoticed.get(session.sessionId) === sourceHead) {
+    const sourceHead = await provider.currentState(workspace.sourceCwd);
+    if (sourceHead === undefined || this.driftNoticed.get(session.sessionId) === sourceHead) {
       return;
     }
-    const contained = await execGit(
-      ["merge-base", "--is-ancestor", sourceHead, "HEAD"],
-      workspace.path,
-    );
-    if (contained.ok) {
+    const here = await provider.currentState(workspace.path);
+    if (here === undefined) {
+      return;
+    }
+    if (await provider.contains(workspace.path, { state: sourceHead, within: here })) {
       // Caught up, whether by a sync or because nothing ever moved.
       // Forgetting the latch here is what lets the NEXT drift speak.
       this.driftNoticed.delete(session.sessionId);
       return;
     }
-    const counted = await execGit(["rev-list", "--count", `HEAD..${sourceHead}`], workspace.path);
-    const behind = Number.parseInt(counted.out.trim(), 10);
-    if (!counted.ok || !Number.isFinite(behind) || behind <= 0) {
+    const spread = await provider.divergence(workspace.path, here, sourceHead);
+    const behind = spread?.behind ?? 0;
+    if (behind <= 0) {
       return;
     }
     this.driftNoticed.set(session.sessionId, sourceHead);
@@ -2355,10 +2320,11 @@ export class SessionManager {
       const others = this.liveSessionsIn(ws.path, session.sessionId).map((s) =>
         stripHydraSessionPrefix(s.sessionId),
       );
+      const statusLine = ws.line;
       const lines = [
         `Isolated in ${shortenHomePath(ws.path)}`,
         `  source:   ${shortenHomePath(ws.sourceCwd)}`,
-        `  provider: ${ws.provider}${ws.vcs?.branch !== undefined ? ` (${ws.vcs.branch})` : ""}`,
+        `  provider: ${ws.provider}${statusLine !== undefined ? ` (${statusLine})` : ""}`,
       ];
       if (others.length > 0) {
         lines.push(`  shared with: ${others.join(", ")}`);
@@ -2524,7 +2490,7 @@ export class SessionManager {
       await this.leaveWorkspace(session, ws, { exit: "discarded" });
       const retired = await this.retireAutosave(ws);
       const lines = [
-        `Discarded ${shortenHomePath(ws.path)} and its branch ${ws.vcs?.branch ?? "(none)"}; ` +
+        `Discarded ${shortenHomePath(ws.path)} and its branch ${ws.line ?? "(none)"}; ` +
           `returned to ${shortenHomePath(ws.sourceCwd)}.`,
       ];
       if (retired !== undefined) {
@@ -2542,7 +2508,7 @@ export class SessionManager {
     return [
       `Returned to ${shortenHomePath(ws.sourceCwd)} WITHOUT merging.`,
       `The workspace is still at ${shortenHomePath(ws.path)} and its branch ` +
-        `${ws.vcs?.branch ?? "(none)"} is intact, so nothing is lost — land it later with ` +
+        `${ws.line ?? "(none)"} is intact, so nothing is lost. Land it later with ` +
         `\`hydra workspace merge\`, or drop it with \`/hydra workspace discard\`.`,
     ].join("\n");
   }
@@ -2561,21 +2527,49 @@ export class SessionManager {
    * Deleting the live ref also clears its reflog, so the next workspace of
    * that name starts with a clean history rather than inheriting one.
    */
+  /**
+   * The provider-facing shape of a persisted binding.
+   *
+   * PersistedWorkspace is a zod schema that deliberately does not import
+   * the provider module, so the two shapes are structurally similar and
+   * nominally unrelated, and this conversion was being written out by hand
+   * at eight call sites. Each hand-written copy is a chance to forget a
+   * field the provider needs, and `line` is the one that matters: forget it
+   * and a landing has nothing to integrate from.
+   */
+  private asWorkspace(ws: PersistedWorkspace): Workspace {
+    return {
+      path: ws.path,
+      sourceCwd: ws.sourceCwd,
+      label: ws.label,
+      provider: ws.provider,
+      ...(ws.snapshot !== undefined ? { snapshot: asSnapshotId(ws.snapshot) } : {}),
+      ...(ws.line !== undefined ? { line: ws.line } : {}),
+      ...(ws.vcs !== undefined ? { vcs: ws.vcs } : {}),
+    };
+  }
+
   private async retireAutosave(ws: PersistedWorkspace): Promise<string | undefined> {
-    const repoRoot = ws.vcs?.repoRoot ?? ws.sourceCwd;
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider === undefined) {
+      return undefined;
+    }
+    const asWs = this.asWorkspace(ws);
     const live = this.snapshotRefFor(ws.label);
-    const found = await execGit(["rev-parse", "--verify", "--quiet", live], repoRoot);
-    const sha = found.out.trim();
-    if (!found.ok || sha.length === 0) {
+    const sha = await provider.resolveRetained(asWs, live).catch(() => undefined);
+    if (sha === undefined) {
       return undefined;
     }
     const retired = retiredSnapshotRef(ws.label, sha);
-    const written = await execGit(["update-ref", retired, sha], repoRoot);
-    if (!written.ok) {
-      // Keep the live ref rather than dropping the only copy.
+    const written = await provider
+      .retainSnapshot(asWs, retired, sha)
+      .then(() => true)
+      .catch(() => false);
+    if (!written) {
+      // Keep the live handle rather than dropping the only copy.
       return live;
     }
-    await execGit(["update-ref", "-d", live], repoRoot);
+    await provider.dropSnapshotRef(asWs, live).catch(() => undefined);
     return retired;
   }
 
@@ -2643,31 +2637,17 @@ export class SessionManager {
         );
       }
 
-      const asWorkspace = {
-        path: ws.path,
-        sourceCwd: ws.sourceCwd,
-        label: ws.label,
-        provider: ws.provider,
-        snapshot: asSnapshotId(ws.snapshot),
-        ...(ws.vcs !== undefined ? { vcs: ws.vcs } : {}),
-      };
+      const asWorkspace = this.asWorkspace(ws);
+      const base = asSnapshotId(ws.snapshot);
 
       // Everything that describes what is about to be destroyed is read
       // BEFORE the first write, because afterwards it is unrecoverable and
       // the reply is the only place it is ever named.
-      const dirty = await execGit(["status", "--porcelain", "-uall"], ws.path);
-      const dirtyCount = dirty.ok
-        ? dirty.out
-            .trim()
-            .split("\n")
-            .filter((l) => l.trim().length > 0).length
-        : 0;
-      const aheadRaw = await execGit(
-        ["rev-list", "--count", `${ws.snapshot}..HEAD`],
-        ws.path,
-      );
-      const ahead = aheadRaw.ok ? Number.parseInt(aheadRaw.out.trim(), 10) : 0;
-      const tipBefore = (await execGit(["rev-parse", "HEAD"], ws.path)).out.trim();
+      const dirty = await provider.status(asWorkspace).catch(() => undefined);
+      const dirtyCount = dirty?.changedPaths.length ?? 0;
+      const spread = await provider.divergence(ws.path, base, "HEAD").catch(() => undefined);
+      const ahead = spread?.behind ?? 0;
+      const tipBefore = (await provider.currentState(ws.path)) ?? "";
 
       // The autosave becomes a recovery point before anything is
       // destroyed, not after. Retired rather than left in place because a
@@ -2677,34 +2657,22 @@ export class SessionManager {
 
       session.broadcastWorkspacePhase({ phase: "cleaning", label: ws.label });
 
-      const reset = await execGit(["reset", "--hard", ws.snapshot], ws.path);
+      // Ignored files are preserved unless deep. That is what makes the
+      // plain form both fast and correct: installed dependencies and a
+      // carried .env are part of what `start` produced, so keeping them IS
+      // returning to the created state rather than a shortcut. Deep rebuilds
+      // them instead, which is the same target reached the expensive way.
+      //
+      // resetTo also handles nested trees, which neither a plain reset nor a
+      // plain clean reaches into, so without it the verb would leave exactly
+      // the mess it was asked to remove.
+      const reset = await provider.resetTo(ws.path, base, { purgeIgnored: opts.deep });
       if (!reset.ok) {
         throw new Error(
-          `could not reset ${shortenHomePath(ws.path)} to its base: ` +
-            `${reset.err.trim() || "unknown error"}. Nothing was changed.`,
+          `could not return ${shortenHomePath(ws.path)} to its base: ` +
+            `${reset.reason ?? "unknown error"}. Nothing was changed.`,
         );
       }
-      // -fd normally, -ffdx under deep. Preserving ignored files is what
-      // makes the plain form both fast and correct: node_modules and a
-      // carried .env are part of what `start` produced, so keeping them
-      // IS returning to the created state rather than a shortcut. Deep
-      // rebuilds them instead, which is the same target reached the
-      // expensive way.
-      const cleaned = await execGit(["clean", opts.deep ? "-ffdx" : "-fd"], ws.path);
-      if (!cleaned.ok) {
-        throw new Error(
-          `reset ${shortenHomePath(ws.path)} but could not remove untracked files: ` +
-            `${cleaned.err.trim() || "unknown error"}`,
-        );
-      }
-
-      // Neither reset nor clean reaches inside a nested tree (verified on
-      // git 2.43), so without this the verb leaves exactly the mess it
-      // was asked to remove.
-      const nestedNote = await this.materializeNestedTrees(ws, {
-        discardLocal: true,
-        purgeIgnored: opts.deep,
-      });
 
       // Only deep needs setup re-run: -ffdx removed the carried config
       // files and whatever postCreate installed, and a workspace missing
@@ -2740,7 +2708,7 @@ export class SessionManager {
         cwd: session.cwd,
         sourceCwd: ws.sourceCwd,
         label: ws.label,
-        ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+        ...(asWorkspace.line !== undefined ? { branch: asWorkspace.line } : {}),
       });
 
       const lines = [
@@ -2761,9 +2729,6 @@ export class SessionManager {
       } else {
         lines.push(`  nothing to discard; it was already at its base`);
       }
-      if (nestedNote !== undefined) {
-        lines.push(`  ${nestedNote}`);
-      }
       if (setupNote !== undefined) {
         lines.push(`  ${setupNote}`);
       }
@@ -2779,7 +2744,7 @@ export class SessionManager {
       if (ahead > 0 && tipBefore.length > 0) {
         lines.push(
           `  discarded commits are still at ${tipBefore.slice(0, 12)} ` +
-            `(and in the reflog for ${ws.vcs?.branch ?? "this branch"})`,
+            `(and in the reflog for ${ws.line ?? "this branch"})`,
         );
       }
       lines.push(
@@ -2816,9 +2781,9 @@ export class SessionManager {
     sessionId: string,
   ): Promise<{ merged: string; warnings: string[] }> {
     const source = ws.sourceCwd;
-    const branch = ws.vcs?.branch;
+    const branch = ws.line;
     if (branch === undefined) {
-      throw new Error(`workspace ${ws.label} has no branch to merge from`);
+      throw new Error(`workspace ${ws.label} has no line of work to land from`);
     }
     const exists = await this.dirExists(source);
     if (!exists) {
@@ -2832,8 +2797,10 @@ export class SessionManager {
     // answered before proceeding into one that answers itself at the
     // end — and only fails when two edits genuinely overlap.
     const provider = getWorkspaceProvider(ws.provider);
+    const asWs = this.asWorkspace(ws);
     const capture = await captureSourceForLanding({
       source,
+      ws: asWs,
       // The START ref. Using the per-turn autosave ref here was the bug:
       // it holds WORKSPACE state, so the replay diff came out as the
       // inverse of the agent's work rather than as the source's
@@ -2850,10 +2817,16 @@ export class SessionManager {
       provider,
     });
 
-    const sourceHead = (await execGit(["rev-parse", "HEAD"], source)).out.trim();
-    let canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+    if (provider === undefined) {
+      throw new Error(`no provider "${ws.provider}" available to land this workspace`);
+    }
+    const sourceHead = await provider.currentState(source);
+    if (sourceHead === undefined) {
+      throw new Error(`could not read the state of ${shortenHomePath(source)}`);
+    }
+    let canFf = await provider.contains(source, { state: sourceHead, within: branch });
     const notes: string[] = [];
-    if (!canFf.ok) {
+    if (!canFf) {
       // Sync first, rather than making the user do it.
       //
       // Landing is fast-forward-only so that the SOURCE can never be left
@@ -2876,7 +2849,7 @@ export class SessionManager {
           const attempt = await this.syncWorkspaceFromSource(live, ws, { onConflict: "abort" });
           if (attempt.ok) {
             notes.push(`\n  synced with the source first: ${attempt.message}`);
-            canFf = await execGit(["merge-base", "--is-ancestor", sourceHead, branch], source);
+            canFf = await provider.contains(source, { state: sourceHead, within: branch });
           } else {
             why = `\nA sync was attempted first and could not complete: ${attempt.message}`;
           }
@@ -2889,8 +2862,8 @@ export class SessionManager {
           }`;
         }
       }
-      if (!canFf.ok) {
-        const current = (await execGit(["rev-parse", "--abbrev-ref", "HEAD"], source)).out.trim();
+      if (!canFf) {
+        const current = (await provider.currentLineName(source)) ?? "the source";
         throw new Error(
           // Prose gets the short path; the command keeps the absolute one,
           // so it stays paste-able outside a shell that expands `~`.
@@ -2918,16 +2891,16 @@ export class SessionManager {
     // before the merge for the same reason as everything else here: after
     // it, this function starts writing.
     //
-    // Separate from `pending` below because the superproject capture
-    // cannot express it. `captureWorkingState` on the workspace records a
-    // gitlink per submodule, so an agent that edited files inside one
-    // produces nothing in that snapshot and its work would be dropped by
-    // a landing that reported success.
+    // Separate from `pending` below because the container's own capture
+    // cannot express it: a container records a nested tree as a pointer, so
+    // an agent that edited files inside one produces nothing in that
+    // snapshot and its work would be dropped by a landing that reported
+    // success.
     const nestedPending =
-      provider?.capabilities().supports.nestedTrees === true
-        ? await captureNested(ws.path, await enumerateNested(ws.path)).catch(
-            (): NestedCarry[] => [],
-          )
+      provider !== undefined && provider.capabilities().supports.nestedTrees
+        ? await provider
+            .captureNested(ws.path, await provider.listNested(ws.path))
+            .catch((): readonly NestedCapture[] => [])
         : [];
 
     // Capture what the workspace has NOT committed, but do not commit it.
@@ -2937,8 +2910,8 @@ export class SessionManager {
     // the latter hands back something the user never chose to create,
     // and quietly promotes their untracked files to tracked ones.
     let pending: SnapshotId | undefined;
-    const outstanding = await execGit(["status", "--porcelain", "-uall"], ws.path);
-    if (outstanding.ok && outstanding.out.trim().length > 0 && provider !== undefined) {
+    const outstanding = await provider.status(asWs).catch(() => undefined);
+    if (outstanding !== undefined && outstanding.changedPaths.length > 0) {
       pending = await provider
         .captureWorkingState(ws.path, `hydra: uncommitted work in ${ws.label}`)
         .catch(() => undefined);
@@ -2952,9 +2925,8 @@ export class SessionManager {
     // Every check that could refuse has now run, and both trees are
     // captured. First write happens here.
     if (!capture.clean) {
-      const reset = await execGit(["reset", "--hard", "HEAD"], source);
-      const cleaned = await execGit(["clean", "-fd"], source);
-      if (!reset.ok || !cleaned.ok) {
+      const cleared = await provider.resetTo(source, sourceHead);
+      if (!cleared.ok) {
         throw new Error(
           `could not clear ${shortenHomePath(source)} for the merge; your work is preserved ` +
             `at ${capture.retainedRef}. Nothing was merged.`,
@@ -2962,43 +2934,44 @@ export class SessionManager {
       }
     }
 
-    const merged = await execGit(["merge", "--ff-only", branch], source);
+    const merged = await provider.integrate({
+      into: source,
+      from: branch,
+      fastForwardOnly: true,
+    });
     if (!merged.ok) {
-      throw new Error(`merge failed: ${merged.err.trim() || "unknown error"}`);
+      throw new Error(`merge failed: ${merged.reason ?? "unknown error"}`);
     }
 
     // Replay the uncommitted remainder on top, as uncommitted changes.
-    // Applied without --index so modifications land unstaged and new
-    // files land untracked, which is the shape they had in the
-    // workspace.
+    // Reproduced without staging so modifications land loose and new files
+    // land untracked, which is the shape they had in the workspace.
     let replayed = true;
     if (pending !== undefined) {
-      const tip = (await execGit(["rev-parse", "HEAD"], source)).out.trim();
-      const patch = await execGit(["diff", "--binary", tip, pending], source);
-      if (patch.ok && patch.out.trim().length > 0) {
-        replayed = (await execGitStdin(["apply"], source, patch.out)).ok;
+      const delta = await provider.captureDelta(source, merged.snapshot, pending);
+      if (delta !== undefined) {
+        replayed = (await provider.applyDelta(source, delta)).ok;
       }
     }
 
     // Then whatever the source had that the workspace never saw. Empty
     // unless the user kept editing after isolating.
-    const divergenceOk = await replaySourceDivergence({ source, capture });
+    const divergenceOk = await replaySourceDivergence({ source, capture, provider });
     if (divergenceOk) {
-      await releaseSourceCapture({ source, capture });
+      await releaseSourceCapture({ source, ws: asWs, capture, provider });
     }
 
-    // Nested trees last, because the fast-forward above moved their
-    // gitlinks without moving their checkouts. Left here, the source
-    // reports every bumped submodule as modified, sitting on the old
-    // commit, possibly without the objects for the new one. See
-    // workspace/nested.ts.
+    // Nested trees last, because the integration above moved what the
+    // container records for them without moving the trees themselves. Left
+    // here, the source reports every advanced nested tree as modified,
+    // sitting on its old state, possibly unable to even reach the new one.
+    const noNested = { applied: [] as string[], failed: [] as { path: string; reason: string }[] };
     const nestedLanded =
-      provider?.capabilities().supports.nestedTrees === true
-        ? await landNested(source, ws.path, nestedPending).catch(() => ({
-            landed: [] as string[],
-            skipped: [] as { path: string; reason: string }[],
-          }))
-        : { landed: [] as string[], skipped: [] as { path: string; reason: string }[] };
+      provider !== undefined && provider.capabilities().supports.nestedTrees
+        ? await provider
+            .integrateNested(source, ws.path, nestedPending)
+            .catch(() => noNested)
+        : noNested;
 
     // Re-baseline: record how this landing left the source, so the NEXT
     // one measures divergence from here instead of from `start`. Written
@@ -3010,19 +2983,16 @@ export class SessionManager {
     // Best-effort: a failure here costs a stale warning on the next
     // landing, which is not worth failing a landing that has already
     // succeeded over.
-    if (provider !== undefined) {
-      const after = await provider
-        .captureWorkingState(source, `hydra: source state after landing ${ws.label}`)
+    const after = await provider
+      .captureWorkingState(source, `hydra: source state after landing ${ws.label}`)
+      .catch(() => undefined);
+    if (after !== undefined) {
+      // Retained like the others: this one moves on every landing, so the
+      // provider's history of it is the record of where each landing left
+      // the source.
+      await provider
+        .retainSnapshot({ ...asWs, path: source }, this.baselineRefFor(ws.label), after)
         .catch(() => undefined);
-      if (after !== undefined) {
-        // Reflogged like the others: this one moves on every landing, so
-        // its previous values are the record of where each landing left
-        // the source.
-        await execGit(
-          ["update-ref", "--create-reflog", this.baselineRefFor(ws.label), after],
-          source,
-        );
-      }
     }
 
     const warnings: string[] = [];
@@ -3060,11 +3030,11 @@ export class SessionManager {
     // Named individually rather than counted, because each one is a
     // separate thing the user has to go and finish by hand, and the
     // reason differs per submodule.
-    for (const skip of nestedLanded.skipped) {
+    for (const skip of nestedLanded.failed) {
       warnings.push(
-        `  WARNING: submodule ${skip.path} was NOT reconciled: ${skip.reason}. ` +
-          `The superproject now records a different commit for it, so ` +
-          `${shortenHomePath(source)} will report it as modified until you resolve that.`,
+        `  WARNING: nested tree ${skip.path} was NOT reconciled: ${skip.reason}. ` +
+          `${shortenHomePath(source)} now records a different state for it, so it will ` +
+          `report it as modified until you resolve that.`,
       );
     }
     return {
@@ -3252,12 +3222,15 @@ export class SessionManager {
         `so refusing to join a workspace that may not match your tree`
       );
     }
-    const trees = await Promise.all(
-      [sourceState, wsState].map(async (sha) =>
-        (await execGit(["rev-parse", `${sha}^{tree}`], sourceCwd)).out.trim(),
+    // Compared by CONTENT identity, not by snapshot id: two separately
+    // recorded states of the same files are different snapshots and the
+    // same content, and "do these trees match?" is the content question.
+    const contents = await Promise.all(
+      [sourceState, wsState].map((state) =>
+        provider.contentId(sourceCwd, state).catch(() => undefined),
       ),
     );
-    if (trees[0]!.length > 0 && trees[0] === trees[1]) {
+    if (contents[0] !== undefined && contents[0] === contents[1]) {
       return undefined;
     }
     return (
@@ -3364,6 +3337,7 @@ export class SessionManager {
           ...(ws.requestedLabel !== undefined ? { requestedLabel: ws.requestedLabel } : {}),
           provider: ws.provider,
           ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+          ...(ws.line !== undefined ? { line: ws.line } : {}),
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
         },
         historyLength: history.length,
@@ -3376,12 +3350,13 @@ export class SessionManager {
         workspace: session.workspace,
       });
       this.invalidateListCache();
+      const joinedLine = ws.line;
       session.broadcastWorkspacePhase({
         phase: "entered",
         cwd: session.cwd,
         sourceCwd: ws.sourceCwd,
         label: ws.label,
-        ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+        ...(joinedLine !== undefined ? { branch: joinedLine } : {}),
       });
 
       const sharers = this.liveSessionsIn(ws.path, session.sessionId).map((s) =>
@@ -3391,8 +3366,8 @@ export class SessionManager {
         `Joined workspace ${shortenHomePath(ws.path)}`,
         `  source: ${shortenHomePath(ws.sourceCwd)}`,
       ];
-      if (ws.vcs?.branch !== undefined) {
-        lines.push(`  branch: ${ws.vcs.branch}`);
+      if (joinedLine !== undefined) {
+        lines.push(`  branch: ${joinedLine}`);
       }
       lines.push(`  shared with: ${sharers.join(", ")}`);
       lines.push(`  your edits will interleave with that session's`);
@@ -3480,11 +3455,10 @@ export class SessionManager {
     // produce the same reply: the first leaves work behind that the user
     // needs to know is still there.
     let leftBehind: readonly string[] = [];
-    // Work inside submodules, which the superproject's snapshot cannot
-    // express at all: it records a gitlink, not content. Captured
-    // separately and replayed after the workspace's own submodules are
-    // populated. See workspace/nested.ts.
-    let nestedCarries: readonly NestedCarry[] = [];
+    // Work inside nested trees, which a container's snapshot cannot express
+    // at all: it records a pointer, not content. Captured separately and
+    // replayed after the workspace's own nested trees are populated.
+    let nestedCarries: readonly NestedCapture[] = [];
     const wantClean = opts?.clean === true;
     if (caps.supports.captureWorkingState) {
       const status = await provider
@@ -3493,27 +3467,21 @@ export class SessionManager {
       sourceProbed = status !== undefined;
       // Enumerated before either branch, because both need it: the carry
       // path to capture the work, and `--clean` to report accurately what
-      // it is leaving behind. A dirty submodule shows up in the
-      // superproject's status as the bare path `sub`, so without this both
-      // lists would report thirty edits as one file.
+      // it is leaving behind. A container reports a dirty nested tree as the
+      // bare path `sub`, so without this both lists would report thirty
+      // edits as one file.
       const nestedStates =
         caps.supports.nestedTrees && status !== undefined && status.changedPaths.length > 0
-          ? await enumerateNested(sourceCwd).catch((): NestedState[] => [])
+          ? await provider.listNested(sourceCwd).catch((): readonly NestedState[] => [])
           : [];
       if (status !== undefined && status.changedPaths.length > 0 && wantClean) {
         leftBehind = expandChangedPaths(status.changedPaths, nestedStates);
       } else if (status !== undefined && status.changedPaths.length > 0) {
         carriedPaths = expandChangedPaths(status.changedPaths, nestedStates);
-        nestedCarries = await captureNested(sourceCwd, nestedStates).catch(
-          (): NestedCarry[] => [],
-        );
-        // Raw git, like copyCarriedWork below it: this whole block is
-        // git-only in practice (the copy provider reports
-        // captureWorkingState: false). Asking by name rather than by exit
-        // code so a failed probe stays silent instead of claiming
-        // everything was staged.
-        const staged = await execGit(["diff", "--cached", "--name-only"], sourceCwd);
-        carriedStaged = staged.ok && staged.out.trim().length > 0;
+        nestedCarries = await provider
+          .captureNested(sourceCwd, nestedStates)
+          .catch((): readonly NestedCapture[] => []);
+        carriedStaged = status.hasStagedWork === true;
         carried = await provider
           .captureWorkingState(sourceCwd, `hydra: work carried into workspace`)
           .catch(() => undefined);
@@ -3601,29 +3569,27 @@ export class SessionManager {
       // one that is present and applyCarry skips it, which is the right
       // precedence anyway.
       //
-      // Against nested trees: which commit each submodule should sit at
-      // is part of what was carried, so populating them before the
-      // superproject's state has arrived puts them on the wrong commits.
+      // Against nested trees: which state each one should sit at is part of
+      // what was carried, so populating them before the container's state
+      // has arrived puts them on the wrong ones.
       copied = carried !== undefined ? await this.copyCarriedWork(ws, carried, sourceCwd) : true;
       const nestedNote = await this.materializeNestedTrees(ws);
-      // After population, because this moves each nested tree from the
-      // commit the workspace materialized to the one the source has, then
-      // replays its working tree on top. Reversed, the patch would be
-      // applied to a tree sitting on a different commit and fail on
-      // context.
+      // After population, because this moves each nested tree onto the state
+      // the source has and then replays its contents on top. Reversed, the
+      // replay would be applied to a tree sitting somewhere else and fail.
       if (nestedCarries.length > 0) {
-        const nestedResult = await applyNestedCarry(ws.path, sourceCwd, nestedCarries).catch(
-          (err: unknown) => ({
+        const nestedResult = await provider
+          .reproduceNested(ws.path, sourceCwd, nestedCarries)
+          .catch((err: unknown) => ({
             applied: [] as string[],
             failed: nestedCarries.map((c) => ({
               path: c.relPath,
               reason: err instanceof Error ? err.message : String(err),
             })),
-          }),
-        );
+          }));
         // Folded into `copied` rather than reported apart: from the user's
         // side "did my uncommitted work come along" is one question, and
-        // work inside a submodule is not a lesser kind of work.
+        // work inside a nested tree is not a lesser kind of work.
         if (nestedResult.failed.length > 0) {
           copied = false;
           nestedFailures = nestedResult.failed;
@@ -3647,6 +3613,7 @@ export class SessionManager {
           ...(label !== undefined && label !== ws.label ? { requestedLabel: label } : {}),
           provider: ws.provider,
           ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+          ...(ws.line !== undefined ? { line: ws.line } : {}),
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
           // The consequence, not the flag: what landing needs to know is
           // that the anchor is a base commit, and a start over a clean
@@ -3685,15 +3652,15 @@ export class SessionManager {
       cwd: session.cwd,
       sourceCwd: ws.sourceCwd,
       label: ws.label,
-      ...(ws.vcs?.branch !== undefined ? { branch: ws.vcs.branch } : {}),
+      ...(ws.line !== undefined ? { branch: ws.line } : {}),
     });
 
     // Paths shortened throughout: these lines are read, not copied, and
     // three absolute paths under ~ push the parts that differ off the
     // right of the screen.
     const lines = [`Moved into workspace ${shortenHomePath(ws.path)}`, `  source: ${shortenHomePath(sourceCwd)}`];
-    if (ws.vcs?.branch !== undefined) {
-      lines.push(`  branch: ${ws.vcs.branch}`);
+    if (ws.line !== undefined) {
+      lines.push(`  branch: ${ws.line}`);
     }
     if (label !== undefined && label !== ws.label) {
       lines.push(
@@ -3722,7 +3689,7 @@ export class SessionManager {
         lines.push(`  staging did not come along; everything above is unstaged here`);
       }
       for (const failure of nestedFailures) {
-        lines.push(`    submodule ${failure.path}: ${failure.reason}`);
+        lines.push(`    nested tree ${failure.path}: ${failure.reason}`);
       }
     } else if (leftBehind.length > 0) {
       // Named rather than counted, same reasoning as the carry list, and
@@ -3766,12 +3733,16 @@ export class SessionManager {
    * once the content is provably preserved on the branch.
    */
   private async copyCarriedWork(
-    ws: { path: string; sourceCwd: string; vcs?: Record<string, string> },
+    ws: { path: string; sourceCwd: string; provider: string },
     snapshot: SnapshotId,
     sourceCwd: string,
   ): Promise<boolean> {
-    const repoRoot = ws.vcs?.repoRoot ?? sourceCwd;
-    const patch = await this.patchFromSnapshot(repoRoot, snapshot);
+    // The source tree, not a resolved repository root. Capturing a delta
+    // between two recorded states is a question about the project rather
+    // than about a directory, so the provider answers it from anywhere
+    // inside one. This used to prefer `vcs.repoRoot` with `sourceCwd` as a
+    // fallback, which is a caller deciding where a provider keeps things.
+    const patch = await this.patchFromSnapshot(sourceCwd, snapshot, ws.provider);
     if (patch === undefined) {
       return false;
     }
@@ -3783,49 +3754,40 @@ export class SessionManager {
     if (patch.length === 0) {
       return true;
     }
-    // Applied WITHOUT --index, so the copy lands unstaged and new files
-    // land untracked. Staging it would put the user's WIP in the index
-    // the agent is about to commit from, and the agent's first bare
-    // `git commit` would sweep it into a commit nobody asked for —
-    // exactly the outcome `stop` goes to trouble to avoid.
-    return (await execGitStdin(["apply"], ws.path, patch)).ok;
+    // Reproduced WITHOUT staging, so the copy lands loose and new files
+    // land untracked. Staging it would put the user's work into what the
+    // agent is about to record, and its first bare commit would sweep it
+    // into history nobody asked for: exactly the outcome `stop` goes to
+    // trouble to avoid.
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider === undefined) {
+      return false;
+    }
+    return (await provider.applyDelta(ws.path, asStateDelta(patch))).ok;
   }
 
-  // The working-state snapshot as a patch against HEAD. Undefined when
-  // there is nothing to move or the diff cannot be produced.
+  // The working-state snapshot as a delta against the tree's current
+  // state. Undefined when it cannot be produced; an EMPTY delta when there
+  // is genuinely nothing, which callers act on differently.
   //
-  // Submodules are excluded with `--ignore-submodules=all` rather than
-  // left in and filtered out afterwards. A gitlink hunk in this patch is
-  // not merely useless, it is harmful: `git apply` exits 0 on one, leaves
-  // the submodule's HEAD exactly where it was, and tries to `rmdir` the
-  // submodule directory on the way past (verified on git 2.43, which
-  // declines only because the directory is non-empty). So the recorded
-  // commit never moves, nothing reports a problem, and an UNPOPULATED
-  // submodule directory is one successful rmdir away from vanishing.
-  //
-  // Submodule state is carried explicitly instead: see
-  // carryNestedWork, which aligns each submodule's checkout and replays
-  // its working tree from inside the submodule, where a patch means what
-  // it says.
+  // The provider excludes nested trees from this, and it has to: a pointer
+  // change reproduced here does nothing useful and risks removing the
+  // nested directory. Nested state is carried through the provider's nested
+  // methods instead.
   private async patchFromSnapshot(
-    repoRoot: string,
+    root: string,
     snapshot: SnapshotId,
+    providerKind?: string,
   ): Promise<string | undefined> {
-    const head = await execGit(["rev-parse", "HEAD"], repoRoot);
-    if (!head.ok) {
+    const provider = getWorkspaceProvider(providerKind);
+    if (provider === undefined) {
       return undefined;
     }
-    const patch = await execGit(
-      ["diff", "--binary", "--ignore-submodules=all", head.out.trim(), snapshot],
-      repoRoot,
-    );
-    // Undefined means "could not produce a diff"; empty string means
-    // "there is genuinely nothing here". Callers act differently on the
-    // two, so they must not share a return value.
-    if (!patch.ok) {
+    const head = await provider.currentState(root);
+    if (head === undefined) {
       return undefined;
     }
-    return patch.out.trim().length === 0 ? "" : patch.out;
+    return await provider.captureDelta(root, head, snapshot).catch(() => undefined);
   }
 
   /**
@@ -3944,7 +3906,7 @@ export class SessionManager {
     // `/hydra workspace start` here means a fork looks exactly like its
     // parent did: same commits, same dirty files, same authorship story.
     const parentTip = caps.sharedHistory
-      ? (await execGit(["rev-parse", "HEAD"], parent.path)).out.trim()
+      ? ((await provider.currentState(parent.path)) ?? "")
       : "";
 
     const created = await provider
@@ -3971,7 +3933,7 @@ export class SessionManager {
         .captureWorkingState(parent.path, `hydra: fork carry from ${parent.label}`)
         .catch(() => undefined);
       if (snap !== undefined && snap !== parentTip) {
-        await this.copyUncommittedInto(parent.path, ws.path, parentTip, snap).catch(
+        await this.copyUncommittedInto(parent.path, ws.path, parentTip, snap, ws.provider).catch(
           () => undefined,
         );
       }
@@ -3983,6 +3945,7 @@ export class SessionManager {
       label: ws.label,
       provider: ws.provider,
       ...(ws.snapshot !== undefined ? { snapshot: ws.snapshot } : {}),
+      ...(ws.line !== undefined ? { line: ws.line } : {}),
       ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
     };
   }
@@ -3993,17 +3956,26 @@ export class SessionManager {
    * without recording it as somebody's commit.
    */
   private async copyUncommittedInto(
-    repoRoot: string,
+    root: string,
     targetPath: string,
     fromCommit: string,
     toCommit: string,
+    providerKind?: string,
   ): Promise<boolean> {
-    const patch = await execGit(["diff", "--binary", fromCommit, toCommit], repoRoot);
-    if (!patch.ok || patch.out.trim().length === 0) {
+    const provider = getWorkspaceProvider(providerKind);
+    if (provider === undefined) {
       return false;
     }
-    const applied = await execGitStdin(["apply", "--index"], targetPath, patch.out);
-    return applied.ok;
+    const delta = await provider
+      .captureDelta(root, asSnapshotId(fromCommit), asSnapshotId(toCommit))
+      .catch(() => undefined);
+    if (delta === undefined || delta.trim().length === 0) {
+      return false;
+    }
+    // Staged here, unlike every other replay, because this one seeds a
+    // fork's own workspace rather than handing a user's work back to them:
+    // there is no in-progress state to preserve the shape of.
+    return (await provider.applyDelta(targetPath, delta, { stage: true })).ok;
   }
 
   private async recoverWorkspace(

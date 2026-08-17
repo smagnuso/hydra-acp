@@ -196,10 +196,26 @@ describe.each(FIXTURES)("IsolationProvider contract [$kind]", (fixture) => {
     if (!supports.record) {
       await expect(provider.record(ws, "m")).rejects.toBeInstanceOf(WorkspaceUnsupportedError);
     }
-    if (!supports.integrate) {
-      await expect(
-        provider.integrate({ from: ws.snapshot ?? ("x" as never), into: ws }),
-      ).rejects.toBeInstanceOf(WorkspaceUnsupportedError);
+  });
+
+  it("declines rather than throws when it cannot integrate", async () => {
+    // Deliberately not WorkspaceUnsupportedError. A caller offering to land
+    // work needs an answer it can put in front of the user, and every other
+    // integrate failure (nothing to do, cannot fast-forward, conflicts) is
+    // already a returned result. Throwing for one of them would make the
+    // caller classify an exception to decide whether anything happened.
+    const { provider, ws } = await created();
+    if (provider.capabilities().supports.integrate) {
+      return;
+    }
+    const res = await provider.integrate({
+      into: ws.path,
+      from: ws.line ?? ws.snapshot ?? "x",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.declined).toBe(true);
+      expect((res.reason ?? "").length).toBeGreaterThan(0);
     }
   });
 

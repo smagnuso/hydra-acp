@@ -106,6 +106,16 @@ export const PersistedWorkspace = z.object({
   provider: z.string(),
   /** Opaque provider-issued token. Never parse this. */
   snapshot: z.string().optional(),
+  /**
+   * Handle for this workspace's line of work, when the provider keeps one.
+   * Passed back to the provider to say what should be landed.
+   *
+   * Optional because a provider need not have lines at all: the copy
+   * provider has none, so a workspace of that kind carries no handle and
+   * landing has to check rather than assume. Not optional for any
+   * compatibility reason.
+   */
+  line: z.string().optional(),
   /** Provider-specific display detail; absent for providers without one. */
   vcs: z.record(z.string(), z.string()).optional(),
   /**

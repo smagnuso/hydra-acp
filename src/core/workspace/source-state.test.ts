@@ -57,6 +57,7 @@ describe("replaySourceDivergence", () => {
     const ok = await replaySourceDivergence({
       source: repo,
       capture: { clean: false, base, snapshot },
+      provider,
     });
 
     expect(ok).toBe(true);
@@ -78,6 +79,7 @@ describe("replaySourceDivergence", () => {
     const ok = await replaySourceDivergence({
       source: repo,
       capture: { clean: false, base, snapshot },
+      provider,
     });
 
     expect(ok).toBe(true);
@@ -96,6 +98,7 @@ describe("replaySourceDivergence", () => {
     const ok = await replaySourceDivergence({
       source: repo,
       capture: { clean: false, base, snapshot },
+      provider,
     });
 
     expect(ok).toBe(false);
@@ -104,7 +107,11 @@ describe("replaySourceDivergence", () => {
   it("treats a clean capture as nothing to do", async () => {
     const repo = await makeRepo();
     expect(
-      await replaySourceDivergence({ source: repo, capture: { clean: true, base: "HEAD" } }),
+      await replaySourceDivergence({
+        source: repo,
+        capture: { clean: true, base: "HEAD" },
+        provider,
+      }),
     ).toBe(true);
   });
 });

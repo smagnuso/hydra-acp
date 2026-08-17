@@ -32,9 +32,16 @@ import {
   type CreateWorkspaceOptions,
   type CreateWorkspaceResult,
   type IntegrateResult,
+  type DeltaOutcome,
+  type Divergence,
   type IsolationProvider,
+  type NestedCapture,
+  type NestedOutcome,
+  type NestedState,
   type NestedTreesResult,
   type PathChange,
+  type ResetOutcome,
+  type StateDelta,
   type SnapshotId,
   type Workspace,
   type WorkspaceStatus,
@@ -353,12 +360,163 @@ export class CopyProvider implements IsolationProvider {
     throw new WorkspaceUnsupportedError(this.kind, "record");
   }
 
+  /**
+   * The manifest sidecar names the source, so a copy workspace whose record
+   * is gone can still say where it came from.
+   *
+   * Read from beside the directory rather than inside it, deliberately: a
+   * marker within the tree would be copied into every workspace derived
+   * from this one and would show up as an untracked file in the user's own
+   * project.
+   */
+  async attributeOrphan(dir: string): Promise<Workspace | undefined> {
+    const manifest = await readJsonSafe<Manifest>(manifestPathFor(dir));
+    if (manifest?.sourceCwd === undefined) {
+      return undefined;
+    }
+    return {
+      path: dir,
+      sourceCwd: manifest.sourceCwd,
+      label: manifest.label ?? path.basename(dir),
+      provider: this.kind,
+    };
+  }
+
+  // No lines of work and no registry, so both of these are honest no-ops
+  // rather than refusals: teardown calls them unconditionally, and making
+  // that a special case at every call site would be worse.
+
+  async discardLine(): Promise<{ ok: boolean; dropped: number }> {
+    return { ok: true, dropped: 0 };
+  }
+
+  // No lines at all, so none of them are this provider's to discard.
+  ownsLine(): boolean {
+    return false;
+  }
+
+  async pruneStale(): Promise<void> {
+    return;
+  }
+
   async changedPaths(): Promise<readonly PathChange[]> {
     throw new WorkspaceUnsupportedError(this.kind, "changedPaths");
   }
 
   async integrate(): Promise<IntegrateResult> {
-    throw new WorkspaceUnsupportedError(this.kind, "integrate");
+    // Declined rather than thrown, so a caller that offers to integrate
+    // gets an answer it can report instead of an exception it has to
+    // classify. There is nothing to integrate FROM: a copy has no history,
+    // so no common ancestor and no line of work.
+    return {
+      ok: false,
+      conflicts: [],
+      declined: true,
+      reason: `the "${this.kind}" provider keeps no history, so there is nothing to integrate from`,
+    };
+  }
+
+  // =====================================================================
+  // State inspection and mutation.
+  //
+  // A copied directory records nothing, so most of these are honestly
+  // unanswerable rather than merely unimplemented. They return undefined or
+  // an empty answer instead of throwing, because every caller is a decision
+  // point that must be able to proceed without them: that is the whole
+  // point of asking a provider rather than assuming git.
+  //
+  // The ones that would be actively misleading if they guessed (contains,
+  // divergence) return the answer that makes callers do LESS, not more.
+  // =====================================================================
+
+  async currentState(): Promise<SnapshotId | undefined> {
+    return undefined;
+  }
+
+  async contentId(): Promise<string | undefined> {
+    // The manifest records sizes and mtimes, not content, so a content
+    // identity here would compare equal for two trees that differ. Better
+    // to have no answer than a wrong one: the join check depends on this.
+    return undefined;
+  }
+
+  async currentLineName(): Promise<string | undefined> {
+    return undefined;
+  }
+
+  async resolveRoot(somePath: string): Promise<string | undefined> {
+    // A plain directory is its own root. Nothing to walk up to, and
+    // claiming otherwise would make an unrelated parent look like a project.
+    return somePath;
+  }
+
+  async resolveRetained(): Promise<SnapshotId | undefined> {
+    return undefined;
+  }
+
+  async contains(): Promise<boolean> {
+    // False, so a caller asking "is this already landed?" does not skip
+    // work on the strength of an answer this provider cannot give.
+    return false;
+  }
+
+  async divergence(): Promise<Divergence | undefined> {
+    return undefined;
+  }
+
+  async changedPathsBetween(): Promise<readonly string[]> {
+    return [];
+  }
+
+  async captureDelta(): Promise<StateDelta | undefined> {
+    throw new WorkspaceUnsupportedError(this.kind, "captureDelta");
+  }
+
+  async applyDelta(): Promise<DeltaOutcome> {
+    return {
+      ok: false,
+      reason: `the "${this.kind}" provider cannot reproduce a captured change`,
+    };
+  }
+
+  async resetTo(): Promise<ResetOutcome> {
+    return {
+      ok: false,
+      reason: `the "${this.kind}" provider records no state to return to`,
+    };
+  }
+
+  async integrationInProgress(): Promise<boolean> {
+    return false;
+  }
+
+  async abortIntegration(): Promise<void> {
+    return;
+  }
+
+  async conflictedPaths(): Promise<readonly string[]> {
+    return [];
+  }
+
+  // Nested trees: a copy reproduces whatever was in the source, including
+  // the contents of anything nested, so there is nothing left unpopulated
+  // and nothing to carry separately. Empty answers rather than refusals,
+  // matching materializeNested above.
+
+  async listNested(): Promise<readonly NestedState[]> {
+    return [];
+  }
+
+  async captureNested(): Promise<readonly NestedCapture[]> {
+    return [];
+  }
+
+  async reproduceNested(): Promise<NestedOutcome> {
+    return { applied: [], failed: [] };
+  }
+
+  async integrateNested(): Promise<NestedOutcome> {
+    return { applied: [], failed: [] };
   }
 
   async lock(): Promise<void> {
