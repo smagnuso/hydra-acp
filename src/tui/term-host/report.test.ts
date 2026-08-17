@@ -154,6 +154,118 @@ describe("state derivation", () => {
   });
 });
 
+// A daemon restart reports idle → unknown → idle with the agent label
+// unchanged, which is precisely herdr's completion condition: it marks the
+// pane unseen (blue dot) and notifies, claiming the session finished
+// something when the socket merely blinked. Holding the last state means the
+// snapshot never changes, so no frame is sent and there is no transition for
+// a host to misread.
+describe("the unreachable hold", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("emits nothing at all across a disconnect and reconnect", async () => {
+    reportBanner({ status: "ready" });
+    await settle();
+    snaps = [];
+
+    reportBanner({ status: "disconnected" });
+    await settle();
+    expect(snaps).toEqual([]);
+
+    reportBanner({ status: "ready" });
+    await settle();
+    expect(snaps).toEqual([]);
+  });
+
+  it("holds a turn in flight as working, not just an idle session", async () => {
+    reportBanner({ status: "busy" });
+    await settle();
+    snaps = [];
+
+    reportBanner({ status: "disconnected" });
+    await settle();
+    expect(snaps).toEqual([]);
+
+    // Coming back to an idle session emits exactly one frame, idle. Getting
+    // there in one step is what proves the held state was `working`: had the
+    // disconnect degraded, this would be the second of two transitions.
+    reportBanner({ status: "ready" });
+    await settle();
+    expect(snaps.map((s) => s.state)).toEqual(["idle"]);
+  });
+
+  it("degrades to unknown once the window lapses", async () => {
+    reportBanner({ status: "ready" });
+    await settle();
+    snaps = [];
+
+    reportBanner({ status: "disconnected" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await settle();
+    expect(last()?.state).toBe("unknown");
+  });
+
+  it("does not degrade after the connection is back", async () => {
+    reportBanner({ status: "ready" });
+    reportBanner({ status: "disconnected" });
+    reportBanner({ status: "ready" });
+    await settle();
+    snaps = [];
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(snaps).toEqual([]);
+  });
+
+  it("does not let a repeated disconnect frame extend the window", async () => {
+    reportBanner({ status: "ready" });
+    await settle();
+    snaps = [];
+
+    reportBanner({ status: "disconnected" });
+    await vi.advanceTimersByTimeAsync(9_000);
+    reportBanner({ status: "disconnected", queued: 1 });
+    await vi.advanceTimersByTimeAsync(1_500);
+    await settle();
+    expect(last()?.state).toBe("unknown");
+  });
+
+  it("covers a session going cold, which a restart can present as instead", async () => {
+    reportBanner({ status: "ready" });
+    await settle();
+    snaps = [];
+
+    reportBanner({ status: "cold" });
+    await settle();
+    expect(snaps).toEqual([]);
+  });
+
+  it("reports unknown immediately when there was no live state to hold", async () => {
+    reportBanner({ status: "disconnected" });
+    await settle();
+    expect(last()?.state).toBe("unknown");
+  });
+
+  it("drops the hold on teardown", async () => {
+    reportBanner({ status: "ready" });
+    reportBanner({ status: "disconnected" });
+    await settle();
+    await releaseTerminalHost();
+    snaps = [];
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(snaps).toEqual([]);
+  });
+});
+
 describe("suspended (picker up)", () => {
   it("releases the pane instead of reporting a state for it", async () => {
     // A pane showing a picker is not showing a session, so it should not

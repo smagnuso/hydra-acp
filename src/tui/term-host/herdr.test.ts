@@ -153,6 +153,10 @@ function lastOf(method: string): Frame | undefined {
   return [...frames].reverse().find((f) => f.method === method);
 }
 
+function countOf(method: string): number {
+  return frames.filter((f) => f.method === method).length;
+}
+
 // Host detection walks CANDIDATES in order and the first match wins, so the
 // tmux candidate is reached whenever the herdr env is incomplete. Running the
 // suite INSIDE tmux therefore made the "is inert" cases resolve a real TmuxHost
@@ -325,12 +329,35 @@ describe("state mapping", () => {
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
   });
 
-  it("maps disconnected to unknown rather than idle", async () => {
+  it("maps a lasting disconnect to unknown rather than idle", async () => {
+    // Two guards stand between a disconnect and an `unknown` frame: the
+    // opening-unknown withhold (a first observation is not a transition) and
+    // the unreachable hold (a blink is not a state change). So the only way
+    // herdr ever hears `unknown` is a session that was genuinely live and
+    // stayed unreachable — which is exactly when it's true.
+    vi.useFakeTimers();
+    try {
+      reportBanner({ status: "ready" });
+      await settle();
+      reportBanner({ status: "disconnected" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settle();
+      expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not send an agent frame for a disconnect it is holding through", async () => {
+    // The reason the hold exists is herdr-specific: it reads unknown → idle
+    // with an unchanged agent label as a completion, so a daemon restart
+    // would blue-dot the pane. Assert the frame never leaves.
     reportBanner({ status: "ready" });
     await settle();
+    const before = countOf("pane.report_agent");
     reportBanner({ status: "disconnected" });
     await settle();
-    expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+    expect(countOf("pane.report_agent")).toBe(before);
   });
 
   it("lets a pending permission win over a running turn", async () => {

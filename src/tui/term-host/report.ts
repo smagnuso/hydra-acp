@@ -91,6 +91,66 @@ const live: {
 // second with an identical snapshot.
 let sent: string | null = null;
 
+// How long a session that has stopped being reachable keeps reporting the
+// state it was last in before it degrades to `unknown`.
+//
+// Sized to cover a `hydra daemon restart`: ResilientWsStream's backoff caps
+// at 5s (BACKOFF_MAX_MS), so a restart that comes back at all comes back
+// well inside this. A daemon that is genuinely gone degrades to `unknown`
+// one window later, which is the honest answer, just deferred.
+const UNREACHABLE_HOLD_MS = 10_000;
+
+// Statuses that mean "this session isn't reachable right now" as opposed to
+// "there is no agent here". Exactly the set deriveState would otherwise map
+// straight to `unknown`; an unrecognized status is not in here on purpose,
+// since that's a bug rather than a known transient.
+const UNREACHABLE_STATUSES = new Set(["disconnected", "cold"]);
+
+// The state to keep reporting while unreachable, and the timer that gives up
+// on it. Null when we're not holding.
+//
+// WHY THIS EXISTS: herdr treats `unknown → idle` as a COMPLETION when the
+// agent label is unchanged across it (is_completion_transition_parts in
+// herdr's app/actions.rs), which marks the pane unseen — the blue dot — and
+// fires a notification. A daemon restart reports idle → unknown → idle with
+// hydra's constant agent label on every frame, so it lands in that condition
+// exactly and claims the session finished something. Nothing finished; the
+// socket blinked. Holding the last state means herdr never sees the round
+// trip: same state before and after, so the snapshot doesn't change, so no
+// frame is sent at all.
+//
+// herdr's rule is a recovery inference meant for screen-scraped agents that
+// lost the thread and later saw a prompt box again. It shouldn't apply to a
+// hook-authoritative source like hydra, which reports every transition
+// explicitly — but declining to emit the transition is the half we own.
+let heldState: AgentActivity | null = null;
+let holdTimer: ReturnType<typeof setTimeout> | null = null;
+
+function beginHold(state: AgentActivity): void {
+  // Nothing to preserve: holding `unknown` in place of `unknown` would only
+  // buy a pointless timer.
+  if (state === "unknown" || holdTimer !== null) {
+    return;
+  }
+  heldState = state;
+  holdTimer = setTimeout(() => {
+    holdTimer = null;
+    heldState = null;
+    flush();
+  }, UNREACHABLE_HOLD_MS);
+  // The TUI exit path awaits releaseTerminalHost, and a pending hold must
+  // not be what keeps the process alive past it.
+  holdTimer.unref?.();
+}
+
+function endHold(): void {
+  if (holdTimer !== null) {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+  }
+  heldState = null;
+}
+
 /**
  * Map hydra's banner status onto a semantic activity.
  *
@@ -112,7 +172,8 @@ function deriveState(): AgentActivity {
       return "idle";
     case "disconnected":
     case "cold":
-      return "unknown";
+      // Held state while the hold is live; see heldState.
+      return heldState ?? "unknown";
     default:
       return "unknown";
   }
@@ -235,6 +296,17 @@ export function reportBanner(view: BannerView): void {
   if (!terminalHost()) {
     return;
   }
+  // Arm or disarm the unreachable hold on the TRANSITION, reading the state
+  // from the outgoing status: once live.status is overwritten the pre-outage
+  // state is gone. Re-entering an already-held status must not re-arm, or a
+  // disconnect hook that fires twice would extend the window indefinitely.
+  const wasUnreachable = UNREACHABLE_STATUSES.has(live.status ?? "");
+  const nowUnreachable = UNREACHABLE_STATUSES.has(view.status ?? "");
+  if (nowUnreachable && !wasUnreachable) {
+    beginHold(deriveState());
+  } else if (!nowUnreachable) {
+    endHold();
+  }
   live.status = view.status;
   live.queued = view.queued;
   flush();
@@ -321,6 +393,7 @@ export async function releaseTerminalHost(): Promise<void> {
   // Label first: it must not be left holding a transient value, and the
   // release below may drop the authority it hangs off.
   await restoreTabLabel();
+  endHold();
   if (sent === null) {
     return;
   }
@@ -346,4 +419,5 @@ export function __resetReportForTests(): void {
   live.permission = false;
   live.suspended = false;
   sent = null;
+  endHold();
 }
