@@ -2581,6 +2581,12 @@ async function runSession(
       screen.setWorkspaceIndicator("merging workspace back...");
       return;
     }
+    // Not a landing: the content goes back, the history does not. Saying
+    // "merging" here would name the one thing `apply` deliberately skips.
+    if (phase === "applying") {
+      screen.setWorkspaceIndicator("staging workspace changes...");
+      return;
+    }
     if (phase === "returning") {
       screen.setWorkspaceIndicator("returning to source tree...");
       return;

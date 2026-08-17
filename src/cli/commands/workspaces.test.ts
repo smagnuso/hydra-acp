@@ -17,6 +17,7 @@ import { writeDaemonPidFile } from "../../core/daemon-pidfile.js";
 import { writeServiceToken } from "../../core/service-token.js";
 import {
   collectWorkspaces,
+  runWorkspaceApply,
   runWorkspaceList,
   runWorkspacePrune,
   runWorkspaceRemove,
@@ -660,5 +661,85 @@ describe("workspace list — inactive rows", () => {
 
     const parsed = JSON.parse(out) as { workspaces: Array<{ state: string }> };
     expect(parsed.workspaces.map((w) => w.state)).toEqual(["inactive"]);
+  });
+});
+
+// `workspace apply` from a shell: the same landing as `merge`, delivered
+// into the index instead of as commits.
+
+describe("workspace apply", () => {
+  let out: string;
+
+  beforeEach(() => {
+    out = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(path.join(paths.home(), "sessions"), { recursive: true, force: true });
+    await fs.rm(path.join(paths.home(), "workspaces"), { recursive: true, force: true });
+  });
+
+  /** A workspace with a session record behind it, as `start` would leave. */
+  async function bound(repo: string, label: string): Promise<string> {
+    const dir = path.join(paths.home(), "workspaces", "deadbeef", label);
+    await fs.mkdir(path.dirname(dir), { recursive: true });
+    await exec("git", ["worktree", "add", "-b", `hydra/${label}`, dir], { cwd: repo });
+    await bindSession(`hydra_session_${label}`, {
+      path: dir,
+      sourceCwd: repo,
+      label,
+      branch: `hydra/${label}`,
+      repoRoot: repo,
+    });
+    return dir;
+  }
+
+  it("stages the workspace's work into the source without committing", async () => {
+    const repo = await makeGitRepo();
+    const dir = await bound(repo, "clistage");
+    await fs.writeFile(path.join(dir, "tracked.txt"), "agent work\n");
+    await fs.writeFile(path.join(dir, "added.txt"), "new file\n");
+    const { stdout: before } = await exec("git", ["rev-parse", "HEAD"], { cwd: repo });
+
+    await runWorkspaceApply({ target: "clistage" });
+
+    expect(out).toContain("as staged changes");
+    const { stdout: cached } = await exec("git", ["diff", "--cached", "--name-status"], {
+      cwd: repo,
+    });
+    expect(cached).toContain("M\ttracked.txt");
+    expect(cached).toContain("A\tadded.txt");
+    const { stdout: after } = await exec("git", ["rev-parse", "HEAD"], { cwd: repo });
+    expect(after).toBe(before);
+  });
+
+  it("refuses when the source already has something staged, and touches nothing", async () => {
+    const repo = await makeGitRepo();
+    const dir = await bound(repo, "clirefuse");
+    await fs.writeFile(path.join(dir, "tracked.txt"), "agent work\n");
+    await fs.writeFile(path.join(repo, "mine.txt"), "my staged work\n");
+    await exec("git", ["add", "mine.txt"], { cwd: repo });
+
+    await expect(runWorkspaceApply({ target: "clirefuse" })).rejects.toThrow(
+      /already has changes staged/,
+    );
+
+    const { stdout: status } = await exec("git", ["status", "--porcelain"], { cwd: repo });
+    expect(status).toContain("A  mine.txt");
+    expect(await fs.readFile(path.join(repo, "tracked.txt"), "utf8")).toBe("original\n");
+  });
+
+  it("says so when the workspace holds nothing the source lacks", async () => {
+    const repo = await makeGitRepo();
+    await bound(repo, "cliquiet");
+
+    await runWorkspaceApply({ target: "cliquiet" });
+
+    expect(out).toContain("Nothing to apply");
   });
 });

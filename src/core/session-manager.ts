@@ -2304,7 +2304,16 @@ export class SessionManager {
    */
   async runWorkspaceAction(
     sessionId: string,
-    action: "start" | "merge" | "sync" | "stop" | "detach" | "discard" | "clean" | "status",
+    action:
+      | "start"
+      | "merge"
+      | "apply"
+      | "sync"
+      | "stop"
+      | "detach"
+      | "discard"
+      | "clean"
+      | "status",
     name?: string,
     opts?: { clean?: boolean; deep?: boolean },
   ): Promise<string> {
@@ -2399,6 +2408,26 @@ export class SessionManager {
         `${landed.merged}; still working in ${shortenHomePath(ws.path)}.`,
         ...landed.warnings,
       ].join("\n");
+    }
+    if (action === "apply") {
+      session.broadcastWorkspacePhase({ phase: "applying" });
+      let staged: { applied: string; warnings: string[] };
+      try {
+        staged = await this.applyWorkspaceToSource(ws, session.sessionId);
+      } catch (err) {
+        const base = err instanceof Error ? err.message : String(err);
+        session.broadcastWorkspacePhase({ phase: "failed", error: base });
+        throw err;
+      }
+      // Staying put, like `merge`: nothing relocated, so the indicator is
+      // cleared rather than left lit.
+      session.broadcastWorkspacePhase({
+        phase: "entered",
+        cwd: session.cwd,
+        sourceCwd: ws.sourceCwd,
+        label: ws.label,
+      });
+      return [staged.applied, ...staged.warnings].join("\n");
     }
     if (action === "stop") {
       // Shared workspace: `stop` degrades to `detach`.
@@ -3043,6 +3072,243 @@ export class SessionManager {
     };
   }
 
+  /**
+   * Put the workspace's changes into the source as one staged changeset,
+   * without landing its history.
+   *
+   * The no-lineage sibling of `merge`: the same content arrives, but as a
+   * single reviewable diff in the index instead of as the agent's
+   * commits. That is what it is for ("give me the change, not the commit
+   * structure"), and it is why it needs neither a line of work nor a
+   * fast-forward, so it still works once the source has moved on.
+   *
+   * Everything else is deliberately `merge`'s machinery: the same
+   * capture/reset/replay dance around the source's own uncommitted work,
+   * the same retained recovery ref, and the same re-baseline afterwards.
+   * The two verbs write into the same tree, so they must not disagree
+   * about what happens to work already sitting in it.
+   */
+  private async applyWorkspaceToSource(
+    ws: PersistedWorkspace,
+    sessionId: string,
+  ): Promise<{ applied: string; warnings: string[] }> {
+    const source = ws.sourceCwd;
+    if (!(await this.dirExists(source))) {
+      throw new Error(`source tree ${shortenHomePath(source)} no longer exists`);
+    }
+    const provider = getWorkspaceProvider(ws.provider);
+    if (provider === undefined) {
+      throw new Error(`no provider "${ws.provider}" available to apply this workspace`);
+    }
+    if (!provider.capabilities().supports.captureWorkingState) {
+      throw new Error(
+        `provider "${ws.provider}" cannot snapshot a working tree, so there is no change set ` +
+          `to apply. Use \`/hydra workspace stop\` to land this workspace instead.`,
+      );
+    }
+    const asWs = this.asWorkspace(ws);
+
+    // Refused rather than merged into, because the index IS the
+    // deliverable here. Two changesets in one index cannot be told apart
+    // afterwards, `git reset` would unstage both, and the reset below
+    // does not preserve the marking anyway, so the user's own staging
+    // would come back as loose edits underneath a changeset that looks
+    // like it swallowed it. Only `merge` can be indifferent to this: it
+    // delivers commits, not an index.
+    //
+    // Explicitly true only: absent means the provider has no notion of
+    // staging, and there is nothing to protect there.
+    const sourceStatus = await provider.status({ ...asWs, path: source }).catch(() => undefined);
+    if (sourceStatus?.hasStagedWork === true) {
+      throw new Error(
+        `${shortenHomePath(source)} already has changes staged for its next commit, and \`apply\` ` +
+          `delivers into that same index: the two sets would be indistinguishable, and ` +
+          `unstaging one would unstage both. Commit or unstage them first, or use ` +
+          `\`/hydra workspace merge\`, which lands the work as commits and does not touch the index.`,
+      );
+    }
+
+    const sourceHead = await provider.currentState(source);
+    if (sourceHead === undefined) {
+      throw new Error(`could not read the state of ${shortenHomePath(source)}`);
+    }
+
+    // What the workspace's changes get measured against.
+    //
+    // The source's own tip, when the workspace already contains it: the
+    // difference is then exactly what this workspace added, and it is a
+    // patch against the very tree the reset below leaves behind, so it
+    // applies exactly rather than by reconciliation.
+    //
+    // Measuring from the workspace's creation state unconditionally would
+    // break every workspace that has ever synced: a sync brings the
+    // source's commits INTO the workspace, so the difference would carry
+    // content the source already has, and `apply` is atomic: one
+    // already-present hunk takes the whole changeset down.
+    //
+    // The creation state is the fallback, and it is the drift case: the
+    // source moved on, the workspace never caught up, and the two trees
+    // last agreed there. A patch from that far back has to be reconciled
+    // onto what the source has become, which is what `tolerant` is for.
+    const line = ws.line;
+    const contained =
+      line !== undefined &&
+      (await provider.contains(source, { state: sourceHead, within: line }).catch(() => false));
+    const from = contained ? sourceHead : asSnapshotId(ws.snapshot ?? "");
+    if (from.length === 0) {
+      throw new Error(
+        `workspace ${ws.label} has no recorded base to measure its changes against, so there ` +
+          `is no way to tell its work apart from what the source already had`,
+      );
+    }
+
+    // Same capture as a landing, and for the same reason: a dirty source
+    // is the normal case, and the reset below can only be safe once what
+    // it clears is held somewhere.
+    const capture = await captureSourceForLanding({
+      source,
+      ws: asWs,
+      startSnapshotRef: this.startRefFor(ws.label),
+      // Wins over the start ref once anything has landed, so content a
+      // previous landing (or a previous `apply`) already put in the source
+      // stops counting as the user's own divergence.
+      baselineRef: this.baselineRefFor(ws.label),
+      retainRef: landingRetainRef(sessionId),
+      provider,
+    });
+
+    // Nested trees are named, not carried. A container records one as a
+    // pointer, so the changeset can only ever move that pointer in the
+    // index: it cannot check the tree out, and it cannot reach the work
+    // inside one at all. `merge` has a whole reconciliation path for
+    // this; `apply` has one staged patch, and pretending otherwise would
+    // report success over work that never arrived.
+    const nestedLeft =
+      provider.capabilities().supports.nestedTrees
+        ? (await provider.listNested(ws.path).catch((): readonly NestedState[] => [])).filter(
+            (n) => n.changedPaths.length > 0 || (n.recorded !== undefined && n.recorded !== n.actual),
+          )
+        : [];
+
+    const snapshot = await provider
+      .captureWorkingState(ws.path, `hydra: apply from ${ws.label}`)
+      .catch(() => undefined);
+    if (snapshot === undefined) {
+      throw new Error(
+        `could not snapshot the work in ${shortenHomePath(ws.path)}; nothing was changed`,
+      );
+    }
+    const delta = await provider.captureDelta(source, from, snapshot);
+    if (delta === undefined) {
+      throw new Error(
+        `could not work out what ${ws.label} changed; ${shortenHomePath(source)} was not touched`,
+      );
+    }
+    if (delta.trim().length === 0) {
+      // Nothing was written, so the recovery ref has nothing to recover.
+      await releaseSourceCapture({ source, ws: asWs, capture, provider });
+      return {
+        applied: `Nothing to apply: ${ws.label} holds no changes ${shortenHomePath(source)} does not already have.`,
+        warnings: [],
+      };
+    }
+
+    // Every check that could refuse has run. First write happens here.
+    if (!capture.clean) {
+      const cleared = await provider.resetTo(source, sourceHead);
+      if (!cleared.ok) {
+        throw new Error(
+          `could not clear ${shortenHomePath(source)} to apply onto; your work is preserved at ` +
+            `${capture.retainedRef}. Nothing was applied.`,
+        );
+      }
+    }
+
+    // Staged, unlike every other replay in this file. Work moving INTO a
+    // workspace lands loose on purpose, so the agent's next bare commit
+    // cannot sweep up WIP nobody asked it to commit. Here the reviewable
+    // changeset in the index is the entire deliverable, so new files
+    // arrive added rather than untracked.
+    const outcome = await provider.applyDelta(source, delta, {
+      stage: true,
+      // Only in the drift case. With an exact base the patch either
+      // applies or something is genuinely wrong, and reconciliation there
+      // would hide it; with a stale base it is the whole point.
+      tolerant: !contained,
+    });
+    if (!outcome.ok) {
+      // A refused apply has to be a no-op, and reconciliation may have
+      // written conflict markers on its way to failing. Put the tree back
+      // rather than hand over a mess nobody asked for; the capture is
+      // what makes that safe.
+      await provider.resetTo(source, sourceHead).catch(() => undefined);
+      const restored = await replaySourceDivergence({ source, capture, provider });
+      if (restored) {
+        await releaseSourceCapture({ source, ws: asWs, capture, provider });
+      }
+      throw new Error(
+        `could not apply ${ws.label} into ${shortenHomePath(source)}: ` +
+          `${outcome.reason ?? "the change set did not apply"}.` +
+          (contained
+            ? ""
+            : ` The source has moved on since this workspace was created; \`/hydra workspace sync\` ` +
+              `brings those commits in here, which is what lets the change set apply against them.`) +
+          (restored
+            ? ` ${shortenHomePath(source)} is as you left it.`
+            : ` Your uncommitted work there is preserved at ${capture.retainedRef}.`),
+      );
+    }
+
+    // Then whatever the source had that the workspace never saw, loose,
+    // on top. Empty unless the user kept editing after isolating.
+    const divergenceOk = await replaySourceDivergence({ source, capture, provider });
+    if (divergenceOk) {
+      await releaseSourceCapture({ source, ws: asWs, capture, provider });
+    }
+
+    // Re-baseline, exactly as a landing does, and load-bearing for the
+    // same reason: this content is in the source now. Without it the next
+    // `stop` measures divergence from `start`, finds the changeset this
+    // just staged, and reports the workspace's own work as the user's,
+    // then replays it on top of the same content arriving from the branch.
+    const after = await provider
+      .captureWorkingState(source, `hydra: source state after applying ${ws.label}`)
+      .catch(() => undefined);
+    if (after !== undefined) {
+      await provider
+        .retainSnapshot({ ...asWs, path: source }, this.baselineRefFor(ws.label), after)
+        .catch(() => undefined);
+    }
+
+    const warnings: string[] = [];
+    if (outcome.alreadyPresent === true) {
+      warnings.push(
+        `  Nothing was staged: ${shortenHomePath(source)} already had every one of those changes.`,
+      );
+    }
+    if (!divergenceOk) {
+      warnings.push(
+        `  WARNING: your own edits to ${shortenHomePath(source)} overlap the workspace's ` +
+          `changes and could not be replayed on top. They are preserved at ` +
+          `${capture.retainedRef}; recover with: git -C ${source} diff ${capture.base} ${capture.retainedRef}`,
+      );
+    }
+    for (const nested of nestedLeft) {
+      warnings.push(
+        `  WARNING: nested tree ${nested.relPath} was NOT included: a change set can only move ` +
+          `the pointer to it, not what is inside. Land it with \`/hydra workspace stop\`, or ` +
+          `copy that work across by hand.`,
+      );
+    }
+    return {
+      applied:
+        `Applied ${ws.label} into ${shortenHomePath(source)} as staged changes; still working ` +
+        `in ${shortenHomePath(ws.path)}.\n` +
+        `  Nothing was committed: review it with \`git -C ${source} diff --cached\` and commit ` +
+        `it however you like. The workspace and its history are untouched.`,
+      warnings,
+    };
+  }
 
   /**
    * Swap the session back to its source tree and drop the binding.

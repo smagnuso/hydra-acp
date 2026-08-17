@@ -1978,7 +1978,7 @@ Attached clients receive `session/update` notifications as compaction progresses
 ### session/update — workspace lifecycle
 
 Emitted while a session moves into or out of an isolated workspace, or has its
-workspace reset underneath it (`/hydra workspace start|merge|sync|stop|detach|clean|discard`).
+workspace reset underneath it (`/hydra workspace start|merge|apply|sync|stop|detach|clean|discard`).
 `update.sessionUpdate` is
 `"hydra_workspace"` for every phase. Ephemeral: never written to
 `history.jsonl`, so replaying clients do not see it.
@@ -1992,6 +1992,19 @@ workspace reset underneath it (`/hydra workspace start|merge|sync|stop|detach|cl
 
 // swapping — the agent process is being replaced in the new directory
 { "sessionUpdate": "hydra_workspace", "phase": "swapping" }
+
+// landing: the workspace is being merged back into the source tree. The
+//          session STAYS in it for `merge`; for `stop` a `returning`
+//          follows.
+{ "sessionUpdate": "hydra_workspace", "phase": "landing" }
+
+// applying: the workspace's changes are being staged into the source
+//           without its history. Followed by `entered` with an unchanged
+//           cwd, since the session stays put.
+{ "sessionUpdate": "hydra_workspace", "phase": "applying" }
+
+// returning: the session is being swapped back to the source tree
+{ "sessionUpdate": "hydra_workspace", "phase": "returning" }
 
 // cleaning: the workspace's tree is being reset to its base under a
 //           session that STAYS in it. Followed by `entered` with an

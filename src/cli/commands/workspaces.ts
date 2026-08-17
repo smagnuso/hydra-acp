@@ -511,7 +511,6 @@ export async function runWorkspaceApply(opts: {
   into?: string;
 }): Promise<void> {
   const row = await resolveTarget(opts.target);
-  const { source, capture } = await preflight(row, opts.into);
 
   const provider = getProvider(row.provider);
   if (provider === undefined || !provider.capabilities().supports.captureWorkingState) {
@@ -522,7 +521,42 @@ export async function runWorkspaceApply(opts: {
   if (binding === undefined) {
     throw new Error(`workspace ${row.label} is no longer bound to a session`);
   }
-  const base = binding.workspace.snapshot;
+  const source = opts.into !== undefined ? path.resolve(opts.into) : row.sourceCwd;
+
+  // Before the capture, because it is a refusal and refusals come first.
+  // The index is what `apply` delivers, so it cannot also hold the user's
+  // own staging: the two sets would be indistinguishable afterwards, and
+  // the reset below does not preserve the marking anyway. `merge` has no
+  // such constraint: it delivers commits.
+  const staged = await provider.status({ ...rowWorkspace(row), path: source }).catch(() => undefined);
+  if (staged?.hasStagedWork === true) {
+    throw new Error(
+      `${shortenHomePath(source)} already has changes staged for its next commit, and apply ` +
+        `delivers into that same index; unstaging one set would unstage both. Commit or ` +
+        `unstage them first, or use \`${invokedBinName()} workspace merge\` instead`,
+    );
+  }
+
+  const { capture } = await preflight(row, opts.into);
+  const sourceHead = await provider.currentState(source);
+  if (sourceHead === undefined) {
+    throw new Error(`could not read the state of ${shortenHomePath(source)}`);
+  }
+  // The source's own tip when the workspace already contains it, so the
+  // change set is exactly what the workspace added and is a patch against
+  // the tree the clear below leaves behind. Its creation state otherwise,
+  // which is the drift case: the two trees last agreed there, and the
+  // patch has to be reconciled onto what the source has become.
+  //
+  // Measuring from the creation state unconditionally broke every synced
+  // workspace: a sync brings the source's commits INTO the workspace, so
+  // the change set carried content the source already had, and one
+  // already-present hunk takes the whole (atomic) apply down.
+  const branch = rowWorkspace(row).line;
+  const contained =
+    branch !== undefined &&
+    (await provider.contains(source, { state: sourceHead, within: branch }).catch(() => false));
+  const base = contained ? sourceHead : binding.workspace.snapshot;
   if (base === undefined) {
     throw new Error(`workspace ${row.label} has no recorded base to diff against`);
   }
@@ -537,6 +571,9 @@ export async function runWorkspaceApply(opts: {
     throw new Error("could not compute the change set");
   }
   if (delta.trim().length === 0) {
+    if (capture !== undefined) {
+      await releaseSourceCapture({ source, ws: rowWorkspace(row), capture, provider });
+    }
     process.stdout.write("Nothing to apply: the workspace matches its base.\n");
     return;
   }
@@ -544,11 +581,43 @@ export async function runWorkspaceApply(opts: {
   // Staged, unlike the other replays: `apply` exists to hand you the
   // workspace's changes to review and commit yourself, so they arrive
   // marked for the next commit rather than loose.
-  const applied = await provider.applyDelta(source, delta, { stage: true });
+  const applied = await provider.applyDelta(source, delta, {
+    stage: true,
+    // Only with a stale base. Against an exact one the patch either
+    // applies or something is genuinely wrong, and reconciling there
+    // would hide it.
+    tolerant: !contained,
+  });
   if (!applied.ok) {
-    throw new Error(`could not apply the change set: ${applied.reason ?? "unknown error"}`);
+    // A refused apply has to be a no-op, and reconciliation may have
+    // written conflict markers on its way to failing. Put the tree back;
+    // the capture is what makes that safe.
+    await provider.resetTo(source, sourceHead).catch(() => undefined);
+    await replayAfterLanding(source, row, capture);
+    throw new Error(
+      `could not apply the change set: ${applied.reason ?? "unknown error"}` +
+        (contained
+          ? ""
+          : `\nThe source has moved on since this workspace was created; sync it into the ` +
+            `workspace first so the change set applies against those commits`),
+    );
   }
   await replayAfterLanding(source, row, capture);
+  // Re-baseline, as a merge does: this content is in the source now, so a
+  // later landing must not count it as the user's own divergence and
+  // replay it on top of the same content arriving from the branch.
+  const after = await provider
+    .captureWorkingState(source, `hydra: source state after applying ${row.label}`)
+    .catch(() => undefined);
+  if (after !== undefined) {
+    await provider
+      .retainSnapshot(
+        { ...rowWorkspace(row), path: source },
+        workspaceAnchorRefs(row.label).baseline,
+        after,
+      )
+      .catch(() => undefined);
+  }
   process.stdout.write(
     `applied ${row.label} into ${shortenHomePath(source)} as staged changes (not committed)\n`,
   );

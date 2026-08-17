@@ -183,6 +183,7 @@ export interface UsageSnapshot {
 export const WORKSPACE_VERBS = [
   "start",
   "merge",
+  "apply",
   "sync",
   "stop",
   "detach",
