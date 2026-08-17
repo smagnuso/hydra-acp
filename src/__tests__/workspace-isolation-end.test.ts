@@ -22,6 +22,7 @@ import { makeControlledStream } from "./test-utils.js";
 import {
   drainSnapshots,
   exec,
+  makeClient,
   makeGitRepo,
   makeIsolationManager,
   registerTempRootCleanup,
@@ -86,6 +87,40 @@ describe("session isolation end-to-end: leaving a workspace", () => {
         cwd: repo,
       }),
     ).rejects.toThrow();
+  });
+
+  it("leaves the recall watermark on disk, so a cold wake still has recall", async () => {
+    // Regression. Both round trips stamp summarizedThroughEntry to arm
+    // recall, and neither used to persist it: leaveWorkspace's record
+    // write carries cwd and the binding only. The session then kept
+    // recall exactly as long as it stayed warm, and the first idle
+    // timeout or daemon restart cost it every turn before the swap,
+    // which is the history the round trip exists to preserve.
+    //
+    // Asserted through loadFromDisk because that is the read the
+    // descriptor gate in resurrectFromDisk uses to decide whether the
+    // resurrected agent is handed the recall MCP server at all.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const { client } = makeClient();
+    await session.attach(client, "none");
+    await session.prompt(client.clientId, {
+      prompt: [{ type: "text", text: "work worth recalling" }],
+    });
+
+    await manager.runWorkspaceAction(session.sessionId, "start", "recallable");
+    const entered = (await manager.loadFromDisk(session.sessionId))?.summarizedThroughEntry;
+    expect(entered).toBeGreaterThan(0);
+
+    await manager.runWorkspaceAction(session.sessionId, "stop");
+
+    const left = await manager.loadFromDisk(session.sessionId);
+    expect(left?.workspace).toBeUndefined();
+    // The leave swap moves the watermark forward again (the workspace
+    // turns are now behind it too), and that later value is the one that
+    // has to survive.
+    expect(left?.summarizedThroughEntry).toBe(session.summarizedThroughEntry);
+    expect(left?.summarizedThroughEntry).toBeGreaterThanOrEqual(entered as number);
   });
 
   it("lands cleanly after several turns of autosave", async () => {

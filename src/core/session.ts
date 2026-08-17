@@ -353,6 +353,15 @@ export interface SessionInit {
   // data needed for rollback. SessionManager uses this to persist the
   // breadcrumb to meta.json.
   onCompactionSwapHook?: (breadcrumb: RollbackBreadcrumb) => void;
+  // Called whenever a swap moves the summarizedThroughEntry watermark, so
+  // SessionManager can persist it. The watermark is what arms recall, and
+  // both gates that read it (the descriptor gate in resurrectFromDisk, the
+  // call-time gate in the recall server) read it off the RECORD. A swap
+  // that moves it in memory only therefore works until the first cold
+  // wake and then loses recall with no error anywhere. That is what the
+  // workspace swaps did before this hook existed, since they skip the
+  // synopsis generation that used to be the field's only persister.
+  persistWatermarkHook?: (summarizedThroughEntry: number) => void;
   // Called when /hydra uncompact is invoked. Provided by SessionManager;
   // performs all guards and the actual rollback. Returns a rejected
   // promise with a descriptive Error on guard failure.
@@ -836,6 +845,7 @@ export class Session {
   private loadExistingAgentSession: LoadExistingAgentSession | undefined;
   private clearRollbackBreadcrumbHook: (() => void) | undefined;
   private onCompactionSwapHook: ((breadcrumb: RollbackBreadcrumb) => void) | undefined;
+  private persistWatermarkHook: ((summarizedThroughEntry: number) => void) | undefined;
   private uncompactHook: (() => Promise<void>) | undefined;
   private forkHook:
     | ((opts?: {
@@ -1153,6 +1163,7 @@ export class Session {
     this.loadExistingAgentSession = init.loadExistingAgentSession;
     this.clearRollbackBreadcrumbHook = init.clearRollbackBreadcrumbHook;
     this.onCompactionSwapHook = init.onCompactionSwapHook;
+    this.persistWatermarkHook = init.persistWatermarkHook;
     this.uncompactHook = init.uncompactHook;
     this.forkHook = init.forkHook;
     this.mcpServersConfig = init.mcpServers;
@@ -1887,6 +1898,11 @@ export class Session {
       ...(opts.summarizedThroughEntry !== undefined
         ? { watermark: opts.summarizedThroughEntry }
         : {}),
+      // The watermark this swap is about to install is what arms recall,
+      // so read it from opts first; a swap that doesn't move it inherits
+      // whatever the session already had.
+      recallArmed:
+        (opts.summarizedThroughEntry ?? this._summarizedThroughEntry ?? 0) > 0,
     });
 
     // Send the seed as a single session/prompt on the fresh agent. The
@@ -1930,7 +1946,8 @@ export class Session {
     // Atomically swap: kill the old agent, point this.agent and
     // this.upstreamSessionId at the new one. The in-memory rotation
     // (this.agent / this.upstreamSessionId) and ALL meta-write-triggering
-    // hooks (agentChangeHandlers, onCompactionSwapHook) fire in one
+    // hooks (agentChangeHandlers, onCompactionSwapHook, and
+    // persistWatermarkHook) fire in one
     // synchronous block BEFORE any await — otherwise any concurrent
     // poller (waitFor-style helpers in tests, picker polls in
     // production) can observe rotation while the breadcrumb /
@@ -1968,6 +1985,17 @@ export class Session {
     // before the breadcrumb is written (the breadcrumb references the
     // previous id, not the current).
     this.notifyAgentChange("swapUpstream");
+    // Persist the moved watermark. Not gated on crossAgent: a cross-agent
+    // swap advances it too, and recall's gates read the record either way.
+    if (opts.summarizedThroughEntry !== undefined && this.persistWatermarkHook) {
+      try {
+        this.persistWatermarkHook(opts.summarizedThroughEntry);
+      } catch (err) {
+        this.logger?.warn(
+          `swapUpstream: persistWatermarkHook failed: ${(err as Error).message}`,
+        );
+      }
+    }
     // Cross-agent swaps skip the rollback breadcrumb: rollbackToUpstream
     // resumes the prior upstream on this.agentId, which after a cross-
     // agent swap is the NEW agent — incompatible with a session created
@@ -6994,6 +7022,7 @@ export class Session {
         // any in-flight open turn from a mid-turn /btw renders in its
         // own section.
         watermark: this._summarizedThroughEntry,
+        recallArmed: (this._summarizedThroughEntry ?? 0) > 0,
       });
 
       if (this.internalPromptCapture) {

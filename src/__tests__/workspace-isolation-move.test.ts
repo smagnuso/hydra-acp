@@ -15,6 +15,7 @@ import type { SessionManager } from "../core/session-manager.js";
 import {
   drainSnapshots,
   exec,
+  makeClient,
   makeGitRepo,
   makeIsolationManager,
   registerTempRootCleanup,
@@ -375,5 +376,28 @@ describe("session isolation end-to-end: moving a live session", () => {
     const status = await manager.runWorkspaceAction(session.sessionId, "status");
     expect(status).toContain("Isolated in");
     expect(status).toContain(repo);
+  });
+
+  it("persists the recall watermark the swap installs", async () => {
+    // The swap arms recall by stamping summarizedThroughEntry, which is
+    // the whole reason it can skip generating a synopsis first. Both
+    // gates that decide whether the replacement agent actually gets the
+    // recall tools read that field off the RECORD, so a watermark that
+    // only ever lived in memory buys recall until the first idle timeout
+    // or daemon restart and then loses it with no error anywhere.
+    const repo = await makeGitRepo();
+    const session = await manager.create({ agentId: "claude-code", cwd: repo });
+    const { client } = makeClient();
+    await session.attach(client, "none");
+    await session.prompt(client.clientId, {
+      prompt: [{ type: "text", text: "work worth recalling" }],
+    });
+
+    await manager.runWorkspaceAction(session.sessionId, "start", "watermarked");
+
+    const armed = session.summarizedThroughEntry;
+    expect(armed).toBeGreaterThan(0);
+    const record = await manager.loadFromDisk(session.sessionId);
+    expect(record?.summarizedThroughEntry).toBe(armed);
   });
 });

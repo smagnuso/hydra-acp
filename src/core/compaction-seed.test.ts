@@ -352,6 +352,30 @@ describe("renderCompactionSeed", () => {
       "(Hydra has compacted earlier conversation. Do NOT call any tools yet. Do NOT read any files, run any commands, or invoke hydra-recall. Reply with the single word 'OK' and wait for the next user message — at that point you can use the hydra-recall tools to look up specifics on demand if needed.)",
     );
   });
+
+  it("does not point at recall when recall is not armed", () => {
+    // The note is the agent's only signal that the rest of the
+    // conversation is retrievable. Promising it to an agent whose session
+    // never crossed the watermark costs a turn to discover otherwise, and
+    // the seed is exactly where that turn is most expensive.
+    const compacted = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: [],
+      tailK: 0,
+      recallArmed: false,
+    });
+    expect(compacted).toContain("Hydra has compacted earlier conversation");
+    expect(compacted).toContain("Reply with the single word 'OK'");
+    expect(compacted).not.toContain("hydra-recall");
+
+    const forked = renderCompactionSeed({
+      tail: buildHistory(1),
+      tailK: 5,
+      recallArmed: false,
+    });
+    expect(forked).toContain("side conversation forked from another session");
+    expect(forked).not.toContain("hydra-recall");
+  });
 });
 
 // Build a history array with N complete user/agent turns.

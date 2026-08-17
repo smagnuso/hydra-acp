@@ -47,6 +47,15 @@ export interface RenderCompactionSeedOptions {
   // tokens by giving the new agent recent ground truth. Defaults to 0
   // (compaction: pure synopsis, no continuity tail).
   tailFloor?: number;
+  // Whether the recall MCP tools are actually reachable from the agent
+  // this seed is being sent to. Recall is armed by a non-zero
+  // summarizedThroughEntry on the RECORD, so a seed that promises recall
+  // to an agent whose session never crossed that watermark costs the
+  // agent a turn to discover otherwise. Not derived from `watermark`
+  // here: that field's job is anchoring the verbatim tail, and the two
+  // are only incidentally the same number. Defaults to true, which is
+  // what every pre-existing caller meant.
+  recallArmed?: boolean;
 }
 
 const UNTITLED = "(untitled)";
@@ -137,14 +146,23 @@ export function renderCompactionSeed(
   }
 
   // closing note
+  const recallArmed = opts.recallArmed ?? true;
   lines.push("");
-  if (syn !== undefined) {
+  if (syn !== undefined && recallArmed) {
     lines.push(
       "(Hydra has compacted earlier conversation. Do NOT call any tools yet. Do NOT read any files, run any commands, or invoke hydra-recall. Reply with the single word 'OK' and wait for the next user message — at that point you can use the hydra-recall tools to look up specifics on demand if needed.)",
     );
-  } else {
+  } else if (syn !== undefined) {
+    lines.push(
+      "(Hydra has compacted earlier conversation; the turns above are what survives. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)",
+    );
+  } else if (recallArmed) {
     lines.push(
       "(This is a side conversation forked from another session. The turns above are the most recent; earlier history is available on demand via the hydra-recall tools. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)",
+    );
+  } else {
+    lines.push(
+      "(This is a side conversation forked from another session. The turns above are the most recent. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)",
     );
   }
 

@@ -66,6 +66,9 @@ importers:
       '@types/ws':
         specifier: ^8.5.0
         version: 8.18.1
+      sonic-boom:
+        specifier: ^4.2.1
+        version: 4.2.1
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(postcss@8.5.14)(tsx@4.21.0)(typescript@5.9.3)
@@ -1517,7 +1520,7 @@ packages:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
 
   sonic-boom@4.2.1:
-    resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
+    resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==, tarball: http://artifacts.netflix.com/api/npm/npm-netflix/_relative/sonic-boom/-/sonic-boom-4.2.1.tgz}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}

@@ -984,6 +984,8 @@ export class SessionManager {
         this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+      persistWatermarkHook: (summarizedThroughEntry) =>
+        void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
         void this.mutateRecord(session.sessionId, {}, ["rollbackBreadcrumb"]).catch(() => undefined),
     });
@@ -1312,6 +1314,8 @@ export class SessionManager {
         this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+      persistWatermarkHook: (summarizedThroughEntry) =>
+        void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
         void this.mutateRecord(session.sessionId, {}, ["rollbackBreadcrumb"]).catch(() => undefined),
     });
@@ -1438,6 +1442,8 @@ export class SessionManager {
         this.runWorkspaceAction(session.sessionId, action, name),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+      persistWatermarkHook: (summarizedThroughEntry) =>
+        void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
         void this.mutateRecord(session.sessionId, {}, ["rollbackBreadcrumb"]).catch(() => undefined),
     });
