@@ -263,7 +263,33 @@ standalone `and` / `or` token (any case) sets the operator for the whole
 query, and `AND` wins if both appear. Wrap a phrase in double quotes to
 match it literally, operators included. A term may carry a scope prefix:
 `prompt:` (user text), `response:` (agent text + thoughts), `tool:` (tool
-titles, names, rawInput, locations).
+titles, names, rawInput, locations), `edit:` / `edited:` (paths of files
+the session *changed*).
+
+`edit:` differs from the others in three ways:
+
+- **Edits, not mentions.** It matches only tool calls carrying an edit
+  payload (canonical `content[]` `type:"diff"`, or Claude's Edit / Write /
+  MultiEdit `rawInput`), so a `Read` or `Grep` of the same path does not
+  match. `tool:` would match those, since it searches the whole serialized
+  `rawInput`. Deletes and shell-driven mutations (`sed -i`, `git checkout`,
+  `mv`) carry no edit payload and are therefore invisible to it.
+- **Path-segment matching, not substring.** An absolute term is a subtree
+  test (`edit:/repo/src` matches `/repo/src/tui/app.ts`); a relative term
+  matches any run of whole segments (`edit:src/tui`, `edit:app.ts`), so
+  `edit:foo` does not match `/dev/foobar`.
+- **Counts distinct files.** `totalMatches` is the number of distinct files
+  matched, not the number of sightings — a path is re-emitted on every
+  `tool_call_update` for the same call, so counting sightings would be
+  meaningless. Snippet `text` is the whole path rather than a centred
+  window, and `snippetWidth` does not apply.
+
+For a workspace-isolated session, a term matches against **either** the
+recorded path or its source-tree equivalent (the session's `cwd` prefix
+swapped for `workspace.sourceCwd`), so both the workspace path and the real
+checkout find it. Snippets always report the recorded path. A session whose
+workspace binding has since been cleared has no mapping left, so only its
+workspace paths match.
 
 `snippetWidth` is the caller's render width in characters, match text
 included. Clamped to `[24, 512]`; defaults to `72`. Snippets are built by
@@ -288,10 +314,11 @@ the failure text of tool calls that ended `failed` / `rejected` /
       "updatedAt":    "<iso8601>",
       "title":        "…",     // omitted when the session has none
       "totalMatches": 12,      // every occurrence, not just the shown ones
+                               // (for edit: scope, distinct files matched)
       "snippets": [            // capped at 5/session, budgeted per term
         {
-          "kind":       "agent" | "user" | "thought" | "tool" | "tool-input",
-          "toolName":   "Edit", // only for tool / tool-input kinds
+          "kind":       "agent" | "user" | "thought" | "tool" | "tool-input" | "edit",
+          "toolName":   "Edit", // only for tool / tool-input / edit kinds
           "text":       "…regression…",
           "recordedAt": 1782587063587
         }

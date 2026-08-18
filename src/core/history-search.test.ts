@@ -5,6 +5,7 @@ import {
   parseQuery,
   scanSessionEntries,
   searchHistories,
+  workspacePathNormalizer,
   type ParsedQuery,
   type SessionSearchResponse,
 } from "./history-search.js";
@@ -115,6 +116,187 @@ function toolResultEntry(
     recordedAt,
   };
 }
+
+// A tool_call carrying a canonical content[] diff block, which is how an
+// edit reaches history when the agent speaks canonical ACP.
+function diffBlockEntry(
+  path: string,
+  opts: { oldText?: unknown; newText?: unknown; recordedAt?: number } = {},
+): HistoryEntry {
+  return {
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        name: "Edit",
+        content: [
+          {
+            type: "diff",
+            path,
+            oldText: opts.oldText ?? "before",
+            newText: opts.newText ?? "after",
+          },
+        ],
+      },
+    },
+    recordedAt: opts.recordedAt ?? 1,
+  };
+}
+
+describe("edit: scope", () => {
+  const ABS = "/home/u/repo/src/tui/app.ts";
+
+  it("matches an absolute directory as a subtree", () => {
+    const r = scanSessionEntries([diffBlockEntry(ABS)], q("/home/u/repo/src", "edit"), 10);
+    expect(r.totalMatches).toBe(1);
+    expect(r.snippets[0]?.kind).toBe("edit");
+    expect(r.snippets[0]?.text).toBe(ABS);
+  });
+
+  it("does not match a sibling directory sharing a name prefix", () => {
+    const r = scanSessionEntries([diffBlockEntry(ABS)], q("/home/u/repo/src/tu", "edit"), 10);
+    expect(r.totalMatches).toBe(0);
+  });
+
+  it("matches a relative run of whole segments, and a bare basename", () => {
+    expect(scanSessionEntries([diffBlockEntry(ABS)], q("src/tui", "edit"), 10).totalMatches).toBe(1);
+    expect(scanSessionEntries([diffBlockEntry(ABS)], q("app.ts", "edit"), 10).totalMatches).toBe(1);
+  });
+
+  it("does not match a partial segment", () => {
+    expect(scanSessionEntries([diffBlockEntry("/dev/foobar/x.ts")], q("foo", "edit"), 10).totalMatches).toBe(0);
+  });
+
+  it("counts distinct files, not sightings of the same path", () => {
+    // Same call re-asserted on three updates, plus a second file.
+    const r = scanSessionEntries(
+      [
+        diffBlockEntry(ABS),
+        diffBlockEntry(ABS),
+        diffBlockEntry(ABS),
+        diffBlockEntry("/home/u/repo/src/tui/picker.ts"),
+      ],
+      q("src/tui", "edit"),
+      10,
+    );
+    expect(r.totalMatches).toBe(2);
+    expect(r.snippets).toHaveLength(2);
+  });
+
+  it("finds a path whose edit body was externalized to a blob ref", () => {
+    // tools:"references" shape — bodies are { __hydraBlob } objects. The
+    // string-gated readers drop these; the path must survive anyway.
+    const ref = { __hydraBlob: "abc123", bytes: 9001 };
+    const viaDiffBlock = scanSessionEntries(
+      [diffBlockEntry(ABS, { oldText: ref, newText: ref })],
+      q("app.ts", "edit"),
+      10,
+    );
+    expect(viaDiffBlock.totalMatches).toBe(1);
+    const viaRawInput = scanSessionEntries(
+      [toolCallEntry("Write", { file_path: ABS, content: ref })],
+      q("app.ts", "edit"),
+      10,
+    );
+    expect(viaRawInput.totalMatches).toBe(1);
+  });
+
+  it("reads the Edit / Write / MultiEdit rawInput carriers", () => {
+    const cases: Array<Record<string, unknown>> = [
+      { file_path: ABS, old_string: "a", new_string: "b" },
+      { file_path: ABS, content: "whole file" },
+      { file_path: ABS, edits: [{ old_string: "a", new_string: "b" }] },
+      { path: ABS, content: "alternate path key" },
+    ];
+    for (const rawInput of cases) {
+      const r = scanSessionEntries([toolCallEntry("Edit", rawInput)], q("app.ts", "edit"), 10);
+      expect(r.totalMatches, JSON.stringify(rawInput)).toBe(1);
+    }
+  });
+
+  it("ignores a read of the same path", () => {
+    const r = scanSessionEntries(
+      [toolCallEntry("Read", { file_path: ABS }, { locations: [{ path: ABS }] })],
+      q("app.ts", "edit"),
+      10,
+    );
+    expect(r.totalMatches).toBe(0);
+  });
+
+  it("is not reachable from the all or tool scopes, so plain queries are unchanged", () => {
+    const entry = diffBlockEntry(ABS);
+    expect(scanSessionEntries([entry], q("app.ts", "all"), 10).snippets.map((s) => s.kind))
+      .not.toContain("edit");
+    expect(scanSessionEntries([entry], q("app.ts", "tool"), 10).snippets.map((s) => s.kind))
+      .not.toContain("edit");
+  });
+
+  it("matches an isolated session's workspace edits against the source tree", () => {
+    // An isolated session's cwd IS the workspace; its edits all land
+    // under there, so without normalization a query naming the real
+    // checkout finds nothing.
+    const isolated = {
+      cwd: "/home/u/.hydra-acp/workspaces/abc123/s-1",
+      workspace: { sourceCwd: "/home/u/repo" },
+    };
+    const entries = [
+      diffBlockEntry("/home/u/.hydra-acp/workspaces/abc123/s-1/src/tui/app.ts"),
+    ];
+    const normalize = workspacePathNormalizer(isolated);
+    const hit = scanSessionEntries(entries, q("/home/u/repo/src/tui", "edit"), 10, 72, normalize);
+    expect(hit.totalMatches).toBe(1);
+    // Reported path stays the real one — that it landed in a workspace is
+    // information, not noise.
+    expect(hit.snippets[0]?.text).toBe(
+      "/home/u/.hydra-acp/workspaces/abc123/s-1/src/tui/app.ts",
+    );
+    // Without the normalizer the same query misses entirely.
+    expect(
+      scanSessionEntries(entries, q("/home/u/repo/src/tui", "edit"), 10).totalMatches,
+    ).toBe(0);
+    // The workspace path itself still matches, since it's the real path.
+    expect(
+      scanSessionEntries(entries, q(isolated.cwd, "edit"), 10, 72, normalize).totalMatches,
+    ).toBe(1);
+  });
+
+  it("returns no normalizer for an ordinary session", () => {
+    expect(workspacePathNormalizer({ cwd: "/home/u/repo" })).toBeUndefined();
+  });
+
+  it("parses the edit: / edited: prefixes, bare and quoted", () => {
+    expect(parseQuery("edit:src/tui").terms).toEqual([{ scope: "edit", term: "src/tui" }]);
+    expect(parseQuery("edited:/abs/path").terms).toEqual([{ scope: "edit", term: "/abs/path" }]);
+    expect(parseQuery('edit:"a path/with space.ts"').terms).toEqual([
+      { scope: "edit", term: "a path/with space.ts" },
+    ]);
+    // Not an alias: stays a literal all-scope search.
+    expect(parseQuery("changed:3").terms).toEqual([{ scope: "all", term: "changed:3" }]);
+  });
+
+  it("composes with AND", () => {
+    const entries = [diffBlockEntry(ABS), userEntry("fix the picker")];
+    expect(
+      scanSessionEntries(entries, {
+        operator: "AND",
+        terms: [
+          { scope: "edit", term: "src/tui" },
+          { scope: "user", term: "picker" },
+        ],
+      }, 10).totalMatches,
+    ).toBe(2);
+    expect(
+      scanSessionEntries(entries, {
+        operator: "AND",
+        terms: [
+          { scope: "edit", term: "src/daemon" },
+          { scope: "user", term: "picker" },
+        ],
+      }, 10).totalMatches,
+    ).toBe(0);
+  });
+});
 
 describe("parseQuery", () => {
   it("single term, no prefix → OR with scope all", () => {

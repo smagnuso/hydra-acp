@@ -42,7 +42,9 @@ import {
 } from "./cli/commands/workspaces.js";
 import { runSessionsInfo } from "./cli/commands/sessions-info.js";
 import { parseColumns } from "./cli/session-row.js";
+import { resolveDirFilter } from "./cli/session-dir-filter.js";
 import { runSessionsDiff } from "./cli/commands/sessions-diff.js";
+import { runSessionsChanges } from "./cli/commands/sessions-changes.js";
 import {
   runExtensionsAdd,
   runExtensionsList,
@@ -540,10 +542,19 @@ async function main(): Promise<void> {
             return;
           }
         }
+        // Bare `--dir` means "here". No env fallback (cf. --host): an
+        // exported HYDRA_ACP_DIR silently hiding sessions would be a trap.
+        const dir =
+          flags.dir === undefined
+            ? undefined
+            : resolveDirFilter(
+                typeof flags.dir === "string" ? flags.dir : process.cwd(),
+              );
         await runSessionsList({
           all: flags.all === true,
           json: flags.json === true,
           host: typeof flags.host === "string" ? flags.host : undefined,
+          ...(dir !== undefined ? { dir } : {}),
           includeNonInteractive: flags["include-non-interactive"] === true,
           columns,
         });
@@ -566,6 +577,26 @@ async function main(): Promise<void> {
           noColor: flags["no-color"] === true,
           noPager: flags["no-pager"] === true,
           fold: flags.fold === true,
+        });
+        return;
+      }
+      if (sub === "changes" || sub === "changed") {
+        let changesColumns;
+        const changesColumnsRaw = resolveOption(flags, "columns");
+        if (changesColumnsRaw !== undefined) {
+          try {
+            changesColumns = parseColumns(changesColumnsRaw);
+          } catch (err) {
+            process.stderr.write(`${(err as Error).message}\n`);
+            process.exit(2);
+            return;
+          }
+        }
+        await runSessionsChanges(positional[2], {
+          json: flags.json === true,
+          files: flags.files === true,
+          ...(typeof flags.host === "string" ? { host: flags.host } : {}),
+          ...(changesColumns !== undefined ? { columns: changesColumns } : {}),
         });
         return;
       }
@@ -1278,13 +1309,18 @@ function printHelp(subcommand?: string): void {
     [DAEMON, "  hydra-acp daemon stop|restart"],
     [DAEMON, "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log"],
     [VERSION, "  hydra-acp version [--json]         Print CLI, daemon, and extension/transformer versions"],
-    [SESSION, "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]"],
+    [SESSION, "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--dir[=<path>]] [--include-non-interactive] [--columns=<list>]"],
     [SESSION, "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts)."],
     [SESSION, "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer."],
+    [SESSION, "                                     --dir scopes the listing to a directory and everything under it (bare --dir means the current directory; ~ and relative paths accepted). Isolated sessions match on their source tree as well as their workspace."],
     [SESSION, "                                     --include-non-interactive surfaces ancillary (e.g. `hydra cat`) or never-prompted sessions while keeping the cold cap (a narrower --all)."],
     [SESSION, "                                     --columns picks which columns show and their order, e.g. --columns=session,state,title,cost (valid: session,upstream,host,state,agent,model,age,cwd,title,cost). UPSTREAM/HOST/MODEL hidden by default; COST is the trailing column; overrides config.tui.sessionColumns."],
     [SESSION, "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]"],
     [SESSION, "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold)."],
+    [SESSION, "  hydra-acp session changes [<path>] [--files] [--json] [--host=<host>] [--columns=<list>]"],
+    [SESSION, "                                     Which sessions changed files under <path> (default: the current directory). A path that exists on disk is resolved; anything else is matched as a run of whole path segments, so `changes app.ts` finds it wherever it lives."],
+    [SESSION, "                                     --files expands each row to its complete file list with per-file edit counts (the row itself samples up to 5). Unlike `list`, imported and non-interactive sessions are included by default and there is no cold cap — narrow with --host."],
+    [SESSION, "                                     Blind spots: deletes and shell-driven edits (sed -i, git checkout, mv) carry no edit payload, so they never appear. Same `edit:` search available in the TUI picker's ^F."],
     [SESSION, "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]"],
     [SESSION, "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk."],
     [SESSION, "  hydra-acp session kill <id>        Demote a warm session to cold (keeps the on-disk record)"],

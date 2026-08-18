@@ -15,6 +15,8 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "diff",
   "disabled",
   "drip",
+  // `session changes --files`: expand each row to its full file list.
+  "files",
   "fold",
   "follow",
   "force",
@@ -58,6 +60,9 @@ const KNOWN_VALUE_FLAGS = new Set([
   "columns",
   "command",
   "cwd",
+  // `session list --dir <path>`: scope the listing to a directory
+  // subtree. Distinct from --cwd, which SETS a session's directory.
+  "dir",
   "drip-speed",
   "env",
   "from",

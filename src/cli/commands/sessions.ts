@@ -27,12 +27,15 @@ import {
   type FormatOptions,
   type SessionSummary,
 } from "../session-row.js";
+import { sessionMatchesDir } from "../session-dir-filter.js";
 
 export async function runSessionsList(
   opts: {
     all?: boolean;
     json?: boolean;
     host?: string;
+    // Already resolved to an absolute path by the caller.
+    dir?: string;
     includeNonInteractive?: boolean;
     // Explicit column set/order from --columns. Overrides
     // config.tui.sessionColumns. Already parsed/validated by the caller.
@@ -102,15 +105,31 @@ export async function runSessionsList(
           (s) =>
             s.importedFromMachine === host && !s.upstreamSessionId,
         );
+  // Directory scope, applied after the host filter and before --json so
+  // scripts and the table agree. Subtree match on either recorded path.
+  const dirFiltered = opts.dir === undefined
+    ? hostFiltered
+    : hostFiltered.filter((s) => sessionMatchesDir(s, opts.dir as string));
   // --json bypasses the table renderer and the cold-cap truncation:
   // a script wants the full list verbatim, not a TTY-trimmed view.
   // The host filter still applies — scripts read the same world view
   // as the table does, so `--json --host=all` is the way to get raw.
   if (opts.json) {
-    process.stdout.write(JSON.stringify(hostFiltered, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(dirFiltered, null, 2) + "\n");
     return;
   }
-  if (hostFiltered.length === 0) {
+  if (dirFiltered.length === 0) {
+    if (opts.dir !== undefined) {
+      const elsewhere = hostFiltered.length;
+      process.stdout.write(
+        `No sessions in ${opts.dir}.` +
+          (elsewhere > 0
+            ? ` ${elsewhere} session${elsewhere === 1 ? "" : "s"} elsewhere — drop --dir to see them.`
+            : "") +
+          "\n",
+      );
+      return;
+    }
     if (host === "local" && body.sessions.length > 0) {
       process.stdout.write(
         "No local sessions. Use --host=all to include imported sessions.\n",
@@ -124,7 +143,7 @@ export async function runSessionsList(
     process.stdout.write("No active sessions.\n");
     return;
   }
-  const sorted = hostFiltered.slice().sort((a, b) => {
+  const sorted = dirFiltered.slice().sort((a, b) => {
     const warmDiff = (b.status === "warm" ? 1 : 0) - (a.status === "warm" ? 1 : 0);
     if (warmDiff !== 0) {
       return warmDiff;

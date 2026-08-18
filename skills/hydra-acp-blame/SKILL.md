@@ -44,6 +44,7 @@ Standard `git blame` tells you *what* commit changed a line. This skill tells yo
 | `git reflog --date=iso` | resets, checkouts, stashes, amends, rebases — every HEAD move (local, ~90 days) |
 | `git stash list` + `git stash show -p stash@{N}` | WIPs that might explain missing / extra state |
 | `hydra session list --all --host all --include-non-interactive --columns=session,host,age,title,cwd` | every session — interactive + planner workers + imports from peer hosts. **Use these flags together for forensics**; the default `list` hides non-interactive sessions, imports, and older cold rows. |
+| `hydra session list --dir[=<path>]` | same listing, scoped to one directory subtree (bare `--dir` = cwd) |
 | `hydra session diff <id>` | aggregate final-vs-initial diff for that session |
 | `hydra session info <id>` | turn count, tool histogram, files touched, cost, synopsis |
 | `~/.hydra-acp/sessions/<id>/meta.json` | title, cwd, agent, upstream id, timestamps, `importedFromMachine` (peer host), `interactive` (false for planner workers / `hydra cat`) |
@@ -125,14 +126,16 @@ If the commit message describes work on file A but the stat also shows file B ch
 Narrow to sessions in the same repo cwd, seeing everything:
 
 ```bash
-hydra session list --all --host all --columns=session,host,age,title,cwd | rg "$(basename $PWD)"
+hydra session list --all --host all --dir --columns=session,host,age,title,cwd
 ```
+
+`--dir` scopes to the current directory and everything under it (pass a path to scope elsewhere), matching isolated sessions by their source tree too. Prefer it over `| rg "$(basename $PWD)"`, which also matches repo names that merely appear in a title.
 
 Or a more targeted sweep when you know the window is recent:
 
 ```bash
-hydra session list --include-non-interactive --host all --columns=session,host,age,title,cwd \
-  | rg "$(basename $PWD)"
+hydra session list --include-non-interactive --host all --dir \
+  --columns=session,host,age,title,cwd
 ```
 
 Cross-host authorship signal: the session's `meta.json` has `importedFromMachine` set when the session was created on a peer host. When the commit sha only makes sense as "made on my other machine", look for a session with `importedFromMachine` matching that host and a cwd that resolves to the same repo (path prefixes differ across machines — e.g. `/Users/...` vs `/home/...` — so match on the trailing repo path, not the full path).
