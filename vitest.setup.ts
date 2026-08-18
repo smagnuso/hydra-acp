@@ -32,13 +32,44 @@ const workerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hydra-acp-vitest-"));
 // one run in twenty, and never reproducibly. Point git at an empty
 // directory instead: the env var outranks the config, no test asserts on
 // hook contents, and copying nothing makes init marginally faster too.
-//
-// Deliberately narrow. Neutralizing the whole global config
-// (GIT_CONFIG_GLOBAL) would be more hermetic, but it is a much broader
-// change to make on the strength of one diagnosed failure.
 const gitTemplateDir = path.join(workerRoot, "empty-git-template");
 fs.mkdirSync(gitTemplateDir, { recursive: true });
 process.env.GIT_TEMPLATE_DIR = gitTemplateDir;
+
+// GIT_TEMPLATE_DIR alone was not enough, because a template is only one
+// of the ways the developer's environment reaches into a fixture repo.
+// core.hooksPath is another, and it is not copied at init time but read
+// at command time, so an empty template does nothing about it. A global
+// core.hooksPath pointing anywhere unreliable (dotfiles that symlink
+// into another checkout, say) fails the fixture's own commits:
+//
+//   Error: Command failed: git commit -q -m agent work
+//   /bin/sh: ~/.git_template/hooks/pre-commit: No such file or directory
+//
+// which lands as one arbitrary workspace test failing per full-suite run
+// and passing when that file is run alone. Other keys are latent traps of
+// the same shape: status.showuntrackedfiles=no, diff.renames=copies and
+// core.whitespace all change output this suite parses.
+//
+// So substitute a config of our own for the user's. It is not empty: an
+// identity has to come from somewhere. Fixtures set user.name/user.email
+// on the repos they create by hand, but a submodule this suite clones
+// into a workspace gets a fresh config with no identity, and its commits
+// then die on "Author identity unknown" — which presents as a submodule
+// test seeing an unexpectedly clean tree, not as an obvious config error.
+// Naming the identity here also keeps the developer's own name out of
+// fixture commits. Branch names need no equivalent: fixtures pass
+// `git init -b main` explicitly.
+//
+// The GIT_CONFIG_KEY_* injections a couple of tests use still win over
+// this, since env-supplied config outranks config files.
+const gitConfigFile = path.join(workerRoot, "gitconfig");
+fs.writeFileSync(
+  gitConfigFile,
+  "[user]\n\tname = hydra-acp tests\n\temail = tests@hydra-acp.invalid\n",
+);
+process.env.GIT_CONFIG_GLOBAL = gitConfigFile;
+process.env.GIT_CONFIG_SYSTEM = gitConfigFile;
 
 // Mint a fresh empty HYDRA_ACP_HOME before every test. Doing this
 // globally (instead of in each test's own beforeEach) means tests can't

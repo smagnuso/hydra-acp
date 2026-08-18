@@ -42,11 +42,14 @@ async function makeHarness(): Promise<Harness> {
   return { app, registry, baseUrl: `http://127.0.0.1:${addr.port}` };
 }
 
+// Awaited by every caller: a discarded rewrite() promise can reject
+// after teardown deletes the temp HYDRA_ACP_HOME, which vitest reports as
+// an unhandled rejection against whichever test was running.
 function populateHistory(
   session: Session,
   entries: HistoryEntry[],
-): void {
-  void (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
+): Promise<void> {
+  return (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
     session.sessionId,
     entries,
   );
@@ -126,7 +129,7 @@ describe("tool_calls — tool_name filter", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -234,7 +237,7 @@ describe("tool_calls — tool_name filter", () => {
   });
 
   it("includes status from the tool_call entry", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -258,7 +261,7 @@ describe("tool_calls — tool_name filter", () => {
   });
 
   it("defaults to in_progress when no status field present", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -281,7 +284,7 @@ describe("tool_calls — tool_name filter", () => {
   });
 
   it("includes timestamp from recordedAt", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -305,7 +308,7 @@ describe("tool_calls — tool_name filter", () => {
   });
 
   it("excludes non-tool_call entries", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -340,7 +343,7 @@ describe("tool_calls — tool_name filter", () => {
   });
 
   it("uses title field when name is absent", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -387,7 +390,7 @@ describe("tool_calls — file_path filter", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -479,7 +482,7 @@ describe("tool_calls — file_path filter", () => {
   });
 
   it("does not match against non-path fields like command", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -520,7 +523,7 @@ describe("tool_calls — file_path filter", () => {
   });
 
   it("excludes non-tool_call entries even with a matching path in prompt", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -564,7 +567,7 @@ describe("tool_calls — both filters combined", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -676,7 +679,7 @@ describe("tool_calls — args and truncation", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -725,7 +728,7 @@ describe("tool_calls — args and truncation", () => {
   });
 
   it("includes number and boolean args", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -752,7 +755,7 @@ describe("tool_calls — args and truncation", () => {
 
   it("truncates long string args at 500 chars", async () => {
     const longContent = "x".repeat(600);
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -778,7 +781,7 @@ describe("tool_calls — args and truncation", () => {
   });
 
   it("excludes non-primitive arg values (objects, arrays)", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -818,7 +821,7 @@ describe("tool_calls — args and truncation", () => {
         recordedAt: 1000 + i,
       });
     }
-    populateHistory(session, entries);
+    await populateHistory(session, entries);
 
     const r = await client!.callTool({
       name: "tool_calls",
@@ -845,7 +848,7 @@ describe("tool_calls — args and truncation", () => {
         recordedAt: 1000 + i,
       });
     }
-    populateHistory(session, entries);
+    await populateHistory(session, entries);
 
     const r = await client!.callTool({
       name: "tool_calls",
@@ -888,7 +891,7 @@ describe("tool_calls — args and truncation", () => {
         recordedAt: 1000 + i,
       });
     }
-    populateHistory(session, entries);
+    await populateHistory(session, entries);
 
     const r = await client!.callTool({
       name: "tool_calls",
@@ -900,7 +903,7 @@ describe("tool_calls — args and truncation", () => {
   });
 
   it("skips non-session/update entries in iteration", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "notification",
         params: { type: "session_info" },
@@ -929,7 +932,7 @@ describe("tool_calls — args and truncation", () => {
   });
 
   it("does not include full tool result body — only status and short args", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {

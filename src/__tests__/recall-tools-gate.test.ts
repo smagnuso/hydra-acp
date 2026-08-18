@@ -63,8 +63,11 @@ async function connectClient(
   return client;
 }
 
-function populateHistory(session: Session, entries: HistoryEntry[]): void {
-  void (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
+// Awaited by every caller: a discarded rewrite() promise can reject
+// after teardown deletes the temp HYDRA_ACP_HOME, which vitest reports as
+// an unhandled rejection against whichever test was running.
+function populateHistory(session: Session, entries: HistoryEntry[]): Promise<void> {
+  return (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
     session.sessionId,
     entries,
   );
@@ -187,7 +190,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       const historyStore = new HistoryStore();
       session = makeStreamSession({ historyStore, summarizedThroughEntry: 42 });
       expect(session.summarizedThroughEntry).toBe(42);
-      populateHistory(session, [
+      await populateHistory(session, [
         {
           method: "session/update",
           params: {
@@ -261,7 +264,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
     });
 
     it("tool_calls returns entries matching a tool filter", async () => {
-      populateHistory(session, [
+      await populateHistory(session, [
         {
           method: "session/update",
           params: {
@@ -301,7 +304,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       const session = makeStreamSession({ historyStore });
       expect(session.summarizedThroughEntry).toBeUndefined();
 
-      populateHistory(session, [
+      await populateHistory(session, [
         {
           method: "session/update",
           params: {

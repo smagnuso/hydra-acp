@@ -155,11 +155,6 @@ export interface FormattedLine {
   // ANSI-aware wrap/width helpers so escape bytes don't inflate column
   // counts. Only used today for highlighted code blocks inside fences.
   ansi?: boolean;
-  // When set on user-text echo lines, the screen layer emits the
-  // iTerm2 OSC 1337 inline-image escape after the body so a thumbnail
-  // of the attached image appears in scrollback. Non-iTerm2 terminals
-  // ignore the field and only the body (filename / size) is shown.
-  iterm2Image?: { data: string; heightCells: number };
   // The upsert key of the block this line belongs to, stamped by
   // Screen.upsertLines. Lets a left-click resolve the line back to its
   // owning block (for click-to-expand) even after the key is forgotten
@@ -228,6 +223,11 @@ export function formatEvent(
         event.sentBy,
         true,
       );
+      // Name only, no inline preview. An OSC 1337 image here was placed
+      // by the terminal against the real cursor rather than the row it
+      // was written on, because the frame paints inside a DEC 2026
+      // synchronized-output bracket; it landed in the composer and no
+      // repaint could erase it. See drawAttachmentChipZone.
       if (event.attachments && event.attachments.length > 0) {
         for (const a of event.attachments) {
           lines.push({
@@ -236,7 +236,6 @@ export function formatEvent(
             body: `📎 ${a.name ?? "image"}`,
             bodyStyle: "user",
             fillRow: true,
-            iterm2Image: { data: a.data, heightCells: 5 },
           });
         }
       }

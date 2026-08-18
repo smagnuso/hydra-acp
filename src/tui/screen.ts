@@ -661,9 +661,8 @@ export class Screen {
   private lastQueueEditingIndex = -1;
   // Attachments on the current draft, pushed by the app whenever the
   // dispatcher mutates. The chip zone (drawAttachmentChipZone) renders
-  // one row per attachment plus, in iTerm2-capable terminals, an inline
-  // thumbnail. Capped at MAX_CHIP_ROWS in the visible zone — additional
-  // chips collapse into an overflow row.
+  // one text row per attachment, capped at MAX_CHIP_ROWS in the visible
+  // zone; additional chips collapse into an overflow row.
   private attachments: Attachment[] = [];
   private repaintPaused = 0;
   private repaintPending = false;
@@ -7090,9 +7089,15 @@ export class Screen {
 
   // Chip zone: one row per attached image, sitting between the queued
   // zone and the separator (closest to the user's draft). Each row
-  // shows "📎 <name> · <size>" plus, in iTerm2-capable terminals, a
-  // tiny inline thumbnail at the end. Overflow collapses into a
-  // single "+ N more attached" row.
+  // shows "📎 <name> · <size>". Overflow collapses into a single
+  // "+ N more attached" row.
+  //
+  // Text only, deliberately. This used to append a 1-cell iTerm2 OSC
+  // 1337 thumbnail, but the escape is not a cell write, so inside the
+  // frame's DEC 2026 bracket iTerm2 placed it against the real cursor
+  // at commit time: wherever placeCursor() had just put it, i.e. in the
+  // middle of the composer. Being invisible to the painter, nothing
+  // erased it short of a full clear.
   private drawAttachmentChipZone(): void {
     const rows = this.chipRows();
     if (rows === 0) {
@@ -7108,7 +7113,6 @@ export class Screen {
       BANNER_ROWS;
     const chipBottom = separatorRow - 1;
     const chipTop = chipBottom - rows + 1;
-    const iterm = this.isIterm2();
     for (let i = 0; i < rows; i++) {
       const row = chipTop + i;
       const isLast = i === rows - 1 && this.attachments.length > MAX_CHIP_ROWS;
@@ -7117,12 +7121,10 @@ export class Screen {
       const label = att
         ? `${att.name ?? "image"} · ${formatSize(att.sizeBytes)}`
         : "";
-      // Sig: row content + iterm flag + a data fingerprint (sizeBytes
-      // is enough — base64 strings of the same image are equal).
       const sig = isLast
         ? `chip|${w}|overflow|${overflow}`
         : att
-          ? `chip|${w}|${iterm ? "i" : "t"}|${label}|${att.sizeBytes}`
+          ? `chip|${w}|${label}`
           : `chip|${w}|empty`;
       this.paintRow(row, sig, () => {
         if (isLast) {
@@ -7134,30 +7136,8 @@ export class Screen {
         }
         this.term.noFormat("  ");
         paint(this.term, "attachment", `📎 ${label}`);
-        if (iterm) {
-          // Trailing space keeps a visible gap between the label and
-          // the thumbnail in terminals where the image renders at the
-          // current cursor with no margin.
-          this.term(" ");
-          this.writeIterm2Image(att.data, 1);
-        }
       });
     }
-  }
-
-  private isIterm2(): boolean {
-    const env = process.env;
-    return env.LC_TERMINAL === "iTerm2" || env.TERM_PROGRAM === "iTerm.app";
-  }
-
-  // Emits the iTerm2 OSC 1337 inline image escape at the current
-  // cursor position. Wraps in DCS-passthrough when tmux is detected
-  // (requires `set -g allow-passthrough on` in the user's tmux conf).
-  // Caller is responsible for knowing iTerm2 is the active terminal.
-  private writeIterm2Image(base64: string, heightCells: number): void {
-    process.stdout.write(
-      buildIterm2ImageEscape(base64, heightCells, Boolean(process.env.TMUX)),
-    );
   }
 
   private drawQueuedZone(): void {
@@ -8446,14 +8426,6 @@ export class Screen {
       if (line.ansi) {
         wrappedLine.ansi = true;
       }
-      // Attach the iTerm2 inline image only to the first wrapped row.
-      // Wrapping a body that carries an image should produce a tiny
-      // body (filename), so wrap rarely splits it — but if it did,
-      // emitting the OSC on each continuation would draw the same
-      // image twice.
-      if (i === 0 && line.iterm2Image) {
-        wrappedLine.iterm2Image = line.iterm2Image;
-      }
       if (id !== undefined && chunk.length > 0) {
         if (line.ansi) {
           const srcStart = ansiSrcCursor;
@@ -8787,18 +8759,6 @@ export class Screen {
     if (line.ansi || line.body.includes("\x1b")) {
       this.term.styleReset();
     }
-    // iTerm2 inline thumbnail (only emitted on iTerm2 — host terminals
-    // silently ignore the OSC). The image renders at the current
-    // cursor with heightCells rows; iTerm2 may advance the cursor
-    // beyond our row, but the next paintRow's moveTo resets it for
-    // the row below. Net effect: the image visually overlays this row
-    // and a few rows below, with subsequent paint calls untouched.
-    if (line.iterm2Image && this.isIterm2()) {
-      this.writeIterm2Image(
-        line.iterm2Image.data,
-        line.iterm2Image.heightCells,
-      );
-    }
   }
 }
 
@@ -8833,14 +8793,6 @@ function sameRenderedLine(a: FormattedLine, b: FormattedLine): boolean {
     (a.maxWrapRows ?? 0) !== (b.maxWrapRows ?? 0) ||
     (a.hangingIndent ?? 0) !== (b.hangingIndent ?? 0)
   ) {
-    return false;
-  }
-  const ai = a.iterm2Image;
-  const bi = b.iterm2Image;
-  if ((ai === undefined) !== (bi === undefined)) {
-    return false;
-  }
-  if (ai && bi && (ai.data !== bi.data || ai.heightCells !== bi.heightCells)) {
     return false;
   }
   const al = a.links;
@@ -8878,19 +8830,12 @@ function formattedLineSig(
   if (!line) {
     return `${zone}|${width}|empty|${highlight ?? ""}|${active}|${sel}`;
   }
-  // iTerm2 image fingerprint: heightCells + base64 length is enough —
-  // identical base64s of the same length are de-facto identical images
-  // and the user's attachments don't get mutated in place. Including
-  // the full base64 would explode the sig string for no benefit.
-  const img = line.iterm2Image
-    ? `i${line.iterm2Image.heightCells}:${line.iterm2Image.data.length}`
-    : "";
   return (
     `${zone}|${width}|` +
     `${line.prefix ?? ""}|${line.prefixStyle ?? ""}|` +
     `${line.body}|${line.bodyStyle ?? ""}|` +
     `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}|` +
-    `${highlight ?? ""}|${active}|${sel}|${img}`
+    `${highlight ?? ""}|${active}|${sel}`
   );
 }
 
@@ -9580,26 +9525,6 @@ export interface WrapOptions {
   // behaviour for the cwd/title/spec call sites, whose text never contains
   // an escape.
   escapeAware?: boolean;
-}
-
-// Build the iTerm2 OSC 1337 inline-image escape, optionally wrapped in
-// tmux DCS-passthrough. Pure function — exported for unit tests so the
-// wrap math (doubling every ESC inside the passthrough payload, ESC \
-// terminator, not BEL) can be verified without a real terminal.
-export function buildIterm2ImageEscape(
-  base64: string,
-  heightCells: number,
-  insideTmux: boolean,
-): string {
-  const inner = `\x1b]1337;File=inline=1;height=${heightCells};preserveAspectRatio=1:${base64}\x07`;
-  if (!insideTmux) {
-    return inner;
-  }
-  // Tmux DCS-passthrough: prefix with ESC P tmux ;, double every ESC
-  // inside the payload, terminate with ESC \ (ST). Without this, tmux
-  // swallows the OSC and the host terminal sees nothing.
-  const doubled = inner.replace(/\x1b/g, "\x1b\x1b");
-  return `\x1bPtmux;${doubled}\x1b\\`;
 }
 
 export function wrap(

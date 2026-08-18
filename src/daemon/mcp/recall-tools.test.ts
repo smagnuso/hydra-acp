@@ -42,11 +42,14 @@ async function makeHarness(): Promise<Harness> {
   return { app, registry, baseUrl: `http://127.0.0.1:${addr.port}` };
 }
 
+// Awaited by every caller: a discarded rewrite() promise can reject
+// after teardown deletes the temp HYDRA_ACP_HOME, which vitest reports as
+// an unhandled rejection against whichever test was running.
 function populateHistory(
   session: Session,
   entries: HistoryEntry[],
-): void {
-  void (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
+): Promise<void> {
+  return (session as unknown as { historyStore: HistoryStore }).historyStore.rewrite(
     session.sessionId,
     entries,
   );
@@ -209,7 +212,7 @@ describe("search — matches return", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -292,7 +295,7 @@ describe("search — matches return", () => {
   });
 
   it("includes tool_call entries by default", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -316,7 +319,7 @@ describe("search — matches return", () => {
   });
 
   it("excludes tool_call entries when include_tool_calls is false", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -339,7 +342,7 @@ describe("search — matches return", () => {
   });
 
   it("includes timestamps from recordedAt", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -361,7 +364,7 @@ describe("search — matches return", () => {
   });
 
   it("renders entryId as the zero-based array index", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -433,7 +436,7 @@ describe("search — limit honored", () => {
         recordedAt: 1000 + i,
       });
     }
-    populateHistory(session, entries);
+    await populateHistory(session, entries);
   });
 
   afterEach(async () => {
@@ -515,7 +518,7 @@ describe("search — case-insensitive match", () => {
     client = new Client({ name: "test-client", version: "0.0.1" });
     await client.connect(transport);
 
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -550,7 +553,7 @@ describe("search — case-insensitive match", () => {
   });
 
   it("matches mixed-case query against text", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -572,7 +575,7 @@ describe("search — case-insensitive match", () => {
   });
 
   it("does not match when case differs and no overlap", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -629,7 +632,7 @@ describe("search — snippet formatting", () => {
   });
 
   it("returns the full text when rendered entry is short", async () => {
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {
@@ -652,7 +655,7 @@ describe("search — snippet formatting", () => {
 
   it("centers the snippet around the match for long text", async () => {
     const longText = "aaaa".repeat(200) + "MATCH" + "bbbb".repeat(200);
-    populateHistory(session, [
+    await populateHistory(session, [
       {
         method: "session/update",
         params: {

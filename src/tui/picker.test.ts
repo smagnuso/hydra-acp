@@ -355,9 +355,15 @@ describe("filterByHost", () => {
     expect(filterByHost([s], "__local")).toEqual([s]);
   });
 
+  // Any case that treats "broom" as a *peer* must inject the local-host
+  // set. Left to default, filterByHost calls localMachines(), so on a box
+  // actually named broom the self-import rule folds these into __local and
+  // the assertions invert.
+  const locals = new Set(["blackbox"]);
+
   it("__local: excludes passive mirrors (imported, no local upstream)", () => {
     const s = session({ importedFromMachine: "broom" });
-    expect(filterByHost([s], "__local")).toEqual([]);
+    expect(filterByHost([s], "__local", locals)).toEqual([]);
   });
 
   it("<host>: includes passive mirrors from that host only", () => {
@@ -368,7 +374,7 @@ describe("filterByHost", () => {
     });
     const otherPeer = session({ importedFromMachine: "dustpan" });
     expect(
-      filterByHost([passive, attached, otherPeer], "broom"),
+      filterByHost([passive, attached, otherPeer], "broom", locals),
     ).toEqual([passive]);
   });
 

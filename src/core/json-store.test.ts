@@ -40,7 +40,13 @@ describe("readJsonSafe", () => {
   });
 
   it("re-throws non-ENOENT IO errors", async () => {
-    await expect(readJsonSafe("/proc/self/mem")).rejects.toThrow();
+    // A directory read fails EISDIR everywhere. The old probe was
+    // /proc/self/mem, which only exists on Linux; on macOS it is a plain
+    // ENOENT and readJsonSafe correctly returns undefined, so the test
+    // failed for a reason unrelated to what it is asserting.
+    const dir = p("a-directory");
+    await fs.mkdir(dir, { recursive: true });
+    await expect(readJsonSafe(dir)).rejects.toThrow();
   });
 });
 

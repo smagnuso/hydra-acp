@@ -85,6 +85,13 @@ function pathExists(p: string): Promise<boolean> {
     .catch(() => false);
 }
 
+// Resolved form of a path, or the path itself when it cannot be resolved.
+// A workspace root that does not exist yet is the common miss, and it is
+// not an error: there are simply no workspaces under it.
+function realpathOrSelf(p: string): Promise<string> {
+  return fs.realpath(p).catch(() => p);
+}
+
 function runGit(
   args: string[],
   cwd: string,
@@ -518,13 +525,25 @@ export class GitProvider implements IsolationProvider {
       return [];
     }
     const root = workspaceRootFor(source);
+    // `git worktree list` reports fully resolved paths, so the comparison
+    // below has to be symlink-insensitive or it matches nothing at all.
+    // On macOS that is the normal case, not an edge one: the hydra home
+    // typically sits under /var, which is a symlink to /private/var, and
+    // an unresolved root then excludes every workspace we own.
+    const rootReal = await realpathOrSelf(root);
     const out: Workspace[] = [];
     for (const entry of parseWorktreeListPorcelain(listed.stdout)) {
       // Only report workspaces we own. A user's own `git worktree add`
       // elsewhere is not ours to manage or reconcile away.
-      if (path.dirname(entry.path) !== root) {
+      const parent = path.dirname(entry.path);
+      if (parent !== root && parent !== rootReal) {
         continue;
       }
+      // Re-base onto the unresolved root so a path handed back here is
+      // identical to the one createWorkspace returned. Callers compare
+      // these by string and persist them on session records; letting the
+      // /private form leak in would make the same workspace look like two.
+      const wsPath = path.join(root, path.basename(entry.path));
       const vcs: Record<string, string> = { kind: "git", repoRoot };
       const branch = shortBranchName(entry.branch);
       if (branch !== undefined) {
@@ -542,9 +561,9 @@ export class GitProvider implements IsolationProvider {
       // direction.
       const heldByUs = entry.lockedReason?.startsWith(HYDRA_LOCK_PREFIX) === true;
       out.push({
-        path: entry.path,
+        path: wsPath,
         sourceCwd: source,
-        label: path.basename(entry.path),
+        label: path.basename(wsPath),
         ...(heldByUs ? { heldByUs: true } : {}),
         provider: this.kind,
         ...(branch !== undefined ? { line: branch } : {}),

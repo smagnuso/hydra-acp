@@ -10,7 +10,6 @@ import { setControlWriter } from "./ansi.js";
 import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
   Screen,
-  buildIterm2ImageEscape,
   emergencyTerminalReset,
   truncate,
   wrap,
@@ -1213,28 +1212,6 @@ describe("Screen sticky-bottom block", () => {
     const bodies = getLines(screen).map((l) => l.body);
     expect(bodies[bodies.length - 1]).toBe("plan");
     expect(bodies.indexOf("hi")).toBeLessThan(bodies.indexOf("plan"));
-  });
-});
-
-describe("buildIterm2ImageEscape", () => {
-  it("emits OSC 1337 with inline=1, height, preserveAspectRatio, and BEL terminator", () => {
-    const out = buildIterm2ImageEscape("AAAA", 5, false);
-    expect(out).toBe(
-      "\x1b]1337;File=inline=1;height=5;preserveAspectRatio=1:AAAA\x07",
-    );
-  });
-
-  it("wraps in tmux DCS passthrough when insideTmux=true", () => {
-    const out = buildIterm2ImageEscape("AAAA", 1, true);
-    expect(out.startsWith("\x1bPtmux;")).toBe(true);
-    expect(out.endsWith("\x1b\\")).toBe(true);
-    // Every ESC inside the inner payload must be doubled. The inner
-    // payload has two ESCs (OSC start and BEL — actually BEL is not
-    // ESC; the OSC is just one ESC). So inside the wrap we expect
-    // ESC ESC for the doubled OSC-start.
-    const inner = out.slice("\x1bPtmux;".length, -"\x1b\\".length);
-    // Inner should contain \x1b\x1b (the doubled OSC start).
-    expect(inner.startsWith("\x1b\x1b]1337;")).toBe(true);
   });
 });
 
