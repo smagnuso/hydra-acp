@@ -75,6 +75,18 @@ export interface SynopsisCoordinatorOptions {
     summarizedThroughEntry: number,
     targetAgentId?: string,
   ) => Promise<void>;
+  // Called when a compaction job finished without producing any artifact
+  // AND the job was a /hydra agent switch (targetAgentId set). The switch
+  // is the user's escape hatch from a broken agent or an overloaded
+  // model, so it must not be gated on the LLM call that just failed: the
+  // dispatcher swaps anyway, seeding the target from the verbatim tail
+  // with recall armed. Plain compaction jobs get no such callback — a
+  // compaction with no synopsis has no purpose.
+  onSynthesisUnavailable?: (
+    sessionId: string,
+    targetAgentId: string,
+    reason: string,
+  ) => Promise<void>;
   // Max iterations for the compaction catch-up loop. Default 3.
   compactionMaxIterations?: number;
   // Called on each compaction state transition so the caller can persist
@@ -461,6 +473,9 @@ export class SynopsisCoordinator {
               phase: "failed",
               error: errorMsg,
             });
+            if (targetAgentId) {
+              await this.opts.onSynthesisUnavailable?.(sessionId, targetAgentId, errorMsg);
+            }
           } else if (iter >= maxIterations) {
             this.opts.logger?.info(
               `synopsis: compaction converged sessionId=${sessionId} watermark=${latestThrough} iterations=${iter}`,
@@ -485,6 +500,14 @@ export class SynopsisCoordinator {
             phase: "failed",
             error: message,
           }, { targetAgentId });
+          if (targetAgentId) {
+            try {
+              await this.opts.onSynthesisUnavailable?.(sessionId, targetAgentId, message);
+            } catch {
+              // Already in the failure path; a failed fallback swap is
+              // logged by the dispatcher and must not mask `message`.
+            }
+          }
         }
       } else {
         const result = await generateSynopsis({

@@ -125,6 +125,12 @@ const QUEUE_REPLAY_TTL_MS = 15 * 60 * 1000;
 // re-verifies via isQuiescedForSwap, and either swaps or — if history
 // grew during the wait — reschedules the synopsis run.
 
+// Verbatim closed turns to carry into a cross-agent swap that has no
+// synopsis (synthesis failed or was unavailable). Larger than the
+// synopsis-backed floor of 5 because nothing else describes the earlier
+// conversation; bounded because the rest is reachable via recall.
+const SYNOPSISLESS_SWAP_TAIL_FLOOR = 12;
+
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const generateRawSessionId = customAlphabet(HYDRA_ID_ALPHABET, 16);
@@ -537,6 +543,38 @@ export class SessionManager {
       onSynthesisArtifact: async (sessionId, artifact, summarizedThroughEntry, targetAgentId) => {
         await this.dispatchSynthesisSwap(sessionId, artifact, summarizedThroughEntry, targetAgentId);
       },
+      onSynthesisUnavailable: async (sessionId, targetAgentId, reason) => {
+        // Synthesis produced nothing, but the switch still has to land.
+        //
+        // "Produced nothing" is not the same as "there is nothing": this
+        // also fires for `no new history to compact since last summary`,
+        // where a perfectly good synopsis already sits on the record and
+        // covers everything. Discarding it would downgrade a healthy
+        // switch to a bare tail for no reason, so prefer the persisted
+        // artifact and fall back to the tail only when there truly is
+        // none.
+        const record = await this.store.read(sessionId).catch(() => undefined);
+        if (record?.synopsis && record.summarizedThroughEntry !== undefined) {
+          this.logger?.info(
+            `agent switch: synthesis produced no new artifact for sessionId=${sessionId} (${reason}); swapping to ${targetAgentId} on the persisted synopsis`,
+          );
+          await this.dispatchSynthesisSwap(
+            sessionId,
+            record.synopsis,
+            record.summarizedThroughEntry,
+            targetAgentId,
+          );
+          return;
+        }
+        // Watermark = current history length, exactly as fork does: it
+        // arms recall over everything the verbatim tail leaves out
+        // without paying for a synopsis first.
+        const historyLen = (await this.histories.load(sessionId).catch(() => [])).length;
+        this.logger?.warn(
+          `agent switch: synthesis unavailable for sessionId=${sessionId} (${reason}); swapping to ${targetAgentId} on verbatim tail`,
+        );
+        await this.dispatchSynthesisSwap(sessionId, undefined, historyLen, targetAgentId);
+      },
     });
     void this.refreshAgentCatalog();
   }
@@ -551,11 +589,17 @@ export class SessionManager {
   // fresh artifact triggers a new dispatchSynthesisSwap call).
   private async dispatchSynthesisSwap(
     sessionId: string,
-    artifact: SessionSynopsis,
+    artifact: SessionSynopsis | undefined,
     summarizedThroughEntry: number,
     targetAgentId?: string,
   ): Promise<void> {
     const live = this.get(sessionId);
+    if (artifact === undefined && targetAgentId === undefined) {
+      // A synopsis-less rotation in place is a no-op by definition: the
+      // whole point of /compact is the synopsis. Only the agent switch
+      // has a reason to proceed without one.
+      return;
+    }
     if (!live) {
       // Cold — persist the artifact for the next resume. No swap target.
       // targetAgentId is preserved on compactionState (written by the
@@ -564,6 +608,11 @@ export class SessionManager {
       this.logger?.info(
         `compaction: persisted artifact for cold session sessionId=${sessionId}`,
       );
+      if (artifact === undefined) {
+        // Nothing to persist, and no live agent to swap. The
+        // pendingAgentSwap breadcrumb stays so resume re-attempts.
+        return;
+      }
       await this.mutateRecord(sessionId, {
         synopsis: artifact,
         summarizedThroughEntry,
@@ -627,11 +676,37 @@ export class SessionManager {
             record.summarizedThroughEntry,
             record.pendingAgentSwap,
           );
+        } else if (record?.pendingAgentSwap) {
+          // Synopsis-less agent switch (synthesis failed) — re-park it
+          // too, or the escape hatch is lost to a transient busy edge.
+          void this.dispatchSynthesisSwap(
+            sessionId,
+            undefined,
+            (await this.histories.load(sessionId).catch(() => [])).length,
+            record.pendingAgentSwap,
+          );
         }
         return;
       }
       const record = await this.store.read(sessionId).catch(() => undefined);
       if (!record?.synopsis || record.summarizedThroughEntry === undefined) {
+        if (record?.pendingAgentSwap) {
+          // No artifact, but an agent switch is pending: swap anyway on
+          // the verbatim tail. Stamp the watermark to the current history
+          // length so recall is armed for everything the tail omits.
+          const historyLen = (await this.histories.load(sessionId).catch(() => [])).length;
+          this.logger?.info(
+            `compaction: no artifact for sessionId=${sessionId}, swapping to ${record.pendingAgentSwap} on verbatim tail`,
+          );
+          await this.performSynthesisSwap(
+            live,
+            undefined,
+            tailK,
+            historyLen,
+            record.pendingAgentSwap,
+          );
+          return;
+        }
         this.logger?.warn(
           `compaction: persisted artifact missing for sessionId=${sessionId}, abandoning swap`,
         );
@@ -672,9 +747,21 @@ export class SessionManager {
     }
   }
 
+  // The session's persisted synopsis, shaped for spreading into a
+  // swapIntoWorkspace call. Absent when the session has never been
+  // compacted, which is the common case for a workspace move made early
+  // in a session's life. Read-only: a workspace move never generates a
+  // synopsis, it only avoids throwing away one that already exists.
+  private async recordSynopsisFor(
+    sessionId: string,
+  ): Promise<{ synopsis?: SessionSynopsis }> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    return record?.synopsis ? { synopsis: record.synopsis } : {};
+  }
+
   private async performSynthesisSwap(
     live: Session,
-    artifact: SessionSynopsis,
+    artifact: SessionSynopsis | undefined,
     tailK: number,
     summarizedThroughEntry: number,
     targetAgentId?: string,
@@ -683,9 +770,19 @@ export class SessionManager {
       // Per-intent floor: /hydra agent (cross-agent) wants a few
       // verbatim turns for continuity; /compact wants pure synopsis
       // (lean handoff, the explicit point of compaction).
-      const tailFloor = targetAgentId ? Math.min(5, tailK) : 0;
+      //
+      // With no artifact the tail is the ONLY context the new agent gets,
+      // so the floor grows: nothing condenses the pre-watermark history
+      // and 5 turns is not enough to reorient. Still capped, because
+      // recall is the safety valve and blowing the target's context on
+      // its first prompt just relocates the failure.
+      const tailFloor = targetAgentId
+        ? artifact === undefined
+          ? Math.min(SYNOPSISLESS_SWAP_TAIL_FLOOR, tailK)
+          : Math.min(5, tailK)
+        : 0;
       await live.swapUpstream({
-        artifact,
+        ...(artifact !== undefined ? { artifact } : {}),
         tailK,
         tailFloor,
         summarizedThroughEntry,
@@ -3352,15 +3449,14 @@ export class SessionManager {
       cwd: ws.sourceCwd,
       workspace: undefined,
       historyLength: history.length,
-      artifact: {
-        summary:
-          `Returned to the source tree at ${ws.sourceCwd}` +
-          (opts.exit === "landed"
-            ? " after merging the workspace."
-            : opts.exit === "discarded"
-              ? " after discarding the workspace and its work."
-              : " without merging."),
-      } as SessionSynopsis,
+      note:
+        `Returned to the source tree at ${ws.sourceCwd}` +
+        (opts.exit === "landed"
+          ? " after merging the workspace."
+          : opts.exit === "discarded"
+            ? " after discarding the workspace and its work."
+            : " without merging."),
+      ...(await this.recordSynopsisFor(session.sessionId)),
       // `removed` is the difference between a stale path that fails
       // loudly and one that silently absorbs work. `stop` and `discard`
       // delete the workspace; `detach` keeps it, which is the dangerous
@@ -3608,9 +3704,8 @@ export class SessionManager {
           ...(ws.vcs !== undefined ? { vcs: { ...ws.vcs } } : {}),
         },
         historyLength: history.length,
-        artifact: {
-          summary: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}, shared with another session.`,
-        } as SessionSynopsis,
+        note: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}, shared with another session.`,
+        ...(await this.recordSynopsisFor(session.sessionId)),
       });
       await this.mutateRecord(session.sessionId, {
         cwd: session.cwd,
@@ -3888,9 +3983,8 @@ export class SessionManager {
           ...(carried === undefined ? { clean: true } : {}),
         },
         historyLength: history.length,
-        artifact: {
-          summary: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}.`,
-        } as SessionSynopsis,
+        note: `Continuing in an isolated workspace at ${ws.path}, derived from ${sourceCwd}.`,
+        ...(await this.recordSynopsisFor(session.sessionId)),
       });
     } catch (err) {
       const note = await this.unwindStartWorkspace({

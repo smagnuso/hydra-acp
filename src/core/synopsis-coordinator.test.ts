@@ -477,6 +477,55 @@ describe("SynopsisCoordinator", () => {
     expect(compactionArtifacts[0]!.through).toBe(3);
   });
 
+  it("onSynthesisUnavailable fires for an agent switch whose synthesis produced nothing", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    const unavailable: Array<{ sessionId: string; targetAgentId: string; reason: string }> = [];
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "other-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onSynthesisUnavailable: async (sessionId, targetAgentId, reason) => {
+        unavailable.push({ sessionId, targetAgentId, reason });
+      },
+    });
+    mockCompaction.mockResolvedValue(undefined);
+    coord.scheduleCompaction(record.sessionId, { targetAgentId: "other-agent" });
+    await coord.flush(5_000);
+
+    expect(unavailable).toHaveLength(1);
+    expect(unavailable[0]!.sessionId).toBe(record.sessionId);
+    expect(unavailable[0]!.targetAgentId).toBe("other-agent");
+    expect(unavailable[0]!.reason).toBeTruthy();
+  });
+
+  it("onSynthesisUnavailable does not fire for a plain compaction failure", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    let called = false;
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onSynthesisUnavailable: async () => {
+        called = true;
+      },
+    });
+    mockCompaction.mockResolvedValue(undefined);
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(called).toBe(false);
+  });
+
   it("onSynthesisArtifact is not called for title jobs", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);

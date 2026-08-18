@@ -2757,6 +2757,51 @@ describe("Session", () => {
       expect(banner).toBeDefined();
     });
 
+    it("setAgent schedules the switch while a turn is wedged in flight", async () => {
+      // The whole point of the switch is escaping a broken agent, so it
+      // must not serialize behind the turn that is stuck on it.
+      const scheduleCompaction = vi.fn();
+      const mock = makeMockAgent({ agentId: "old", cwd: "/w" });
+      let releaseStuckTurn: (() => void) | undefined;
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+        async (method: string) => {
+          if (method !== "session/prompt") {
+            return undefined;
+          }
+          await new Promise<void>((resolve) => {
+            releaseStuckTurn = resolve;
+          });
+          return { stopReason: "end_turn" };
+        },
+      );
+      const session = new Session({
+        sessionId: "hydra_session_SWQ",
+        cwd: "/w",
+        agentId: "old",
+        agent: mock.agent,
+        upstreamSessionId: "u_old",
+        historyStore: new HistoryStore(),
+        scheduleCompaction,
+      });
+      const { client: alice } = makeClient();
+      await session.attach(alice, "full");
+
+      const stuck = session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "hello" }],
+      });
+      while (releaseStuckTurn === undefined) {
+        await new Promise((r) => setImmediate(r));
+      }
+
+      // Would hang forever if this went through the prompt queue.
+      const result = await session.setAgent("new");
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+      expect(scheduleCompaction).toHaveBeenCalledWith({ targetAgentId: "new" });
+
+      releaseStuckTurn?.();
+      await stuck;
+    });
+
     it("/hydra agent with no agent id rejects", async () => {
       const { session } = makeSession("hydra_session_S0", "u_S0");
       const { client: alice } = makeClient();

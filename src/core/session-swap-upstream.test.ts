@@ -308,6 +308,66 @@ describe("Session.swapUpstream", () => {
     expect((session as unknown as Record<string, unknown>).parentSessionId).toBeUndefined();
   });
 
+  it("swapIntoWorkspace puts the move note in the seed and keeps the session's synopsis", async () => {
+    // Regression: the note used to be passed AS the artifact, cast to
+    // SessionSynopsis with a `summary` field that type doesn't have. The
+    // renderer emits no `summary`, so the note vanished and the seed
+    // claimed a compaction while carrying no synopsis at all.
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_swap_ws_note",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: store,
+      spawnReplacementAgent,
+    });
+
+    const synopsis = makeSynopsis();
+    await session.swapIntoWorkspace({
+      cwd: "/ws/feature",
+      workspace: undefined,
+      historyLength: 7,
+      note: "Returned to the source tree at /w after merging the workspace.",
+      synopsis,
+    });
+
+    const { renderCompactionSeed } = await import("./compaction-seed.js");
+    const args = ((renderCompactionSeed as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ??
+      {}) as { note?: string; framing?: string; synopsis?: unknown };
+    expect(args.note).toContain("Returned to the source tree at /w");
+    expect(args.synopsis).toBe(synopsis);
+    // Nothing was summarized away, so the seed must not say otherwise.
+    expect(args.framing).toBe("swap");
+  });
+
+  it("swaps with no artifact, rendering a synopsis-less seed", async () => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_swap_no_artifact",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: store,
+      spawnReplacementAgent,
+    });
+
+    await session.swapUpstream({ tailK: 2, tailFloor: 2, newAgentId: "a2" });
+
+    expect(spawnReplacementAgent).toHaveBeenCalledTimes(1);
+    const { renderCompactionSeed } = await import("./compaction-seed.js");
+    const args = ((renderCompactionSeed as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ??
+      {}) as { synopsis?: unknown; tailFloor?: number };
+    expect(args.synopsis).toBeUndefined();
+    expect(args.tailFloor).toBe(2);
+  });
+
   it("sends seed text via session/prompt on the fresh agent", async () => {
     const newMock = makeMockAgent({ agentId: "a1", cwd: "/w" });
 

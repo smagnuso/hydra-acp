@@ -47,6 +47,21 @@ export interface RenderCompactionSeedOptions {
   // tokens by giving the new agent recent ground truth. Defaults to 0
   // (compaction: pure synopsis, no continuity tail).
   tailFloor?: number;
+  // Why the agent is being replaced, in the caller's own words, when the
+  // cause is something other than compaction — currently a workspace
+  // move ("you are now running in <dir>"). Rendered as its own section
+  // rather than smuggled into the synopsis, because it is a fact about
+  // the environment, not a summary of the conversation, and the two must
+  // not displace each other: passing it AS the artifact is what used to
+  // drop it on the floor (no `summary` field exists on SessionSynopsis,
+  // so the renderer never emitted it).
+  note?: string;
+  // How to frame the seed in its closing instruction. Defaults to
+  // "compaction" when a synopsis is present and "fork" when it isn't,
+  // which is what every pre-existing caller meant. "swap" is for a
+  // replacement that summarized nothing away (workspace move): the
+  // history is intact, only the process changed.
+  framing?: "compaction" | "fork" | "swap";
   // Whether the recall MCP tools are actually reachable from the agent
   // this seed is being sent to. Recall is armed by a non-zero
   // summarizedThroughEntry on the RECORD, so a seed that promises recall
@@ -127,6 +142,10 @@ export function renderCompactionSeed(
     lines.push(`[Title] ${opts.title ?? UNTITLED}`);
   }
 
+  if (opts.note !== undefined && opts.note.trim().length > 0) {
+    lines.push(`[Situation] ${opts.note.trim()}`);
+  }
+
   // --- recent turns verbatim ---
   const { closedText, openText, keptCount } = renderTail(
     opts.tail,
@@ -148,11 +167,18 @@ export function renderCompactionSeed(
   // closing note
   const recallArmed = opts.recallArmed ?? true;
   lines.push("");
-  if (syn !== undefined && recallArmed) {
+  const framing = opts.framing ?? (syn !== undefined ? "compaction" : "fork");
+  if (framing === "swap") {
+    lines.push(
+      recallArmed
+        ? "(This session's agent process was replaced; nothing was summarized away. The turns above are the most recent; earlier history is available on demand via the hydra-recall tools. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)"
+        : "(This session's agent process was replaced; nothing was summarized away. The turns above are the most recent. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)",
+    );
+  } else if (framing === "compaction" && recallArmed) {
     lines.push(
       "(Hydra has compacted earlier conversation. Do NOT call any tools yet. Do NOT read any files, run any commands, or invoke hydra-recall. Reply with the single word 'OK' and wait for the next user message — at that point you can use the hydra-recall tools to look up specifics on demand if needed.)",
     );
-  } else if (syn !== undefined) {
+  } else if (framing === "compaction") {
     lines.push(
       "(Hydra has compacted earlier conversation; the turns above are what survives. Do NOT call any tools yet. Do NOT read any files or run any commands. Reply with the single word 'OK' and wait for the next user message.)",
     );

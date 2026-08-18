@@ -341,6 +341,50 @@ describe("renderCompactionSeed", () => {
     expect(seed).not.toContain("--- end current in-flight turn");
   });
 
+  it("renders the note as its own section, alongside a synopsis", () => {
+    // A workspace move is a fact about the environment, not a summary of
+    // the conversation, and it must not displace the synopsis.
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      note: "Continuing in an isolated workspace at /ws/feature, derived from /src.",
+      framing: "swap",
+      tail: [],
+      tailK: 0,
+    });
+
+    expect(seed).toContain(
+      "[Situation] Continuing in an isolated workspace at /ws/feature, derived from /src.",
+    );
+    expect(seed).toContain("[Goal] build a feature");
+  });
+
+  it("swap framing does not claim a compaction happened", () => {
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      note: "Returned to the source tree at /src without merging.",
+      framing: "swap",
+      tail: [],
+      tailK: 0,
+    });
+
+    expect(seed).not.toContain("Hydra has compacted earlier conversation");
+    expect(seed).toContain("agent process was replaced; nothing was summarized away");
+    expect(seed).toContain("hydra-recall");
+  });
+
+  it("swap framing omits the recall pointer when recall is not armed", () => {
+    const seed = renderCompactionSeed({
+      note: "Returned to the source tree at /src without merging.",
+      framing: "swap",
+      tail: [],
+      tailK: 0,
+      recallArmed: false,
+    });
+
+    expect(seed).toContain("agent process was replaced");
+    expect(seed).not.toContain("hydra-recall");
+  });
+
   it("returns closing note on every invocation", () => {
     const seed = renderCompactionSeed({
       synopsis: synopsis(),

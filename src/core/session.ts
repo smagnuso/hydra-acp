@@ -1731,7 +1731,25 @@ export class Session {
     cwd: string;
     workspace: PersistedWorkspace | undefined;
     historyLength: number;
-    artifact: SessionSynopsis;
+    /**
+     * What changed about the environment, in the caller's words. Rendered
+     * as its own `[Situation]` line.
+     *
+     * This used to be passed as `artifact`, cast to `SessionSynopsis`
+     * with a `summary` field that type does not have — so the renderer,
+     * which emits goal/outcome/decisions and no `summary`, dropped every
+     * word of it and emitted a bare compaction header instead. The
+     * replacement agent learned nothing about the move it had just been
+     * spawned for, and was told a compaction had happened.
+     */
+    note: string;
+    /**
+     * The session's real synopsis, when it has one. A workspace move
+     * summarizes nothing away, so this is not generated here — it is the
+     * existing record's, forwarded so a long compacted session doesn't
+     * lose its brief just because it changed directory.
+     */
+    synopsis?: SessionSynopsis;
     title?: string;
     /**
      * Set when leaving, so the session can tell the replacement agent
@@ -1742,7 +1760,11 @@ export class Session {
     left?: { path: string; removed: boolean };
   }): Promise<void> {
     await this.swapUpstream({
-      artifact: opts.artifact,
+      ...(opts.synopsis !== undefined ? { artifact: opts.synopsis } : {}),
+      note: opts.note,
+      // Nothing was summarized away; only the process moved. Compaction
+      // framing would tell the new agent to expect gaps that aren't there.
+      framing: "swap",
       ...(opts.title !== undefined ? { title: opts.title } : {}),
       tailK: 8,
       // A small verbatim floor: the user is mid-thought when they switch,
@@ -1775,7 +1797,12 @@ export class Session {
   }
 
   async swapUpstream(opts: {
-    artifact: SessionSynopsis;
+    // Optional, mirroring seedFromFork: when synthesis is unavailable
+    // (agent down, model overloaded, unparseable artifact) the swap must
+    // still happen, seeded from the verbatim tail alone with recall armed.
+    // A switch that depends on an LLM call cannot be an escape hatch from
+    // a broken LLM.
+    artifact?: SessionSynopsis;
     title?: string;
     tailK: number;
     // Minimum closed turns to include verbatim even when the synopsis
@@ -1807,6 +1834,10 @@ export class Session {
      * "compaction", which is what every pre-existing caller means.
      */
     reason?: "compaction" | "workspace-enter" | "workspace-leave";
+    // See doSwapUpstream: the caller's statement of why the agent
+    // changed, and the framing for the seed's closing instruction.
+    note?: string;
+    framing?: "compaction" | "fork" | "swap";
   }): Promise<void> {
     const quiesced = await this.isQuiescedForSwap();
     if (!quiesced) {
@@ -1826,7 +1857,7 @@ export class Session {
   }
 
   private async doSwapUpstream(opts: {
-    artifact: SessionSynopsis;
+    artifact?: SessionSynopsis;
     title?: string;
     tailK: number;
     tailFloor?: number;
@@ -1839,6 +1870,12 @@ export class Session {
      * "compaction", which is what every pre-existing caller means.
      */
     reason?: "compaction" | "workspace-enter" | "workspace-leave";
+    // Passed straight through to the seed renderer: the caller's own
+    // statement of why the agent changed, and how the seed should frame
+    // itself. A workspace move sets both — nothing was summarized away,
+    // so compaction framing would be a lie.
+    note?: string;
+    framing?: "compaction" | "fork" | "swap";
   }): Promise<void> {
     // Pre-swap observation hook. Fires before the agent is replaced so
     // subscribers (notifier, archiver, audit) can stamp the old upstream
@@ -1936,7 +1973,9 @@ export class Session {
     }
 
     const seedText = renderCompactionSeed({
-      synopsis: opts.artifact,
+      ...(opts.artifact !== undefined ? { synopsis: opts.artifact } : {}),
+      ...(opts.note !== undefined ? { note: opts.note } : {}),
+      ...(opts.framing !== undefined ? { framing: opts.framing } : {}),
       title: opts.title,
       tail: historyEntries,
       tailK: opts.tailK,
@@ -5914,7 +5953,9 @@ export class Session {
         case "title":
           return inline ? this.runTitleCommandInline(remainder) : this.runTitleCommand(remainder);
         case "agent":
-          return inline ? this.runAgentCommandInline(remainder) : this.runAgentCommand(remainder);
+          // Never queued in either path (see setAgent) — scheduling a
+          // switch must not serialize behind the turn it is escaping.
+          return this.runAgentCommandInline(remainder);
         case "config":
           return this.handleConfigCommand(`/config ${remainder}`);
         case "kill":
@@ -6540,12 +6581,17 @@ export class Session {
   // (session/set_config_option with configId "agent"), the protocol twin
   // of the `/hydra agent` text command. Both routes funnel through the
   // same scheduler so behavior is identical regardless of trigger.
+  // Deliberately NOT queued, for the same reason as runKillCommand: this
+  // is a control action, not conversation. It validates an id, sets the
+  // pendingAgentSwap breadcrumb, and returns — it never touches the
+  // upstream agent, so there is nothing for the queue to serialize
+  // against. Queuing it made the switch unreachable exactly when it is
+  // most needed: a wedged turn (provider 529, hung tool call) holds
+  // promptInFlight for the whole drain loop, so the escape hatch from a
+  // broken agent sat behind the broken agent. The swap itself still waits
+  // for a quiesce edge; force_cancel is what supplies that edge.
   setAgent(newAgentId: string): Promise<unknown> {
-    return this.runAgentCommand(newAgentId);
-  }
-
-  private runAgentCommand(newAgentId: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runAgentCommandInline(newAgentId));
+    return this.runAgentCommandInline(newAgentId);
   }
 
   private async runAgentCommandInline(arg: string): Promise<unknown> {
@@ -6580,8 +6626,11 @@ export class Session {
       return { stopReason: "end_turn" };
     }
     this.scheduleCompactionHook({ targetAgentId: newAgentId });
+    const busy = this.promptInFlight || this.unsolicitedTurn !== undefined;
     this.emitExtensionReply(
-      `Agent switch to ${newAgentId} scheduled. The session will rotate to ${newAgentId} once synthesis completes.`,
+      busy
+        ? `Agent switch to ${newAgentId} scheduled. A turn is still in flight — the rotation lands on the next idle edge; cancel the turn to make that happen now.`
+        : `Agent switch to ${newAgentId} scheduled. The session will rotate to ${newAgentId} once synthesis completes.`,
     );
     return { stopReason: "end_turn" };
   }
