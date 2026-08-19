@@ -2194,7 +2194,16 @@ export class Session {
       }
     }
 
-    await oldAgent.kill().catch(() => undefined);
+    // The killed process owned any background work it had armed. The
+    // replacement knows nothing about it and will never wake for it.
+    const abandonedTasks = await this.retireAgent(
+      oldAgent,
+      crossAgent
+        ? "agent switch"
+        : opts.reason === "workspace-enter" || opts.reason === "workspace-leave"
+          ? "workspace move"
+          : "compaction swap",
+    );
 
     // Post-swap observation hook. Fires after the new agent is fully
     // installed and the old one is dead.
@@ -2258,12 +2267,31 @@ export class Session {
     // It was also premature. This fires as soon as the new agent is up,
     // which is before startWorkspace has written the cwd/binding record
     // — so it claimed a move that nothing on disk yet justified.
-    const completedText =
-      opts.reason === "workspace-enter" || opts.reason === "workspace-leave"
-        ? undefined
-        : crossAgent
-          ? `\nSwitched to ${targetAgentId}.\n`
-          : "\nCompaction completed.\n";
+    // Background work does not survive the rotation, and the user has no
+    // other way to find that out: the "◐ running" indicator simply stops,
+    // which reads as "it finished". Naming the tasks is the difference
+    // between a monitor that reported and a monitor that was killed
+    // mid-watch. Listed rather than counted because the label is what
+    // makes it actionable ("re-arm the validation harness watch").
+    const abandonedNote =
+      abandonedTasks.length > 0
+        ? `\nStopped ${abandonedTasks.length} background task(s) with the previous agent: ` +
+          `${abandonedTasks.join(", ")}. Re-arm anything still needed.\n`
+        : "";
+    // The abandoned-task note is appended even on a workspace move, which
+    // otherwise says nothing here. It is not an announcement of the step
+    // (the thing that rule exists to suppress) but a side effect only this
+    // function can see: startWorkspace owns the outcome message and has no
+    // idea what was armed. Silence would be silence about killed work.
+    const isWorkspaceMove =
+      opts.reason === "workspace-enter" || opts.reason === "workspace-leave";
+    const completedBody = isWorkspaceMove
+      ? ""
+      : crossAgent
+        ? `\nSwitched to ${targetAgentId}.\n`
+        : "\nCompaction completed.\n";
+    const completedJoined = completedBody + abandonedNote;
+    const completedText = completedJoined === "" ? undefined : completedJoined;
     if (completedText !== undefined) {
       const completedParams = this.rewriteForClient({
         sessionId: this.upstreamSessionId,
@@ -2358,7 +2386,10 @@ export class Session {
     this.broadcastMergedCommands();
     this.broadcastConfigOptions();
 
-    await oldAgent.kill().catch(() => undefined);
+    // The killed process owned these, and the resumed upstream is a
+    // different process that never armed them. Rollback restores
+    // conversation state, not running work.
+    await this.retireAgent(oldAgent, "rollback");
 
     // Restore the pre-compaction summarizedThroughEntry watermark.
     this._summarizedThroughEntry = opts.previousSummarizedThroughEntry;
@@ -3589,6 +3620,49 @@ export class Session {
       ...(since !== undefined ? { since } : {}),
       tasks: this.armedBackgroundTasks,
     });
+  }
+
+  /**
+   * Kill a retired agent process and drop every arming it owned.
+   *
+   * The two are one operation, and this is the only way Session should
+   * end an agent it is replacing. Keeping the kill and the discard apart
+   * is what let three separate rotation paths each need to remember the
+   * second half, and a fourth (`/hydra fork`, a workspace join) would
+   * have had to remember it too.
+   *
+   * An arming is a claim that THIS agent process will wake itself up. Both
+   * discharge paths depend on that process still existing: a resumption
+   * comes from it, and a TaskStop is a tool call made by it. Replacing it
+   * severs both, so an arming that survives a rotation can never leave the
+   * map again. The observable result is a session stuck reporting
+   * "◐ running" with a timer climbing from an `armedSince` in the previous
+   * agent's life, forever, for work nothing is doing.
+   *
+   * Distinct from the unfixable case documented on
+   * noteBackgroundTaskStopped (an agent pkill'ing its own watch, which we
+   * cannot see): here hydra is the one doing the killing, so the arming is
+   * knowably void and clearing it needs no guesswork.
+   *
+   * Returns the labels dropped so callers can tell the user what stopped
+   * rather than letting it vanish.
+   */
+  private async retireAgent(agent: AgentInstance, reason: string): Promise<string[]> {
+    await agent.kill().catch(() => undefined);
+    return this.discardArmedTasks(reason);
+  }
+
+  private discardArmedTasks(reason: string): string[] {
+    if (this.armedTasks.size === 0) {
+      return [];
+    }
+    const labels = [...this.armedTasks.values()].map((t) => t.label);
+    this.armedTasks.clear();
+    this.logger?.info(
+      `session ${this.sessionId} discarded ${labels.length} armed task(s) on ${reason}: ${labels.join(", ")}`,
+    );
+    this.onArmedTasksChanged();
+    return labels;
   }
 
   // The agent explicitly cancelled a background task, so stop counting it
@@ -7223,7 +7297,9 @@ export class Session {
     this.setAgentAdvertisedModes(fresh.initialModes ?? []);
     // Killing the old agent rejects any in-flight session/prompt bound to
     // its (already-captured) connection — that's how a stuck turn ends.
-    await oldAgent.kill().catch(() => undefined);
+    // Restart and force-cancel both land here. The transcript replay
+    // below restores what was SAID, never what was running.
+    await this.retireAgent(oldAgent, "agent restart");
 
     if (transcript) {
       await this.runInternalPrompt(transcript).catch(() => undefined);

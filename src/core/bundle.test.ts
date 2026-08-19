@@ -180,3 +180,37 @@ describe("Bundle", () => {
     expect(() => Bundle.parse(encoded)).not.toThrow();
   });
 });
+
+// `/hydra fork` builds the child's record by spreading the SOURCE record
+// and passing it through encodeBundle. The spread carries the parent's
+// compaction lineage; the bundle's field allowlist is the only thing
+// stopping the child from inheriting it. If that allowlist ever grows
+// these fields, a fresh fork starts life claiming its parent's
+// compactions in `/hydra compact status`, and its rollback breadcrumb
+// points at an upstream belonging to another session.
+describe("Bundle: compaction lineage is not inherited", () => {
+  it("drops upstreamGenerations, rollbackBreadcrumb and compactionState", () => {
+    const encoded = encodeBundle({
+      record: {
+        ...sampleRecord(),
+        upstreamGenerations: [
+          { upstreamSessionId: "u_parent_1", agentId: "claude-acp", reason: "compaction" as const },
+          { upstreamSessionId: "u_parent_2", agentId: "claude-acp", reason: "compaction" as const },
+        ],
+        rollbackBreadcrumb: {
+          previousUpstreamSessionId: "u_parent_1",
+          runId: "run_parent",
+        },
+        compactionState: { status: "running" as const, requestedAt: 1, runId: "run_parent" },
+      },
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "test-host",
+    });
+
+    const session = encoded.session as Record<string, unknown>;
+    expect(session.upstreamGenerations).toBeUndefined();
+    expect(session.rollbackBreadcrumb).toBeUndefined();
+    expect(session.compactionState).toBeUndefined();
+  });
+});

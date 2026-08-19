@@ -1271,3 +1271,186 @@ describe("context figure after a compaction swap", () => {
     expect(session.currentUsage?.used).toBe(0);
   });
 });
+
+// A swap kills the process that owned any armed background work. Both
+// discharge paths (a resumption, or a TaskStop tool call) require that
+// process, so an arming surviving the swap can never leave the map: the
+// session reports "◐ running" with a climbing timer forever, for work
+// nothing is doing.
+describe("armed background tasks across a rotation", () => {
+  const armMonitor = async (
+    mock: ReturnType<typeof makeMockAgent>,
+    toolCallId = "toolu_mon",
+  ): Promise<void> => {
+    await triggerUpdate(mock, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      title: "Monitor",
+      rawInput: { description: "validation harness completion" },
+      _meta: { claudeCode: { toolResponse: { taskId: `bg_${toolCallId}` } } },
+    });
+  };
+
+  const makeArmedSession = async (
+    sessionId: string,
+  ): Promise<{ session: Session; oldMock: ReturnType<typeof makeMockAgent> }> => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    const session = new Session({
+      sessionId,
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+    });
+    await armMonitor(oldMock);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+    return { session, oldMock };
+  };
+
+  it("drops armings when compaction replaces the agent", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_compact");
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+    // The clock behind the TUI's "running Xs" readout has to go with it.
+    expect(session.armedSince).toBeUndefined();
+  });
+
+  it("drops armings on a cross-agent switch", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_agent");
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2, newAgentId: "a2" });
+
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  it("drops armings on workspace start", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_ws_start");
+
+    await session.swapIntoWorkspace({
+      cwd: "/ws/feature",
+      workspace: {
+        path: "/ws/feature",
+        label: "feature",
+        sourceCwd: "/w",
+        provider: "git-worktree",
+      },
+      historyLength: 3,
+      note: "entering",
+      synopsis: makeSynopsis(),
+    });
+
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  // `stop` / `detach` / `discard` all funnel through leaveWorkspace, which
+  // is the same swapIntoWorkspace call with no workspace.
+  it("drops armings on workspace stop", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_ws_stop");
+
+    await session.swapIntoWorkspace({
+      cwd: "/w",
+      workspace: undefined,
+      historyLength: 3,
+      note: "returning to the source tree",
+      synopsis: makeSynopsis(),
+    });
+
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+    expect(session.armedSince).toBeUndefined();
+  });
+
+  // Every rotation kills through one choke point, so a path added later
+  // cannot forget the discard half. Asserted behaviourally: the agent is
+  // dead AND the map is empty, for each rotation kind.
+  it("kills the old agent and clears armings together, on every rotation", async () => {
+    const kinds: Array<[string, (s: Session) => Promise<unknown>]> = [
+      ["compaction", (s) => s.swapUpstream({ artifact: makeSynopsis(), tailK: 2 })],
+      ["agent-swap", (s) => s.swapUpstream({ artifact: makeSynopsis(), tailK: 2, newAgentId: "a2" })],
+      [
+        "workspace",
+        (s) =>
+          s.swapIntoWorkspace({
+            cwd: "/ws/x",
+            workspace: undefined,
+            historyLength: 2,
+            note: "n",
+            synopsis: makeSynopsis(),
+          }),
+      ],
+      ["restart", (s) => (s as unknown as { respawnAgent(): Promise<void> }).respawnAgent()],
+    ];
+    for (const [kind, run] of kinds) {
+      const { session, oldMock } = await makeArmedSession(`hydra_rotation_${kind}`);
+      await run(session);
+      expect(oldMock.agent.kill, kind).toHaveBeenCalled();
+      expect(session.armedBackgroundTasks, kind).toHaveLength(0);
+    }
+  });
+
+  it("tells attached clients the tasks stopped, by name", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_notify");
+    const { client, stream } = makeClient();
+    session.attach(client, "full");
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    const texts = stream.sent
+      .map((m) => m as { method?: string; params?: unknown })
+      .filter((m) => m.method === "session/update")
+      .map((m) => {
+        const u = (m.params as { update?: { content?: { text?: string } } }).update;
+        return u?.content?.text ?? "";
+      })
+      .join("");
+    expect(texts).toContain("Compaction completed.");
+    // The label, not just a count: it is the difference between "a monitor
+    // reported" and "a monitor was killed mid-watch".
+    expect(texts).toContain("validation harness completion");
+    expect(texts).toContain("Stopped 1 background task(s)");
+  });
+
+  it("says nothing about background tasks when none were armed", async () => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    const session = new Session({
+      sessionId: "hydra_swap_armed_none",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+    });
+    const { client, stream } = makeClient();
+    session.attach(client, "full");
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    const texts = stream.sent
+      .map((m) => m as { method?: string; params?: unknown })
+      .filter((m) => m.method === "session/update")
+      .map((m) => {
+        const u = (m.params as { update?: { content?: { text?: string } } }).update;
+        return u?.content?.text ?? "";
+      })
+      .join("");
+    expect(texts).toContain("Compaction completed.");
+    expect(texts).not.toContain("background task");
+  });
+
+  // /hydra restart and forceCancel both kill and respawn. The transcript
+  // replay restores what was SAID; nothing restores what was running.
+  it("drops armings when the agent is restarted in place", async () => {
+    const { session } = await makeArmedSession("hydra_swap_armed_restart");
+
+    await (session as unknown as { respawnAgent(): Promise<void> }).respawnAgent();
+
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+    expect(session.armedSince).toBeUndefined();
+  });
+});
