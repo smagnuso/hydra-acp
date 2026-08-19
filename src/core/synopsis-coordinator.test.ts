@@ -784,6 +784,97 @@ describe("SynopsisCoordinator", () => {
     expect(iterations[0]?.historyLen).toBe(sharedHistory.length);
   });
 
+  // The common success path (loop breaks because history stopped
+  // growing, with an artifact in hand and iterations left) used to emit
+  // nothing at all: no state, no broadcast, not even a log line. A
+  // compaction that worked was indistinguishable from one that never ran.
+  it("broadcasts phase:converged on the normal success exit", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const sharedHistory: unknown[] = [{}, {}, {}];
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "done" } });
+
+    const phases: string[] = [];
+    let converged: { iter?: number; summarizedThroughEntry?: number } | undefined;
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, sharedHistory]])),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      broadcastHydraCompaction: (_sid, payload) => {
+        phases.push(payload.phase);
+        if (payload.phase === "converged") {
+          converged = {
+            iter: payload.iter,
+            summarizedThroughEntry: payload.summarizedThroughEntry,
+          };
+        }
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(phases).toContain("converged");
+    expect(phases).not.toContain("failed");
+    // Terminal: nothing follows it.
+    expect(phases[phases.length - 1]).toBe("converged");
+    expect(converged?.iter).toBe(1);
+    expect(converged?.summarizedThroughEntry).toBe(sharedHistory.length);
+  });
+
+  it("still reports failure, not convergence, when no artifact was produced", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    mockCompaction.mockResolvedValue({ synopsis: undefined });
+
+    const phases: string[] = [];
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, [{}, {}, {}]]])),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      broadcastHydraCompaction: (_sid, payload) => phases.push(payload.phase),
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(phases).toContain("failed");
+    expect(phases).not.toContain("converged");
+  });
+
+  // One id for the whole run, so a second swap can be recognised as
+  // belonging to it rather than looking like a fresh compaction.
+  it("stamps one runId across the run's state writes and artifact dispatch", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "done" } });
+
+    const stateRunIds: Array<string | undefined> = [];
+    let artifactRunId: string | undefined;
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, [{}, {}, {}]]])),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionStateChange: async (_sid, state) => {
+        stateRunIds.push(state.runId);
+      },
+      onSynthesisArtifact: async (_sid, _artifact, _through, _target, runId) => {
+        artifactRunId = runId;
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(stateRunIds.length).toBeGreaterThan(0);
+    expect(stateRunIds.every((id) => id !== undefined)).toBe(true);
+    expect(new Set(stateRunIds).size).toBe(1);
+    expect(artifactRunId).toBe(stateRunIds[0]);
+  });
+
   it("compaction job uses compactionAgent when set, ignores synopsisAgent", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);

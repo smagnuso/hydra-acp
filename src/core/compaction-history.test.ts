@@ -152,7 +152,7 @@ describe("formatCompactionHistory", () => {
     const lines = formatCompactionHistory(h);
     expect(lines[0]).toBe("Compacted 1 time:");
     expect(lines.at(-1)).toBe(
-      "2 earlier rotations, cause not recorded — the count above is a lower bound.",
+      "2 earlier rotations, cause not recorded; the count above is a lower bound.",
     );
   });
 
@@ -198,5 +198,98 @@ describe("formatCompactionHistory", () => {
       5,
     );
     expect(formatCompactionHistory(h)[1]).toContain("unknown time");
+  });
+});
+
+// The incident that motivated runIds: one `/hydra compact` swapped twice
+// because a background turn grew history under iteration 1. Counting
+// swaps tells the user they compacted twice when they typed the command
+// once.
+describe("multi-swap runs", () => {
+  const twoSwapRun = [
+    gen({ upstreamSessionId: "u_pre" }),
+    gen({
+      upstreamSessionId: "u_mid",
+      reason: "compaction",
+      runId: "run1",
+      startedAt: "2026-08-19T22:06:56.172Z",
+      endedAt: "2026-08-19T22:08:13.736Z",
+      cost: 2,
+    }),
+    gen({
+      upstreamSessionId: "u_final",
+      reason: "compaction",
+      runId: "run1",
+      startedAt: "2026-08-19T22:08:13.736Z",
+      cost: 3,
+    }),
+  ];
+
+  it("counts two swaps of one run as one compaction", () => {
+    const h = readCompactionHistory(twoSwapRun, 11646);
+    expect(h.compactions).toHaveLength(2);
+    expect(h.runs).toHaveLength(1);
+    expect(formatCompactionHistory(h)[0]).toBe("Compacted 1 time:");
+  });
+
+  it("reports the run by its final upstream and first swap time", () => {
+    const h = readCompactionHistory(twoSwapRun, 11646);
+    const run = h.runs[0]!;
+    // The intermediate upstream lived 77 seconds and is already
+    // superseded, so pointing the user at it would be pointing at a
+    // dead end.
+    expect(run.upstreamSessionId).toBe("u_final");
+    expect(run.at).toBe("2026-08-19T22:06:56.172Z");
+    expect(run.swaps).toBe(2);
+    expect(run.cost).toBe(5);
+    expect(run.current).toBe(true);
+  });
+
+  it("shows the swap count so the extra rotation is not hidden", () => {
+    const lines = formatCompactionHistory(readCompactionHistory(twoSwapRun, 11646));
+    expect(lines[1]).toContain("(2 swaps)");
+    expect(lines[1]).toContain("u_final");
+  });
+
+  it("keeps distinct runs separate", () => {
+    const h = readCompactionHistory(
+      [
+        gen({ upstreamSessionId: "u0" }),
+        gen({ upstreamSessionId: "u1", reason: "compaction", runId: "runA", startedAt: "2026-08-19T10:00:00Z" }),
+        gen({ upstreamSessionId: "u2", reason: "compaction", runId: "runB", startedAt: "2026-08-19T11:00:00Z" }),
+      ],
+      500,
+    );
+    expect(h.runs).toHaveLength(2);
+    expect(formatCompactionHistory(h)[0]).toBe("Compacted 2 times:");
+  });
+
+  // Pre-runId entries have nothing to group on. Merging them would
+  // under-count, which hides exactly what the user is asking about.
+  it("treats reasonless-runId compactions as separate runs", () => {
+    const h = readCompactionHistory(
+      [
+        gen({ upstreamSessionId: "u0" }),
+        gen({ upstreamSessionId: "u1", reason: "compaction", startedAt: "2026-08-19T10:00:00Z" }),
+        gen({ upstreamSessionId: "u2", reason: "compaction", startedAt: "2026-08-19T11:00:00Z" }),
+      ],
+      500,
+    );
+    expect(h.runs).toHaveLength(2);
+    expect(h.runs.every((r) => r.swaps === 1)).toBe(true);
+  });
+
+  // Same id reappearing after an unrelated run must not fuse the two.
+  it("only merges consecutive swaps", () => {
+    const h = readCompactionHistory(
+      [
+        gen({ upstreamSessionId: "u0" }),
+        gen({ upstreamSessionId: "u1", reason: "compaction", runId: "runA", startedAt: "2026-08-19T10:00:00Z" }),
+        gen({ upstreamSessionId: "u2", reason: "compaction", runId: "runB", startedAt: "2026-08-19T11:00:00Z" }),
+        gen({ upstreamSessionId: "u3", reason: "compaction", runId: "runA", startedAt: "2026-08-19T12:00:00Z" }),
+      ],
+      500,
+    );
+    expect(h.runs).toHaveLength(3);
   });
 });

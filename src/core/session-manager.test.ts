@@ -4483,6 +4483,91 @@ describe("SessionManager: extension state", () => {
 // transcript that would otherwise reveal it gets pruned, so the chain
 // has to be persisted as it happens or the early generations of a
 // long-compacted session become permanently unattributable.
+// The multi-swap compaction defect, at the layer that actually decides:
+// two swaps of one run must leave the breadcrumb pinned at the
+// pre-compaction upstream, not at the intermediate one the first swap
+// created.
+describe("SessionManager: rollback breadcrumb pinning", () => {
+  const BC_CWD = process.cwd();
+  function makeManagerForBreadcrumb(): SessionManager {
+    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+      const mock = makeMockAgent({ agentId: "claude-code", cwd: BC_CWD });
+      const req = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      req.mockImplementation((method: string) => {
+        if (method === "initialize") return Promise.resolve({ protocolVersion: 1 });
+        if (method === "session/new") return Promise.resolve({ sessionId: `u_${Math.random()}` });
+        return Promise.resolve({});
+      });
+      return mock.agent;
+    });
+  }
+
+  // Reaches the private persist path the same way swapUpstream does.
+  const persist = (
+    manager: SessionManager,
+    sessionId: string,
+    crumb: { previousUpstreamSessionId: string; previousSummarizedThroughEntry?: number; runId?: string },
+  ): Promise<void> =>
+    (manager as unknown as {
+      persistRollbackBreadcrumb: (id: string, c: unknown) => Promise<void>;
+    }).persistRollbackBreadcrumb(sessionId, crumb);
+
+  const readCrumb = async (manager: SessionManager, sessionId: string) =>
+    (await manager.getRollbackBreadcrumb(sessionId));
+
+  it("keeps the first swap's pin when a later swap of the same run lands", async () => {
+    const manager = makeManagerForBreadcrumb();
+    const session = await manager.create({ cwd: BC_CWD, agentId: "claude-code" });
+
+    await persist(manager, session.sessionId, {
+      previousUpstreamSessionId: "u_pre_compaction",
+      previousSummarizedThroughEntry: 11_000,
+      runId: "run1",
+    });
+    // Second swap of the SAME run: its "previous" is the intermediate
+    // upstream the first swap produced.
+    await persist(manager, session.sessionId, {
+      previousUpstreamSessionId: "u_intermediate",
+      previousSummarizedThroughEntry: 11_641,
+      runId: "run1",
+    });
+
+    const crumb = await readCrumb(manager, session.sessionId);
+    expect(crumb?.previousUpstreamSessionId).toBe("u_pre_compaction");
+    // The watermark has to be pinned with it, or rollback restores the
+    // right upstream against the wrong recall gate.
+    expect(crumb?.previousSummarizedThroughEntry).toBe(11_000);
+  });
+
+  it("replaces the pin for a genuinely new run", async () => {
+    const manager = makeManagerForBreadcrumb();
+    const session = await manager.create({ cwd: BC_CWD, agentId: "claude-code" });
+
+    await persist(manager, session.sessionId, {
+      previousUpstreamSessionId: "u_first",
+      runId: "run1",
+    });
+    await persist(manager, session.sessionId, {
+      previousUpstreamSessionId: "u_second",
+      runId: "run2",
+    });
+
+    expect((await readCrumb(manager, session.sessionId))?.previousUpstreamSessionId).toBe("u_second");
+  });
+
+  // Pre-runId behavior: without an id there is nothing to match on, so
+  // last-write-wins is the only option. Must not start silently pinning.
+  it("falls back to last-write-wins when no runId is supplied", async () => {
+    const manager = makeManagerForBreadcrumb();
+    const session = await manager.create({ cwd: BC_CWD, agentId: "claude-code" });
+
+    await persist(manager, session.sessionId, { previousUpstreamSessionId: "u_first" });
+    await persist(manager, session.sessionId, { previousUpstreamSessionId: "u_second" });
+
+    expect((await readCrumb(manager, session.sessionId))?.previousUpstreamSessionId).toBe("u_second");
+  });
+});
+
 describe("appendUpstreamGeneration", () => {
   const base: SessionRecord = {
     version: 1 as const,

@@ -147,6 +147,13 @@ export type PersistedWorkspace = z.infer<typeof PersistedWorkspace>;
 export const RollbackBreadcrumb = z.object({
   previousUpstreamSessionId: z.string(),
   previousSummarizedThroughEntry: z.number().int().nonnegative().optional(),
+  // The compaction run this breadcrumb was pinned by. A run can swap more
+  // than once (history grew under an iteration), and each swap's
+  // "previous upstream" is the one the PREVIOUS swap just created, so
+  // letting the second swap overwrite the breadcrumb aims rollback at an
+  // already-compacted upstream while still calling itself a rollback.
+  // Matching runIds is the signal to leave the pin where it is.
+  runId: z.string().optional(),
 });
 export type RollbackBreadcrumb = z.infer<typeof RollbackBreadcrumb>;
 
@@ -190,6 +197,11 @@ export const UpstreamGeneration = z.object({
   // demonstrably was. Report a count over unknowns as a lower bound —
   // same discipline as `inferred` below.
   reason: UpstreamGenerationReason.optional(),
+  // Present on compaction rotations: which run produced this swap. Two
+  // entries sharing a runId are two swaps of ONE `/hydra compact`, and
+  // must be reported as one compaction: counting swaps tells a user who
+  // compacted once that they compacted twice.
+  runId: z.string().optional(),
   // Absent only on a back-filled entry seeded from a pre-existing record
   // on its first rotation after upgrade: that upstream's real start time
   // was never recorded, and guessing it (e.g. from the session's

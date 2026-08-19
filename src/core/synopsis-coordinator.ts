@@ -24,6 +24,7 @@
 //     pick its default model.
 
 import * as fs from "node:fs/promises";
+import { customAlphabet } from "nanoid";
 import { generateCompaction, generateSynopsis } from "./synopsis-agent.js";
 import type { AgentLogger } from "./agent-instance.js";
 import {
@@ -74,6 +75,10 @@ export interface SynopsisCoordinatorOptions {
     artifact: SessionSynopsis,
     summarizedThroughEntry: number,
     targetAgentId?: string,
+    // Identifies the compaction run, so the swap can tell whether it is
+    // the first of this run (pin the rollback breadcrumb) or a later one
+    // (leave the pin alone).
+    runId?: string,
   ) => Promise<void>;
   // Called when a compaction job finished without producing any artifact
   // AND the job was a /hydra agent switch (targetAgentId set). The switch
@@ -116,7 +121,23 @@ export type HydraCompactionPayload =
   | { sessionUpdate: "hydra_compaction"; phase: "iteration"; iter: number; historyLen: number }
   | { sessionUpdate: "hydra_compaction"; phase: "deferred"; attempts: number }
   | { sessionUpdate: "hydra_compaction"; phase: "swapped"; title?: string; summarizedThroughEntry: number }
+  // Terminal success. Distinct from "swapped": that one fires per swap
+  // from the Session, this fires once per RUN from the coordinator, and a
+  // run can swap more than once.
+  | {
+      sessionUpdate: "hydra_compaction";
+      phase: "converged";
+      iter: number;
+      summarizedThroughEntry: number;
+    }
   | { sessionUpdate: "hydra_compaction"; phase: "failed"; error: string };
+
+// Same alphabet as hydra session ids: alphanumeric only, so a runId
+// survives being embedded in log lines and json without escaping.
+const generateRunId = customAlphabet(
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+  12,
+);
 
 const DEFAULT_MAX_CONCURRENT = 2;
 type JobKind = "title" | "compaction";
@@ -349,9 +370,13 @@ export class SynopsisCoordinator {
         // `/hydra compact status` and the TUI's failed broadcast.
         let lastFailureReason: string | undefined;
         const requestedAt = Date.now();
+        // One id for the whole run, stamped on every state write and
+        // carried into each swap this run performs.
+        const runId = generateRunId();
         const ctx = { targetAgentId };
         const writeState = (state: CompactionState): Promise<void> =>
-          this.opts.onCompactionStateChange?.(sessionId, state, ctx) ?? Promise.resolve();
+          this.opts.onCompactionStateChange?.(sessionId, { runId, ...state }, ctx) ??
+          Promise.resolve();
         const wireBroadcast = (payload: HydraCompactionPayload): void => {
           this.opts.broadcastHydraCompaction?.(sessionId, payload, ctx);
         };
@@ -427,7 +452,13 @@ export class SynopsisCoordinator {
                   iter,
                   historyLen: historyAtStart.length,
                 });
-                await this.opts.onSynthesisArtifact?.(sessionId, merged, latestThrough, targetAgentId);
+                await this.opts.onSynthesisArtifact?.(
+                  sessionId,
+                  merged,
+                  latestThrough,
+                  targetAgentId,
+                  runId,
+                );
                 this.opts.logger?.info(
                   `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,
                 );
@@ -476,10 +507,32 @@ export class SynopsisCoordinator {
             if (targetAgentId) {
               await this.opts.onSynthesisUnavailable?.(sessionId, targetAgentId, errorMsg);
             }
-          } else if (iter >= maxIterations) {
+          } else {
+            // Every successful exit lands here, including the common one:
+            // the do/while broke because history stopped growing, with an
+            // artifact in hand and iter < maxIterations. That path used to
+            // fall through both branches and emit NOTHING: no state, no
+            // broadcast, not even a log line, so a compaction that worked
+            // was indistinguishable from one that never ran. The
+            // iter >= maxIterations case is the same success, just reached
+            // by exhausting the iteration budget instead.
             this.opts.logger?.info(
-              `synopsis: compaction converged sessionId=${sessionId} watermark=${latestThrough} iterations=${iter}`,
+              `synopsis: compaction converged sessionId=${sessionId} runId=${runId} ` +
+                `watermark=${latestThrough} iterations=${iter}` +
+                (iter >= maxIterations ? ` (hit maxIterations=${maxIterations})` : ""),
             );
+            // Deliberately no writeState here: the swap clears
+            // compactionState on success (session-manager
+            // performSynthesisSwap), and re-writing a terminal state
+            // afterwards would resurrect a field whose absence is what
+            // "no compaction in progress" means. The durable success
+            // record is the generation entry the swap appends.
+            wireBroadcast({
+              sessionUpdate: "hydra_compaction",
+              phase: "converged",
+              iter,
+              summarizedThroughEntry: latestThrough,
+            });
           }
         } catch (err) {
           // Thrown errors land here — record so the state isn't stranded.

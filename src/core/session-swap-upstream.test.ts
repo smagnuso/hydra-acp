@@ -1153,3 +1153,121 @@ describe("Session.swapUpstream", () => {
     });
   });
 });
+
+// Defect from a live incident: one `/hydra compact` that swapped twice
+// left the breadcrumb aimed at the upstream the FIRST swap created: an
+// already-compacted 80k seed, while still presenting itself as a
+// rollback to pre-compaction state. Session's job is to report the runId
+// on every swap; SessionManager.persistRollbackBreadcrumb does the
+// pinning with it.
+describe("rollback breadcrumb across a multi-swap run", () => {
+  const makeSession = (
+    sessionId: string,
+    onCompactionSwapHook: (c: { previousUpstreamSessionId: string; runId?: string }) => void,
+  ): Session => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    return new Session({
+      sessionId,
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u_pre",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+      onCompactionSwapHook,
+    });
+  };
+
+  it("carries the runId onto the breadcrumb", async () => {
+    const crumbs: Array<{ previousUpstreamSessionId: string; runId?: string }> = [];
+    const session = makeSession("hydra_swap_bc_runid", (c) => crumbs.push(c));
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2, runId: "run1" });
+
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0]!.previousUpstreamSessionId).toBe("u_pre");
+    expect(crumbs[0]!.runId).toBe("run1");
+  });
+
+  it("reports the same runId on a second swap, so the pin can be held", async () => {
+    const crumbs: Array<{ previousUpstreamSessionId: string; runId?: string }> = [];
+    const session = makeSession("hydra_swap_bc_two", (c) => crumbs.push(c));
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2, runId: "run1" });
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2, runId: "run1" });
+
+    expect(crumbs).toHaveLength(2);
+    // The second swap's "previous" IS the upstream the first swap just
+    // created. This is the value that must not overwrite the pin.
+    expect(crumbs[1]!.previousUpstreamSessionId).not.toBe("u_pre");
+    expect(crumbs[1]!.previousUpstreamSessionId.startsWith("fresh_")).toBe(true);
+    expect(crumbs[1]!.runId).toBe("run1");
+  });
+
+  it("omits runId when the swap is not part of a run", async () => {
+    const crumbs: Array<{ previousUpstreamSessionId: string; runId?: string }> = [];
+    const session = makeSession("hydra_swap_bc_norun", (c) => crumbs.push(c));
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    expect(crumbs[0]!.runId).toBeUndefined();
+  });
+});
+
+// The status bar read 0/1.0M straight after a compaction: the cost reset
+// writes used:0 before the seed runs, and the seeded agent's own report
+// was captured for a log line and then dropped on the floor.
+describe("context figure after a compaction swap", () => {
+  it("adopts the seeded agent's reported context instead of leaving the reset 0", async () => {
+    const { spawnReplacementAgent, oldMock, newMock } = makeSpawnMock({ agentId: "a1" });
+    // The fresh agent reports its post-seed context while the seed
+    // prompt is in flight, as claude-acp does.
+    (newMock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async (method: string) => {
+        if (method === "session/prompt") {
+          newMock.triggerNotification("session/update", {
+            sessionId: "agent-sess",
+            update: { sessionUpdate: "usage_update", used: 80_340, size: 1_000_000 },
+          });
+          return { stopReason: "end_turn" };
+        }
+        return {};
+      },
+    );
+
+    const session = new Session({
+      sessionId: "hydra_swap_seed_usage",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+      currentUsage: { used: 973_659, size: 1_000_000 },
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    expect(session.currentUsage?.used).toBe(80_340);
+    expect(session.currentUsage?.size).toBe(1_000_000);
+  });
+
+  it("leaves the reset 0 when the seeded agent reports nothing", async () => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    const session = new Session({
+      sessionId: "hydra_swap_seed_no_usage",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+      currentUsage: { used: 973_659, size: 1_000_000 },
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    // No invented figure: 0 is honest when the agent hasn't said.
+    expect(session.currentUsage?.used).toBe(0);
+  });
+});

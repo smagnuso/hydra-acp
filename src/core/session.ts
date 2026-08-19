@@ -1044,6 +1044,9 @@ export class Session {
       // swap, a workspace move and an agent switch are the same shape.
       // Undefined only from paths that genuinely can't say.
       reason?: UpstreamGenerationReason;
+      // Set for compaction rotations: which run this swap belongs to, so
+      // two swaps of one `/hydra compact` are countable as one.
+      runId?: string;
     }) => void
   > = [];
   // Set by accumulateAndResetCost, consumed by the next agentChange
@@ -1618,6 +1621,7 @@ export class Session {
       upstreamSessionId: string;
       retiredCost?: number;
       reason?: UpstreamGenerationReason;
+      runId?: string;
     }) => void,
   ): void {
     this.agentChangeHandlers.push(handler);
@@ -1877,6 +1881,9 @@ export class Session {
      * "compaction", which is what every pre-existing caller means.
      */
     reason?: "compaction" | "workspace-enter" | "workspace-leave";
+    // Identifies the compaction run this swap belongs to. A run can swap
+    // more than once; see doSwapUpstream's breadcrumb pinning.
+    runId?: string;
     // See doSwapUpstream: the caller's statement of why the agent
     // changed, and the framing for the seed's closing instruction.
     note?: string;
@@ -1913,6 +1920,7 @@ export class Session {
      * "compaction", which is what every pre-existing caller means.
      */
     reason?: "compaction" | "workspace-enter" | "workspace-leave";
+    runId?: string;
     // Passed straight through to the seed renderer: the caller's own
     // statement of why the agent changed, and how the seed should frame
     // itself. A workspace move sets both — nothing was summarized away,
@@ -2063,17 +2071,46 @@ export class Session {
       thinkingChars: 0,
       messageChars: 0,
     };
+    let seedUsed: number | undefined;
+    let seedSize: number | undefined;
     try {
       await fresh.agent.connection.request<unknown>("session/prompt", {
         sessionId: fresh.upstreamSessionId,
         prompt: [{ type: "text", text: seedText }],
       });
       const cap = this.internalPromptCapture;
+      seedUsed = cap.lastUsed;
+      seedSize = cap.lastSize;
       this.logger?.info(
         `swapUpstream: seed processed sessionId=${this.sessionId} seedChars=${seedText.length} toolCalls=${cap.toolCalls} thinkingChars=${cap.thinkingChars} messageChars=${cap.messageChars} used=${cap.lastUsed ?? "?"} size=${cap.lastSize ?? "?"} reply=${JSON.stringify(cap.chunks.join("").slice(0, 200))}`,
       );
     } finally {
       this.internalPromptCapture = undefined;
+    }
+
+    // Adopt the seeded agent's own context figure.
+    //
+    // accumulateAndResetCost ran before the seed and wrote used:0, which
+    // is right at that instant (the new agent has no context yet) but is
+    // a placeholder by the time the seed lands: the agent just told us it
+    // is holding ~80k tokens of synopsis. Leaving the 0 makes the status
+    // bar read "0/1.0M" immediately after a compaction, which looks like
+    // a broken counter rather than "compacted down to 80k", and it is
+    // the single number the user checks to decide whether compaction
+    // worked. The value was already captured for a log line; this just
+    // stops throwing it away.
+    if (seedUsed !== undefined) {
+      // Routed through the normal agent-usage merge (rather than writing
+      // _currentUsage directly) so a sparse figure preserves the fields
+      // it doesn't carry, exactly as a real notification would.
+      this.maybeApplyAgentUsage({
+        update: {
+          sessionUpdate: "usage_update",
+          used: seedUsed,
+          ...(seedSize !== undefined ? { size: seedSize } : {}),
+        },
+      });
+      this.broadcastCurrentUsage();
     }
 
     // Capture the pre-swap upstream id + summarizedThroughEntry so the
@@ -2127,7 +2164,7 @@ export class Session {
     // onCompactionSwapHook so meta.json's upstreamSessionId is updated
     // before the breadcrumb is written (the breadcrumb references the
     // previous id, not the current).
-    this.notifyAgentChange("swapUpstream", generationReason);
+    this.notifyAgentChange("swapUpstream", generationReason, opts.runId);
     // Persist the moved watermark. Not gated on crossAgent: a cross-agent
     // swap advances it too, and recall's gates read the record either way.
     if (opts.summarizedThroughEntry !== undefined && this.persistWatermarkHook) {
@@ -2150,6 +2187,7 @@ export class Session {
           ...(previousSummarizedThroughEntry !== undefined
             ? { previousSummarizedThroughEntry }
             : {}),
+          ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
         });
       } catch (err) {
         this.logger?.warn(`swapUpstream: onCompactionSwapHook failed: ${(err as Error).message}`);
@@ -5409,6 +5447,7 @@ export class Session {
   private notifyAgentChange(
     context: string,
     reason?: UpstreamGenerationReason,
+    runId?: string,
   ): void {
     const retiredCost = this.retiringGenerationCost;
     this.retiringGenerationCost = undefined;
@@ -5419,6 +5458,7 @@ export class Session {
           upstreamSessionId: this.upstreamSessionId,
           ...(retiredCost !== undefined ? { retiredCost } : {}),
           ...(reason !== undefined ? { reason } : {}),
+          ...(runId !== undefined ? { runId } : {}),
         });
       } catch (err) {
         this.logger?.warn(
@@ -5479,36 +5519,46 @@ export class Session {
     // Broadcast a usage_update so already-attached clients (the TUI's
     // status bar in particular) drop the OLD agent's used/size figures
     // immediately rather than wait for the new agent's first turn to
-    // emit a fresh usage_update. State-update kinds are not appended
-    // to history.jsonl by recordAndBroadcast, so this is a pure
-    // live-broadcast — no double-record, no replay churn.
+    // emit a fresh usage_update.
+    this.broadcastCurrentUsage();
+  }
+
+  // Push currentUsage to attached clients as a usage_update.
+  //
+  // State-update kinds are not appended to history.jsonl by
+  // recordAndBroadcast, so this is a pure live-broadcast: no
+  // double-record, no replay churn. Used whenever hydra changes the
+  // figures itself rather than relaying the agent (cost reset at
+  // rotation, and adopting the seed's context after a compaction swap).
+  private broadcastCurrentUsage(): void {
     const displayed = this.currentUsage;
-    if (displayed !== undefined) {
-      const update: Record<string, unknown> = { sessionUpdate: "usage_update" };
-      if (typeof displayed.used === "number") {
-        update.used = displayed.used;
-      }
-      if (typeof displayed.size === "number") {
-        update.size = displayed.size;
-      }
-      if (
-        typeof displayed.costAmount === "number" ||
-        typeof displayed.costCurrency === "string"
-      ) {
-        const cost: Record<string, unknown> = {};
-        if (typeof displayed.costAmount === "number") {
-          cost.amount = displayed.costAmount;
-        }
-        if (typeof displayed.costCurrency === "string") {
-          cost.currency = displayed.costCurrency;
-        }
-        update.cost = cost;
-      }
-      this.recordAndBroadcast("session/update", {
-        sessionId: this.upstreamSessionId,
-        update,
-      });
+    if (displayed === undefined) {
+      return;
     }
+    const update: Record<string, unknown> = { sessionUpdate: "usage_update" };
+    if (typeof displayed.used === "number") {
+      update.used = displayed.used;
+    }
+    if (typeof displayed.size === "number") {
+      update.size = displayed.size;
+    }
+    if (
+      typeof displayed.costAmount === "number" ||
+      typeof displayed.costCurrency === "string"
+    ) {
+      const cost: Record<string, unknown> = {};
+      if (typeof displayed.costAmount === "number") {
+        cost.amount = displayed.costAmount;
+      }
+      if (typeof displayed.costCurrency === "string") {
+        cost.currency = displayed.costCurrency;
+      }
+      update.cost = cost;
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update,
+    });
   }
 
   // Returns a modified envelope with cost.amount replaced by the running

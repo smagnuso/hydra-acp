@@ -2029,7 +2029,7 @@ it, and an agent that reports neither simply gets an unlabelled turn.
 
 ### session/update — compaction lifecycle
 
-Attached clients receive `session/update` notifications as compaction progresses. The `update.sessionUpdate` field is `"hydra_compaction"` for all five phases.
+Attached clients receive `session/update` notifications as compaction progresses. The `update.sessionUpdate` field is `"hydra_compaction"` for all six phases.
 
 **Envelope shape** (all phases):
 
@@ -2038,7 +2038,7 @@ Attached clients receive `session/update` notifications as compaction progresses
   "sessionId": "<upstream session id>",
   "update": {
     "sessionUpdate": "hydra_compaction",
-    "phase": "started" | "iteration" | "deferred" | "swapped" | "failed",
+    "phase": "started" | "iteration" | "deferred" | "swapped" | "converged" | "failed",
     // ... phase-specific fields below
   }
 }
@@ -2060,11 +2060,29 @@ Attached clients receive `session/update` notifications as compaction progresses
 //            replaces the old empty session_info_update signal
 { "sessionUpdate": "hydra_compaction", "phase": "swapped", "title": "My Session", "summarizedThroughEntry": 42 }
 
+// converged: emitted once per RUN when the catch-up loop finishes having
+//             produced an artifact, whether it stopped because history
+//             stopped growing or because it hit maxIterations
+{ "sessionUpdate": "hydra_compaction", "phase": "converged", "iter": 2, "summarizedThroughEntry": 11646 }
+
 // failed — emitted when retrySwap exhausts deferrals or encounters a fatal error
 { "sessionUpdate": "hydra_compaction", "phase": "failed", "error": "deferral cap reached — session never quiesced" }
 ```
 
-**Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed.
+**`converged` is per-run; `swapped` is per-swap.** One compaction run can swap
+more than once: if history grows while an iteration is in flight (a background
+turn is enough), the loop runs again and swaps again. Clients counting
+compactions must count `converged`, not `swapped`, or a single `/hydra compact`
+reads as two. The generation entries the run appends to
+`upstreamGenerations` share a `runId` for the same reason.
+
+`converged` normally arrives **after** the run's final `swapped`, because the
+swap is dispatched from inside the loop. When the swap is deferred (session not
+quiesced), `converged` can arrive *before* the eventual `swapped`; it reports
+that synthesis finished, not that the agent was replaced. A client clearing a
+"compacting…" indicator should key off `swapped`/`failed`, not `converged`.
+
+**Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed. `converged` is the exception in one direction only: it deliberately writes **no** terminal `compactionState`, because a successful swap clears that field and re-writing it would resurrect state whose absence is what "no compaction in progress" means. The durable record of a successful compaction is the `upstreamGenerations` entry, not `compactionState`.
 
 ### session/update — workspace lifecycle
 

@@ -38,6 +38,13 @@ export const CompactionState = z.object({
   // on the next compaction trigger; cleared when the live session resurrects.
   status: z.enum(["requested", "running", "swap_pending", "swap_deferred", "failed"]),
   requestedAt: z.number(),
+  // Identifies one compaction RUN, which is not the same as one swap: a
+  // run whose history grows under an iteration swaps again, and the user
+  // who typed `/hydra compact` once still means one compaction. Carried
+  // onto the rollback breadcrumb and each generation entry so both can
+  // tell "second swap of this run" from "a later, separate compaction".
+  // Optional for records written before runs were identified.
+  runId: z.string().optional(),
   iter: z.number().int().nonnegative().optional(),
   attempts: z.number().int().nonnegative().optional(),
   lastError: z.string().optional(),

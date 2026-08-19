@@ -541,8 +541,20 @@ export class SessionManager {
       broadcastHydraCompaction: (sessionId, payload, ctx) => {
         this.emitSwapPhase(sessionId, ctx.targetAgentId, payload);
       },
-      onSynthesisArtifact: async (sessionId, artifact, summarizedThroughEntry, targetAgentId) => {
-        await this.dispatchSynthesisSwap(sessionId, artifact, summarizedThroughEntry, targetAgentId);
+      onSynthesisArtifact: async (
+        sessionId,
+        artifact,
+        summarizedThroughEntry,
+        targetAgentId,
+        runId,
+      ) => {
+        await this.dispatchSynthesisSwap(
+          sessionId,
+          artifact,
+          summarizedThroughEntry,
+          targetAgentId,
+          runId,
+        );
       },
       onSynthesisUnavailable: async (sessionId, targetAgentId, reason) => {
         // Synthesis produced nothing, but the switch still has to land.
@@ -593,6 +605,7 @@ export class SessionManager {
     artifact: SessionSynopsis | undefined,
     summarizedThroughEntry: number,
     targetAgentId?: string,
+    runId?: string,
   ): Promise<void> {
     const live = this.get(sessionId);
     if (artifact === undefined && targetAgentId === undefined) {
@@ -627,7 +640,14 @@ export class SessionManager {
         // Drop any prior waiter — we're acting now.
         this.pendingSwapDisposers.get(sessionId)?.();
         this.pendingSwapDisposers.delete(sessionId);
-        await this.performSynthesisSwap(live, artifact, tailK, summarizedThroughEntry, targetAgentId);
+        await this.performSynthesisSwap(
+          live,
+          artifact,
+          tailK,
+          summarizedThroughEntry,
+          targetAgentId,
+          runId,
+        );
         return;
       }
       // Not quiesced — park an onceIdle handler that retries the swap
@@ -740,6 +760,11 @@ export class SessionManager {
         tailK,
         record.summarizedThroughEntry,
         targetAgentId,
+        // The run that scheduled this deferred swap. Read from disk
+        // because the in-memory call chain was unwound when the swap
+        // parked on onceIdle. Without it, a deferred second swap of a
+        // run looks like a brand-new run and re-pins the breadcrumb.
+        record.compactionState?.runId,
       );
     } catch (err) {
       this.logger?.warn(
@@ -766,6 +791,7 @@ export class SessionManager {
     tailK: number,
     summarizedThroughEntry: number,
     targetAgentId?: string,
+    runId?: string,
   ): Promise<void> {
     try {
       // Per-intent floor: /hydra agent (cross-agent) wants a few
@@ -788,6 +814,7 @@ export class SessionManager {
         tailFloor,
         summarizedThroughEntry,
         ...(targetAgentId ? { newAgentId: targetAgentId } : {}),
+        ...(runId !== undefined ? { runId } : {}),
       });
       if (targetAgentId) {
         // Cross-agent swap completed — drop the breadcrumb so resume
@@ -1087,7 +1114,7 @@ export class SessionManager {
       workspaceHook: (action, name, opts) =>
         this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
-        void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+        void this.persistRollbackBreadcrumb(session.sessionId, breadcrumb).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
         void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1418,7 +1445,7 @@ export class SessionManager {
       workspaceHook: (action, name, opts) =>
         this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
-        void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+        void this.persistRollbackBreadcrumb(session.sessionId, breadcrumb).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
         void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1547,7 +1574,7 @@ export class SessionManager {
       workspaceHook: (action, name, opts) =>
         this.runWorkspaceAction(session.sessionId, action, name, opts),
       onCompactionSwapHook: (breadcrumb) =>
-        void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
+        void this.persistRollbackBreadcrumb(session.sessionId, breadcrumb).catch(() => undefined),
       persistWatermarkHook: (summarizedThroughEntry) =>
         void this.mutateRecord(session.sessionId, { summarizedThroughEntry }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -5176,13 +5203,14 @@ export class SessionManager {
         () => undefined,
       );
     });
-    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost, reason }) => {
+    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost, reason, runId }) => {
       void this.persistAgentChange(
         session.sessionId,
         agentId,
         upstreamSessionId,
         retiredCost,
         reason,
+        runId,
       ).catch(() => undefined);
     });
     session.onModelChange((model) => {
@@ -6663,6 +6691,7 @@ export class SessionManager {
     upstreamSessionId: string,
     retiredCost?: number,
     reason?: UpstreamGenerationReason,
+    runId?: string,
   ): Promise<void> {
     await this.mutateRecord(sessionId, { agentId, upstreamSessionId }, undefined, (prev) => ({
       upstreamGenerations: appendUpstreamGeneration(
@@ -6672,6 +6701,7 @@ export class SessionManager {
         undefined,
         retiredCost,
         reason,
+        runId,
       ),
     }));
   }
@@ -7019,6 +7049,44 @@ export class SessionManager {
   async getCompactionState(sessionId: string): Promise<CompactionState | undefined> {
     const record = await this.store.read(sessionId).catch(() => undefined);
     return record?.compactionState;
+  }
+
+  /**
+   * Persist a rollback breadcrumb, pinned to the FIRST swap of a
+   * compaction run.
+   *
+   * A run swaps more than once whenever history grows under an iteration
+   * (a background turn landing mid-compaction is enough). Each swap's
+   * "previous upstream" is the upstream the previous swap just created,
+   * so last-write-wins leaves the breadcrumb aimed at an
+   * already-compacted 80k-token seed while still presenting itself as a
+   * rollback to pre-compaction state. Observed in the wild: a session
+   * whose breadcrumb pointed at an upstream that had lived 77 seconds,
+   * with the real pre-compaction upstream still sitting in
+   * `upstreamGenerations` two entries back.
+   *
+   * The comparison runs inside the derive slot so a concurrent second
+   * swap can't read-modify-write past it.
+   */
+  private async persistRollbackBreadcrumb(
+    sessionId: string,
+    breadcrumb: RollbackBreadcrumb,
+  ): Promise<void> {
+    await this.mutateRecord(sessionId, {}, undefined, (prev) => {
+      const existing = prev.rollbackBreadcrumb;
+      const sameRun =
+        existing !== undefined &&
+        breadcrumb.runId !== undefined &&
+        existing.runId === breadcrumb.runId;
+      if (sameRun) {
+        this.logger?.info(
+          `compaction: keeping rollback breadcrumb pinned at ${existing.previousUpstreamSessionId} ` +
+            `for runId=${breadcrumb.runId} sessionId=${sessionId} (later swap of the same run)`,
+        );
+        return {};
+      }
+      return { rollbackBreadcrumb: breadcrumb };
+    });
   }
 
   // Read the upstream generation chain from a session's record (cold or
@@ -7932,6 +8000,7 @@ export function appendUpstreamGeneration(
   now: string = new Date().toISOString(),
   retiredCost?: number,
   reason?: UpstreamGenerationReason,
+  runId?: string,
 ): UpstreamGeneration[] {
   const seeded: UpstreamGeneration[] =
     prev.upstreamGenerations && prev.upstreamGenerations.length > 0
@@ -7958,7 +8027,11 @@ export function appendUpstreamGeneration(
     // knows the cause — back-fill rather than drop it, or the reason is
     // lost to whichever write happened to land first.
     if (reason !== undefined && last.reason === undefined) {
-      seeded[seeded.length - 1] = { ...last, reason };
+      seeded[seeded.length - 1] = {
+        ...last,
+        reason,
+        ...(runId !== undefined ? { runId } : {}),
+      };
     }
     return seeded;
   }
@@ -7979,6 +8052,7 @@ export function appendUpstreamGeneration(
     agentId,
     startedAt: now,
     ...(reason !== undefined ? { reason } : {}),
+    ...(runId !== undefined ? { runId } : {}),
   });
   return seeded;
 }
