@@ -1003,9 +1003,13 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // separator's headline, the btw overlay header, and the sidebar's activity
   // and live-session rows.
   //
-  // `status-active` means a turn is in flight — which spans reasoning, text
-  // streaming AND tool execution, since it is driven by pendingTurns going
-  // 0->1. It is deliberately not called "thinking": that is only the label
+  // `status-active` means the session is working. Usually that is a turn in
+  // flight — which spans reasoning, text streaming AND tool execution, since
+  // it is driven by pendingTurns going 0->1 — but it also covers a background
+  // task the agent armed and handed the turn back on, which both the activity
+  // gadget ("◐ running") and the live-session rows paint with it. The glyph
+  // carries which of the two it is; the colour only says "still going".
+  // It is deliberately not called "thinking": that is only the label
   // the activity gadget prints, and naming the token after it would invite
   // using it for reasoning alone. It is also not "busy", which implies load
   // rather than something happening.

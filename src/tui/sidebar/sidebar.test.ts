@@ -507,8 +507,8 @@ describe("folded title notes", () => {
     new SidebarRenderer(ids).render(
       snap({
         liveSessions: [
-          { sessionId: "a", label: "alpha", busy: false, waiting: true },
-          { sessionId: "b", label: "beta", busy: false, waiting: false },
+          { sessionId: "a", label: "alpha", busy: false, armed: false, waiting: true },
+          { sessionId: "b", label: "beta", busy: false, armed: false, waiting: false },
         ],
         editedFiles: [{ path: "/repo/a.ts" }, { path: "/repo/b.ts" }],
       }),
@@ -1232,11 +1232,12 @@ describe("quantizeDuration", () => {
 describe("sessions gadget", () => {
   const live = (
     label: string,
-    opts: { busy?: boolean; waiting?: boolean } = {},
+    opts: { busy?: boolean; armed?: boolean; waiting?: boolean } = {},
   ): SidebarLiveSession => ({
     sessionId: `hydra_session_${label}`,
     label,
     busy: opts.busy === true,
+    armed: opts.armed === true,
     waiting: opts.waiting === true,
   });
 
@@ -1270,11 +1271,34 @@ describe("sessions gadget", () => {
     expect(marker("quiet")).toBe(" ○");
   });
 
-  it("sorts waiting first, then busy, then quiet", () => {
+  // A session that armed a background task and handed the turn back is
+  // still working: `hydra session list` and the picker both call it BUSY.
+  // Here it gets its own glyph but busy's colour, so it reads as active at a
+  // glance without claiming a turn is in flight.
+  it("marks a session with an armed background task as working", () => {
+    const row = (e: SidebarLiveSession) =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
+    const armed = row(live("armed", { armed: true }));
+    expect(armed.body).toBe(" ◐");
+    expect(armed.bodyStyle).toBe("status-active");
+    expect(armed.prefixStyle).toBe("status-active");
+    // Same accent as a mid-turn session, different shape.
+    const busy = row(live("busy", { busy: true }));
+    expect(armed.bodyStyle).toBe(busy.bodyStyle);
+    expect(armed.body).not.toBe(busy.body);
+    // The waiting cell is independent of it, like it is of busy.
+    expect(row(live("both", { armed: true, waiting: true })).body).toBe("◦◐");
+  });
+
+  // A turn in flight outranks a mere armed task, and an armed task outranks
+  // quiet — otherwise a session that will restart itself sinks in with the
+  // ones that are done.
+  it("sorts waiting first, then busy, then armed, then quiet", () => {
     const lines = sessionsGadget.render(
       snap({
         liveSessions: [
           live("quiet"),
+          live("justarmed", { armed: true }),
           live("justbusy", { busy: true }),
           live("justwaiting", { waiting: true }),
           live("both", { busy: true, waiting: true }),
@@ -1286,6 +1310,7 @@ describe("sessions gadget", () => {
       "both",
       "justwaiting",
       "justbusy",
+      "justarmed",
       "quiet",
     ]);
   });
@@ -1316,8 +1341,10 @@ describe("sessions gadget", () => {
   it("keeps busy loud and leaves the rest legible", () => {
     const labelStyle = (e: SidebarLiveSession): string | undefined =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.prefixStyle;
-    // Busy is the one state worth pulling the eye across the whole row.
+    // Working is the one state worth pulling the eye across the whole row,
+    // whether the work is a turn or a background task it armed.
     expect(labelStyle(live("b", { busy: true }))).toBe("status-active");
+    expect(labelStyle(live("r", { armed: true }))).toBe("status-active");
     // The rest read as values, like the agent and model in the info gadget.
     // Neither may be `status-idle`, which is what made the list look dim, nor
     // undefined, which would silently inherit the marker's colour.
@@ -1333,6 +1360,7 @@ describe("sessions gadget", () => {
     const states = [
       live("quiet"),
       live("b", { busy: true }),
+      live("r", { armed: true }),
       live("w", { waiting: true }),
     ].map((e) => `${row(e).body}|${row(e).bodyStyle}`);
     expect(new Set(states).size).toBe(states.length);

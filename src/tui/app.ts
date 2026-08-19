@@ -8285,10 +8285,12 @@ async function runSession(
               s.title !== undefined && s.title.length > 0
                 ? s.title
                 : stripHydraSessionPrefix(s.sessionId),
-            // Two independent axes, forwarded as they come off the wire
-            // rather than collapsed: a session can be mid-turn AND blocked
-            // on a permission prompt at the same time.
+            // Independent axes, forwarded as they come off the wire rather
+            // than collapsed: a session can be mid-turn AND blocked on a
+            // permission prompt at the same time, and an armed background
+            // task outlives the turn that started it.
             busy: s.busy === true,
+            armed: (s.armedTasks ?? 0) > 0,
             waiting: s.awaitingInput === true,
           });
         }

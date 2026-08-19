@@ -251,6 +251,12 @@ export interface SidebarLiveSession {
   // permission prompt, and collapsing that to a single value has to discard
   // one of the two facts.
   busy: boolean;
+  // A background task the agent armed is still running, so the session can
+  // start a turn nobody asked for at any moment. Third state, not folded into
+  // `busy`: an armed-but-idle session takes a prompt immediately, which a
+  // mid-turn one does not. Mirrors `armedSince` above, which says the same
+  // thing about THIS session for the activity gadget.
+  armed: boolean;
   // Something is blocked on the user here — an outstanding permission
   // request or agent question, or a flag raised by an extension. See
   // Session.awaitingInput.

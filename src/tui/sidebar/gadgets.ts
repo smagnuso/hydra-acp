@@ -725,9 +725,14 @@ export function formatCpu(fraction: number | undefined): string {
 // blocked on you. Two independent axes, shown as a two-cell marker at the
 // right edge of the row.
 //
-//   ● working / ○ quiet — the same pair the activity gadget uses at the top
-//   of this very column ("● thinking" / "○ idle"), so the glyph means the
-//   same thing whether it describes this session or another.
+//   ● working / ◐ background task running / ○ quiet — the same three glyphs
+//   the activity gadget uses at the top of this very column ("● thinking" /
+//   "◐ running" / "○ idle"), so a glyph means the same thing whether it
+//   describes this session or another. ◐ shares ●'s yellow: both are the
+//   session doing work, and the shape carries the difference (a turn is in
+//   flight vs. the agent handed the turn back but armed a job that can wake
+//   it up). Without it an armed session read as quiet here while `hydra
+//   session list` and the picker called it BUSY.
 //
 //   ◦ in the cell to its left when something is waiting on you, blank
 //   otherwise. Matches the picker's and `hydra session list`'s "WARM◦",
@@ -745,6 +750,7 @@ export function formatCpu(fraction: number | undefined): string {
 // filesystem paths anyway (see rowLinkSpans) — the row stays
 // double-clickable through openPath.
 const BUSY_MARK = "●";
+const RUNNING_MARK = "◐";
 const IDLE_MARK = "○";
 const WAITING_MARK = "◦";
 
@@ -768,20 +774,26 @@ export const sessionsGadget: Gadget = {
   versionKey: (s, ctx) =>
     `${ctx.width}|` +
     s.liveSessions
-      .map((p) => `${p.waiting ? "w" : ""}${p.busy ? "b" : ""}:${p.sessionId}:${p.label}`)
+      .map(
+        (p) =>
+          `${p.waiting ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}` +
+          `:${p.sessionId}:${p.label}`,
+      )
       .join("\u0000"),
   render: (s, ctx) => {
     const { truncate, cellWidth } = ctx.metrics;
-    // Anything blocked on the user first, then whatever is working. Stable
-    // within a group: the caller supplies them most-recently-used first, and
-    // a list that reshuffles under the pointer is worse than one that
-    // doesn't move.
+    // Anything blocked on the user first, then whatever is working —
+    // mid-turn above merely armed, since a turn in flight is the louder of
+    // the two. Stable within a group: the caller supplies them
+    // most-recently-used first, and a list that reshuffles under the pointer
+    // is worse than one that doesn't move.
     const rank = (e: SidebarLiveSession): number =>
-      (e.waiting ? 0 : 2) + (e.busy ? 0 : 1);
+      (e.waiting ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
     const sorted = [...s.liveSessions].sort((a, b) => rank(a) - rank(b));
     return sorted.map((entry) => {
+      const working = entry.busy || entry.armed;
       const marker = `${entry.waiting ? WAITING_MARK : " "}${
-        entry.busy ? BUSY_MARK : IDLE_MARK
+        entry.busy ? BUSY_MARK : entry.armed ? RUNNING_MARK : IDLE_MARK
       }`;
       const markerWidth = cellWidth(marker);
       const label = truncate(
@@ -793,9 +805,11 @@ export const sessionsGadget: Gadget = {
         prefix: `${label}${" ".repeat(gap)}`,
         // A label is a value — a session's name — so by default it reads like
         // the agent and model values in the info gadget rather than like
-        // scaffolding. Busy is the exception: a session actively working is the
-        // one state worth pulling the eye across the whole row for, so it keeps
-        // the accent it has always had.
+        // scaffolding. Working is the exception: a session doing something is
+        // the one state worth pulling the eye across the whole row for, so it
+        // keeps the accent busy has always had. An armed background task
+        // counts, because from across the room the question the row answers is
+        // "is that session still going?", and it is.
         //
         // What changed, and why: the label used to carry state for every case.
         // Quiet sessions took `status-idle`, and idle is the common case, so the
@@ -809,14 +823,14 @@ export const sessionsGadget: Gadget = {
         // Now it is deliberate. Busy is loud, everything else is legible, and
         // idle-versus-waiting is left to the marker, which carries it as both a
         // glyph and a colour.
-        prefixStyle: entry.busy ? "status-active" : "sidebar-value",
+        prefixStyle: working ? "status-active" : "sidebar-value",
         body: marker,
         // Shares status-active with the banner and the activity gadget, so the
         // three surfaces cannot drift apart. Waiting has its own token rather
         // than falling through to idle: it renders the same today, but it is a
         // distinct state. Deliberately not red — red means failure everywhere
         // else, and a session on a permission prompt hasn't failed.
-        bodyStyle: entry.busy
+        bodyStyle: working
           ? "status-active"
           : entry.waiting
             ? "status-waiting"
