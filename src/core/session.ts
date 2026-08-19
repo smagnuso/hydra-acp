@@ -66,8 +66,17 @@ import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
+import {
+  formatCompactionHistory,
+  readCompactionHistory,
+} from "./compaction-history.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
-import type { PersistedWorkspace, RollbackBreadcrumb } from "./session-store.js";
+import type {
+  PersistedWorkspace,
+  RollbackBreadcrumb,
+  UpstreamGeneration,
+  UpstreamGenerationReason,
+} from "./session-store.js";
 import {
   buildDepartureNote,
   buildWorkspacePreamble,
@@ -283,6 +292,11 @@ export interface SessionInit {
   // does. When absent, `/hydra agent` uses the raw string as-is.
   resolveAgentId?: (id: string) => Promise<string | undefined>;
   getCompactionState?: () => Promise<CompactionState | undefined>;
+  // Reads the persisted upstream generation chain, oldest first. Backs
+  // `/hydra compact status`'s history section — the live Session never
+  // holds this list, so without the hook the command can only describe
+  // the present.
+  getUpstreamGenerations?: () => Promise<UpstreamGeneration[]>;
   // Reads the persisted pendingAgentSwap field (the target agentId of an
   // in-flight /hydra agent swap, or undefined if none pending).
   getPendingAgentSwap?: () => Promise<string | undefined>;
@@ -739,6 +753,7 @@ export class Session {
   private scheduleCompactionHook?: (opts?: { targetAgentId?: string }) => void;
   private resolveAgentIdHook?: (id: string) => Promise<string | undefined>;
   private getCompactionStateHook?: () => Promise<CompactionState | undefined>;
+  private getUpstreamGenerationsHook?: () => Promise<UpstreamGeneration[]>;
   private getPendingAgentSwapHook?: () => Promise<string | undefined>;
   // In-memory mirror of the last hydra_compaction phase broadcast.
   // Kept so buildStateSnapshotReplay can deliver the current phase to
@@ -788,6 +803,27 @@ export class Session {
       cause: { toolCallId: string; label: string } | undefined;
     }
     | undefined;
+  // Set when a queue entry superseded an unsolicited turn that was still
+  // running. The agent is now inside a lane it started by itself, with our
+  // prompt injected on top, and claude-acp owes exactly one SDK result for
+  // both. It stamps that result with the lane that STARTED the work, so it
+  // arrives as an autonomous terminal rather than as the session/prompt
+  // response — see the salvage in noteAgentActivity for why that would
+  // otherwise wedge the turn open until a human cancels.
+  //
+  // Cleared at every turn boundary and on the first autonomous terminal
+  // after it is set, so it can never be read by a turn two hops later.
+  private supersededAutonomousTurn:
+    | {
+      turnMessageId: string;
+      cause: { toolCallId: string; label: string } | undefined;
+      supersededAt: number;
+    }
+    | undefined;
+  // Resolver for the in-flight session/prompt when the salvage above is
+  // armed. Present only between forwardRequest being issued and it (or the
+  // salvage) settling.
+  private autonomousSalvage: ((response: unknown) => void) | undefined;
   // Most recent background task the agent armed, harvested from the tool
   // call that armed it. Only used to label an unsolicited turn with what
   // woke it up; nothing depends on it being accurate or present.
@@ -1003,6 +1039,11 @@ export class Session {
       // the retiring generation entry so the figure survives the history
       // ring evicting that generation's usage_update rows.
       retiredCost?: number;
+      // Why the rotation happened. This is the ONLY point in the pipeline
+      // that knows: by the time SessionManager persists, a compaction
+      // swap, a workspace move and an agent switch are the same shape.
+      // Undefined only from paths that genuinely can't say.
+      reason?: UpstreamGenerationReason;
     }) => void
   > = [];
   // Set by accumulateAndResetCost, consumed by the next agentChange
@@ -1175,6 +1216,7 @@ export class Session {
     this.scheduleCompactionHook = init.scheduleCompaction;
     this.resolveAgentIdHook = init.resolveAgentId;
     this.getCompactionStateHook = init.getCompactionState;
+    this.getUpstreamGenerationsHook = init.getUpstreamGenerations;
     this.getPendingAgentSwapHook = init.getPendingAgentSwap;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
@@ -1575,6 +1617,7 @@ export class Session {
       agentId: string;
       upstreamSessionId: string;
       retiredCost?: number;
+      reason?: UpstreamGenerationReason;
     }) => void,
   ): void {
     this.agentChangeHandlers.push(handler);
@@ -1890,6 +1933,17 @@ export class Session {
     const oldAgentId = this.agentId;
     const targetAgentId = opts.newAgentId ?? this.agentId;
     const crossAgent = targetAgentId !== this.agentId;
+    // `reason` defaults to "compaction" for every caller that doesn't set
+    // it, which is what the workspace paths are distinguishing themselves
+    // FROM — so an explicit non-compaction reason wins outright, and a
+    // cross-agent swap is an agent switch no matter that it borrows the
+    // compaction machinery to get there.
+    const generationReason: UpstreamGenerationReason =
+      opts.reason !== undefined && opts.reason !== "compaction"
+        ? opts.reason
+        : crossAgent
+          ? "agent-swap"
+          : "compaction";
     // Target directory for the replacement agent. Defaults to where we
     // already are; set by the workspace path to move the session.
     const cwd = opts.newCwd ?? this.cwd;
@@ -2073,7 +2127,7 @@ export class Session {
     // onCompactionSwapHook so meta.json's upstreamSessionId is updated
     // before the breadcrumb is written (the breadcrumb references the
     // previous id, not the current).
-    this.notifyAgentChange("swapUpstream");
+    this.notifyAgentChange("swapUpstream", generationReason);
     // Persist the moved watermark. Not gated on crossAgent: a cross-agent
     // swap advances it too, and recall's gates read the record either way.
     if (opts.summarizedThroughEntry !== undefined && this.persistWatermarkHook) {
@@ -2278,7 +2332,7 @@ export class Session {
 
     // Notify agent change handlers so SessionManager's persistAgentChange
     // fires and persists the restored upstreamSessionId to meta.json.
-    this.notifyAgentChange("rollbackToUpstream");
+    this.notifyAgentChange("rollbackToUpstream", "rollback");
 
     this.updatedAt = Date.now();
   }
@@ -3232,6 +3286,21 @@ export class Session {
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
     }
+    // A salvaged turn is indistinguishable from a clean one on the wire
+    // otherwise, and turn_complete is one of the few things that IS written
+    // to history — so this marker is how a salvage becomes visible on disk
+    // after the fact. The agent's own usage_update, which carries the origin
+    // stamp that triggered it, is filtered out by STATE_UPDATE_KINDS.
+    const salvaged = extractHydraMeta(
+      (response as { _meta?: Record<string, unknown> } | undefined)?._meta,
+    ).salvaged;
+    if (salvaged !== undefined) {
+      update._meta = { [HYDRA_META_KEY]: { salvaged } };
+    }
+    // Any turn boundary retires the salvage arming. It is only ever valid
+    // for the turn that did the superseding; letting it survive would let a
+    // later, unrelated turn settle on somebody else's terminal.
+    this.supersededAutonomousTurn = undefined;
     // Attach the amend marker when this turn_complete closes an
     // amended turn, so renderer clients can paint the cancellation
     // as "amended" rather than the user-cancelled red banner without
@@ -3243,7 +3312,8 @@ export class Session {
       amend.cancelledMessageId === promptMessageId
     ) {
       update._meta = {
-        "hydra-acp": {
+        [HYDRA_META_KEY]: {
+          ...(salvaged !== undefined ? { salvaged } : {}),
           amended: {
             cancelledMessageId: amend.cancelledMessageId,
             newMessageId: amend.newMessageId,
@@ -3319,7 +3389,11 @@ export class Session {
     // it: usage_update is the carrier claude-acp stamps the origin onto, and
     // an autonomous origin is the authoritative end of the turn.
     if (autonomousTurnTerminal(envelope)) {
-      this.closeUnsolicitedTurn("completed");
+      if (this.unsolicitedTurn !== undefined) {
+        this.closeUnsolicitedTurn("completed");
+        return;
+      }
+      this.salvageSupersededTerminal();
       return;
     }
     // State-shaped updates (model, mode, advertised commands) say nothing
@@ -3730,15 +3804,36 @@ export class Session {
   // `reason` tells clients which of those it was. "completed" is the only one
   // that means the agent said it finished; the rest are hydra or the user
   // ending the turn from outside.
+  // `by` names what did the closing, for the daemon log only. A supersede
+  // that reads `internal:<label>` rather than `prompt:<messageId>` is the
+  // queue-hold bypass: the hold in drainQueue only guards user entries, so
+  // an internal entry can clear the turn out from under one.
   private closeUnsolicitedTurn(
     reason: "completed" | "cancelled" | "superseded" | "closed",
+    by?: string,
   ): void {
     const turn = this.unsolicitedTurn;
     if (turn === undefined) {
       return;
     }
+    const durationMs = Date.now() - turn.startedAt;
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
+    this.logger?.info(
+      `session ${this.sessionId} unsolicited turn ${turn.messageId} closed ` +
+        `reason=${reason} durationMs=${durationMs}` +
+        (by ? ` by=${by}` : "") +
+        (turn.cause ? ` cause=${JSON.stringify(turn.cause.label)}` : ""),
+    );
+    // A supersede leaves the agent inside a lane it started by itself with
+    // our prompt stacked on top. Arm the salvage; see the field's comment.
+    if (reason === "superseded") {
+      this.supersededAutonomousTurn = {
+        turnMessageId: turn.messageId,
+        cause: turn.cause,
+        supersededAt: Date.now(),
+      };
+    }
     // Analytics consumers diff successive usage_update rows for per-turn
     // cost. Without a row here an unsolicited turn's tokens silently fold
     // into whichever turn happens to close next.
@@ -3752,10 +3847,81 @@ export class Session {
         sessionUpdate: "turn_ended",
         messageId: generateMessageId(),
         startedMessageId: turn.messageId,
-        durationMs: Date.now() - turn.startedAt,
+        durationMs,
         _meta: { "hydra-acp": { unsolicited: true, reason } },
       },
     });
+  }
+
+  // Settle a session/prompt that claude-acp attributed to the wrong lane.
+  //
+  // When a prompt supersedes a running unsolicited turn, the agent owes one
+  // SDK result covering both, and stamps it with the lane that STARTED the
+  // work. It therefore arrives here as an autonomous terminal with no
+  // unsolicited turn left to close, and the parked session/prompt is never
+  // answered: promptInFlight stays set, the session reads BUSY, and the turn
+  // survives until a human cancels. Measured live on session
+  // wmXi2gvvkacPLd1V: agent published its whole final answer at 14:16:04,
+  // turn stayed open until a cancel at 14:18:13.
+  //
+  // Gated on supersededAutonomousTurn rather than firing for any autonomous
+  // terminal seen during a user turn. An agent that legitimately runs a peer
+  // or subagent lane alongside a prompt emits one of these too, and closing
+  // the user's turn on it would be a worse bug than the wedge. The tradeoff
+  // that remains: if the superseded lane finishes while the agent is still
+  // working on the prompt, this ends the turn early and the remaining output
+  // opens a fresh unsolicited turn — the conversation is split in two, not
+  // lost, which is the failure worth having of the two.
+  //
+  // Not a timer. It settles on a signal the agent actually sent and we were
+  // previously discarding, which is why it does not contradict the
+  // deliberate no-timer-fallback stance in autonomousTurnTerminal.
+  private salvageSupersededTerminal(): void {
+    const superseded = this.supersededAutonomousTurn;
+    if (superseded === undefined) {
+      return;
+    }
+    this.supersededAutonomousTurn = undefined;
+    const settle = this.autonomousSalvage;
+    if (settle === undefined) {
+      return;
+    }
+    this.autonomousSalvage = undefined;
+    this.logger?.warn(
+      `session ${this.sessionId} salvaged session/prompt from autonomous ` +
+        `terminal (superseded turn ${superseded.turnMessageId}, ` +
+        `${Date.now() - superseded.supersededAt}ms earlier)` +
+        (superseded.cause ? ` cause=${JSON.stringify(superseded.cause.label)}` : ""),
+    );
+    settle({
+      stopReason: "end_turn",
+      _meta: {
+        [HYDRA_META_KEY]: {
+          salvaged: {
+            reason: "autonomous_terminal",
+            supersededMessageId: superseded.turnMessageId,
+          },
+        },
+      },
+    });
+  }
+
+  // Race the upstream session/prompt against the salvage above, but only
+  // when this entry actually took over a running unsolicited turn. With no
+  // supersede in play there is nothing to salvage and the request is awaited
+  // as before. A late real response after a salvage is simply dropped.
+  private async awaitPromptResponse(pending: Promise<unknown>): Promise<unknown> {
+    if (this.supersededAutonomousTurn === undefined) {
+      return pending;
+    }
+    try {
+      return await new Promise<unknown>((resolve, reject) => {
+        this.autonomousSalvage = resolve;
+        pending.then(resolve, reject);
+      });
+    } finally {
+      this.autonomousSalvage = undefined;
+    }
   }
 
   // Record that a prompt's turn has ended, with its terminal stopReason.
@@ -5240,7 +5406,10 @@ export class Session {
   // zero-spend generation, mis-attributing the earlier generation's spend
   // a second time. The lifetime total is unaffected — cumulativeCost is
   // banked separately — but per-generation attribution would be wrong.
-  private notifyAgentChange(context: string): void {
+  private notifyAgentChange(
+    context: string,
+    reason?: UpstreamGenerationReason,
+  ): void {
     const retiredCost = this.retiringGenerationCost;
     this.retiringGenerationCost = undefined;
     for (const handler of this.agentChangeHandlers) {
@@ -5249,6 +5418,7 @@ export class Session {
           agentId: this.agentId,
           upstreamSessionId: this.upstreamSessionId,
           ...(retiredCost !== undefined ? { retiredCost } : {}),
+          ...(reason !== undefined ? { reason } : {}),
         });
       } catch (err) {
         this.logger?.warn(
@@ -6725,21 +6895,42 @@ export class Session {
   private async runCompactStatusCommandInline(): Promise<unknown> {
     const state = await this.getCompactionStateHook?.();
     const summarized = this._summarizedThroughEntry;
-    if (state == null && summarized == null) {
+    const generations = (await this.getUpstreamGenerationsHook?.()) ?? [];
+    const history = readCompactionHistory(generations, summarized);
+    const historyLines = formatCompactionHistory(history);
+
+    // "Never been compacted" is only sayable when the generation chain
+    // agrees. A session can carry no watermark and no in-flight state and
+    // still have rotated — through a workspace move, an agent switch, or
+    // a compaction predating the watermark — and reporting a blank slate
+    // over a non-empty chain is the one wrong answer here.
+    if (state == null && summarized == null && historyLines.length === 0) {
       this.emitExtensionReply("This session has never been compacted.");
       return { stopReason: "end_turn" };
     }
+
+    const lines: string[] = [];
     if (state == null) {
-      this.emitExtensionReply(
-        `No compaction in progress. Last summarized through entry: ${summarized}`,
+      lines.push(
+        `No compaction in progress. Last summarized through entry: ${summarized ?? 0}`,
       );
-      return { stopReason: "end_turn" };
+    } else {
+      lines.push(
+        `Compaction state: ${state.status}${state.iter != null ? ` (iteration ${state.iter})` : ""}`,
+        `Summarized through entry: ${summarized ?? 0}`,
+        `Pending attempts: ${state.attempts ?? 0}`,
+      );
+      if (state.lastError !== undefined) {
+        lines.push(`Last error: ${state.lastError}`);
+      }
     }
-    const lines: string[] = [
-      `Compaction state: ${state.status}${state.iter != null ? ` (iteration ${state.iter})` : ""}`,
-      `Summarized through entry: ${summarized ?? 0}`,
-      `Pending attempts: ${state.attempts ?? 0}`,
-    ];
+    // The upstream this session is on right now. It's the join key back
+    // into the agent's own storage, and until now no hydra surface
+    // printed it next to the compaction that produced it.
+    lines.push(`Current upstream: ${this.upstreamSessionId}`);
+    if (historyLines.length > 0) {
+      lines.push("", ...historyLines);
+    }
     this.emitExtensionReply(lines.join("\n"));
     return { stopReason: "end_turn" };
   }
@@ -6990,14 +7181,13 @@ export class Session {
 
     this.broadcastAgentSwitch(agentId, agentId);
 
-    const info = { agentId, upstreamSessionId: this.upstreamSessionId };
-    for (const handler of this.agentChangeHandlers) {
-      try {
-        handler(info);
-      } catch {
-        void 0;
-      }
-    }
+    // Routed through notifyAgentChange rather than walking the handlers
+    // inline: this path calls accumulateAndResetCost above, and the
+    // inline loop never consumed `retiringGenerationCost`. The value then
+    // sat armed until the next rotation and was stamped onto THAT
+    // generation — exactly the sticky mis-attribution the comment on
+    // notifyAgentChange warns about.
+    this.notifyAgentChange("respawnAgent", "restart");
   }
 
   // Walk the persisted history and produce a labeled transcript suitable

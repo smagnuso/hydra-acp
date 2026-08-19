@@ -37,6 +37,7 @@ import {
   type PersistedWorkspace,
   type RollbackBreadcrumb,
   type UpstreamGeneration,
+  type UpstreamGenerationReason,
   type SessionRecord,
 } from "./session-store.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
@@ -1079,6 +1080,7 @@ export class SessionManager {
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getUpstreamGenerations: () => this.getUpstreamGenerations(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
@@ -1409,6 +1411,7 @@ export class SessionManager {
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getUpstreamGenerations: () => this.getUpstreamGenerations(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
@@ -1537,6 +1540,7 @@ export class SessionManager {
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getUpstreamGenerations: () => this.getUpstreamGenerations(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
@@ -5172,12 +5176,13 @@ export class SessionManager {
         () => undefined,
       );
     });
-    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost }) => {
+    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost, reason }) => {
       void this.persistAgentChange(
         session.sessionId,
         agentId,
         upstreamSessionId,
         retiredCost,
+        reason,
       ).catch(() => undefined);
     });
     session.onModelChange((model) => {
@@ -6657,6 +6662,7 @@ export class SessionManager {
     agentId: string,
     upstreamSessionId: string,
     retiredCost?: number,
+    reason?: UpstreamGenerationReason,
   ): Promise<void> {
     await this.mutateRecord(sessionId, { agentId, upstreamSessionId }, undefined, (prev) => ({
       upstreamGenerations: appendUpstreamGeneration(
@@ -6665,6 +6671,7 @@ export class SessionManager {
         upstreamSessionId,
         undefined,
         retiredCost,
+        reason,
       ),
     }));
   }
@@ -7012,6 +7019,14 @@ export class SessionManager {
   async getCompactionState(sessionId: string): Promise<CompactionState | undefined> {
     const record = await this.store.read(sessionId).catch(() => undefined);
     return record?.compactionState;
+  }
+
+  // Read the upstream generation chain from a session's record (cold or
+  // live). The live Session doesn't hold it — every append happens on the
+  // persistence side — so this is the only way to read it back.
+  async getUpstreamGenerations(sessionId: string): Promise<UpstreamGeneration[]> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    return record?.upstreamGenerations ?? [];
   }
 
   // Read rollbackBreadcrumb from a session's persisted record.
@@ -7916,6 +7931,7 @@ export function appendUpstreamGeneration(
   upstreamSessionId: string,
   now: string = new Date().toISOString(),
   retiredCost?: number,
+  reason?: UpstreamGenerationReason,
 ): UpstreamGeneration[] {
   const seeded: UpstreamGeneration[] =
     prev.upstreamGenerations && prev.upstreamGenerations.length > 0
@@ -7936,6 +7952,14 @@ export function appendUpstreamGeneration(
         seeded[seeded.length - 2] = { ...retiring, cost: retiredCost };
       }
     }
+    // Same race, for the reason: the routine persist knows only that the
+    // upstream rotated, never why, so it pushes a reasonless entry. The
+    // rotation's own call arrives second and is the only caller that
+    // knows the cause — back-fill rather than drop it, or the reason is
+    // lost to whichever write happened to land first.
+    if (reason !== undefined && last.reason === undefined) {
+      seeded[seeded.length - 1] = { ...last, reason };
+    }
     return seeded;
   }
   if (last && last.endedAt === undefined) {
@@ -7950,7 +7974,12 @@ export function appendUpstreamGeneration(
       ...(retiredCost !== undefined ? { cost: retiredCost } : {}),
     };
   }
-  seeded.push({ upstreamSessionId, agentId, startedAt: now });
+  seeded.push({
+    upstreamSessionId,
+    agentId,
+    startedAt: now,
+    ...(reason !== undefined ? { reason } : {}),
+  });
   return seeded;
 }
 

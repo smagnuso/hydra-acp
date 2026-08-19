@@ -4572,6 +4572,77 @@ describe("appendUpstreamGeneration", () => {
     expect(out[0]!.cost).toBe(361.11);
   });
 
+  // Reason is the only thing distinguishing a compaction from a
+  // workspace move or an agent switch after the fact — they are the same
+  // shape on disk otherwise.
+  it("stamps the reason on the generation that begins, not the one retiring", () => {
+    const out = appendUpstreamGeneration(
+      base,
+      "opencode",
+      "ses_2",
+      "2026-06-02T00:00:00.000Z",
+      undefined,
+      "compaction",
+    );
+    expect(out[0]!.reason).toBeUndefined();
+    expect(out[1]!.reason).toBe("compaction");
+  });
+
+  it("leaves the reason absent when the caller cannot say why", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z");
+    expect(out[1]!.reason).toBeUndefined();
+  });
+
+  // Same race as the cost back-fill: mergeForPersistence knows the
+  // upstream rotated but never why, so it pushes a reasonless entry. If
+  // the rotation's own notify then early-returns, the cause is lost and
+  // the rotation is indistinguishable from a pre-upgrade one forever.
+  it("back-fills the reason when a routine persist already pushed the entry", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z" },
+        { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+      ],
+    };
+    const out = appendUpstreamGeneration(
+      rec,
+      "opencode",
+      "ses_2",
+      "2026-06-02T00:00:01.000Z",
+      undefined,
+      "compaction",
+    );
+    expect(out).toHaveLength(2);
+    expect(out[1]!.reason).toBe("compaction");
+  });
+
+  it("does not overwrite a reason already recorded on a generation", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z" },
+        {
+          upstreamSessionId: "ses_2",
+          agentId: "opencode",
+          startedAt: "2026-06-02T00:00:00.000Z",
+          reason: "workspace-enter" as const,
+        },
+      ],
+    };
+    const out = appendUpstreamGeneration(
+      rec,
+      "opencode",
+      "ses_2",
+      "2026-06-03T00:00:00.000Z",
+      undefined,
+      "compaction",
+    );
+    expect(out[1]!.reason).toBe("workspace-enter");
+  });
+
   it("does not overwrite a cost already recorded on a retired generation", () => {
     const rec: SessionRecord = {
       ...base,

@@ -1080,4 +1080,76 @@ describe("Session.swapUpstream", () => {
     expect(session.currentUsage?.costAmount).toBe(62.5);
     expect(session.currentUsage?.costCurrency).toBe("USD");
   });
+  // The reason recorded here is the only thing that distinguishes these
+  // rotations after the fact: on disk a compaction, a workspace move and
+  // an agent switch are the same shape. Getting it from the one place
+  // that knows to the persistence layer is the whole feature.
+  describe("rotation reason reaches the persistence handler", () => {
+    const captureReason = async (
+      run: (session: Session) => Promise<void>,
+      init: { agentId: string } = { agentId: "a1" },
+    ): Promise<string | undefined> => {
+      const { spawnReplacementAgent, oldMock } = makeSpawnMock(init);
+      const session = new Session({
+        sessionId: `hydra_swap_reason_${init.agentId}`,
+        cwd: "/w",
+        agentId: init.agentId,
+        agent: oldMock.agent,
+        upstreamSessionId: "u1",
+        historyStore: new HistoryStore(),
+        spawnReplacementAgent,
+      });
+      let seen: string | undefined;
+      session.onAgentChange((info) => {
+        seen = info.reason;
+      });
+      await run(session);
+      return seen;
+    };
+
+    it("labels a plain swap as a compaction", async () => {
+      const reason = await captureReason((s) =>
+        s.swapUpstream({ artifact: makeSynopsis(), tailK: 2 }),
+      );
+      expect(reason).toBe("compaction");
+    });
+
+    it("labels a cross-agent swap as an agent-swap, not a compaction", async () => {
+      const reason = await captureReason((s) =>
+        s.swapUpstream({ artifact: makeSynopsis(), tailK: 2, newAgentId: "a2" }),
+      );
+      expect(reason).toBe("agent-swap");
+    });
+
+    it("labels entering a workspace as workspace-enter", async () => {
+      const reason = await captureReason((s) =>
+        s.swapIntoWorkspace({
+          cwd: "/ws/feature",
+          workspace: {
+            path: "/ws/feature",
+            label: "feature",
+            sourceCwd: "/w",
+            provider: "git-worktree",
+          },
+          historyLength: 3,
+          note: "entering",
+          synopsis: makeSynopsis(),
+        }),
+      );
+      expect(reason).toBe("workspace-enter");
+    });
+
+    it("labels leaving a workspace as workspace-leave", async () => {
+      const reason = await captureReason((s) =>
+        s.swapIntoWorkspace({
+          cwd: "/w",
+          workspace: undefined,
+          historyLength: 3,
+          note: "leaving",
+          synopsis: makeSynopsis(),
+        }),
+      );
+      expect(reason).toBe("workspace-leave");
+    });
+  });
 });

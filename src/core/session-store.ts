@@ -165,9 +165,31 @@ export type RollbackBreadcrumb = z.infer<typeof RollbackBreadcrumb>;
 // rotated into archives and pruned. Once that happens a long-compacted
 // session's early generations become permanently unattributable, and its
 // cost silently under-reports.
+// Why a generation BEGAN. Stamped on the entry being pushed, not on the
+// one being retired, so the reason and the `startedAt` that dates it live
+// on the same entry and "compactions" is a plain filter over the list.
+// (The retiring entry's endedAt is the same instant, so nothing is lost.)
+export const UpstreamGenerationReason = z.enum([
+  "compaction",
+  "agent-swap",
+  "workspace-enter",
+  "workspace-leave",
+  "rollback",
+  "restart",
+]);
+export type UpstreamGenerationReason = z.infer<typeof UpstreamGenerationReason>;
+
 export const UpstreamGeneration = z.object({
   upstreamSessionId: z.string(),
   agentId: z.string(),
+  // Absent on every entry written before this field existed, and on the
+  // seeded back-fill entry. Consumers must treat an absent reason as
+  // UNKNOWN rather than as any particular cause: counting unknowns as
+  // compactions inflates the count with workspace moves and agent swaps,
+  // and excluding them reports "never compacted" for a session that
+  // demonstrably was. Report a count over unknowns as a lower bound —
+  // same discipline as `inferred` below.
+  reason: UpstreamGenerationReason.optional(),
   // Absent only on a back-filled entry seeded from a pre-existing record
   // on its first rotation after upgrade: that upstream's real start time
   // was never recorded, and guessing it (e.g. from the session's
