@@ -584,6 +584,10 @@ interface UserPromptQueueEntry {
 interface InternalQueueEntry {
   kind: "internal";
   messageId: string;
+  // Names the housekeeping task, for the daemon log only. Internal entries
+  // emit no queue broadcasts, so without this an internal entry that
+  // supersedes an unsolicited turn is unattributable after the fact.
+  label: string;
   enqueuedAt: number;
   cancelled: boolean;
   task: () => Promise<unknown>;
@@ -788,6 +792,29 @@ export class Session {
       cause: { toolCallId: string; label: string } | undefined;
     }
     | undefined;
+  // Set when a queue entry superseded an unsolicited turn that was still
+  // running. The agent is now inside a lane it started by itself, with our
+  // prompt injected on top, and claude-acp owes exactly one SDK result for
+  // both. It stamps that result with the lane that STARTED the work, so it
+  // arrives as an autonomous terminal rather than as the session/prompt
+  // response — see the salvage in noteAgentActivity for why that would
+  // otherwise wedge the turn open until a human cancels.
+  //
+  // Scoped to a single drain pass: cleared when the pass ends, at every turn
+  // boundary, and on the first autonomous terminal after it is set. So it can
+  // only ever be read by an entry queued alongside the one that superseded,
+  // which is the production sequence (measured 1ms apart).
+  private supersededAutonomousTurn:
+    | {
+      turnMessageId: string;
+      cause: { toolCallId: string; label: string } | undefined;
+      supersededAt: number;
+    }
+    | undefined;
+  // Resolver for the in-flight session/prompt when the salvage above is
+  // armed. Present only between forwardRequest being issued and it (or the
+  // salvage) settling.
+  private autonomousSalvage: ((response: unknown) => void) | undefined;
   // Most recent background task the agent armed, harvested from the tool
   // call that armed it. Only used to label an unsolicited turn with what
   // woke it up; nothing depends on it being accurate or present.
@@ -3053,7 +3080,11 @@ export class Session {
     // only one turn is ever live and promptStartedAt below isn't clobbering
     // a start time the unsolicited turn owns. Must run before this method
     // sets promptStartedAt.
-    this.closeUnsolicitedTurn("superseded");
+    //
+    // Reaching here with a turn still open means the queue hold let a user
+    // prompt through while the agent was mid-flight, which it is supposed to
+    // prevent — the `by=` tag in the close log is how that gets attributed.
+    this.closeUnsolicitedTurn("superseded", `prompt:${entry.messageId}`);
     const sentBy: Record<string, unknown> = { clientId: entry.originator.clientId };
     if (entry.originator.name) {
       sentBy.name = entry.originator.name;
@@ -3232,6 +3263,21 @@ export class Session {
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
     }
+    // A salvaged turn is indistinguishable from a clean one on the wire
+    // otherwise, and turn_complete is one of the few things that IS written
+    // to history — so this marker is how a salvage becomes visible on disk
+    // after the fact. The agent's own usage_update, which carries the origin
+    // stamp that triggered it, is filtered out by STATE_UPDATE_KINDS.
+    const salvaged = extractHydraMeta(
+      (response as { _meta?: Record<string, unknown> } | undefined)?._meta,
+    ).salvaged;
+    if (salvaged !== undefined) {
+      update._meta = { [HYDRA_META_KEY]: { salvaged } };
+    }
+    // Any turn boundary retires the salvage arming. It is only ever valid
+    // for the turn that did the superseding; letting it survive would let a
+    // later, unrelated turn settle on somebody else's terminal.
+    this.supersededAutonomousTurn = undefined;
     // Attach the amend marker when this turn_complete closes an
     // amended turn, so renderer clients can paint the cancellation
     // as "amended" rather than the user-cancelled red banner without
@@ -3243,7 +3289,8 @@ export class Session {
       amend.cancelledMessageId === promptMessageId
     ) {
       update._meta = {
-        "hydra-acp": {
+        [HYDRA_META_KEY]: {
+          ...(salvaged !== undefined ? { salvaged } : {}),
           amended: {
             cancelledMessageId: amend.cancelledMessageId,
             newMessageId: amend.newMessageId,
@@ -3319,7 +3366,11 @@ export class Session {
     // it: usage_update is the carrier claude-acp stamps the origin onto, and
     // an autonomous origin is the authoritative end of the turn.
     if (autonomousTurnTerminal(envelope)) {
-      this.closeUnsolicitedTurn("completed");
+      if (this.unsolicitedTurn !== undefined) {
+        this.closeUnsolicitedTurn("completed");
+        return;
+      }
+      this.salvageSupersededTerminal();
       return;
     }
     // State-shaped updates (model, mode, advertised commands) say nothing
@@ -3668,10 +3719,23 @@ export class Session {
     entry: UserPromptQueueEntry,
   ): Promise<void> {
     if (this.unsolicitedTurn === undefined) {
+      // Logged, not silent. "Was the hold skipped, or did it engage and
+      // release?" is the first question any stuck-turn postmortem asks, and
+      // held/released are broadcasts only — nothing about this decision
+      // reaches disk otherwise.
+      this.logger?.info(
+        `session ${this.sessionId} queue hold skipped for ${entry.messageId} ` +
+          `(no unsolicited turn open)`,
+      );
       return;
     }
     const holdStartedAt = Date.now();
     const cause = this.unsolicitedTurn.cause;
+    this.logger?.info(
+      `session ${this.sessionId} holding ${entry.messageId} behind ` +
+        `unsolicited turn ${this.unsolicitedTurn.messageId}` +
+        (cause ? ` cause=${JSON.stringify(cause.label)}` : ""),
+    );
     this.broadcastQueueNotification("hydra-acp/prompt_queue/held", {
       sessionId: this.sessionId,
       messageId: entry.messageId,
@@ -3715,11 +3779,16 @@ export class Session {
         }
       });
     }
+    const heldMs = Date.now() - holdStartedAt;
+    this.logger?.info(
+      `session ${this.sessionId} released ${entry.messageId} ` +
+        `reason=${released} heldMs=${heldMs}`,
+    );
     this.broadcastQueueNotification("hydra-acp/prompt_queue/released", {
       sessionId: this.sessionId,
       messageId: entry.messageId,
       reason: released,
-      heldMs: Date.now() - holdStartedAt,
+      heldMs,
     });
   }
 
@@ -3730,15 +3799,36 @@ export class Session {
   // `reason` tells clients which of those it was. "completed" is the only one
   // that means the agent said it finished; the rest are hydra or the user
   // ending the turn from outside.
+  // `by` names what did the closing, for the daemon log only. A supersede
+  // that reads `internal:<label>` rather than `prompt:<messageId>` is the
+  // queue-hold bypass: the hold in drainQueue only guards user entries, so
+  // an internal entry can clear the turn out from under one.
   private closeUnsolicitedTurn(
     reason: "completed" | "cancelled" | "superseded" | "closed",
+    by?: string,
   ): void {
     const turn = this.unsolicitedTurn;
     if (turn === undefined) {
       return;
     }
+    const durationMs = Date.now() - turn.startedAt;
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
+    this.logger?.info(
+      `session ${this.sessionId} unsolicited turn ${turn.messageId} closed ` +
+        `reason=${reason} durationMs=${durationMs}` +
+        (by ? ` by=${by}` : "") +
+        (turn.cause ? ` cause=${JSON.stringify(turn.cause.label)}` : ""),
+    );
+    // A supersede leaves the agent inside a lane it started by itself with
+    // our prompt stacked on top. Arm the salvage; see the field's comment.
+    if (reason === "superseded") {
+      this.supersededAutonomousTurn = {
+        turnMessageId: turn.messageId,
+        cause: turn.cause,
+        supersededAt: Date.now(),
+      };
+    }
     // Analytics consumers diff successive usage_update rows for per-turn
     // cost. Without a row here an unsolicited turn's tokens silently fold
     // into whichever turn happens to close next.
@@ -3752,10 +3842,81 @@ export class Session {
         sessionUpdate: "turn_ended",
         messageId: generateMessageId(),
         startedMessageId: turn.messageId,
-        durationMs: Date.now() - turn.startedAt,
+        durationMs,
         _meta: { "hydra-acp": { unsolicited: true, reason } },
       },
     });
+  }
+
+  // Settle a session/prompt that claude-acp attributed to the wrong lane.
+  //
+  // When a prompt supersedes a running unsolicited turn, the agent owes one
+  // SDK result covering both, and stamps it with the lane that STARTED the
+  // work. It therefore arrives here as an autonomous terminal with no
+  // unsolicited turn left to close, and the parked session/prompt is never
+  // answered: promptInFlight stays set, the session reads BUSY, and the turn
+  // survives until a human cancels. Measured live on session
+  // wmXi2gvvkacPLd1V: agent published its whole final answer at 14:16:04,
+  // turn stayed open until a cancel at 14:18:13.
+  //
+  // Gated on supersededAutonomousTurn rather than firing for any autonomous
+  // terminal seen during a user turn. An agent that legitimately runs a peer
+  // or subagent lane alongside a prompt emits one of these too, and closing
+  // the user's turn on it would be a worse bug than the wedge. The tradeoff
+  // that remains: if the superseded lane finishes while the agent is still
+  // working on the prompt, this ends the turn early and the remaining output
+  // opens a fresh unsolicited turn — the conversation is split in two, not
+  // lost, which is the failure worth having of the two.
+  //
+  // Not a timer. It settles on a signal the agent actually sent and we were
+  // previously discarding, which is why it does not contradict the
+  // deliberate no-timer-fallback stance in autonomousTurnTerminal.
+  private salvageSupersededTerminal(): void {
+    const superseded = this.supersededAutonomousTurn;
+    if (superseded === undefined) {
+      return;
+    }
+    this.supersededAutonomousTurn = undefined;
+    const settle = this.autonomousSalvage;
+    if (settle === undefined) {
+      return;
+    }
+    this.autonomousSalvage = undefined;
+    this.logger?.warn(
+      `session ${this.sessionId} salvaged session/prompt from autonomous ` +
+        `terminal (superseded turn ${superseded.turnMessageId}, ` +
+        `${Date.now() - superseded.supersededAt}ms earlier)` +
+        (superseded.cause ? ` cause=${JSON.stringify(superseded.cause.label)}` : ""),
+    );
+    settle({
+      stopReason: "end_turn",
+      _meta: {
+        [HYDRA_META_KEY]: {
+          salvaged: {
+            reason: "autonomous_terminal",
+            supersededMessageId: superseded.turnMessageId,
+          },
+        },
+      },
+    });
+  }
+
+  // Race the upstream session/prompt against the salvage above, but only
+  // when this entry actually took over a running unsolicited turn. With no
+  // supersede in play there is nothing to salvage and the request is awaited
+  // as before. A late real response after a salvage is simply dropped.
+  private async awaitPromptResponse(pending: Promise<unknown>): Promise<unknown> {
+    if (this.supersededAutonomousTurn === undefined) {
+      return pending;
+    }
+    try {
+      return await new Promise<unknown>((resolve, reject) => {
+        this.autonomousSalvage = resolve;
+        pending.then(resolve, reject);
+      });
+    } finally {
+      this.autonomousSalvage = undefined;
+    }
   }
 
   // Record that a prompt's turn has ended, with its terminal stopReason.
@@ -6036,7 +6197,7 @@ export class Session {
   // agent_message_chunk so it appears in the conversation alongside the
   // user's invocation.
   private runExtensionCommand(name: string, remainder: string): Promise<unknown> {
-    return this.enqueuePrompt(() =>
+    return this.enqueuePrompt(`extension:${name}`, () =>
       this.runExtensionCommandInline(name, remainder, undefined),
     );
   }
@@ -6542,7 +6703,7 @@ export class Session {
   // returns end_turn immediately; the new title (and synopsis) land on
   // the cold record asynchronously.
   private runTitleCommand(arg: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runTitleCommandInline(arg));
+    return this.enqueuePrompt("title", () => this.runTitleCommandInline(arg));
   }
 
   // Inline core for /hydra title — dispatchable directly from
@@ -6681,7 +6842,7 @@ export class Session {
   // available after a quota reset) and the resumed session is locked to a
   // stale model list.
   private runRestartCommand(): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runRestartCommandInline());
+    return this.enqueuePrompt("restart", () => this.runRestartCommandInline());
   }
 
   private async runRestartCommandInline(): Promise<unknown> {
@@ -6702,7 +6863,7 @@ export class Session {
   // + upstream swap) runs asynchronously via the coordinator; this
   // method returns end_turn immediately.
   private runCompactCommand(arg?: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runCompactCommandInline(arg));
+    return this.enqueuePrompt("compact", () => this.runCompactCommandInline(arg));
   }
 
   private async runCompactCommandInline(arg?: string): Promise<unknown> {
@@ -6745,7 +6906,7 @@ export class Session {
   }
 
   private runUncompactCommand(): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runUncompactCommandInline());
+    return this.enqueuePrompt("uncompact", () => this.runUncompactCommandInline());
   }
 
   /**
@@ -6841,7 +7002,7 @@ export class Session {
   // pass "verbatim" to slice at the last completed turn instead. Runs
   // out of the prompt queue so it doesn't fight in-flight turns.
   private runForkCommand(arg?: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runForkCommandInline(arg, undefined));
+    return this.enqueuePrompt("fork", () => this.runForkCommandInline(arg, undefined));
   }
 
   // Walk the persisted history and return the messageId of the last
@@ -7099,7 +7260,7 @@ export class Session {
   // if the agent fails to absorb the transcript we still leave the
   // session usable — the user just continues without context.
   async seedFromImport(): Promise<void> {
-    await this.enqueuePrompt(async () => {
+    await this.enqueuePrompt("seed:import", async () => {
       const transcript = await this.buildSwitchTranscript(this.agentId, {
         intro:
           "You are continuing a conversation that was imported from another hydra. Below is the transcript so far.",
@@ -7124,7 +7285,7 @@ export class Session {
   // the agent's acknowledgement lands in history.jsonl. Safe with empty
   // history (tail degrades to nothing).
   async seedFromFork(synopsis?: SessionSynopsis): Promise<void> {
-    await this.enqueuePrompt(async () => {
+    await this.enqueuePrompt("seed:fork", async () => {
       const title = this.title ?? "(untitled)";
 
       let historyEntries: Array<{ method: string; params: unknown }> = [];
@@ -8177,11 +8338,15 @@ export class Session {
   // injection, import seed). Serializes behind any user prompts already
   // in flight, but doesn't emit prompt_queue_* broadcasts — clients
   // shouldn't see hydra's housekeeping in their chip list.
-  private async enqueuePrompt(task: () => Promise<unknown>): Promise<unknown> {
+  private async enqueuePrompt(
+    label: string,
+    task: () => Promise<unknown>,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const entry: InternalQueueEntry = {
         kind: "internal",
         messageId: generateMessageId(),
+        label,
         enqueuedAt: Date.now(),
         cancelled: false,
         task,
@@ -8462,6 +8627,16 @@ export class Session {
       }
     } finally {
       this.promptInFlight = false;
+      // The salvage arming is scoped to a single drain pass. It exists for
+      // the internal-entry-then-user-prompt handoff, where both land in the
+      // same pass (measured 1ms apart in production), and letting it outlive
+      // that would let an unrelated later turn settle on a stray terminal.
+      //
+      // A supersede whose user prompt arrives in a LATER pass needs no
+      // salvage: an agent still working in that lane emits content with no
+      // prompt in flight, which opens a fresh unsolicited turn, and the queue
+      // hold then does its job on the prompt behind it.
+      this.supersededAutonomousTurn = undefined;
       this.dispatchIdle();
     }
   }
@@ -8482,7 +8657,13 @@ export class Session {
       // Housekeeping drives the agent too, so it likewise takes over from
       // any open unsolicited turn. The user-entry path does this from
       // broadcastPromptReceived, which internal entries deliberately skip.
-      this.closeUnsolicitedTurn("superseded");
+      //
+      // Note this is NOT covered by the queue hold, which only guards user
+      // heads — so an internal entry landing here clears the turn and the
+      // user prompt behind it then sails through a hold that has nothing
+      // left to wait on. `by=internal:<label>` in the log is the fingerprint
+      // of that sequence.
+      this.closeUnsolicitedTurn("superseded", `internal:${entry.label}`);
       return entry.task();
     }
     this.broadcastPromptReceived(entry);
@@ -8590,11 +8771,13 @@ export class Session {
       // injection) get to see and potentially rewrite the prompt before it
       // reaches the agent. forwardRequest handles rewriteForAgent
       // (sessionId → upstreamSessionId) and tail-forwards to the agent.
-      response = await this.forwardRequest(
-        "session/prompt",
-        { sessionId: this.sessionId, prompt: outboundPrompt },
-        entry.emitterName ? new Set([entry.emitterName]) : new Set(),
-        entry.chainStartIdx ?? 0,
+      response = await this.awaitPromptResponse(
+        this.forwardRequest(
+          "session/prompt",
+          { sessionId: this.sessionId, prompt: outboundPrompt },
+          entry.emitterName ? new Set([entry.emitterName]) : new Set(),
+          entry.chainStartIdx ?? 0,
+        ),
       );
     } catch (err) {
       // Deliberate force-cancel: the agent was killed on purpose. Resolve
