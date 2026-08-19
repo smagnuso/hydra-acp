@@ -242,6 +242,12 @@ export interface HydraMeta {
   // it does NOT promote an undecided session to interactive. Absent (the
   // default) means a normal human turn that promotes undefined → true.
   ancillary?: boolean;
+  // Present on a session/prompt response, and on the matching turn_complete,
+  // when hydra settled the turn from the agent's own autonomous terminal
+  // rather than from a session/prompt response the agent never sent. See
+  // Session.salvageSupersededTerminal. Purely diagnostic: the turn is over
+  // either way, and clients need do nothing with it.
+  salvaged?: { reason: string; supersededMessageId: string };
   // Triage/provenance fields. Emitted on every session-describing response
   // (session/list, session/new, session/attach) by buildHydraSessionMeta so
   // an attaching client gets the same view session/list offers. status,
@@ -492,6 +498,15 @@ export function extractHydraMeta(
   }
   if (typeof obj.ancillary === "boolean") {
     out.ancillary = obj.ancillary;
+  }
+  if (obj.salvaged && typeof obj.salvaged === "object" && !Array.isArray(obj.salvaged)) {
+    const s = obj.salvaged as Record<string, unknown>;
+    if (typeof s.reason === "string" && typeof s.supersededMessageId === "string") {
+      out.salvaged = {
+        reason: s.reason,
+        supersededMessageId: s.supersededMessageId,
+      };
+    }
   }
   if (Array.isArray(obj.queue)) {
     const entries: PromptQueueEntry[] = [];

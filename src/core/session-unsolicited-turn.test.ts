@@ -507,6 +507,164 @@ describe("queue hold during an unsolicited turn", () => {
   });
 });
 
+// What happens when the hold above is bypassed and the prompt lands on an
+// agent already mid-flight in a lane it started by itself.
+//
+// claude-acp then owes exactly one SDK result for both, and stamps it with
+// the lane that STARTED the work — so it arrives as an autonomous terminal,
+// not as the session/prompt response, and nothing settles the prompt.
+// Observed on session wmXi2gvvkacPLd1V: the agent streamed its entire final
+// answer at 14:16:04 and the turn stayed open until a human cancelled it at
+// 14:18:13, with the session reading BUSY throughout.
+describe("salvaging a superseded turn's terminal", () => {
+  async function setup(): Promise<{
+    session: Session;
+    mock: ReturnType<typeof makeMockAgent>;
+    client: AttachedClient;
+    sent: JsonRpcMessage[];
+  }> {
+    return makeSessionAfterOneTurn();
+  }
+
+  // An agent that accepts session/prompt and never answers it.
+  function neverResponds(mock: ReturnType<typeof makeMockAgent>): void {
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise<never>(() => {}),
+    );
+  }
+
+  // Reproduce the bypass: an internal housekeeping entry at the head of the
+  // queue with the user prompt landing behind it in the SAME drain pass,
+  // which is the production ordering (the two were 1ms apart on disk). The
+  // hold only guards user heads, so the internal entry clears the unsolicited
+  // turn and the prompt behind it finds nothing left to wait on. This is
+  // defect (2), reproduced rather than fixed — the salvage must cope either
+  // way.
+  //
+  // Nothing is awaited between the two enqueues on purpose: drainQueue yields
+  // past a setImmediate before touching the head, so both entries are in the
+  // queue by the time it starts.
+  function supersedeThenPrompt(
+    session: Session,
+    mock: ReturnType<typeof makeMockAgent>,
+    client: AttachedClient,
+    text = "follow-up",
+  ): Promise<unknown> {
+    agentChunk(mock);
+    neverResponds(mock);
+    void (
+      session as unknown as {
+        enqueuePrompt(l: string, task: () => Promise<unknown>): Promise<unknown>;
+      }
+    ).enqueuePrompt("test:housekeeping", async () => ({ ok: true }));
+    return session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text }],
+    });
+  }
+
+  it("settles the prompt on the agent's autonomous terminal", async () => {
+    const { session, mock, client } = await setup();
+    const done = supersedeThenPrompt(
+      session,
+      mock,
+      client,
+      "I do not understand your suggestion",
+    );
+    await settleDrain();
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    autonomousTerminal(mock);
+    await expect(done).resolves.toMatchObject({ stopReason: "end_turn" });
+  });
+
+  it("marks the salvaged turn_complete so it is visible in history", async () => {
+    const { session, mock, client, sent } = await setup();
+    const done = supersedeThenPrompt(session, mock, client);
+    await settleDrain();
+    autonomousTerminal(mock);
+    await done;
+    await settleDrain();
+
+    // turn_complete is recorded to history; the agent's usage_update that
+    // triggered the salvage is filtered out by STATE_UPDATE_KINDS. So this
+    // marker is the only on-disk trace a salvage ever happened.
+    const completes = updatesOfKind(sent, "turn_complete");
+    const salvaged = hydraMeta(completes.at(-1)!).salvaged as
+      | Record<string, unknown>
+      | undefined;
+    expect(salvaged).toMatchObject({ reason: "autonomous_terminal" });
+  });
+
+  it("leaves the session idle afterwards rather than wedged BUSY", async () => {
+    const { session, mock, client } = await setup();
+    const done = supersedeThenPrompt(session, mock, client);
+    await settleDrain();
+    autonomousTerminal(mock);
+    await done;
+    await settleDrain();
+
+    expect(session.turnStartedAt).toBeUndefined();
+    expect(session.inUnsolicitedTurn).toBe(false);
+  });
+
+  it("does not salvage an ordinary turn that never superseded anything", async () => {
+    const { session, mock, client } = await setup();
+    vi.useFakeTimers();
+    neverResponds(mock);
+    let settled = false;
+    void session
+      .prompt(client.clientId, {
+        sessionId: "sess_u",
+        prompt: [{ type: "text", text: "ordinary" }],
+      })
+      .then(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // An agent running a peer or subagent lane alongside a user prompt emits
+    // one of these too. Settling the user's turn on it would be a worse bug
+    // than the wedge, so the salvage stays gated on an actual supersede.
+    autonomousTerminal(mock);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+  });
+
+  it("does not carry the arming into a later drain pass", async () => {
+    const { session, mock, client } = await setup();
+    agentChunk(mock);
+    void (
+      session as unknown as {
+        enqueuePrompt(l: string, task: () => Promise<unknown>): Promise<unknown>;
+      }
+    ).enqueuePrompt("test:housekeeping", async () => ({ ok: true }));
+    await settleDrain();
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    vi.useFakeTimers();
+    neverResponds(mock);
+    let settled = false;
+    void session
+      .prompt(client.clientId, {
+        sessionId: "sess_u",
+        prompt: [{ type: "text", text: "much later" }],
+      })
+      .then(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(1_000);
+    autonomousTerminal(mock);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // The housekeeping entry's drain pass ended before this prompt was even
+    // enqueued, so there is no supersede for it to inherit. An agent still
+    // working that lane would have opened a fresh unsolicited turn, and the
+    // queue hold covers the prompt from there.
+    expect(settled).toBe(false);
+  });
+});
+
 // The third session state: the agent handed the turn back and is idle,
 // but a watch it started is still pending, so it can restart itself.
 describe("armed background tasks", () => {

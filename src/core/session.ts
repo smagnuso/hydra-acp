@@ -598,6 +598,10 @@ interface UserPromptQueueEntry {
 interface InternalQueueEntry {
   kind: "internal";
   messageId: string;
+  // Names the housekeeping task, for the daemon log only. Internal entries
+  // emit no queue broadcasts, so without this an internal entry that
+  // supersedes an unsolicited turn is unattributable after the fact.
+  label: string;
   enqueuedAt: number;
   cancelled: boolean;
   task: () => Promise<unknown>;
@@ -811,8 +815,10 @@ export class Session {
   // response — see the salvage in noteAgentActivity for why that would
   // otherwise wedge the turn open until a human cancels.
   //
-  // Cleared at every turn boundary and on the first autonomous terminal
-  // after it is set, so it can never be read by a turn two hops later.
+  // Scoped to a single drain pass: cleared when the pass ends, at every turn
+  // boundary, and on the first autonomous terminal after it is set. So it can
+  // only ever be read by an entry queued alongside the one that superseded,
+  // which is the production sequence (measured 1ms apart).
   private supersededAutonomousTurn:
     | {
       turnMessageId: string;
@@ -3176,7 +3182,11 @@ export class Session {
     // only one turn is ever live and promptStartedAt below isn't clobbering
     // a start time the unsolicited turn owns. Must run before this method
     // sets promptStartedAt.
-    this.closeUnsolicitedTurn("superseded");
+    //
+    // Reaching here with a turn still open means the queue hold let a user
+    // prompt through while the agent was mid-flight, which it is supposed to
+    // prevent — the `by=` tag in the close log is how that gets attributed.
+    this.closeUnsolicitedTurn("superseded", `prompt:${entry.messageId}`);
     const sentBy: Record<string, unknown> = { clientId: entry.originator.clientId };
     if (entry.originator.name) {
       sentBy.name = entry.originator.name;
@@ -3854,10 +3864,23 @@ export class Session {
     entry: UserPromptQueueEntry,
   ): Promise<void> {
     if (this.unsolicitedTurn === undefined) {
+      // Logged, not silent. "Was the hold skipped, or did it engage and
+      // release?" is the first question any stuck-turn postmortem asks, and
+      // held/released are broadcasts only — nothing about this decision
+      // reaches disk otherwise.
+      this.logger?.info(
+        `session ${this.sessionId} queue hold skipped for ${entry.messageId} ` +
+          `(no unsolicited turn open)`,
+      );
       return;
     }
     const holdStartedAt = Date.now();
     const cause = this.unsolicitedTurn.cause;
+    this.logger?.info(
+      `session ${this.sessionId} holding ${entry.messageId} behind ` +
+        `unsolicited turn ${this.unsolicitedTurn.messageId}` +
+        (cause ? ` cause=${JSON.stringify(cause.label)}` : ""),
+    );
     this.broadcastQueueNotification("hydra-acp/prompt_queue/held", {
       sessionId: this.sessionId,
       messageId: entry.messageId,
@@ -3901,11 +3924,16 @@ export class Session {
         }
       });
     }
+    const heldMs = Date.now() - holdStartedAt;
+    this.logger?.info(
+      `session ${this.sessionId} released ${entry.messageId} ` +
+        `reason=${released} heldMs=${heldMs}`,
+    );
     this.broadcastQueueNotification("hydra-acp/prompt_queue/released", {
       sessionId: this.sessionId,
       messageId: entry.messageId,
       reason: released,
-      heldMs: Date.now() - holdStartedAt,
+      heldMs,
     });
   }
 
@@ -6330,7 +6358,7 @@ export class Session {
   // agent_message_chunk so it appears in the conversation alongside the
   // user's invocation.
   private runExtensionCommand(name: string, remainder: string): Promise<unknown> {
-    return this.enqueuePrompt(() =>
+    return this.enqueuePrompt(`extension:${name}`, () =>
       this.runExtensionCommandInline(name, remainder, undefined),
     );
   }
@@ -6836,7 +6864,7 @@ export class Session {
   // returns end_turn immediately; the new title (and synopsis) land on
   // the cold record asynchronously.
   private runTitleCommand(arg: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runTitleCommandInline(arg));
+    return this.enqueuePrompt("title", () => this.runTitleCommandInline(arg));
   }
 
   // Inline core for /hydra title — dispatchable directly from
@@ -6975,7 +7003,7 @@ export class Session {
   // available after a quota reset) and the resumed session is locked to a
   // stale model list.
   private runRestartCommand(): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runRestartCommandInline());
+    return this.enqueuePrompt("restart", () => this.runRestartCommandInline());
   }
 
   private async runRestartCommandInline(): Promise<unknown> {
@@ -6996,7 +7024,7 @@ export class Session {
   // + upstream swap) runs asynchronously via the coordinator; this
   // method returns end_turn immediately.
   private runCompactCommand(arg?: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runCompactCommandInline(arg));
+    return this.enqueuePrompt("compact", () => this.runCompactCommandInline(arg));
   }
 
   private async runCompactCommandInline(arg?: string): Promise<unknown> {
@@ -7060,7 +7088,7 @@ export class Session {
   }
 
   private runUncompactCommand(): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runUncompactCommandInline());
+    return this.enqueuePrompt("uncompact", () => this.runUncompactCommandInline());
   }
 
   /**
@@ -7156,7 +7184,7 @@ export class Session {
   // pass "verbatim" to slice at the last completed turn instead. Runs
   // out of the prompt queue so it doesn't fight in-flight turns.
   private runForkCommand(arg?: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runForkCommandInline(arg, undefined));
+    return this.enqueuePrompt("fork", () => this.runForkCommandInline(arg, undefined));
   }
 
   // Walk the persisted history and return the messageId of the last
@@ -7415,7 +7443,7 @@ export class Session {
   // if the agent fails to absorb the transcript we still leave the
   // session usable — the user just continues without context.
   async seedFromImport(): Promise<void> {
-    await this.enqueuePrompt(async () => {
+    await this.enqueuePrompt("seed:import", async () => {
       const transcript = await this.buildSwitchTranscript(this.agentId, {
         intro:
           "You are continuing a conversation that was imported from another hydra. Below is the transcript so far.",
@@ -7440,7 +7468,7 @@ export class Session {
   // the agent's acknowledgement lands in history.jsonl. Safe with empty
   // history (tail degrades to nothing).
   async seedFromFork(synopsis?: SessionSynopsis): Promise<void> {
-    await this.enqueuePrompt(async () => {
+    await this.enqueuePrompt("seed:fork", async () => {
       const title = this.title ?? "(untitled)";
 
       let historyEntries: Array<{ method: string; params: unknown }> = [];
@@ -8493,11 +8521,15 @@ export class Session {
   // injection, import seed). Serializes behind any user prompts already
   // in flight, but doesn't emit prompt_queue_* broadcasts — clients
   // shouldn't see hydra's housekeeping in their chip list.
-  private async enqueuePrompt(task: () => Promise<unknown>): Promise<unknown> {
+  private async enqueuePrompt(
+    label: string,
+    task: () => Promise<unknown>,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const entry: InternalQueueEntry = {
         kind: "internal",
         messageId: generateMessageId(),
+        label,
         enqueuedAt: Date.now(),
         cancelled: false,
         task,
@@ -8778,6 +8810,16 @@ export class Session {
       }
     } finally {
       this.promptInFlight = false;
+      // The salvage arming is scoped to a single drain pass. It exists for
+      // the internal-entry-then-user-prompt handoff, where both land in the
+      // same pass (measured 1ms apart in production), and letting it outlive
+      // that would let an unrelated later turn settle on a stray terminal.
+      //
+      // A supersede whose user prompt arrives in a LATER pass needs no
+      // salvage: an agent still working in that lane emits content with no
+      // prompt in flight, which opens a fresh unsolicited turn, and the queue
+      // hold then does its job on the prompt behind it.
+      this.supersededAutonomousTurn = undefined;
       this.dispatchIdle();
     }
   }
@@ -8798,7 +8840,13 @@ export class Session {
       // Housekeeping drives the agent too, so it likewise takes over from
       // any open unsolicited turn. The user-entry path does this from
       // broadcastPromptReceived, which internal entries deliberately skip.
-      this.closeUnsolicitedTurn("superseded");
+      //
+      // Note this is NOT covered by the queue hold, which only guards user
+      // heads — so an internal entry landing here clears the turn and the
+      // user prompt behind it then sails through a hold that has nothing
+      // left to wait on. `by=internal:<label>` in the log is the fingerprint
+      // of that sequence.
+      this.closeUnsolicitedTurn("superseded", `internal:${entry.label}`);
       return entry.task();
     }
     this.broadcastPromptReceived(entry);
@@ -8906,11 +8954,13 @@ export class Session {
       // injection) get to see and potentially rewrite the prompt before it
       // reaches the agent. forwardRequest handles rewriteForAgent
       // (sessionId → upstreamSessionId) and tail-forwards to the agent.
-      response = await this.forwardRequest(
-        "session/prompt",
-        { sessionId: this.sessionId, prompt: outboundPrompt },
-        entry.emitterName ? new Set([entry.emitterName]) : new Set(),
-        entry.chainStartIdx ?? 0,
+      response = await this.awaitPromptResponse(
+        this.forwardRequest(
+          "session/prompt",
+          { sessionId: this.sessionId, prompt: outboundPrompt },
+          entry.emitterName ? new Set([entry.emitterName]) : new Set(),
+          entry.chainStartIdx ?? 0,
+        ),
       );
     } catch (err) {
       // Deliberate force-cancel: the agent was killed on purpose. Resolve

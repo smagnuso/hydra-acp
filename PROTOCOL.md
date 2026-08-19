@@ -1879,6 +1879,36 @@ Empirically this path is `claude-acp`-only: across 1291 recorded sessions,
 agent-initiated turns appear in 6, all of them `claude-acp`. `opencode` has
 produced none in 615 sessions.
 
+**Salvage: when the terminal arrives for a turn that was superseded.** If a
+prompt takes over an agent-initiated turn that is still running, the agent
+owes exactly one SDK `result` covering both, and stamps it with the lane that
+*started* the work. It therefore arrives as an autonomous terminal, not as the
+`session/prompt` response, and the prompt is never answered: the session reads
+`busy` until a human cancels. Observed live at 2m 08s of dead air after the
+agent had streamed its complete final answer.
+
+Hydra settles the parked `session/prompt` itself in that case, with
+`stopReason: "end_turn"` plus a marker naming what happened:
+
+```jsonc
+{ "stopReason": "end_turn",
+  "_meta": { "hydra-acp": { "salvaged": {
+    "reason": "autonomous_terminal",
+    "supersededMessageId": "m_wzEBMNkrutPIraSA" } } } }
+```
+
+The same `salvaged` block is attached to the resulting `turn_complete`, which
+**is** written to `history.jsonl` — so a salvage is diagnosable after the
+fact even though the `usage_update` that triggered it is not recorded.
+Clients need do nothing with it; the turn is over either way.
+
+This is not a timer. It settles on a signal the agent genuinely sent and
+hydra previously discarded, so the no-fallback stance above still holds. It
+is armed only for a turn that actually superseded a running agent-initiated
+one, and only within that drain pass: an agent that legitimately runs a peer
+or subagent lane alongside a user prompt also emits autonomous terminals, and
+ending the user's turn on one of those would be worse than the wedge.
+
 **Gating.** Detection is armed only after the session's first `turn_complete`,
 since the failure mode is the agent *resuming* after a turn ended. While an
 unsolicited turn is open the session reports `busy` in the REST session list,
