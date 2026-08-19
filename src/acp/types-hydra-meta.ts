@@ -205,6 +205,14 @@ export interface HydraMeta {
   // the busy banner already showing the right elapsed time rather
   // than waiting for the next live update.
   turnStartedAt?: number;
+  // How many background tasks the agent has armed, and when the oldest of
+  // them was armed. Delivered on attach so a client can SEED its "running
+  // Xs" clock — and, just as important, clear a stale one: armed state is
+  // otherwise push-only, so a client that saw a task armed before the
+  // session closed has no way to find out the new incarnation has none.
+  // A count of 0 is meaningful and distinct from absent (older daemon).
+  armedTasks?: number;
+  armedSince?: number;
   // Daemon capability groups advertised on the initialize response so
   // capability-aware clients can probe support before calling a method
   // (rather than catching MethodNotFound). Grouped by resource to mirror
@@ -430,6 +438,14 @@ export function extractHydraMeta(
   }
   if (typeof obj.turnStartedAt === "number" && obj.turnStartedAt > 0) {
     out.turnStartedAt = obj.turnStartedAt;
+  }
+  // 0 is a real value here, so the guard is >= 0 rather than > 0: it is how
+  // the daemon says "nothing armed", which is what clears a stale clock.
+  if (typeof obj.armedTasks === "number" && obj.armedTasks >= 0) {
+    out.armedTasks = obj.armedTasks;
+  }
+  if (typeof obj.armedSince === "number" && obj.armedSince > 0) {
+    out.armedSince = obj.armedSince;
   }
   if (Array.isArray(obj.availableCommands)) {
     const cmds: HydraAdvertisedCommand[] = [];

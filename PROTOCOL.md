@@ -1996,6 +1996,26 @@ the task going away while nobody is looking. An idle session gets no other
 traffic, so a client that only learned the count at attach time would keep
 claiming a job was running long after it finished.
 
+**But push alone is not enough — the attach response carries the state too.**
+`_meta["hydra-acp"]` on the `session/attach` and `session/new` responses
+includes `armedTasks` and `armedSince`, the same two values the notification
+carries. Clients MUST seed from them on every attach, including reattach, and
+MUST treat `armedTasks: 0` as "clear whatever you were showing".
+
+The armed set is per-`Session` and in-memory only; it is never persisted. So a
+session that closes and comes back — force-cancel, crash, cold-resurrect,
+daemon restart — returns as a *new* `Session` whose armed set is empty, and it
+will never announce that: `armed_tasks_updated` fires only on a mutation, and
+an empty set at construction is not one. A client relying on push alone
+therefore holds its last-known count forever across any such event. Observed:
+a session force-cancelled mid-turn whose TUI showed `◐ running 2h 36m`,
+clocked from an arming two incarnations earlier, while the daemon and
+`hydra session list` both correctly reported nothing armed.
+
+`armedTasks` is emitted even when 0, and absent only from a daemon too old to
+report it. Clients MUST distinguish the two: reading absence as zero would
+clear a live badge on every reattach to an older daemon.
+
 Deduplicated on the rendered state: several updates for one tool call all
 carry the arming signal (a real `Monitor` sent seven), and re-arming an
 entry already counted leaves `count` and `since` unchanged, so it fires

@@ -3041,6 +3041,11 @@ async function runSession(
   // when we reattach mid-turn. Lets the post-drain reconcile flip the
   // banner to busy and start the elapsed timer at the right offset.
   let initialTurnStartedAt: number | undefined;
+  // Epoch-ms the oldest armed background task was armed, per the attach
+  // response. Undefined when the daemon says none are armed OR when it is
+  // too old to say; both mean "don't show a running clock", and a fresh
+  // client has nothing stale to preserve either way.
+  let initialArmedSince: number | undefined;
   // True when the session/attach call that started this TUI is what
   // brought the session from cold → warm. Drives one-shot attach-time
   // UX (currently the compaction prompt) so re-attaches to an already
@@ -3196,6 +3201,7 @@ async function runSession(
     initialMode = hydraMeta.currentMode;
     initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
+    initialArmedSince = hydraMeta.armedSince;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
@@ -3281,6 +3287,7 @@ async function runSession(
     initialMode = hydraMeta.currentMode;
     initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
+    initialArmedSince = hydraMeta.armedSince;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
@@ -9471,6 +9478,15 @@ async function runSession(
     adjustPendingTurns(-pendingTurns);
   }
 
+  // Seed the armed-task clock from the attach response. Armed state is
+  // otherwise push-only — applyArmedTasks had exactly one caller, the
+  // armed_tasks_updated handler — so a client that boots while a task is
+  // already armed showed nothing until the next arm/release, and one that
+  // reattached after the session closed kept a clock from the previous
+  // incarnation indefinitely. Runs unconditionally: passing null is what
+  // clears a stale value, and applyArmedTasks no-ops when nothing moved.
+  applyArmedTasks(initialArmedSince ?? null);
+
   // Everything from here on is live. Set after the reconcile above, not
   // after the replay drain: that snap-to-zero is still accounting for
   // history, and stamping the idle clock off it would date the session's
@@ -9775,6 +9791,19 @@ async function runSession(
         }
       } else {
         screen.setBanner({ status: "ready", elapsedMs: undefined });
+      }
+      // Resync the armed-task clock the same way, and for the same reason:
+      // the daemon's view is authoritative and ours can only be stale. The
+      // session we just reattached to may be a NEW Session object (crash,
+      // force-cancel, resurrect) whose armed map starts empty without ever
+      // broadcasting that, so a client holding an armedSince from the
+      // previous incarnation would show "running" forever. Gated on the
+      // count being reported at all: an older daemon omits both fields, and
+      // treating that silence as zero would clear a genuinely live badge.
+      if (fields.armedTasks !== undefined) {
+        applyArmedTasks(
+          fields.armedTasks > 0 ? (fields.armedSince ?? null) : null,
+        );
       }
     } else {
       screen.setBanner({

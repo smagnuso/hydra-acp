@@ -280,6 +280,26 @@ export function buildHydraSessionMeta(
   if (entry.priority !== undefined && entry.priority > 0) {
     meta.priority = entry.priority;
   }
+  // Armed background tasks, both halves. Emitted on the attach response —
+  // not just in session/list — because a client's armed state is otherwise
+  // push-only: it learns of an armed task from armed_tasks_updated and has
+  // no other way to resync. A session that closes and comes back (crash,
+  // force-cancel, cold-resurrect) returns with an empty in-memory map and
+  // never announces it, since onArmedTasksChanged only fires on a mutation.
+  // Without these two fields the client keeps a "running" clock from the
+  // previous incarnation forever; observed on a session force-cancelled
+  // mid-turn, whose TUI showed "◐ running 2h 36m" against a daemon
+  // reporting zero.
+  //
+  // `armedTasks` is emitted even when 0, and that zero is the whole point:
+  // absence has to mean "this daemon is too old to say", not "nothing is
+  // armed", or an older daemon's silence would clear a live badge.
+  if (entry.armedTasks !== undefined) {
+    meta.armedTasks = entry.armedTasks;
+  }
+  if (entry.armedSince !== undefined) {
+    meta.armedSince = entry.armedSince;
+  }
   if (entry.compactionState !== undefined) {
     meta.compactionState = entry.compactionState;
   }

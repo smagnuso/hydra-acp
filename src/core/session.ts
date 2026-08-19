@@ -3454,10 +3454,23 @@ export class Session {
       since === this.lastArmedBroadcast?.since) {
       return;
     }
-    this.lastArmedBroadcast = { count, since };
+    // Record only what was actually sent. This assignment used to sit above
+    // the `closed` guard, so a clear during close (openUnsolicitedTurn
+    // discharging one-shots on the way down) latched {0, undefined} as
+    // though clients had been told.
+    //
+    // Unobservable today, and deliberately not given a test that would
+    // pretend otherwise: `closed` is one-way (set once in close(), never
+    // reset), so a closed session never broadcasts again and the poisoned
+    // entry is never read. It is fixed because a dedup cache that records
+    // unsent messages is wrong on its own terms, and it becomes a live bug
+    // the moment close stops being terminal — an agent respawned in place
+    // would resume with the cache claiming clients know a state they were
+    // never sent.
     if (this.closed) {
       return;
     }
+    this.lastArmedBroadcast = { count, since };
     this.broadcastQueueNotification("hydra-acp/session/armed_tasks_updated", {
       sessionId: this.sessionId,
       count,

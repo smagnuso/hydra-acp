@@ -269,6 +269,8 @@ describe("buildHydraSessionMeta", () => {
         },
         workspaceError: "provider unavailable",
         currentModel: "opus",
+        armedTasks: 2,
+        armedSince: 1_700_000_000_000,
       },
       {
         clientId: "cli_abc",
@@ -290,8 +292,6 @@ describe("buildHydraSessionMeta", () => {
       "status",
       "busy",
       "awaitingInput",
-      "armedTasks",
-      "armedSince",
       "updatedAt",
       "interactive",
       "priority",
@@ -321,6 +321,37 @@ describe("buildHydraSessionMeta", () => {
       (k) => !notInHydraMeta.has(k) && parsed[k] === undefined,
     );
     expect(dropped).toEqual([]);
+  });
+
+  // Armed state is push-only on the client side, so the attach response is
+  // the only place a client can RESYNC it. A session that closes and returns
+  // (force-cancel, crash, resurrect) comes back with an empty in-memory
+  // armed map and never broadcasts that, so without these two fields on the
+  // attach meta a client keeps a "running" clock from the previous
+  // incarnation forever.
+  it("carries armed background tasks, including the zero that clears them", () => {
+    const armed = buildHydraSessionMeta({
+      ...baseEntry,
+      armedTasks: 3,
+      armedSince: 1_700_000_000_000,
+    });
+    expect(armed.armedTasks).toBe(3);
+    expect(armed.armedSince).toBe(1_700_000_000_000);
+
+    // The load-bearing case: 0 is the daemon saying "nothing armed", which
+    // is what clears a stale badge. A truthiness guard in either the builder
+    // or the parser would drop it and the badge would stick.
+    const idle = buildHydraSessionMeta({ ...baseEntry, armedTasks: 0 });
+    expect(idle.armedTasks).toBe(0);
+    expect(idle.armedSince).toBeUndefined();
+    expect(extractHydraMeta({ "hydra-acp": idle }).armedTasks).toBe(0);
+
+    // Absent is distinct from 0: a daemon too old to report armed state
+    // must not be read as one reporting none, or it would clear a live
+    // badge on every reattach.
+    const silent = buildHydraSessionMeta(baseEntry);
+    expect("armedTasks" in silent).toBe(false);
+    expect(extractHydraMeta({ "hydra-acp": silent }).armedTasks).toBeUndefined();
   });
 
   it("carries the workspace binding through to the client, not just its cwd", () => {

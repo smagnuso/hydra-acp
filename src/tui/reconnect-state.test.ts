@@ -77,6 +77,37 @@ describe("parseReattachResponse", () => {
     expect(result.clientId).toBe(newClientId);
     expect(result.clientId).not.toBe(oldClientId);
   });
+
+  // A reattach may land on a NEW Session object (the old one was
+  // force-cancelled, crashed, or was resurrected from cold), whose armed-task
+  // map starts empty and which never broadcasts that, because the daemon only
+  // pushes on a mutation. The reattach response is therefore the only chance
+  // to clear a running clock the TUI is still painting.
+  it("extracts armed-task state, including the zero that clears a stale clock", () => {
+    const armed = parseReattachResponse({
+      historyPolicy: "none",
+      _meta: { "hydra-acp": { armedTasks: 2, armedSince: 1_700_000_000_000 } },
+    });
+    expect(armed.armedTasks).toBe(2);
+    expect(armed.armedSince).toBe(1_700_000_000_000);
+
+    const cleared = parseReattachResponse({
+      historyPolicy: "none",
+      _meta: { "hydra-acp": { armedTasks: 0 } },
+    });
+    expect(cleared.armedTasks).toBe(0);
+    expect(cleared.armedSince).toBeUndefined();
+
+    // An older daemon says nothing at all, which must stay distinguishable
+    // from saying zero: the caller keeps its prior value rather than
+    // clearing a badge that may well be live.
+    const silent = parseReattachResponse({
+      historyPolicy: "none",
+      _meta: { "hydra-acp": { turnStartedAt: 5 } },
+    });
+    expect(silent.armedTasks).toBeUndefined();
+    expect(silent.armedSince).toBeUndefined();
+  });
 });
 
 describe("shouldDriftSnap", () => {

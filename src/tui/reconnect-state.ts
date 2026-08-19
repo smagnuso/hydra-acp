@@ -23,6 +23,17 @@ export interface ReattachResponseFields {
   // > 0 (turn_complete was never emitted before the daemon restarted),
   // snap pendingTurns to 0 so the banner clears.
   turnStartedAt?: number;
+  // Epoch-ms the oldest armed background task was armed, and how many are
+  // armed. Both needed, and neither inferable from the other: a count of 0
+  // is how the daemon says "nothing armed" (which must clear a running
+  // clock the TUI is still showing), while an absent count means the daemon
+  // is too old to say and the prior value must be kept. A reconnect is the
+  // main way a client's armed state goes stale — the session it reattaches
+  // to may be a NEW Session object whose in-memory armed map starts empty
+  // and which never announces that, because the daemon only broadcasts on
+  // a mutation.
+  armedSince?: number;
+  armedTasks?: number;
 }
 
 // Pull the fields we care about out of a session/attach response result.
@@ -44,9 +55,18 @@ export function parseReattachResponse(result: unknown): ReattachResponseFields {
   if (meta && typeof meta === "object") {
     const hydra = (meta as Record<string, unknown>)["hydra-acp"];
     if (hydra && typeof hydra === "object") {
-      const ts = (hydra as Record<string, unknown>).turnStartedAt;
+      const h = hydra as Record<string, unknown>;
+      const ts = h.turnStartedAt;
       if (typeof ts === "number") {
         out.turnStartedAt = ts;
+      }
+      if (typeof h.armedSince === "number" && h.armedSince > 0) {
+        out.armedSince = h.armedSince;
+      }
+      // Accepts 0, unlike every other field here: it is the daemon's way of
+      // saying nothing is armed.
+      if (typeof h.armedTasks === "number" && h.armedTasks >= 0) {
+        out.armedTasks = h.armedTasks;
       }
     }
   }
