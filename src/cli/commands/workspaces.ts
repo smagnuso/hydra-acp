@@ -39,9 +39,16 @@ import {
   workspaceAnchorRefs,
 } from "../../core/workspace/refs.js";
 import { daemonFetch } from "./_shared.js";
+import { toRow, type SessionSummary } from "../session-row.js";
 
 interface Binding {
   sessionId: string;
+  /**
+   * Last activity from the session record. The daemon keeps this current
+   * for live sessions too, so the LAST column works with the daemon down —
+   * which is the state this whole file is written for.
+   */
+  updatedAt?: string;
   workspace: {
     path: string;
     sourceCwd: string;
@@ -67,6 +74,11 @@ export type WorkspaceState =
   /** A session owns it but the directory is gone. Rebuildable. */
   | "inactive";
 
+export interface SessionClaim {
+  sessionId: string;
+  updatedAt?: string;
+}
+
 export interface WorkspaceRow {
   path: string;
   sourceCwd: string;
@@ -79,8 +91,13 @@ export interface WorkspaceRow {
    * Every session claiming this path. More than one once workspaces can
    * be joined; the row is per WORKSPACE, so collapsing co-tenants to the
    * first would hide the fact that a directory is shared at all.
+   *
+   * Carries `updatedAt` because the table renders one line per claimant
+   * and needs a per-session recency, but deliberately not liveness: that
+   * is the one fact here the daemon owns, and `collectWorkspaces` stays
+   * daemon-free so diagnosis works when the daemon is the suspect.
    */
-  sessionIds?: string[];
+  sessions?: SessionClaim[];
   branch?: string;
   /** undefined when it could not be determined (missing dir, no provider). */
   clean?: boolean;
@@ -91,17 +108,40 @@ function workspacesRoot(): string {
   return path.join(paths.home(), "workspaces");
 }
 
+async function lastActivity(
+  sessionId: string,
+  recorded: string | undefined,
+): Promise<string | undefined> {
+  const st = await fs.stat(paths.historyFile(sessionId)).catch(() => undefined);
+  if (st !== undefined) {
+    return new Date(st.mtimeMs).toISOString();
+  }
+  return recorded;
+}
+
 /** Every workspace binding recorded across all session meta.json files. */
 async function readBindings(): Promise<Binding[]> {
   const dir = path.join(paths.home(), "sessions");
   const names = await fs.readdir(dir).catch(() => [] as string[]);
   const out: Binding[] = [];
   for (const name of names) {
-    const rec = await readJsonSafe<{ sessionId?: string; workspace?: Binding["workspace"] }>(
-      path.join(dir, name, "meta.json"),
-    );
+    const rec = await readJsonSafe<{
+      sessionId?: string;
+      updatedAt?: string;
+      workspace?: Binding["workspace"];
+    }>(path.join(dir, name, "meta.json"));
     if (rec?.workspace?.path !== undefined && typeof rec.sessionId === "string") {
-      out.push({ sessionId: rec.sessionId, workspace: rec.workspace });
+      // history.jsonl's mtime first, record `updatedAt` second — the same
+      // order the daemon uses to build the AGE cell in `session list`
+      // (`hist.mtime ?? r.updatedAt`). Reproducing it here rather than
+      // reading the daemon's answer is what keeps the two tables agreeing
+      // about a session's recency whether the daemon is up or not.
+      const activity = await lastActivity(rec.sessionId, rec.updatedAt);
+      out.push({
+        sessionId: rec.sessionId,
+        ...(activity !== undefined ? { updatedAt: activity } : {}),
+        workspace: rec.workspace,
+      });
     }
   }
   return out;
@@ -157,6 +197,13 @@ function rowWorkspace(row: WorkspaceRow): Workspace {
   };
 }
 
+function toClaim(b: Binding): SessionClaim {
+  return {
+    sessionId: b.sessionId,
+    ...(b.updatedAt !== undefined ? { updatedAt: b.updatedAt } : {}),
+  };
+}
+
 export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
   const bindings = await readBindings();
   const byPath = new Map<string, Binding[]>();
@@ -182,7 +229,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
         provider: bound.workspace.provider,
         state: "active",
         sessionId: bound.sessionId,
-        sessionIds: claims.map((c) => c.sessionId),
+        sessions: claims.map(toClaim),
         ...(bound.workspace.line !== undefined ? { branch: bound.workspace.line } : {}),
       });
       continue;
@@ -213,7 +260,7 @@ export async function collectWorkspaces(): Promise<WorkspaceRow[]> {
       provider: b.workspace.provider,
       state: "inactive",
       sessionId: b.sessionId,
-      sessionIds: claims.map((c) => c.sessionId),
+      sessions: claims.map(toClaim),
       ...(b.workspace.line !== undefined ? { branch: b.workspace.line } : {}),
     });
   }
@@ -1014,15 +1061,132 @@ async function removeUnowned(row: WorkspaceRow): Promise<string | undefined> {
   return reclaimBranch(ws);
 }
 
+/**
+ * Live sessions by id, or undefined when the daemon could not be asked.
+ *
+ * The distinction matters and is why this returns undefined rather than an
+ * empty map: with the daemon down every session really is cold, but so is
+ * every session when the token is stale or the port moved, and rendering
+ * COLD for all of them would state as fact something we did not check.
+ *
+ * `status=warm` is the whole point — it skips the cold-record walk on the
+ * daemon side (see SessionManager.list), so this costs one small response
+ * no matter how many hundreds of sessions exist on disk. Everything cold
+ * is already on this side, from the records readBindings opened.
+ */
+async function readLiveSessions(): Promise<Map<string, SessionSummary> | undefined> {
+  const res = await daemonFetch(
+    "/v1/sessions?status=warm&includeNonInteractive=true",
+    { rethrowNetworkError: true },
+  ).catch(() => undefined);
+  if (res === undefined || !res.ok) {
+    return undefined;
+  }
+  const body = res.body as { sessions?: SessionSummary[] } | null;
+  if (body === null || !Array.isArray(body.sessions)) {
+    return undefined;
+  }
+  return new Map(body.sessions.map((s) => [s.sessionId, s]));
+}
+
+/**
+ * One claimant's cells. Live sessions render from the daemon's summary,
+ * cold ones from a synthesized summary, and both go through the session
+ * table's own `toRow` so STATE and AGE cannot drift from `session list`.
+ */
+function claimCells(
+  claim: SessionClaim,
+  live: Map<string, SessionSummary> | undefined,
+  now: number,
+): { session: string; state: string; seen: string } {
+  // A live session renders from the daemon's own summary, so its SEEN is
+  // the daemon's timestamp — the same history-mtime-first answer
+  // lastActivity computes, just fresher mid-turn.
+  const summary = live?.get(claim.sessionId);
+  const row = toRow(
+    summary ?? {
+      sessionId: claim.sessionId,
+      // Unread for the three cells taken from this row, but required by
+      // the shape; the workspace table has its own SOURCE/WORKSPACE cells.
+      cwd: "",
+      attachedClients: 0,
+      updatedAt: claim.updatedAt ?? "",
+      status: "cold",
+    },
+    now,
+  );
+  return {
+    session: row.session,
+    // `?`, not COLD: see readLiveSessions.
+    state: live === undefined ? "?" : row.state,
+    seen: row.age,
+  };
+}
+
+/** Every session claiming a row; empty for an unowned one. */
+function claimsOf(row: WorkspaceRow): SessionClaim[] {
+  return row.sessions ?? (row.sessionId === undefined ? [] : [{ sessionId: row.sessionId }]);
+}
+
+/** Claimants newest first, so a shared workspace leads with the one in use. */
+function orderedClaims(row: WorkspaceRow): SessionClaim[] {
+  return [...claimsOf(row)].sort((a, b) =>
+    (a.updatedAt ?? "") < (b.updatedAt ?? "") ? 1 : -1,
+  );
+}
+
+/**
+ * Freshest claimant's activity, for ordering workspaces by how recently
+ * they were worked in. "" for an unowned row, which sorts it to the bottom.
+ */
+function rowActivity(row: WorkspaceRow): string {
+  let latest = "";
+  for (const claim of claimsOf(row)) {
+    const at = claim.updatedAt ?? "";
+    if (at > latest) {
+      latest = at;
+    }
+  }
+  return latest;
+}
+
 export async function runWorkspaceList(
   opts: { json?: boolean; inactive?: boolean } = {},
 ): Promise<void> {
   const all = await collectWorkspaces();
+  const live = await readLiveSessions();
   // JSON is a dump for tooling and every row carries `state`, so it
   // stays complete: a flag that silently shrinks machine-readable output
   // is worse than the noise it saves.
+  //
+  // Per-claimant liveness rides as the raw wire fields rather than the
+  // rendered cell, and is omitted entirely when the daemon could not be
+  // asked — a script reading `busy: false` off an unreachable daemon
+  // would be reading an assumption.
   if (opts.json === true) {
-    process.stdout.write(JSON.stringify({ workspaces: all }, null, 2) + "\n");
+    const enriched = all.map((r) => ({
+      ...r,
+      ...(r.sessions === undefined
+        ? {}
+        : {
+            sessions: r.sessions.map((c) => {
+              const s = live?.get(c.sessionId);
+              return {
+                ...c,
+                ...(live === undefined
+                  ? {}
+                  : {
+                      status: s === undefined ? "cold" : "warm",
+                      busy: s?.busy === true,
+                      awaitingInput: s?.awaitingInput === true,
+                      armedTasks: s?.armedTasks ?? 0,
+                    }),
+                ...(s?.updatedAt !== undefined ? { updatedAt: s.updatedAt } : {}),
+              };
+            }),
+          }),
+    }));
+    process.stdout.write(JSON.stringify({ workspaces: enriched }, null, 2) + "\n");
     return;
   }
   // An inactive row is a property of a SESSION (it points at a directory
@@ -1039,25 +1203,67 @@ export async function runWorkspaceList(
   if (rows.length === 0) {
     process.stdout.write("No workspaces on disk.\n");
   } else {
+    // One line per (workspace, claimant). The workspace cells repeat down
+    // a shared directory's lines, which is the point: a co-tenant that
+    // only showed up inside a comma-joined SESSION cell could not carry
+    // its own liveness, and liveness is what says whether a workspace is
+    // being worked in or merely exists.
+    //
+    // No STATE column: `-` in SESSION is "no session owns this" (unowned)
+    // and `-` in WORKSPACE is "the directory is not there" (inactive), so
+    // the word would only restate a cell already on the line — and on a
+    // default listing, where inactive rows are filtered out, it would
+    // restate it as the constant `active`. Both cells use the same `-` the
+    // rest of the table already uses for "nothing here", and between them
+    // they disambiguate DIRTY's `?`: with WORKSPACE `-` it means "no
+    // directory to read", and on any other row it means "reading it
+    // failed". The two words survive in the footers, where they are
+    // explained and paired with the command that acts on them.
+    //
+    // Ordered by the freshest claimant, newest first, like `session list`.
+    // Unowned rows have no claimant and sort to the bottom for free.
+    //
     // WORKSPACE goes last because it is the only variable-width column;
     // the short ones stay aligned to the left where they can be scanned.
-    const cols = [
-      ["STATE", "SESSION", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"],
-      ...rows.map((r) => [
-        r.state,
-        (r.sessionIds ?? (r.sessionId === undefined ? [] : [r.sessionId]))
-        .map((id) => id.replace(/^hydra_session_/, ""))
-        .join(",") || "-",
+    const now = Date.now();
+    const ordered = [...rows].sort((a, b) => (rowActivity(a) < rowActivity(b) ? 1 : -1));
+    const cols = [["SESSION", "LIVE", "SEEN", "N", "SOURCE", "LABEL", "DIRTY", "WORKSPACE"]];
+    for (const r of ordered) {
+      const claims = orderedClaims(r);
+      // N is blank unless the directory is shared, and then it appears on
+      // every one of its lines — you should be able to tell from whichever
+      // line you happened to land on.
+      const shared = claims.length > 1 ? String(claims.length) : "-";
+      const tail = [
         shortenHomePath(r.sourceCwd),
         r.label,
         r.changedCount === undefined ? "?" : r.changedCount > 0 ? String(r.changedCount) : "-",
-        shortenHomePath(r.path),
-      ]),
-    ];
+        // The path is recorded, not observed, so an inactive row could
+        // print it — but it names a directory that is not there, and the
+        // reader has no way to tell that from a path they could cd into.
+        // SOURCE and LABEL still say which workspace the row is about, and
+        // --json keeps the path for anything that needs it.
+        r.state === "inactive" ? "-" : shortenHomePath(r.path),
+      ];
+      if (claims.length === 0) {
+        cols.push(["-", "-", "-", "-", ...tail]);
+        continue;
+      }
+      for (const claim of claims) {
+        const cells = claimCells(claim, live, now);
+        cols.push([cells.session, cells.state, cells.seen, shared, ...tail]);
+      }
+    }
     const widths = cols[0]!.map((_, i) => Math.max(...cols.map((row) => (row[i] ?? "").length)));
     for (const row of cols) {
       process.stdout.write(
         row.map((c, i) => (c ?? "").padEnd(widths[i] ?? 0)).join("  ").trimEnd() + "\n",
+      );
+    }
+    if (live === undefined) {
+      process.stdout.write(
+        `\nLIVE is \`?\` for every session: the daemon could not be reached, so ` +
+          `warm/busy state is unknown. SEEN is read from disk and is current.\n`,
       );
     }
   }

@@ -67,6 +67,32 @@ async function branches(repo: string): Promise<string> {
   return stdout;
 }
 
+/**
+ * Split a `workspace list` table line into its columns. Positional by
+ * design: asserting on a bare regex match anywhere in the line reads a
+ * value out of whichever column happened to contain it.
+ */
+function cells(line: string): {
+  session: string;
+  live: string;
+  seen: string;
+  shared: string;
+  label: string;
+  dirty: string;
+  workspace: string;
+} {
+  const parts = line.trim().split(/\s+/);
+  return {
+    session: parts[0] ?? "",
+    live: parts[1] ?? "",
+    seen: parts[2] ?? "",
+    shared: parts[3] ?? "",
+    label: parts[5] ?? "",
+    dirty: parts[6] ?? "",
+    workspace: parts[7] ?? "",
+  };
+}
+
 describe("workspace prune", () => {
   let out: string;
 
@@ -606,10 +632,39 @@ describe("workspace list — shared workspaces", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]?.state).toBe("active");
-    expect(rows[0]?.sessionIds?.sort()).toEqual(["sess-one", "sess-two"]);
+    expect(rows[0]?.sessions?.map((c) => c.sessionId).sort()).toEqual([
+      "sess-one",
+      "sess-two",
+    ]);
+
+    // One line per claimant, each carrying the shared count, so a
+    // co-tenant is visible from whichever line you land on.
+    await runWorkspaceList();
+    const lines = out.split("\n").filter((l) => l.includes("together"));
+    expect(lines).toHaveLength(2);
+    expect(lines.map((l) => cells(l).session).sort()).toEqual(["sess-one", "sess-two"]);
+    expect(lines.map((l) => cells(l).shared)).toEqual(["2", "2"]);
+  });
+
+  it("marks a solo workspace as unshared", async () => {
+    const repo = await makeGitRepo();
+    const dir = await makeUnownedWorktree(repo, "alone");
+    await bindSession("sess-solo", {
+      path: dir,
+      sourceCwd: repo,
+      label: "alone",
+      branch: "hydra/alone",
+      repoRoot: repo,
+    });
 
     await runWorkspaceList();
-    expect(out).toContain("sess-one,sess-two");
+
+    const line = out.split("\n").find((l) => l.includes("sess-solo"));
+    expect(line).toBeDefined();
+    expect(cells(line as string).shared).toBe("-");
+    // No daemon answers in this suite, so LIVE degrades to `?` rather than
+    // claiming the session is cold.
+    expect(cells(line as string).live).toBe("?");
   });
 });
 
@@ -651,6 +706,24 @@ describe("workspace list — inactive rows", () => {
     expect(out).toContain("1 inactive");
     // The hint is for people who cannot see them; they can.
     expect(out).not.toContain("--inactive`");
+  });
+
+  it("renders the missing directory as `-` rather than a path you cannot cd to", async () => {
+    const repo = await makeGitRepo();
+    await makeMissing(repo, "ghost", "sess-ghost");
+
+    await runWorkspaceList({ inactive: true });
+
+    const line = out.split("\n").find((l) => l.includes("sess-ghost"));
+    expect(line).toBeDefined();
+    // WORKSPACE `-` is what carries "inactive" now that the STATE column
+    // is gone: the row still names the session and the label, so it is
+    // identifiable, but nothing invites you to look for the directory.
+    expect(cells(line as string).workspace).toBe("-");
+    expect(cells(line as string).label).toBe("ghost");
+    // And it is what disambiguates DIRTY's `?`: unreadable because there
+    // is nothing to read, not because reading failed.
+    expect(cells(line as string).dirty).toBe("?");
   });
 
   it("keeps every row in --json", async () => {
