@@ -836,12 +836,45 @@ export function registerSessionRoutes(
     // Compute shouldCompact for clients deciding whether to surface a compaction prompt.
     let shouldCompact = false;
     let approxTokens: number | undefined;
-    const rawHistory = await manager.getHistory(id).catch(() => [] as HistoryStoreEntry[]);
-    const history = rawHistory ?? [];
+    // The agent-reported usage the shouldCompact decision is made on when
+    // it's available, echoed back so a client can phrase its prompt from
+    // the same numbers the status bar shows rather than from approxTokens,
+    // which is a separate estimate over a different quantity and can
+    // disagree with it wildly.
+    const usage = session?.currentUsage;
+    const currentUsage =
+      typeof usage?.used === "number" &&
+      typeof usage?.size === "number" &&
+      usage.size > 0
+        ? { used: usage.used, size: usage.size }
+        : undefined;
+    // Uncapped, and in "references" mode.
+    //
+    // Uncapped because `summarizedThroughEntry` is an ABSOLUTE index into
+    // the history: the synopsis coordinator sets it from a
+    // `maxEntries: Infinity` load. A capped load (getHistory, and the
+    // store's 10k default) TAIL-slices, so indexing it by the watermark
+    // cuts at the wrong entry, and once the watermark passes the cap the
+    // slice is empty and approxTokens reads 0 for a session holding half
+    // a million tokens.
+    //
+    // "references" because estimateContextChars counts a
+    // `{__hydraBlob, bytes}` ref as the content it stands for, so the
+    // estimate is identical to the inline load without reading every
+    // externalized tool payload off disk on each attach.
+    const history = await manager
+      .loadHistory(id, { tools: "references", maxEntries: Infinity })
+      .catch(() => [] as HistoryStoreEntry[]);
     if (history.length > 0 && defaults.compaction) {
       const summarized = summarizedThroughEntry ?? 0;
       const totalEntries = history.length;
-      const unsummarizedLines = history.slice(summarized);
+      // A watermark past the end means the head of history.jsonl was
+      // trimmed out from under it: the store spills to archives without
+      // rebasing the watermark. The synopsis coordinator reads that as
+      // "watermark corrupt, re-baseline" and re-summarizes the whole
+      // file, so count the whole file here rather than reporting zero.
+      const start = summarized <= history.length ? summarized : 0;
+      const unsummarizedLines = history.slice(start);
       // Count only context-bearing payload: message/thought text plus each
       // tool call's largest input+output snapshot. Summing the raw JSON of
       // every entry instead (the original approach) counted the streaming
@@ -852,10 +885,8 @@ export function registerSessionRoutes(
       approxTokens = estimateTokens(unsummarizedChars);
       const currentModel = session?.currentModel;
       const lastActivityMs = history.at(-1)!.recordedAt;
-      // Pull authoritative usage from the warm session if attached.
-      // The heuristic prefers these over the char-estimate so utilization
-      // matches what the status bar shows the user.
-      const usage = session?.currentUsage;
+      // The heuristic prefers the agent's own numbers over the
+      // char-estimate so utilization matches what the status bar shows.
       shouldCompact = shouldCompactSession({
         summarizedThroughEntry: summarized,
         totalEntries,
@@ -875,6 +906,7 @@ export function registerSessionRoutes(
       inFlight: manager.getCompactionInFlight(),
       shouldCompact,
       ...(approxTokens != null ? { approxTokens } : {}),
+      ...(currentUsage != null ? { currentUsage } : {}),
       ...(compactionState != null ? { compactionState } : {}),
       ...(rollbackBreadcrumb != null ? { rollbackBreadcrumb } : {}),
     };

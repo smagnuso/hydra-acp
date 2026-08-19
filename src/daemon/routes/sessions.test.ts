@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AddressInfo } from "node:net";
-import { registerSessionRoutes } from "./sessions.js";
+import { registerSessionRoutes, type SessionRouteDefaults } from "./sessions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { Registry, type RegistryAgent } from "../../core/registry.js";
 import { HistoryStore } from "../../core/history-store.js";
@@ -45,7 +45,12 @@ interface Harness {
   baseUrl: string;
 }
 
-async function buildHarness(): Promise<Harness> {
+async function buildHarness(
+  opts: {
+    sessionHistoryMaxEntries?: number;
+    compaction?: SessionRouteDefaults["compaction"];
+  } = {},
+): Promise<Harness> {
   const mocks: MockAgentControls[] = [];
   const manager = new SessionManager(
     fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -58,9 +63,17 @@ async function buildHarness(): Promise<Harness> {
         .mockResolvedValueOnce({ sessionId: `u_${mocks.length}` });
       return m.agent;
     },
+    undefined,
+    opts.sessionHistoryMaxEntries !== undefined
+      ? { sessionHistoryMaxEntries: opts.sessionHistoryMaxEntries }
+      : {},
   );
   const app = Fastify();
-  registerSessionRoutes(app, manager, { agentId: "claude-code", cwd: "/w" });
+  registerSessionRoutes(app, manager, {
+    agentId: "claude-code",
+    cwd: "/w",
+    ...(opts.compaction !== undefined ? { compaction: opts.compaction } : {}),
+  });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return { app, manager, mocks, baseUrl: `http://127.0.0.1:${addr.port}` };
@@ -1500,6 +1513,140 @@ describe("session routes: compaction endpoints", () => {
     expect(body.compactionState).toBeDefined();
     expect(body.compactionState?.status).toBe("running");
     expect(body.compactionState?.iter).toBe(2);
+  });
+});
+
+describe("session routes: compact/status token accounting", () => {
+  const compaction = {
+    tailK: 20,
+    maxIterations: 3,
+    contextFraction: 0.5,
+    hardCeilingFraction: 0.85,
+    absoluteFallback: 200_000,
+    idleBeforePromptMs: 300_000,
+    modelContextWindows: {},
+  } as SessionRouteDefaults["compaction"];
+
+  let harness: Harness;
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  // 400 chars of text per entry, so estimateTokens gives a round 100
+  // tokens each and the expected total is checkable by hand.
+  function chunkEntry(i: number) {
+    return {
+      method: "session/update",
+      params: {
+        sessionId: "u_cap",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "x".repeat(400) },
+        },
+      },
+      recordedAt: 1_000 + i,
+    };
+  }
+
+  it("counts history above a watermark that sits past the store's entry cap", async () => {
+    // The regression: summarizedThroughEntry is an absolute index, but
+    // the route used to read history through the store's default entry
+    // cap, which tail-slices. With a watermark past the cap the slice
+    // came out empty and the endpoint reported 0 tokens for a session
+    // with 10 unsummarized entries in it.
+    harness = await buildHarness({ sessionHistoryMaxEntries: 10, compaction });
+    const imported = await harness.manager.importBundle({
+      version: 1 as const,
+      exportedAt: "2026-08-19T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_cap",
+        lineageId: "lin_cap",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-08-19T00:00:00.000Z",
+        updatedAt: "2026-08-19T00:00:00.000Z",
+        summarizedThroughEntry: 20,
+      },
+      history: Array.from({ length: 30 }, (_, i) => chunkEntry(i)),
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { approxTokens?: number };
+    // Entries 20..29: 10 * 400 chars / 4.
+    expect(body.approxTokens).toBe(1000);
+  });
+
+  it("counts the whole file when the watermark is ahead of it", async () => {
+    // History spills its head to archives without rebasing the
+    // watermark, so a watermark past the end means "stale watermark",
+    // not "nothing left to summarize": the same reading the synopsis
+    // coordinator takes when it re-baselines.
+    harness = await buildHarness({ compaction });
+    const imported = await harness.manager.importBundle({
+      version: 1 as const,
+      exportedAt: "2026-08-19T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_stale_wm",
+        lineageId: "lin_stale_wm",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-08-19T00:00:00.000Z",
+        updatedAt: "2026-08-19T00:00:00.000Z",
+        summarizedThroughEntry: 500,
+      },
+      history: Array.from({ length: 4 }, (_, i) => chunkEntry(i)),
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { approxTokens?: number };
+    expect(body.approxTokens).toBe(400);
+  });
+
+  it("echoes the agent-reported usage the decision was made on", async () => {
+    harness = await buildHarness({ compaction });
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    harness.mocks[0]!.triggerNotification("session/update", {
+      sessionId: "u_1",
+      update: { sessionUpdate: "usage_update", used: 513_500, size: 1_000_000 },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      currentUsage?: { used: number; size: number };
+    };
+    expect(body.currentUsage).toEqual({ used: 513_500, size: 1_000_000 });
+  });
+
+  it("omits currentUsage when the agent has reported none", async () => {
+    harness = await buildHarness({ compaction });
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { currentUsage?: unknown };
+    expect(body.currentUsage).toBeUndefined();
   });
 });
 

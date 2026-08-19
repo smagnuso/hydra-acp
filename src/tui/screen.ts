@@ -461,7 +461,7 @@ export interface ConfirmPromptSpec {
 // hotkey UX as the permission prompt so muscle memory transfers.
 // Dismissed by Enter on the selected option, y/n quick-pick, or Esc.
 export interface CompactionPromptSpec {
-  // E.g. "This session has ~85K tokens of history above the compaction watermark."
+  // E.g. "This session is using 513.5k of its 1.0M token context window."
   message: string;
   options: Array<{ label: string; key: "y" | "n" }>;
   selectedIndex: number;

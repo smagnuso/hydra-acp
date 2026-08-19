@@ -138,6 +138,7 @@ import {
   type PermissionClickTarget,
 } from "./screen.js";
 import { formatApproxTokens } from "../core/compaction-heuristic.js";
+import { formatTokens } from "./bar/fields.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -9374,6 +9375,7 @@ async function runSession(
       const compactInfo = (await compactInfoRes.json()) as {
         shouldCompact?: boolean;
         approxTokens?: number;
+        currentUsage?: { used?: number; size?: number };
         compactionState?: { status?: string; attempts?: number } | null;
       };
       // (A) Seed the indicator from the live compactionState. Mirrors
@@ -9394,10 +9396,23 @@ async function runSession(
       if (compactInfo.shouldCompact !== true) {
         return;
       }
-      const approxTokens = compactInfo.approxTokens ?? 0;
+      // Phrase the prompt from whichever signal the daemon decided on.
+      // Agent-reported usage is both the decision and the pair already
+      // on the status bar, so the prompt and the bar agree by
+      // construction. approxTokens is the weaker estimate the daemon
+      // itself falls back to, and it measures a different quantity: the
+      // history above the compaction watermark alone, which is
+      // legitimately near zero for a session whose last compaction
+      // covered everything on disk while the agent still holds all of it.
+      const used = compactInfo.currentUsage?.used;
+      const size = compactInfo.currentUsage?.size;
+      const message =
+        typeof used === "number" && typeof size === "number" && size > 0
+          ? `This session is using ${formatTokens(used)} of its ${formatTokens(size)} token context window.`
+          : `This session has ~${formatApproxTokens(compactInfo.approxTokens ?? 0)} tokens of history above the compaction watermark.`;
       compactionPromptActive = true;
       screen.setCompactionPrompt({
-        message: `This session has ~${formatApproxTokens(approxTokens)} tokens of history above the compaction watermark.`,
+        message,
         options: [
           { label: "Compact now", key: "y" },
           { label: "Not now", key: "n" },
