@@ -42,6 +42,7 @@ import {
   reportBanner,
   reportPermission,
   reportSessionbar,
+  reportTurn,
   setReportSuspended,
 } from "./report.js";
 import { nearestPane } from "./herdr.js";
@@ -510,6 +511,8 @@ describe("suspended (picker up)", () => {
       model: null,
       cost: null,
       queue: null,
+      turn: null,
+      turn_label: null,
       session: null,
     });
   });
@@ -564,6 +567,100 @@ describe("deduplication", () => {
     reportSessionbar({ sessionId: "s1", agent: "claude", model: "opus-5" });
     await settle();
     expect(methodsSent()).toEqual(["pane.report_metadata"]);
+  });
+
+  it("re-reports state when only the turn origin changed", async () => {
+    // The origin rides the state frame, so deduping on state alone would
+    // swallow it: a peer turn starting while an agent turn is already
+    // running is working -> working with a different cause.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportTurn({ origin: "agent" });
+    reportBanner({ status: "busy" });
+    await settle();
+    frames = [];
+    // reportTurn stores without flushing; the 1Hz elapsed tick is what
+    // carries a mid-turn origin change out. Stand in for that tick.
+    reportTurn({ origin: "peer" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(lastOf("pane.report_agent")!.params).toMatchObject({
+      state: "working",
+      turn_origin: "peer",
+    });
+  });
+
+  it("does not re-report state when only the origin LABEL changed", async () => {
+    // The label is free-form display text and lives in the token map; a new
+    // one should not spend a state frame (or a seq) on an unchanged state.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportTurn({ origin: "agent", label: "monitor one" });
+    reportBanner({ status: "busy" });
+    await settle();
+    frames = [];
+    reportTurn({ origin: "agent", label: "monitor two" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(methodsSent()).toEqual(["pane.report_metadata"]);
+  });
+});
+
+describe("turn provenance", () => {
+  it("rides both the state frame and the token map", async () => {
+    // Two carriers on purpose: the frame is where a future herdr policy
+    // would read it, the tokens are what `pane.list` reads back today.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportTurn({ origin: "agent", label: "monitor: deploy.log" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(lastOf("pane.report_agent")!.params).toMatchObject({
+      state: "working",
+      turn_origin: "agent",
+      turn_label: "monitor: deploy.log",
+    });
+    expect(lastOf("pane.report_metadata")!.params.tokens).toMatchObject({
+      turn: "agent",
+      turn_label: "monitor: deploy.log",
+    });
+  });
+
+  it("omits the frame fields rather than sending nulls", async () => {
+    // herdr ignores what it doesn't know either way; omitting keeps the
+    // frame honest about carrying no claim.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportBanner({ status: "busy" });
+    await settle();
+    const params = lastOf("pane.report_agent")!.params;
+    expect(params).not.toHaveProperty("turn_origin");
+    expect(params).not.toHaveProperty("turn_label");
+  });
+
+  it("still reports `working` for an agent-initiated turn", async () => {
+    // Pass-through, not policy: the state herdr sees is unchanged by this
+    // feature, which is why the completion chime is still herdr's call.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportTurn({ origin: "agent", label: "monitor" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(lastOf("pane.report_agent")!.params.state).toBe("working");
+    reportBanner({ status: "ready" });
+    await settle();
+    expect(lastOf("pane.report_agent")!.params).toMatchObject({
+      state: "idle",
+      turn_origin: "agent",
+    });
+  });
+
+  it("clears both tokens on release", async () => {
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportTurn({ origin: "agent", label: "monitor" });
+    await settle();
+    frames = [];
+    await releaseTerminalHost();
+    await settle();
+    expect(lastOf("pane.report_metadata")!.params.tokens).toMatchObject({
+      turn: null,
+      turn_label: null,
+    });
   });
 });
 
@@ -631,6 +728,8 @@ describe("tokens", () => {
       model: "opus-5",
       cost: "$1.24",
       queue: "3",
+      turn: null,
+      turn_label: null,
       session: "s1",
     });
 
@@ -653,6 +752,8 @@ describe("tokens", () => {
       model: null,
       cost: null,
       queue: null,
+      turn: null,
+      turn_label: null,
       // The whole reason this token exists: it has to follow an
       // in-process switch, which argv and the environment cannot.
       session: "s2",

@@ -97,6 +97,14 @@ const TOKEN_KEYS = [
   "@hydra_model",
   "@hydra_cost",
   "@hydra_queue",
+  // Who caused the most recent turn, and a detail string for it. Semantic
+  // words for the same reason as @hydra_state, and useful for the same kind
+  // of format-string branch — e.g. flag only the windows whose agent stopped
+  // on work a human asked for:
+  //
+  //   #{?#{&&:#{==:#{@hydra_state},idle},#{!=:#{@hydra_turn_origin},agent}},*,}
+  "@hydra_turn_origin",
+  "@hydra_turn_label",
   // Unlike its neighbours this one is not for display: `tmux-hardcopy.sh`
   // reads it to decide whether the pane is showing a hydra session, and
   // which. It lives here rather than in terminal-user-var.ts — which used
@@ -186,6 +194,8 @@ class TmuxHost implements TerminalHost {
       "@hydra_model": snap.model,
       "@hydra_cost": snap.cost,
       "@hydra_queue": snap.queued !== null && snap.queued > 0 ? String(snap.queued) : null,
+      "@hydra_turn_origin": snap.turnOrigin,
+      "@hydra_turn_label": snap.turnLabel,
       // snap.sessionId is the HYDRA session; this.sessionId() above is the
       // tmux one. Unrelated despite the name.
       "@hydra_session": snap.sessionId,

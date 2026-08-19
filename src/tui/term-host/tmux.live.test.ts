@@ -98,11 +98,27 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
       model: "opus",
       cost: "$1.23",
       queued: 2,
+      turnOrigin: "peer",
+      turnLabel: "fix flaky test",
     });
     const rendered = (
       await tmux("display-message", "-p", "-t", pane, "-F", "[#{@hydra_state}][#{@hydra_cost}]")
     ).trim();
     expect(rendered).toBe("[blocked][$1.23]");
+
+    // Turn provenance resolves the same way, which is what makes a
+    // "only flag work a human asked for" format string possible.
+    const turn = (
+      await tmux(
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        "-F",
+        "[#{@hydra_turn_origin}][#{@hydra_turn_label}]",
+      )
+    ).trim();
+    expect(turn).toBe("[peer][fix flaky test]");
 
     // And per-window, which is what window-status-format evaluates.
     const perWindow = (await tmux("list-windows", "-F", "#{@hydra_state}")).trim();
@@ -119,6 +135,8 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
       model: null,
       cost: null,
       queued: null,
+      turnOrigin: null,
+      turnLabel: null,
     });
     const rendered = (
       await tmux("display-message", "-p", "-t", pane, "-F", "[#{@hydra_cost}][#{@hydra_model}]")
@@ -189,6 +207,8 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
       model: null,
       cost: null,
       queued: null,
+      turnOrigin: null,
+      turnLabel: null,
     });
     const listed = (
       await tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@hydra_session}")
@@ -224,6 +244,8 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
       model: null,
       cost: null,
       queued: null,
+      turnOrigin: null,
+      turnLabel: null,
     });
     await expect(host.revealSession!("hydra_session_LIVEGONE")).resolves.toBe(
       true,

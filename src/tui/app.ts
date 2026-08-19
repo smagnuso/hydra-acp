@@ -164,7 +164,9 @@ import {
   revealOrOpen,
   setLauncherMode,
 } from "./term-host/open.js";
-import { releaseTerminalHost } from "./term-host/report.js";
+import { releaseTerminalHost, reportTurn } from "./term-host/report.js";
+import { classifyPromptOrigin } from "./term-host/turn-origin.js";
+import type { TurnOrigin } from "./term-host/types.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -2011,9 +2013,30 @@ async function runSession(
   // timer stay in sync regardless of whether the underlying turn was
   // ours or a peer's. Without this the banner would stay on "ready"
   // while a peer is mid-turn.
-  const adjustPendingTurns = (delta: number): void => {
+  //
+  // `origin` names who caused the turn, for the terminal host's snapshot. It
+  // is read on POSITIVE deltas only, and recorded even when a turn is already
+  // running, so the value always describes the most recently STARTED turn.
+  // Nothing here branches on it — the banner and every state derived from it
+  // are identical for an agent-initiated turn and a typed one; it is passed
+  // through for a host to act on. Omitting it on a positive delta means "a
+  // turn we adopted rather than saw begin", which reports as unknown rather
+  // than inheriting the previous turn's origin.
+  //
+  // Recorded BEFORE the banner moves below, on purpose: reportTurn only
+  // stores the value (it is the one tap that doesn't flush), so the banner's
+  // own flush carries the new state and its cause out together instead of
+  // spending a frame on each. See reportTurn.
+  const adjustPendingTurns = (
+    delta: number,
+    origin?: TurnOrigin | null,
+    originLabel?: string | null,
+  ): void => {
     const before = pendingTurns;
     pendingTurns = Math.max(0, pendingTurns + delta);
+    if (delta > 0) {
+      reportTurn({ origin: origin ?? null, label: originLabel });
+    }
     // Banner updates reference `screen`, which is declared (as `const`)
     // later in this function. During the attach handshake the daemon
     // sends history notifications BEFORE control returns to the line
@@ -2143,7 +2166,13 @@ async function runSession(
       }
     }
     if (rawTag === "prompt_received") {
-      adjustPendingTurns(1);
+      // The daemon excludes the originator from this broadcast, so a
+      // prompt_received arriving here is never ours: it's another client or a
+      // peer session, and sentBy says which.
+      const from = classifyPromptOrigin(
+        (update as { sentBy?: unknown } | undefined)?.sentBy,
+      );
+      adjustPendingTurns(1, from.origin, from.label);
     } else if (event?.kind === "turn-complete") {
       adjustPendingTurns(-1);
       // The main session has advanced — any retained /btw fork's
@@ -6504,7 +6533,7 @@ async function runSession(
           // transition; the wire turn_complete for M2 — now included
           // for amend-originated entries via the daemon's wasAmend
           // flag — will decrement it back when M2 ends.
-          adjustPendingTurns(1);
+          adjustPendingTurns(1, "self");
           return;
         }
         // Daemon didn't accept the amend → echo will never bind to a
@@ -7038,7 +7067,7 @@ async function runSession(
       userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
     }
 
-    adjustPendingTurns(1);
+    adjustPendingTurns(1, "self");
     // Stash the user-text echo for later flush. Hold a reference so
     // we can splice this entry out on error even if other prompts
     // have been pushed behind it in the meantime.
@@ -9073,7 +9102,7 @@ async function runSession(
       screen.appendLines(formatEvent(event));
       if (!unsolicitedTurnOpen) {
         unsolicitedTurnOpen = true;
-        adjustPendingTurns(1);
+        adjustPendingTurns(1, "agent", event.cause ?? null);
       }
       return;
     }
@@ -9778,6 +9807,10 @@ async function runSession(
         pendingTurns,
       });
       if (reconcile.pendingTurnsDelta !== 0) {
+        // No origin on purpose: the daemon's turnStartedAt says a turn is
+        // running, not who started it, so this adopts a turn without
+        // attribution. Reports as unknown rather than inheriting whatever
+        // the last turn we did see was.
         adjustPendingTurns(reconcile.pendingTurnsDelta);
       }
       if (reconcile.banner === "busy" && reconcile.busySince !== undefined) {

@@ -27,6 +27,30 @@
 export type AgentActivity = "idle" | "working" | "blocked" | "unknown";
 
 /**
+ * Who caused a turn.
+ *
+ *   self   — this pane's own composer.
+ *   client — another attached client delivered the prompt (the TUI in
+ *            another pane, the Slack bridge, the browser). Also covers a
+ *            label-only send from an external program (`sentBy.fromLabel`
+ *            with no resolved session, e.g. "jenkins:12847"): something
+ *            delivered it and named itself, which is the same question
+ *            `name` answers.
+ *   peer    — the prompt carried a resolved `sentBy.fromSession`, so another
+ *            hydra session was behind it. Strictly a resolved session id;
+ *            see PROTOCOL.md "Prompt provenance".
+ *   agent   — no prompt at all. The agent resumed itself after a background
+ *            task finished; see PROTOCOL.md "Agent-initiated turns".
+ *
+ * Deliberately only four values. `sentBy` is self-asserted and the protocol's
+ * trust posture is explicit that provenance is not identity proof, so finer
+ * classification here (human vs automation behind a `client`) would be
+ * inventing certainty we don't have. A consumer that wants to guess has
+ * `turnLabel`.
+ */
+export type TurnOrigin = "self" | "client" | "peer" | "agent";
+
+/**
  * Everything a host might want to display about the current session.
  *
  * DECLARATIVE, NOT EVENTS. Core merges the TUI's funnels, derives this,
@@ -70,6 +94,44 @@ export interface TerminalHostSnapshot {
   cost: string | null;
   /** Queued prompt count; null rather than 0 when there's nothing queued. */
   queued: number | null;
+  /**
+   * Who caused the MOST RECENT turn. Null before this pane has seen one.
+   *
+   * DESCRIBES THE MOST RECENT TURN, NOT AN IN-FLIGHT ONE, and deliberately
+   * survives that turn's end. `state` says whether a turn is running; this
+   * says who started the turn `state` is talking about. So the single report
+   * that carries `working -> idle` also carries who started the work that
+   * just finished, and a consumer deciding whether a completion is worth
+   * announcing can decide from that one report. Clearing it on completion
+   * would push "remember the previous report" onto every consumer, for no
+   * gain: "who started the turn that is no longer running" is still a
+   * well-formed fact.
+   *
+   * PUBLISHED, NOT ACTED ON. Nothing in hydra branches on this — `state` is
+   * derived exactly as it was before this field existed, including for
+   * `agent`-origin turns, which still report `working`. It exists so a host
+   * (or anything reading a host's published state) can tell an
+   * agent-initiated completion from one a human is waiting on. Any policy
+   * belongs on the consumer's side of the interface.
+   *
+   * Null also means "adopted a turn already in flight" — after a reconnect
+   * the daemon tells us a turn is running but not who started it, and
+   * inheriting the previous turn's origin there would be a fabrication.
+   */
+  turnOrigin: TurnOrigin | null;
+  /**
+   * Human-readable detail about that turn's origin, or null when there is
+   * nothing more specific than the origin word.
+   *
+   * By origin: the background task that woke the agent (`agent`), the peer
+   * session's title (`peer`), the delivering client's name or asserted label
+   * (`client`). Never set for `self` — the pane the user is looking at needs
+   * no attribution.
+   *
+   * Free-form and agent/client-authored, so treat it as display text: no
+   * consumer should branch on its contents.
+   */
+  turnLabel: string | null;
 }
 
 /**

@@ -61,6 +61,8 @@ function snapshot(over: Partial<TerminalHostSnapshot> = {}): TerminalHostSnapsho
     model: "opus",
     cost: "$1.23",
     queued: 2,
+    turnOrigin: "self",
+    turnLabel: null,
     ...over,
   };
 }
@@ -130,7 +132,7 @@ describe("targeting", () => {
     const a = argv();
     // Every set-option in the chain carries the target, not just the first.
     const targets = a.filter((_, i) => a[i - 1] === "-t");
-    expect(targets).toHaveLength(8);
+    expect(targets).toHaveLength(10);
     expect(new Set(targets)).toEqual(new Set(["%3"]));
   });
 
@@ -222,13 +224,13 @@ describe("splitTab", () => {
 
 describe("report", () => {
   it("writes the whole token set in a single invocation", async () => {
-    // One spawn per report; eight set-options chained inside it. Anything
-    // per-key would be absurd at the banner funnel's 1Hz.
+    // One spawn per report; one set-option per token chained inside it.
+    // Anything per-key would be absurd at the banner funnel's 1Hz.
     await host().report(snapshot());
     expect(calls).toHaveLength(1);
     const a = argv();
-    expect(a.filter((x) => x === ";")).toHaveLength(7);
-    expect(a.filter((x) => x === "set-option")).toHaveLength(8);
+    expect(a.filter((x) => x === ";")).toHaveLength(9);
+    expect(a.filter((x) => x === "set-option")).toHaveLength(10);
   });
 
   it("sets semantic words, not glyphs", async () => {
@@ -285,7 +287,7 @@ describe("report", () => {
     await host().report(snapshot());
     calls = [];
     await host().release();
-    expect(argv().filter((x) => x === "-u")).toHaveLength(8);
+    expect(argv().filter((x) => x === "-u")).toHaveLength(10);
   });
 
   it("does not clear on release when nothing was ever reported", async () => {

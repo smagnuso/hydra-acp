@@ -60,7 +60,6 @@
 import * as net from "node:net";
 import * as path from "node:path";
 import type {
-  AgentActivity,
   OpenTabResult,
   OpenTabSpec,
   TabLabelView,
@@ -86,7 +85,23 @@ const AGENT_LABEL = "hydra";
 // while dropping the id for everyone else. Tokens have no such gate.
 // If hydra is ever added to that allowlist, move `session` there and drop
 // it from this set.
-const TOKEN_KEYS = ["kind", "cwd", "model", "cost", "queue", "session"] as const;
+//
+// `turn`/`turn_label` ride the token map rather than only the state report
+// below because tokens are the only part of this that reads BACK: `pane.list`
+// returns each pane's token map, so external tooling can ask herdr who caused
+// a pane's last turn today, with no herdr-side change. Fields on
+// pane.report_agent are write-only from our side — herdr drops what it
+// doesn't know rather than storing it.
+const TOKEN_KEYS = [
+  "kind",
+  "cwd",
+  "model",
+  "cost",
+  "queue",
+  "turn",
+  "turn_label",
+  "session",
+] as const;
 type TokenKey = (typeof TOKEN_KEYS)[number];
 type Tokens = Record<TokenKey, string | null>;
 
@@ -362,7 +377,12 @@ class HerdrHost implements TerminalHost {
   // herdr splits one snapshot across two frames, so it dedupes at a finer
   // grain than core does: a state-only change shouldn't resend the token
   // map, and the 1Hz banner tick means that would otherwise be constant.
-  private sentState: AgentActivity | null = null;
+  // Keyed on state AND turn origin, not state alone: the origin rides the
+  // state frame, so deduping on state would swallow the origin change on a
+  // `working -> working` re-report. Conversely the key must not include the
+  // origin LABEL, which is free-form text that belongs to the token map — a
+  // changed label alone should not re-report state.
+  private sentState: string | null = null;
   private sentMeta: string | null = null;
   // True once anything has been reported, so release() knows whether there
   // is any authority to withdraw.
@@ -381,6 +401,8 @@ class HerdrHost implements TerminalHost {
       model: snap.model ?? null,
       cost: snap.cost ?? null,
       queue: formatQueue(snap.queued),
+      turn: snap.turnOrigin,
+      turn_label: snap.turnLabel,
       session: snap.sessionId ?? null,
     };
   }
@@ -442,7 +464,8 @@ class HerdrHost implements TerminalHost {
     // transition. The cost is no agent row until a real state arrives, a
     // fraction of a second, versus a false notification on every attach.
     const withholdOpeningUnknown = this.sentState === null && snap.state === "unknown";
-    if (this.sentState !== snap.state && !withholdOpeningUnknown) {
+    const stateKey = `${snap.state} ${snap.turnOrigin ?? ""}`;
+    if (this.sentState !== stateKey && !withholdOpeningUnknown) {
       frames.push({
         method: "pane.report_agent",
         params: {
@@ -450,6 +473,15 @@ class HerdrHost implements TerminalHost {
           source: SOURCE,
           agent: AGENT_LABEL,
           state: snap.state,
+          // Unknown to herdr today, and harmless: nothing in its api schema
+          // sets deny_unknown_fields, so these deserialize away. Sent anyway
+          // so the day herdr wants to gate its completion chime on "did a
+          // human ask for this", the data is already arriving on the frame
+          // that carries the transition — no hydra release needed to turn it
+          // on. herdr does not store or echo these; `turn`/`turn_label` in
+          // the token map are the readable copy.
+          ...(snap.turnOrigin ? { turn_origin: snap.turnOrigin } : {}),
+          ...(snap.turnLabel ? { turn_label: snap.turnLabel } : {}),
           seq: nextSeq(),
         },
       });
@@ -475,7 +507,7 @@ class HerdrHost implements TerminalHost {
     // convince us forever that herdr is up to date.
     const prevState = this.sentState;
     const prevMeta = this.sentMeta;
-    this.sentState = snap.state;
+    this.sentState = stateKey;
     this.sentMeta = metaKey;
     this.claimed = true;
     await this.send(frames, () => {
@@ -500,6 +532,8 @@ class HerdrHost implements TerminalHost {
       model: null,
       cost: null,
       queue: null,
+      turn: null,
+      turn_label: null,
       session: null,
     };
     const flushed = this.send([

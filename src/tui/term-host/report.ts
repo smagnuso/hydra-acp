@@ -34,7 +34,7 @@
 import * as path from "node:path";
 import { terminalHost } from "./index.js";
 import { restoreTabLabel, syncTabLabel, TRANSIENT_TAB_LABEL } from "./label-sync.js";
-import type { AgentActivity, TerminalHostSnapshot } from "./types.js";
+import type { AgentActivity, TerminalHostSnapshot, TurnOrigin } from "./types.js";
 
 /**
  * Tab label shown while the picker is up.
@@ -69,6 +69,19 @@ export interface BannerView {
   queued?: number | undefined;
 }
 
+/**
+ * One turn's provenance, pushed as the turn STARTS.
+ *
+ * Not derived from either funnel: the banner knows a turn is running but not
+ * whose it is, and by the time it goes quiet the daemon has told us nothing
+ * about who started what just ended. The three call sites that begin a turn
+ * each know their own answer, so this is pushed from there.
+ */
+export interface TurnView {
+  origin: TurnOrigin | null;
+  label?: string | null | undefined;
+}
+
 // Merged view of everything the funnels have told us. Partial by nature:
 // each funnel patches its own fields.
 const live: {
@@ -81,10 +94,14 @@ const live: {
   status?: string | undefined;
   queued?: number | undefined;
   permission: boolean;
+  // Provenance of the most recent turn. Outlives the turn deliberately; see
+  // TerminalHostSnapshot.turnOrigin.
+  turnOrigin: TurnOrigin | null;
+  turnLabel: string | null;
   // True while the TUI isn't presenting a session — the picker is up, or the
   // screen is otherwise stopped. See setReportSuspended.
   suspended: boolean;
-} = { permission: false, suspended: false };
+} = { permission: false, turnOrigin: null, turnLabel: null, suspended: false };
 
 // What we last handed to the adapter. The banner funnel fires at 1Hz while a
 // turn runs (the elapsed clock), so without this we'd call report() every
@@ -216,6 +233,8 @@ function snapshot(): TerminalHostSnapshot {
     model: live.model ?? null,
     cost: formatCost(live.costAmount),
     queued: live.queued ?? null,
+    turnOrigin: live.turnOrigin,
+    turnLabel: live.turnLabel,
   };
 }
 
@@ -282,6 +301,15 @@ export function reportSessionbar(view: SessionbarView): void {
   if (!terminalHost()) {
     return;
   }
+  // Turn provenance is the one field that survives its own turn, so it is
+  // also the one field a session switch can strand: the new session's first
+  // report would otherwise be stamped with who started a turn in the session
+  // we just left. Nothing else needs this because everything else arrives in
+  // the patch itself, per the "assign, don't merge" note above.
+  if (view.sessionId !== live.sessionId) {
+    live.turnOrigin = null;
+    live.turnLabel = null;
+  }
   live.sessionId = view.sessionId;
   live.agent = view.agent;
   live.title = view.title;
@@ -310,6 +338,39 @@ export function reportBanner(view: BannerView): void {
   live.status = view.status;
   live.queued = view.queued;
   flush();
+}
+
+/**
+ * Tap for the start of a turn — who caused it.
+ *
+ * Called on every turn START and never on an end, which is what makes the
+ * value outlive the turn. A `null` origin is a real value here: it means a
+ * turn we adopted rather than saw begin (post-reconnect reconcile), where the
+ * daemon tells us a turn is running but not whose it is.
+ *
+ * DELIBERATELY DOES NOT FLUSH, the only tap that doesn't. A turn's origin is
+ * only meaningful next to a state, and at the moment it arrives the banner
+ * has not moved yet — `live.status` still says whatever it said before the
+ * turn began. Flushing here would emit a frame pairing the NEW origin with
+ * the OLD state, and the banner's own flush would follow a beat later with
+ * the pair we actually meant. Two frames, the first of them a fiction.
+ *
+ * So provenance annotates the reports that state changes already produce
+ * rather than producing any of its own. What guarantees it gets out promptly:
+ * a turn beginning always moves the banner (adjustPendingTurns' 0 -> >0 edge
+ * sets `busy` in the same synchronous block), and a turn beginning while the
+ * session is ALREADY busy is covered by the elapsed clock's 1Hz banner tick,
+ * which runs for exactly as long as a turn is in flight. The bounded cost is
+ * that a second turn starting and the first completing inside the same second
+ * can leave the completion carrying the earlier turn's origin — which is
+ * arguably the more accurate answer for the turn that just ended anyway.
+ */
+export function reportTurn(view: TurnView): void {
+  if (!terminalHost()) {
+    return;
+  }
+  live.turnOrigin = view.origin;
+  live.turnLabel = view.label ?? null;
 }
 
 /** Mark the reporter suspended (picker up / screen stopped) or live again. */
@@ -399,6 +460,8 @@ export async function releaseTerminalHost(): Promise<void> {
   }
   sent = null;
   live.sessionId = undefined;
+  live.turnOrigin = null;
+  live.turnLabel = null;
   try {
     await host.release();
   } catch {
@@ -417,6 +480,8 @@ export function __resetReportForTests(): void {
   live.status = undefined;
   live.queued = undefined;
   live.permission = false;
+  live.turnOrigin = null;
+  live.turnLabel = null;
   live.suspended = false;
   sent = null;
   endHold();

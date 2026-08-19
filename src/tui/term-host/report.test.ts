@@ -20,6 +20,7 @@ import {
   reportBanner,
   reportPermission,
   reportSessionbar,
+  reportTurn,
   setReportSuspended,
 } from "./report.js";
 import type { TerminalHost, TerminalHostSnapshot } from "./types.js";
@@ -449,6 +450,128 @@ describe("snapshot fields", () => {
     reportSessionbar({ sessionId: "s2", agent: "codex" });
     await settle();
     expect(last()).toMatchObject({ agent: "codex", model: null, cost: null });
+  });
+});
+
+describe("turn provenance", () => {
+  it("carries the origin and its label", async () => {
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "agent", label: "monitor: errors in deploy.log" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()).toMatchObject({
+      state: "working",
+      turnOrigin: "agent",
+      turnLabel: "monitor: errors in deploy.log",
+    });
+  });
+
+  it("outlives the turn, so the completing report says who started it", async () => {
+    // The load-bearing property. A consumer deciding whether a completion
+    // deserves a notification reads one report, not two.
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "agent", label: "monitor" });
+    reportBanner({ status: "busy" });
+    await settle();
+    reportBanner({ status: "ready" });
+    await settle();
+    expect(last()).toMatchObject({
+      state: "idle",
+      turnOrigin: "agent",
+      turnLabel: "monitor",
+    });
+  });
+
+  it("does not change how state is derived", async () => {
+    // Pass-through only: an agent-initiated turn is still `working`. If this
+    // ever fails, someone has started making policy on the wrong side of the
+    // interface.
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "agent" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()?.state).toBe("working");
+  });
+
+  it("does not itself emit a report", async () => {
+    // The whole discipline: provenance annotates the reports that state
+    // changes already produce. Flushing here would pair the new origin with
+    // the state the banner has not moved off yet.
+    reportSessionbar({ sessionId: "s1" });
+    reportBanner({ status: "ready" });
+    await settle();
+    const before = snaps.length;
+    reportTurn({ origin: "agent", label: "monitor" });
+    await settle();
+    expect(snaps.length).toBe(before);
+    // ...and it rides the next state change that does report.
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()).toMatchObject({ state: "working", turnOrigin: "agent" });
+  });
+
+  it("a later turn replaces the previous origin", async () => {
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "agent", label: "monitor" });
+    reportBanner({ status: "busy" });
+    await settle();
+    // A second turn starting while the first runs. The 1Hz elapsed tick is
+    // what carries it out; stand in for that tick here.
+    reportTurn({ origin: "self" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()).toMatchObject({ turnOrigin: "self", turnLabel: null });
+  });
+
+  it("null is a real origin — a turn adopted rather than seen begin", async () => {
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "peer", label: "fix flaky test" });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()).toMatchObject({ turnOrigin: "peer" });
+    reportTurn({ origin: null });
+    reportBanner({ status: "busy" });
+    await settle();
+    expect(last()).toMatchObject({ turnOrigin: null, turnLabel: null });
+  });
+
+  it("does not survive a session switch", async () => {
+    // The one field that outlives its turn is the one a switch can strand:
+    // the new session's first report must not be stamped with the old
+    // session's turn.
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "peer", label: "fix flaky test" });
+    reportBanner({ status: "busy" });
+    await settle();
+    reportSessionbar({ sessionId: "s2" });
+    await settle();
+    expect(last()).toMatchObject({
+      sessionId: "s2",
+      turnOrigin: null,
+      turnLabel: null,
+    });
+  });
+
+  it("survives a re-report of the SAME session", async () => {
+    // Distinguishes the switch reset above from an ordinary sessionbar
+    // patch, which happens on every model/cost change mid-turn.
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "peer", label: "fix flaky test" });
+    await settle();
+    reportSessionbar({ sessionId: "s1", model: "opus" });
+    await settle();
+    expect(last()).toMatchObject({ turnOrigin: "peer", turnLabel: "fix flaky test" });
+  });
+
+  it("is withdrawn on teardown", async () => {
+    reportSessionbar({ sessionId: "s1" });
+    reportTurn({ origin: "agent", label: "monitor" });
+    reportBanner({ status: "busy" });
+    await settle();
+    await releaseTerminalHost();
+    reportSessionbar({ sessionId: "s1" });
+    await settle();
+    expect(last()).toMatchObject({ turnOrigin: null, turnLabel: null });
   });
 });
 
