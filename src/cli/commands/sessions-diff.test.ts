@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderDiff } from "./sessions-diff.js";
+import { makeSessionPathDisplay } from "../session-path-display.js";
 import type { FileEditAggregate } from "../../core/history-edits.js";
 
 describe("renderDiff", () => {
@@ -22,6 +23,58 @@ describe("renderDiff", () => {
     expect(out).toContain("@@ -1,1 +1,1 @@");
     expect(out).toContain("- old line");
     expect(out).toContain("+ new line");
+  });
+
+  it("renders headers through the display mapping, dropping the a//abs double slash", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/home/u/repo/src/tui/app.ts",
+        created: false,
+        hunks: [{ oldText: "old\n", newText: "new\n" }],
+      },
+    ];
+    const show = makeSessionPathDisplay({ cwd: "/home/u/repo" });
+    const out = renderDiff(files, false, show);
+    expect(out).toContain("diff --hydra a/src/tui/app.ts b/src/tui/app.ts");
+    expect(out).toContain("--- a/src/tui/app.ts");
+    expect(out).toContain("+++ b/src/tui/app.ts");
+    expect(out).not.toContain("a//home");
+  });
+
+  it("maps an isolated session's workspace paths into the source tree", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/home/u/.hydra-acp/workspaces/abc/s-1/src/tui/app.ts",
+        created: true,
+        hunks: [{ oldText: "", newText: "hello\n" }],
+      },
+    ];
+    const show = makeSessionPathDisplay({
+      cwd: "/home/u/.hydra-acp/workspaces/abc/s-1",
+      workspace: {
+        sourceCwd: "/home/u/repo",
+        path: "/home/u/.hydra-acp/workspaces/abc/s-1",
+      },
+    });
+    const out = renderDiff(files, false, show);
+    expect(out).toContain("+++ b/src/tui/app.ts");
+    expect(out).not.toContain("workspaces");
+  });
+
+  it("orders files by displayed path, not by raw workspace path", () => {
+    const mk = (path: string): FileEditAggregate => ({
+      path,
+      created: false,
+      hunks: [{ oldText: "a\n", newText: "b\n" }],
+    });
+    const show = makeSessionPathDisplay({
+      cwd: "/ws",
+      workspace: { sourceCwd: "/repo", path: "/ws" },
+    });
+    // Raw order would put /repo/... before /ws/..., which is not the order
+    // a reader sees once both render relative to /repo.
+    const out = renderDiff([mk("/ws/z.ts"), mk("/repo/a.ts")], false, show);
+    expect(out.indexOf("a/a.ts")).toBeLessThan(out.indexOf("a/z.ts"));
   });
 
   it("emits a new-file header and a -0,0 start for created files", () => {

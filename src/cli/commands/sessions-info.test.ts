@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Bundle } from "../../core/bundle.js";
 import { aggregate, formatSummary } from "./sessions-info.js";
+import { makeSessionPathDisplay } from "../session-path-display.js";
 
 function toolCallEntry(
   name: string,
@@ -379,6 +380,45 @@ describe("aggregate — historyEntries count", () => {
       "cold",
     );
     expect(d.historyEntries).toBe(3);
+  });
+});
+
+describe("formatSummary — edited-file paths", () => {
+  // One Edit of a file under the session cwd, which is what the
+  // files-edited list is built from.
+  const editHistory = [
+    {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc1",
+          name: "Edit",
+          rawInput: {
+            file_path: "/work/src/tui/app.ts",
+            old_string: "a",
+            new_string: "b",
+          },
+        },
+      },
+      recordedAt: 1,
+    },
+  ];
+
+  it("renders paths relative to the session root when given a display mapping", () => {
+    const d = aggregate(makeBundle({ history: editHistory }), "cold");
+    const withMapping = formatSummary(
+      d,
+      false,
+      makeSessionPathDisplay({ cwd: "/work" }),
+    );
+    expect(withMapping).toContain("src/tui/app.ts");
+    expect(withMapping).not.toContain("/work/src/tui/app.ts");
+  });
+
+  it("leaves paths absolute without a mapping, so existing callers are unchanged", () => {
+    const d = aggregate(makeBundle({ history: editHistory }), "cold");
+    expect(formatSummary(d, false)).toContain("/work/src/tui/app.ts");
   });
 });
 

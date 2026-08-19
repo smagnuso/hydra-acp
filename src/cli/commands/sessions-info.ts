@@ -27,6 +27,10 @@ import {
   type FileEditAggregate,
 } from "../../core/history-edits.js";
 import { openPager } from "../pager.js";
+import {
+  makeSessionPathDisplay,
+  type SessionPathContext,
+} from "../session-path-display.js";
 import { renderDiff } from "./sessions-diff.js";
 
 export interface SessionsInfoOptions {
@@ -142,6 +146,16 @@ export async function runSessionsInfo(
   }
 
   const data = aggregate(bundle, liveStatus ?? "cold", liveEntry?.armedTasks);
+  // Path rendering comes off the bundle's own record rather than the list
+  // entry: it carries the full workspace (including its `path`), so the
+  // mapping still works for a session whose cwd has since moved.
+  // Two styles off one record: the files list home-shortens a path outside
+  // the session root, the diff headers must stay absolute there.
+  const displayPath = makeSessionPathDisplay(bundle.session as SessionPathContext);
+  const displayPathForDiff = makeSessionPathDisplay(
+    bundle.session as SessionPathContext,
+    "diff",
+  );
   // --diff opt-in: append a git-diff-shaped view of every file the
   // session edited beneath the summary. Same aggregation/fold/render
   // pipeline `hydra session diff` uses, against the same bundle we
@@ -169,13 +183,13 @@ export async function runSessionsInfo(
   const useColor = !opts.noColor && onTTY;
   if (includeDiff) {
     const pager = openPager({ disabled: opts.noPager === true });
-    pager.stream.write(formatSummary(data, opts.verbose === true));
+    pager.stream.write(formatSummary(data, opts.verbose === true, displayPath));
     pager.stream.write("\n");
-    pager.stream.write(renderDiff(diffFiles ?? [], useColor));
+    pager.stream.write(renderDiff(diffFiles ?? [], useColor, displayPathForDiff));
     await pager.flush();
     return;
   }
-  process.stdout.write(formatSummary(data, opts.verbose === true));
+  process.stdout.write(formatSummary(data, opts.verbose === true, displayPath));
 }
 
 export function aggregate(
@@ -230,7 +244,13 @@ export function aggregate(
 }
 
 // Extract file path candidates from a tool_call's rawInput plus its
-export function formatSummary(d: SessionInfoData, verbose: boolean): string {
+export function formatSummary(
+  d: SessionInfoData,
+  verbose: boolean,
+  // Presentational path mapping (see session-path-display.ts). Identity by
+  // default so callers that only have the aggregate still render.
+  displayPath: (p: string) => string = (p) => p,
+): string {
   const lines: string[] = [];
   const pad = (label: string): string => label.padEnd(14);
 
@@ -355,9 +375,10 @@ export function formatSummary(d: SessionInfoData, verbose: boolean): string {
     lines.push("");
     const label = verbose ? "Files touched" : "Files edited";
     lines.push(`${label} (${filesForRender.length}):`);
-    const shown = verbose
+    const shown = (verbose
       ? filesForRender
-      : filesForRender.slice(0, DEFAULT_TOP_FILES);
+      : filesForRender.slice(0, DEFAULT_TOP_FILES)
+    ).map((f) => ({ ...f, path: displayPath(f.path) }));
     const pathWidth = Math.max(...shown.map((f) => f.path.length), 4);
     for (const f of shown) {
       if (verbose) {

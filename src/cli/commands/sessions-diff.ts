@@ -28,6 +28,10 @@ import {
 } from "../../core/history-edits.js";
 import { buildUnifiedDiff } from "../../tui/format.js";
 import { openPager } from "../pager.js";
+import {
+  makeSessionPathDisplay,
+  type SessionPathContext,
+} from "../session-path-display.js";
 
 export interface SessionsDiffOptions {
   json?: boolean;
@@ -54,6 +58,18 @@ export async function runSessionsDiff(
   // aggregation). Fall back to /export + local aggregate only when the
   // daemon is older and returns 404 for /diff so we keep working
   // against pre-endpoint daemons.
+  // Session record first, for the path mapping only (workspace → source
+  // tree, then relative to the session root). A 404 here is not fatal:
+  // the diff still renders, just with raw absolute paths.
+  const infoRes = await daemonFetch(`/v1/sessions/${encodeURIComponent(id)}`, {
+    expectStatus: [200, 404],
+  });
+  const displayPath = makeSessionPathDisplay(
+    infoRes.status === 200
+      ? (infoRes.body as SessionPathContext)
+      : undefined,
+    "diff",
+  );
   const diffQs = opts.fold === true ? "?fold=true" : "";
   const diffRes = await daemonFetch(
     `/v1/sessions/${encodeURIComponent(id)}/diff${diffQs}`,
@@ -99,22 +115,30 @@ export async function runSessionsDiff(
   const pager = openPager({ disabled: opts.noPager === true });
   const onTTY = process.stdout.isTTY === true;
   const useColor = !opts.noColor && onTTY;
-  pager.stream.write(renderDiff(files, useColor));
+  pager.stream.write(renderDiff(files, useColor, displayPath));
   await pager.flush();
 }
 
 export function renderDiff(
   files: FileEditAggregate[],
   useColor: boolean,
+  // Presentational path mapping (see session-path-display.ts). Defaults to
+  // identity so a caller without a session record still renders.
+  displayPath: (p: string) => string = (p) => p,
 ): string {
   if (files.length === 0) {
     return "No file edits found in this session.\n";
   }
   const out: string[] = [];
   // Sort by path so output order is deterministic across runs.
-  const ordered = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  // Sort on the displayed path so the output order matches what a reader
+  // sees — sorting on the raw path would scatter an isolated session's
+  // files by workspace hash.
+  const ordered = [...files].sort((a, b) =>
+    displayPath(a.path).localeCompare(displayPath(b.path)),
+  );
   for (const f of ordered) {
-    const block = formatFile(f, useColor);
+    const block = formatFile(f, useColor, displayPath);
     if (block !== null) {
       out.push(block);
     }
@@ -169,20 +193,25 @@ function hasVisibleChange(body: string): boolean {
   return false;
 }
 
-function formatFile(f: FileEditAggregate, useColor: boolean): string | null {
+function formatFile(
+  f: FileEditAggregate,
+  useColor: boolean,
+  displayPath: (p: string) => string = (p) => p,
+): string | null {
   const prepared = prepareVisibleHunks(f);
   if (prepared.length === 0) {
     return null;
   }
+  const shown = displayPath(f.path);
   const lines: string[] = [];
-  lines.push(`diff --hydra a/${f.path} b/${f.path}`);
+  lines.push(`diff --hydra a/${shown} b/${shown}`);
   if (f.created) {
     lines.push("new file");
     lines.push("--- /dev/null");
-    lines.push(`+++ b/${f.path}`);
+    lines.push(`+++ b/${shown}`);
   } else {
-    lines.push(`--- a/${f.path}`);
-    lines.push(`+++ b/${f.path}`);
+    lines.push(`--- a/${shown}`);
+    lines.push(`+++ b/${shown}`);
   }
   // One @@ hunk per individual edit. We have no file-relative line
   // numbers (Edit's old_string/new_string are substrings, not
