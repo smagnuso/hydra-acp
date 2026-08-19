@@ -59,6 +59,8 @@ import {
   columnToOffsetFromSegments,
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
+import { runForegroundChild } from "./foreground-run.js";
+import { type OpenFilePlan, planOpenFile } from "./open-file-plan.js";
 import { withSync } from "./sync.js";
 import {
   paint,
@@ -243,6 +245,18 @@ export interface ScreenOptions {
   // Undefined disables the gesture so the normal word-snap copy path
   // runs unchanged.
   openFileCommand?: string | readonly string[];
+  // Where openFileCommand came from. "env" means it fell back to $VISUAL /
+  // $EDITOR, whose contract is "block and own the terminal" (crontab -e,
+  // git commit and visudo all depend on that), so those run in the
+  // foreground. "config" means an explicit tui.openFileCommand, which
+  // stays a detached background spawn. Defaults to "config" — the
+  // conservative direction, since it's what every caller did before.
+  openFileSource?: "config" | "env";
+  // Overrides the openFileSource default in either direction. See
+  // HydraConfig.tui.openFileInTerminal.
+  openFileInTerminal?: boolean;
+  // Test seam for the foreground path. Defaults to runForegroundChild.
+  runForeground?: typeof runForegroundChild;
   // When true (default), emit OSC 9;4 progress-bar codes so the host
   // terminal can render an indeterminate busy indicator while a turn is
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
@@ -1094,6 +1108,14 @@ export class Screen {
   // Which selection buffer(s) a finalized copy targets. See ScreenOptions.
   private selectionClipboard: ClipboardTarget;
   private openFileCommand: readonly string[] | null;
+  // Whether the open-file gesture hands the terminal to the editor and
+  // waits, rather than spawning it detached. See ScreenOptions.
+  private openFileForeground: boolean;
+  private runForeground: typeof runForegroundChild;
+  // Guards against a second foreground editor while one owns the tty.
+  // Mostly theoretical (we aren't reading input while it runs) but the
+  // spawn is not idempotent, so don't rely on that.
+  private foregroundChildActive = false;
   private progressIndicatorEnabled: boolean;
   // Listeners registered on process via installEmergencyCleanup so an
   // ungraceful exit (SIGTERM, SIGHUP, uncaughtException) still restores
@@ -1181,6 +1203,9 @@ export class Screen {
         ? ofc.split(/\s+/).filter((s) => s.length > 0)
         : ofc;
     this.openFileCommand = ofcArgv && ofcArgv.length > 0 ? ofcArgv : null;
+    this.openFileForeground =
+      opts.openFileInTerminal ?? opts.openFileSource === "env";
+    this.runForeground = opts.runForeground ?? runForegroundChild;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.slideEnabled = opts.turnSlide ?? true;
     this.readonly = opts.readonly ?? false;
@@ -5130,45 +5155,75 @@ export class Screen {
     if (file === null) {
       return false;
     }
-    const lineStr = lineNum === null ? "" : String(lineNum);
-    const [program, ...rest] = this.openFileCommand;
-    if (!program) {
+    const plan = planOpenFile(this.openFileCommand, file, lineNum);
+    if (plan === null) {
       return false;
     }
-    let sawFilePlaceholder = false;
-    const args: string[] = [];
-    for (const arg of rest) {
-      if (arg.includes("%f")) {
-        sawFilePlaceholder = true;
-      }
-      // Drop args that reference %n when no line number is known —
-      // otherwise a placeholder like "+%n" collapses to bare "+" and
-      // emacsclient (and most editors) treat it as a filename. Args
-      // that only carry %f or literal text still flow through.
-      if (lineStr === "" && arg.includes("%n")) {
-        continue;
-      }
-      args.push(arg.replaceAll("%f", file).replaceAll("%n", lineStr));
-    }
-    if (!sawFilePlaceholder) {
-      args.push(file);
+    const where = lineNum === null ? file : `${file}:${lineNum}`;
+    if (this.openFileForeground) {
+      this.openInForeground(plan, where);
+      return true;
     }
     try {
-      const child = spawn(program, args, {
+      const child = spawn(plan.program, plan.args, {
         detached: true,
         stdio: "ignore",
-        cwd: this.sessionbar.cwd,
+        cwd: this.spawnCwd(),
       });
       child.on("error", (err) => {
         this.notify(`open file failed: ${(err as Error).message}`);
       });
       child.unref();
-      const where = lineNum === null ? file : `${file}:${lineNum}`;
       this.notify(`opening ${where}`);
     } catch (err) {
       this.notify(`open file failed: ${(err as Error).message}`);
     }
     return true;
+  }
+
+  // Working directory for a spawned editor. sessionbar.cwd is a display
+  // value: "?" until the first setSessionbar, and afterwards a path that
+  // can outlive the directory it names (a workspace that was cleaned up, a
+  // repo that moved). spawn() reports a nonexistent cwd as ENOENT on the
+  // program, so passing one blames the editor for being missing — inherit
+  // ours instead and let the editor open the file by absolute path.
+  private spawnCwd(): string | undefined {
+    const cwd = this.sessionbar.cwd;
+    if (!cwd || !isAbsolute(cwd)) {
+      return undefined;
+    }
+    try {
+      return statSync(cwd).isDirectory() ? cwd : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Hand the terminal to a terminal editor: tear the screen down (alt
+  // screen, mouse, input grab, cooked mode), let the child own the tty,
+  // then re-enter and repaint when it exits. Everything the daemon sends
+  // meanwhile still lands in the model and paints on resume — the same
+  // contract the ^Z suspend path relies on.
+  private openInForeground(plan: OpenFilePlan, where: string): void {
+    if (this.foregroundChildActive) {
+      return;
+    }
+    this.foregroundChildActive = true;
+    void this.runForeground(
+      {
+        program: plan.program,
+        args: plan.args,
+        cwd: this.spawnCwd(),
+        banner: `─ ${plan.program} ${where} — quit the editor to return to hydra ─\n`,
+      },
+      {
+        suspend: () => this.stop(),
+        resume: () => this.start(),
+        notify: (message) => this.notify(message),
+      },
+    ).finally(() => {
+      this.foregroundChildActive = false;
+    });
   }
 
   // Defer a block toggle by DOUBLE_CLICK_MAX_MS so a follow-up click on

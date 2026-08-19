@@ -14,6 +14,7 @@ import {
   truncate,
   wrap,
 } from "./screen.js";
+import type { ScreenOptions } from "./screen.js";
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
 // access private state via casts; TS privates are compile-time only.
@@ -1935,6 +1936,9 @@ describe("Screen block-click routing", () => {
     width?: number;
     height?: number;
     openFileCommand?: string | readonly string[];
+    openFileSource?: "config" | "env";
+    openFileInTerminal?: boolean;
+    runForeground?: ScreenOptions["runForeground"];
   }): Screen {
     const width = opts.width ?? 40;
     const height = opts.height ?? 24;
@@ -1973,6 +1977,9 @@ describe("Screen block-click routing", () => {
       progressIndicator: false,
       mouse: opts.mouse ?? false,
       openFileCommand: opts.openFileCommand,
+      openFileSource: opts.openFileSource,
+      openFileInTerminal: opts.openFileInTerminal,
+      runForeground: opts.runForeground,
     });
   }
 
@@ -2750,6 +2757,136 @@ describe("Screen block-click routing", () => {
     ).tryOpenPathString.bind(screen);
     expect(open("Makefile")).toBe(true);
     expect(open("does-not-exist-anywhere")).toBe(false);
+  });
+
+  it("routes a $VISUAL/$EDITOR command through the foreground runner", async () => {
+    // openFileSource "env" means the command came from $VISUAL/$EDITOR,
+    // whose contract is to block and own the terminal. A detached spawn
+    // hands a terminal editor /dev/null on all three fds, so it draws
+    // nothing and dies — the bug this routing exists to fix.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-fg-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const runs: Array<{ program: string; args: readonly string[] }> = [];
+    const runForeground: ScreenOptions["runForeground"] = async (spec) => {
+      runs.push({ program: spec.program, args: spec.args });
+      return { exitCode: 0 };
+    };
+    const screen = makeTallScreen({
+      openFileCommand: ["vim"],
+      openFileSource: "env",
+      runForeground,
+    });
+    screen.setSessionbar({ cwd: dir });
+    const open = (
+      screen as unknown as { tryOpenPathString: (raw: string) => boolean }
+    ).tryOpenPathString.bind(screen);
+    expect(open("Makefile:42")).toBe(true);
+    expect(runs).toEqual([
+      { program: "vim", args: ["+42", path.join(dir, "Makefile")] },
+    ]);
+  });
+
+  it("drops a cwd that no longer exists rather than blaming the editor", async () => {
+    // spawn() surfaces a nonexistent cwd as ENOENT on the program, so a
+    // session whose directory was cleaned up would report "vim failed:
+    // spawn vim ENOENT" — indistinguishable from vim not being installed.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-cwd-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const cwds: Array<string | undefined> = [];
+    const screen = makeTallScreen({
+      openFileCommand: ["vim"],
+      openFileSource: "env",
+      runForeground: async (spec) => {
+        cwds.push(spec.cwd);
+        return { exitCode: 0 };
+      },
+    });
+    // Awaited between calls: the in-flight guard only clears once the
+    // previous foreground run settles.
+    const open = async (): Promise<void> => {
+      (
+        screen as unknown as { tryOpenPathString: (raw: string) => boolean }
+      ).tryOpenPathString.call(screen, path.join(dir, "Makefile"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    // Default sessionbar cwd is the display placeholder "?".
+    await open();
+    screen.setSessionbar({ cwd: path.join(dir, "gone-subdir") });
+    await open();
+    screen.setSessionbar({ cwd: dir });
+    await open();
+    expect(cwds).toEqual([undefined, undefined, dir]);
+  });
+
+  it("keeps an explicit tui.openFileCommand on the detached path", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-bg-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const runs: string[] = [];
+    const runForeground: ScreenOptions["runForeground"] = async (spec) => {
+      runs.push(spec.program);
+      return { exitCode: 0 };
+    };
+    const screen = makeTallScreen({
+      openFileCommand: ["true"],
+      openFileSource: "config",
+      runForeground,
+    });
+    screen.setSessionbar({ cwd: dir });
+    const open = (
+      screen as unknown as { tryOpenPathString: (raw: string) => boolean }
+    ).tryOpenPathString.bind(screen);
+    expect(open("Makefile")).toBe(true);
+    expect(runs).toEqual([]);
+  });
+
+  it("openFileInTerminal overrides the source default in both directions", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-override-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const openWith = (
+      opts: Parameters<typeof makeTallScreen>[0],
+    ): string[] => {
+      const runs: string[] = [];
+      const screen = makeTallScreen({
+        ...opts,
+        runForeground: async (spec) => {
+          runs.push(spec.program);
+          return { exitCode: 0 };
+        },
+      });
+      screen.setSessionbar({ cwd: dir });
+      (
+        screen as unknown as { tryOpenPathString: (raw: string) => boolean }
+      ).tryOpenPathString.call(screen, "Makefile");
+      return runs;
+    };
+    // A terminal editor named explicitly still gets the terminal...
+    expect(
+      openWith({
+        openFileCommand: ["true"],
+        openFileSource: "config",
+        openFileInTerminal: true,
+      }),
+    ).toEqual(["true"]);
+    // ...and a GUI editor in $VISUAL can opt out of the suspend.
+    expect(
+      openWith({
+        openFileCommand: ["true"],
+        openFileSource: "env",
+        openFileInTerminal: false,
+      }),
+    ).toEqual([]);
   });
 
   it("double-click on a hyphenated identifier snaps the whole hyphenated token", () => {

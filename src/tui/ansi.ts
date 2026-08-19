@@ -30,6 +30,12 @@ export const PASTE_END = "\x1b[201~";
 export const ALT_SCREEN_ENTER = "\x1b[?1049h";
 export const ALT_SCREEN_LEAVE = "\x1b[?1049l";
 
+// Cursor home + erase to end of display: a one-shot clear of whatever
+// buffer is current. Used before handing the terminal to a foreground
+// child so an editor that doesn't take the alt screen (nano, ed) starts
+// on a clean canvas instead of over the host shell's leftovers.
+export const CLEAR_SCREEN_HOME = "\x1b[H\x1b[J";
+
 // DECAWM auto-wrap. We turn it off while rendering frames that own
 // their own line breaks and want to keep the cursor on the last column.
 export const AUTOWRAP_ON = "\x1b[?7h";

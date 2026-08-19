@@ -438,25 +438,27 @@ describe("resolveOpenFileCommand", () => {
   it("prefers the configured value over the environment", () => {
     expect(
       resolveOpenFileCommand("code --goto %f:%n", { VISUAL: "vim", EDITOR: "nano" }),
-    ).toBe("code --goto %f:%n");
+    ).toEqual({ argv: "code --goto %f:%n", source: "config" });
   });
 
   it("preserves the array form as-is", () => {
-    expect(resolveOpenFileCommand(["code", "--goto", "%f:%n"], {})).toEqual([
-      "code",
-      "--goto",
-      "%f:%n",
-    ]);
+    expect(resolveOpenFileCommand(["code", "--goto", "%f:%n"], {})).toEqual({
+      argv: ["code", "--goto", "%f:%n"],
+      source: "config",
+    });
   });
 
   it("falls back to $VISUAL before $EDITOR", () => {
-    expect(resolveOpenFileCommand(undefined, { VISUAL: "gvim", EDITOR: "nano" })).toBe(
-      "gvim",
-    );
+    expect(
+      resolveOpenFileCommand(undefined, { VISUAL: "gvim", EDITOR: "nano" }),
+    ).toEqual({ argv: "gvim", source: "env" });
   });
 
   it("falls back to $EDITOR when $VISUAL is unset", () => {
-    expect(resolveOpenFileCommand(undefined, { EDITOR: "nano" })).toBe("nano");
+    expect(resolveOpenFileCommand(undefined, { EDITOR: "nano" })).toEqual({
+      argv: "nano",
+      source: "env",
+    });
   });
 
   it("stays undefined when nothing is set, keeping the feature off", () => {
@@ -465,6 +467,21 @@ describe("resolveOpenFileCommand", () => {
 
   it("does not treat an empty-string EDITOR as configured", () => {
     expect(resolveOpenFileCommand(undefined, { EDITOR: "" })).toBeFalsy();
+  });
+
+  it("steps over a blank $VISUAL to reach $EDITOR", () => {
+    // `VISUAL= EDITOR=vim` is a normal thing to have in a shell profile;
+    // the blank shouldn't shadow the real one.
+    expect(
+      resolveOpenFileCommand(undefined, { VISUAL: "", EDITOR: "vim" }),
+    ).toEqual({ argv: "vim", source: "env" });
+  });
+
+  it("marks the env fallback so the TUI knows to run it in the foreground", () => {
+    // $EDITOR carries a blocking, owns-the-terminal contract (crontab -e,
+    // git commit, visudo); an explicit tui.openFileCommand does not.
+    expect(resolveOpenFileCommand(undefined, { EDITOR: "vim" })?.source).toBe("env");
+    expect(resolveOpenFileCommand("vim", { EDITOR: "vim" })?.source).toBe("config");
   });
 });
 

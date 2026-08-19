@@ -366,13 +366,36 @@ const TuiConfig = z.object({
   //     (use this when an arg must contain literal whitespace). Example:
   //       ["code", "--goto", "%f:%n"]
   // Unset falls back to $VISUAL, then $EDITOR, treated as the string
-  // form. Those carry no %f/%n, so the path is appended and the line
-  // number is dropped; set this key explicitly to get line positioning.
+  // form. Those carry no %f/%n, so the path is appended; the line number
+  // is passed in the editor's own syntax when it's one we know (`vim +42`,
+  // `hx path:42`) and dropped otherwise.
   // With none of the three set the feature is off — double-click
-  // continues to snap the word for clipboard copy. The process is
+  // continues to snap the word for clipboard copy. A command set here is
   // spawned detached with stdio ignored; failures are surfaced via the
-  // in-app notification line, not blocking the TUI.
+  // in-app notification line, not blocking the TUI. The $VISUAL/$EDITOR
+  // fallback runs in the foreground instead — see openFileInTerminal.
   openFileCommand: z.union([z.string(), z.array(z.string())]).optional(),
+  // Whether the open-file gesture hands the terminal to the editor and
+  // waits for it, rather than spawning it in the background.
+  //
+  // Unset (the default) decides by where the command came from: the
+  // $VISUAL / $EDITOR fallback runs in the foreground, an explicit
+  // openFileCommand runs detached. That split is the convention those
+  // variables already carry — `crontab -e`, `git commit` and `visudo` all
+  // require $EDITOR to block and own the terminal, which is why
+  // `EDITOR="code --wait"` is the idiom — whereas openFileCommand is
+  // hydra-specific and has always been a background spawn here.
+  //
+  // Set true when an explicit openFileCommand names a terminal editor (or
+  // a wrapper we can't see through). Set false for the reverse case: a GUI
+  // editor in $VISUAL, where suspending the TUI for the length of an edit
+  // is not what you want.
+  //
+  // A foreground editor takes the whole terminal: the TUI leaves the
+  // alternate screen, the editor owns stdin/stdout, and quitting it
+  // repaints the session. Nothing streaming in from the daemon is lost —
+  // it lands in the model and paints on the way back.
+  openFileInTerminal: z.boolean().optional(),
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),

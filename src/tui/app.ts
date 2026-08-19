@@ -887,21 +887,39 @@ function isReadonlyForbiddenEffect(effect: InputEffect): boolean {
   }
 }
 
+export interface ResolvedOpenFileCommand {
+  argv: string | string[];
+  source: "config" | "env";
+}
+
 // tui.openFileCommand wins; absent that, fall back to $VISUAL then
-// $EDITOR. The env forms carry no %f/%n placeholders, so tryOpenPathString
-// appends the path and drops the line number — acceptable for GUI/client
-// editors (code, emacsclient -n, subl), which is what these variables
-// usually name on a desktop. Note the fallback also enables the
-// single-click debounce that defers block toggles by 500ms so a
-// double-click can win; that's the cost of having the gesture live at all.
+// $EDITOR. Which branch won is part of the answer, because it decides how
+// the child is spawned: $VISUAL/$EDITOR carry a "block and own the
+// terminal" contract that crontab -e, git commit and visudo all rely on,
+// so those run in the foreground (screen down, editor owns the tty, repaint
+// on exit). An explicit tui.openFileCommand keeps the detached background
+// spawn, which is what a GUI editor wants. See tui.openFileInTerminal to
+// override either default.
+//
+// Note that having any of the three set also enables the single-click
+// debounce that defers block toggles by 500ms so a double-click can win;
+// that's the cost of having the gesture live at all.
 export function resolveOpenFileCommand(
   configured: string | string[] | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): string | string[] | undefined {
+): ResolvedOpenFileCommand | undefined {
   if (configured !== undefined) {
-    return configured;
+    return { argv: configured, source: "config" };
   }
-  return env.VISUAL ?? env.EDITOR;
+  // Skip a blank VISUAL rather than letting it shadow a real EDITOR —
+  // `VISUAL= EDITOR=vim` is a normal thing to have in a shell profile.
+  const fromEnv = [env.VISUAL, env.EDITOR].find(
+    (value) => value !== undefined && value.trim() !== "",
+  );
+  if (fromEnv === undefined) {
+    return undefined;
+  }
+  return { argv: fromEnv, source: "env" };
 }
 
 const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
@@ -929,7 +947,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+PgUp / Alt+PgDn", "jump to previous / next prompt"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
-  ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR)"],
+  ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR — a $EDITOR takes over the terminal until you quit it)"],
   ["Double-click bar", "cwd opens · title renames · agent/model/mode pick · else copy"],
   ["Click in a modal", "row picks / cycles it · hint words act · wheel walks the list"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
@@ -3397,6 +3415,8 @@ async function runSession(
     process.on("SIGCONT", onSigCont);
   }
 
+  const openFile = resolveOpenFileCommand(config.tui.openFileCommand);
+
   screen = new Screen({
     term,
     dispatcher,
@@ -3405,7 +3425,9 @@ async function runSession(
     mouse: viewPrefs.mouseEnabled,
     inAppSelection: viewPrefs.inAppSelectionEnabled,
     selectionClipboard: config.tui.selectionClipboard,
-    openFileCommand: resolveOpenFileCommand(config.tui.openFileCommand),
+    openFileCommand: openFile?.argv,
+    openFileSource: openFile?.source,
+    openFileInTerminal: config.tui.openFileInTerminal,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     // Folding a gadget stops its polling; unfolding has to start it again
