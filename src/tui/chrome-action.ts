@@ -10,7 +10,8 @@
 // ScreenOptions.onBarAction.
 //
 //   "toggle-mode" / "switch-session" / "show-help" / "detach" /
-//   "rename-session" / "choose-model" / "choose-agent" / "choose-mode"
+//   "toggle-options" / "rename-session" / "choose-model" / "choose-agent" /
+//   "choose-mode"
 //     application effects, routed through onBarAction so they go through
 //     the same readonly gate as the equivalent hotkey. The three choosers
 //     open the modal for that session config dimension; they read the live
@@ -25,6 +26,7 @@ export type ChromeAction =
   | "switch-session"
   | "show-help"
   | "detach"
+  | "toggle-options"
   | "rename-session"
   | "choose-model"
   | "choose-agent"
@@ -39,6 +41,7 @@ export const CHROME_ACTIONS: readonly ChromeAction[] = [
   "switch-session",
   "show-help",
   "detach",
+  "toggle-options",
   "rename-session",
   "choose-model",
   "choose-agent",

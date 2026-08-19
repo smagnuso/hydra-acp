@@ -1,4 +1,5 @@
 import type { BarSideConfig } from "../../core/config.js";
+import type { ChromeAction } from "../chrome-action.js";
 
 // Data the chrome rows render. Lives here rather than in screen.ts so
 // the field registry can import it without a cycle (screen.ts imports
@@ -43,10 +44,43 @@ export interface SessionInfo {
   model?: string;
 }
 
+/**
+ * One entry on the composer's help-hint row.
+ *
+ * Structured rather than " · "-joined prose so adding an entry is a
+ * single table row. The prose form needed a substring matcher to recover
+ * which effect each chunk fired, and a chunk whose wording drifted
+ * silently went inert.
+ */
+export interface HintItem {
+  /** Hit-region id, and what bannerHitAt reports. */
+  id: string;
+  label: string;
+  action: ChromeAction;
+}
+
+// Leftmost sheds last (see helpHintGroups), so this is also the order of
+// usefulness on a narrow terminal. `mode` carries the current mode as a
+// suffix when there is one.
+export const DEFAULT_HINT_ITEMS: readonly HintItem[] = [
+  { id: "mode", label: "⇧⇥ mode", action: "toggle-mode" },
+  { id: "options", label: "⌃O options", action: "toggle-options" },
+  { id: "pick", label: "⌃P pick", action: "switch-session" },
+  { id: "guide", label: "⌃G guide", action: "show-help" },
+  { id: "detach", label: "⌃D detach", action: "detach" },
+];
+
 export interface BannerInfo {
   status: string;
   currentMode: string | undefined;
-  hint: string;
+  hint: readonly HintItem[];
+  /**
+   * Set once this session has sent enough prompts that the help hints
+   * have done their onboarding job, at which point helpHint resolves to
+   * nothing and the bottom rule paints as an unbroken line. Computed in
+   * app.ts from tui.composer.hintTurns against the prompt history.
+   */
+  hintsExhausted?: boolean;
   queued: number;
   elapsedMs?: number;
   stalled?: boolean;
@@ -87,6 +121,15 @@ export interface FieldContext {
    * from the placed chunks' ids.
    */
   hovered: string | null;
+  /**
+   * Sticky override that brings collapsed help hints back: the pointer is
+   * somewhere on the composer's bottom rule, or an unbound Ctrl chord was
+   * pressed. Deliberately NOT derived from `hovered` — the collapsed
+   * state has no chunk to hover, and the pad columns between the fill and
+   * the first chunk carry no id, so a hover-derived reveal oscillates
+   * there.
+   */
+  hintsRevealed: boolean;
 }
 
 /** Resolved slot contents for all three chrome rows. */

@@ -117,6 +117,13 @@ export interface LayoutResult {
   signature: string;
   /** Click targets, in paint order. */
   hits: HitRegion[];
+  /**
+   * 1-based column where the right-hand group begins (its leading pad), or
+   * null when the row has no right side. Spans the whole group including
+   * the pads either side of it, so it covers the columns between adjacent
+   * fields that carry no hit region of their own.
+   */
+  rightStart: number | null;
 }
 
 function widthOf(chunks: Chunk[]): number {
@@ -388,7 +395,9 @@ export function layoutRow(
   if (fillCols > 0 && style.fill.length > 0) {
     emit(style.fill.repeat(fillCols), style.ruleToken);
   }
+  let rightStart: number | null = null;
   if (rightChunks.length > 0) {
+    rightStart = col;
     emit(style.pad, style.padToken);
     for (const c of rightChunks) {
       emit(c.text, c.token, c);
@@ -398,5 +407,5 @@ export function layoutRow(
   emit(style.suffix, style.ruleToken);
 
   const signature = placed.map((c) => `${c.token}\u0001${c.text}`).join("\u0000");
-  return { chunks: placed, signature, hits };
+  return { chunks: placed, signature, hits, rightStart };
 }

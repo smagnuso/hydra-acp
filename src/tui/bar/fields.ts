@@ -100,42 +100,43 @@ export function formatUsage(usage: UsageState | undefined): string | null {
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
-// The help-hint string is authored as " · "-joined chunks, each one an
-// independently hoverable and clickable target, so the field emits one
-// group per chunk. Everything else in the registry is a single group.
+// Each hint is an independently hoverable and clickable target, so the
+// field emits one group per item. Everything else in the registry is a
+// single group.
 //
-// Which application effect a hint chunk fires. The mapping is by
-// substring because the hint string is authored as prose in app.ts, not
-// as structured data.
-function helpHintAction(part: string): {
-  action: "toggle-mode" | "switch-session" | "show-help" | "detach" | "none";
-  key: string;
-} {
-  if (part.includes("mode")) return { action: "toggle-mode", key: "mode" };
-  if (part.includes("pick")) return { action: "switch-session", key: "pick" };
-  if (part.includes("guide")) return { action: "show-help", key: "guide" };
-  if (part.includes("detach")) return { action: "detach", key: "detach" };
-  return { action: "none", key: "" };
-}
-
+// Once the session has driven past tui.composer.hintTurns the field
+// resolves to nothing at all rather than to a placeholder glyph: with no
+// right-side group, layoutRow emits no pads and the fill absorbs the
+// whole row, so the rule paints unbroken. A collapsed run of fill
+// characters would instead sit inside those pads and leave two
+// one-column holes in the rule.
+//
+// `hintsRevealed` overrides the threshold rather than being folded into
+// it, which is what makes hintTurns: 0 mean "hover-only" rather than
+// "gone": the two states are indistinguishable here by design.
 function helpHintGroups(ctx: FieldContext): FieldGroup[] | null {
-  const base = ctx.banner.currentMode
-    ? ctx.banner.hint.replace("⇧⇥ mode", `⇧⇥ mode: ${ctx.banner.currentMode}`)
-    : ctx.banner.hint;
-  if (base.length === 0) {
+  if (ctx.banner.hintsExhausted === true && !ctx.hintsRevealed) {
     return null;
   }
-  const parts = base.split(" · ").filter((p) => p.length > 0);
-  return parts.map((part, i) => {
-    const { action, key } = helpHintAction(part);
-    const chunk: Chunk = { text: part, token: "modal-hint", action };
-    // Keep the legacy hit names as the group id so bannerHitAt keeps
-    // answering "mode" / "pick" / "guide" / "detach".
+  const items = ctx.banner.hint;
+  if (items.length === 0) {
+    return null;
+  }
+  return items.map((item, i) => {
+    const label =
+      item.id === "mode" && (ctx.banner.currentMode ?? "") !== ""
+        ? `${item.label}: ${ctx.banner.currentMode}`
+        : item.label;
+    const chunk: Chunk = {
+      text: label,
+      token: "modal-hint",
+      action: item.action,
+    };
     return {
-      id: key !== "" ? key : `helpHint:${i}`,
+      id: item.id,
       chunks: [chunk],
       // Leftmost hint is the most important, so it sheds last.
-      priority: 20 + (parts.length - i),
+      priority: 20 + (items.length - i),
     };
   });
 }

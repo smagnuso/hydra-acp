@@ -306,6 +306,18 @@ const TuiConfig = z.object({
         DEFAULT_COMPOSER_BOTTOM_LEFT,
         DEFAULT_COMPOSER_BOTTOM_RIGHT,
       ),
+      // How many prompts this session has to have sent before the
+      // helpHint field stops rendering. The hints are onboarding, not a
+      // permanent readout: past the threshold the bottom rule paints as
+      // an unbroken line, and hovering it (or pressing a Ctrl chord that
+      // isn't bound to anything) brings them back until the next prompt.
+      // Counted from the per-session prompt history, so turns the agent
+      // starts by itself don't advance it.
+      //
+      // null keeps them up permanently. 0 skips onboarding entirely and
+      // leaves the row hover-only — the reveal overrides the threshold, so
+      // it is "never on its own", not "never".
+      hintTurns: z.number().int().nonnegative().nullable().default(3),
     })
     // Same reasoning as tui.sidebar: leaf defaults are the single
     // source of truth.

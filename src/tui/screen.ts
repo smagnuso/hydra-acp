@@ -11,16 +11,24 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
 import { layoutRow } from "./bar/layout.js";
-import type { BarAction, HitRegion } from "./bar/layout.js";
+import type {
+  BarAction,
+  FieldGroup,
+  HitRegion,
+  LayoutResult,
+} from "./bar/layout.js";
 import { SLOT_STYLES, expandBarConfig, resolveSide } from "./bar/slots.js";
 import type { SlotName } from "./bar/slots.js";
 import { formatUsage, transientGroup } from "./bar/fields.js";
+import { DEFAULT_HINT_ITEMS } from "./bar/types.js";
 import type {
   BarLayoutConfig,
   FieldContext,
+  HintItem,
   SessionInfo,
   UsageState,
 } from "./bar/types.js";
+import type { BarSideConfig } from "../core/config.js";
 import {
   DEFAULT_COMPOSER_BOTTOM_LEFT,
   DEFAULT_COMPOSER_BOTTOM_RIGHT,
@@ -120,6 +128,10 @@ const DOUBLE_CLICK_MAX_MS = 500;
 // (Chebyshev distance) of the prior release still qualify. A strict 0
 // would defeat the gesture on terminals that wobble by a single column.
 const DOUBLE_CLICK_MAX_DIST = 1;
+// Grace period between the pointer leaving the composer's bottom rule and
+// the revealed help hints collapsing again. Long enough to cross the row
+// on the way somewhere else without the hints flickering.
+const HINT_HOVER_HIDE_MS = 700;
 // ASCII-word-character regex for double-click word snap. We deliberately
 // restrict to ASCII for this version (per spec), Unicode word boundary
 // expansion would require ICU or per-codepoint category tables. Hyphen
@@ -315,7 +327,10 @@ export interface ScreenOptions {
 interface BannerState {
   status: string;
   currentMode: string | undefined;
-  hint: string;
+  hint: readonly HintItem[];
+  // Set once the session has sent enough prompts for the hints to have
+  // done their onboarding job; see tui.composer.hintTurns.
+  hintsExhausted?: boolean;
   queued: number;
   // Elapsed time the current turn has been running, in milliseconds.
   // Surfaced as "running · 1m 30s" in the banner so the user has
@@ -500,7 +515,7 @@ const SESSIONBAR_ROWS = 1;
 const BANNER_ROWS = 0;
 const SEPARATOR_ROWS = 1;
 // One-row separator below the prompt and above the sessionbar. Holds the
-// hint chunks (⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach) and the transient
+// hint chunks (DEFAULT_HINT_ITEMS, until they retire) and the transient
 // right-slot (search / compaction / synthesis toast). The top separator
 // (above the prompt) carries status + sid + usage instead. Named
 // BANNER_SEPARATOR_ROWS for backward compatibility with all the bottom-
@@ -942,7 +957,7 @@ export class Screen {
   private banner: BannerState = {
     status: "ready",
     currentMode: undefined,
-    hint: "⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach",
+    hint: DEFAULT_HINT_ITEMS,
     queued: 0,
   };
   // Click hit-regions for the three chrome rows, keyed by terminal row.
@@ -954,6 +969,32 @@ export class Screen {
   // Region id under the pointer, or null. Drives both the hover token
   // swap in drawBar and the OS pointer shape.
   private hoveredBarHit: string | null = null;
+  // Which terminal row the composer's bottom rule was last painted on,
+  // and where on it the help hints live. Re-read on every paint rather
+  // than cached: a multi-line draft grows the composer and moves the row,
+  // and the hints' own width moves the column.
+  //
+  // A span, not a hit region, is what drives the help-hint reveal. A
+  // collapsed hint has no chunk to hover; giving it one would mean giving
+  // it visible text, and any id'd region spanning the fill would be
+  // claimed by handleBarPress across the whole rule. The span also has no
+  // gaps, where `hoveredBarHit === null` on the pad columns between two
+  // fields would oscillate.
+  //
+  // hintZoneStart is where the right-hand group *would* begin once
+  // revealed, so it does not move when the reveal lands — see drawBar.
+  private composerBottomRow: number | null = null;
+  private hintZoneStart: number | null = null;
+  private hintHoverReveal = false;
+  // Leaving the rule hides on a delay, so crossing off it on the way to
+  // another target doesn't flap the row. Entering is immediate; only the
+  // hide is deferred, and re-entering cancels a pending one.
+  private hintHoverHideTimer: NodeJS.Timeout | null = null;
+  // Two flags, not one, because they retire differently: the pointer
+  // leaving the rule clears only the hover reveal, while a keyboard reveal
+  // has to survive pointer motion elsewhere (you pressed the chord without
+  // touching the mouse). A submitted prompt clears both.
+  private hintKeyReveal = false;
   // Armed by a press on a bar region; a release on the same region
   // completes the click.
   private barPressHit: HitRegion | null = null;
@@ -1315,6 +1356,7 @@ export class Screen {
       clearTimeout(this.bannerNotificationTimer);
       this.bannerNotificationTimer = null;
     }
+    this.cancelHintHoverHide();
     this.cancelSlide();
     // A throttled repaint queued just before stop would otherwise fire
     // AFTER we leave the alternate screen and write raw cursor-position
@@ -3702,6 +3744,21 @@ export class Screen {
     const mapped = mapKeyName(name);
     if (mapped) {
       this.onKey([{ type: "key", name: mapped }]);
+      return;
+    }
+    // A Ctrl chord that maps to nothing is dropped here. That is exactly
+    // the moment the cheatsheet earns its keep, so a miss teaches instead
+    // of failing silently. KeyName is a closed union of bound keys, so
+    // "unbound" is only observable at this point, not downstream.
+    //
+    // In practice this is Ctrl+Arrow, Ctrl+Space, Ctrl+Home/End and the
+    // Ctrl+Fn row — all present in terminal-kit's xterm keymap and none of
+    // them in mapKeyName. Note it cannot be exercised through
+    // scripts/tui-capture.mjs: under tmux TERM is screen-*, terminal-kit
+    // has no termconfig for that and falls back to none.js, whose keymap
+    // has no CTRL_* entries at all.
+    if (name.startsWith("CTRL_")) {
+      this.revealHints();
     }
   }
 
@@ -3792,7 +3849,16 @@ export class Screen {
     const barRegion = cell !== null ? this.barHitAt(cell.x, cell.y) : null;
     if (kind === "move") {
       const newHover = barRegion?.id ?? null;
-      if (newHover !== this.hoveredBarHit) {
+      // The columns the help hints occupy on the composer's bottom rule
+      // reveal them when collapsed. Resolved as a span, not a hit region —
+      // see composerBottomRow / hintZoneStart.
+      const onHintZone =
+        cell !== null &&
+        cell.y === this.composerBottomRow &&
+        this.hintZoneStart !== null &&
+        cell.x >= this.hintZoneStart;
+      const revealChanged = this.trackHintHover(onHintZone);
+      if (newHover !== this.hoveredBarHit || revealChanged) {
         this.hoveredBarHit = newHover;
         this.syncedPartialRepaint(() => this.drawBars());
       }
@@ -6290,7 +6356,81 @@ export class Screen {
       scrollOffset: this.scrollOffset,
       transient: this.bannerRightContent(),
       hovered: this.terminalFocused ? this.hoveredBarHit : null,
+      hintsRevealed: this.hintsRevealed(),
     };
+  }
+
+  /**
+   * Fold one motion event into the hover reveal. Returns whether the
+   * revealed state changed *now* — arming the hide timer does not, since
+   * the row keeps its hints until the timer fires.
+   */
+  private trackHintHover(onComposerRule: boolean): boolean {
+    if (onComposerRule) {
+      this.cancelHintHoverHide();
+      if (this.hintHoverReveal) {
+        return false;
+      }
+      this.hintHoverReveal = true;
+      return true;
+    }
+    if (!this.hintHoverReveal || this.hintHoverHideTimer !== null) {
+      return false;
+    }
+    this.hintHoverHideTimer = setTimeout(() => {
+      this.hintHoverHideTimer = null;
+      this.hintHoverReveal = false;
+      this.syncedPartialRepaint(() => this.drawBars());
+    }, HINT_HOVER_HIDE_MS);
+    return false;
+  }
+
+  private cancelHintHoverHide(): void {
+    if (this.hintHoverHideTimer === null) {
+      return;
+    }
+    clearTimeout(this.hintHoverHideTimer);
+    this.hintHoverHideTimer = null;
+  }
+
+  // Either reveal source brings collapsed hints back. Gated on focus for
+  // the same reason `hovered` is: an unfocused terminal's last known
+  // pointer position says nothing about where it is now.
+  private hintsRevealed(): boolean {
+    if (!this.terminalFocused) {
+      return false;
+    }
+    return this.hintHoverReveal || this.hintKeyReveal;
+  }
+
+  /**
+   * Bring collapsed help hints back until the next submitted prompt.
+   * Called for a Ctrl chord that maps to nothing: the keypress did
+   * nothing, so the useful response is to say what does work.
+   */
+  revealHints(): void {
+    if (this.hintKeyReveal) {
+      return;
+    }
+    this.hintKeyReveal = true;
+    this.syncedPartialRepaint(() => this.drawBars());
+  }
+
+  /**
+   * Retire both reveals. Called on a submitted prompt: a turn is the one
+   * event that means "this user knows what they're doing", so it retires a
+   * parked pointer's reveal too rather than leaving the row up for as long
+   * as the mouse happens to sit there. Self-healing — the next motion event
+   * on the rule sets the hover flag again.
+   */
+  clearHintReveal(): void {
+    this.cancelHintHoverHide();
+    if (!this.hintKeyReveal && !this.hintHoverReveal) {
+      return;
+    }
+    this.hintKeyReveal = false;
+    this.hintHoverReveal = false;
+    this.syncedPartialRepaint(() => this.drawBars());
   }
 
   // The btw frame renders the composer.top slot config against the
@@ -6316,10 +6456,13 @@ export class Screen {
           ? { usage: this.btwOverlayUsage }
           : { usage: undefined }),
       },
-      banner: { status, currentMode: undefined, hint: "", queued: 0 },
+      banner: { status, currentMode: undefined, hint: [], queued: 0 },
       scrollOffset: 0,
       transient: null,
       hovered: this.terminalFocused ? this.hoveredBarHit : null,
+      // The overlay frame reuses the composer.top slot config, which has
+      // no helpHint field; an empty hint list already resolves to nothing.
+      hintsRevealed: false,
     };
   }
 
@@ -6340,7 +6483,11 @@ export class Screen {
           ? this.barConfig.composer.bottom
           : // composerTop and btw share one slot config.
             this.barConfig.composer.top;
+    if (slot === "composerBottom") {
+      this.composerBottomRow = row;
+    }
     const ctx = slot === "btw" ? this.btwContext() : this.barContext();
+
     // A live notification / search counter / progress message takes over
     // the bottom rule's right side for its duration, displacing whatever
     // is configured there. See transientGroup: this is the app's only
@@ -6355,6 +6502,9 @@ export class Screen {
       right,
       style,
     );
+    if (slot === "composerBottom") {
+      this.hintZoneStart = this.hintZoneStartFor(w, side, ctx, forced, result);
+    }
     const hovered = this.terminalFocused ? this.hoveredBarHit : null;
     // Derived from the placed chunks rather than hand-listed state, so
     // adding a field can't silently leave a row stale. Hover is part of
@@ -6377,6 +6527,40 @@ export class Screen {
     this.barHits.set(row, result.hits);
   }
 
+  /**
+   * Which column the help hints occupy on the composer's bottom rule, as
+   * the left edge of a span running to the right end of the row. Null when
+   * a reveal would change nothing.
+   */
+  private hintZoneStartFor(
+    w: number,
+    side: { left: BarSideConfig; right: BarSideConfig },
+    ctx: FieldContext,
+    forced: FieldGroup | null,
+    result: LayoutResult,
+  ): number | null {
+    // A transient message owns the right side outright for its duration,
+    // so while one is up there is nothing for a reveal to bring back.
+    if (forced !== null) {
+      return null;
+    }
+    if (ctx.hintsRevealed) {
+      return result.rightStart;
+    }
+    // Collapsed, the hints occupy no columns at all, so the zone has to
+    // come from what the row *would* look like revealed. Every other input
+    // is the same, so this is the column the group actually lands on when
+    // the reveal fires: the zone does not move out from under the pointer,
+    // which is what would make it oscillate.
+    const revealed: FieldContext = { ...ctx, hintsRevealed: true };
+    return layoutRow(
+      w,
+      resolveSide("composerBottom", side.left, revealed),
+      resolveSide("composerBottom", side.right, revealed),
+      SLOT_STYLES.composerBottom,
+    ).rightStart;
+  }
+
   // Which bar chunk (if any) is under the given 1-based terminal cell?
   barHitAt(x: number, y: number): HitRegion | null {
     const regions = this.barHits.get(y);
@@ -6386,17 +6570,17 @@ export class Screen {
     return regions.find((r) => x >= r.start && x <= r.end) ?? null;
   }
 
-  // Legacy narrow view of barHitAt, kept for the help-hint chunks whose
-  // ids are still the four original names.
-  bannerHitAt(x: number, y: number): "mode" | "pick" | "guide" | "detach" | null {
+  // Narrow view of barHitAt: the id of the help-hint chunk under the
+  // cell, or null for anything that isn't one. Membership is checked
+  // against the hint table rather than a hand-listed union, so adding a
+  // hint doesn't need an edit here.
+  bannerHitAt(x: number, y: number): string | null {
     const hit = this.barHitAt(x, y);
     if (hit === null) {
       return null;
     }
     const name = hit.id.slice(hit.id.indexOf(":") + 1);
-    return name === "mode" || name === "pick" || name === "guide" || name === "detach"
-      ? name
-      : null;
+    return DEFAULT_HINT_ITEMS.some((item) => item.id === name) ? name : null;
   }
 
   // Press/release/double-click gesture handling for the three chrome

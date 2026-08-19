@@ -63,6 +63,26 @@ export function appendEntry(
   return out;
 }
 
+// Whether the composer's help hints have done their onboarding job and
+// should dissolve into the bottom rule. `hintTurns` is
+// tui.composer.hintTurns: null keeps them up forever, 0 never shows them
+// (a session with no prompts already meets the threshold).
+//
+// Counted from per-session prompt history, which is the right counter on
+// three axes: it persists, so a resumed session comes up collapsed rather
+// than re-teaching; and it holds only user prompts, so a turn the agent
+// starts by itself can't strip the affordance from someone who has done
+// nothing yet.
+export function hintsExhausted(
+  promptCount: number,
+  hintTurns: number | null,
+): boolean {
+  if (hintTurns === null) {
+    return false;
+  }
+  return promptCount >= hintTurns;
+}
+
 export async function saveHistory(
   file: string,
   history: string[],

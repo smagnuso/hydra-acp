@@ -8,6 +8,7 @@ import {
   appendEntry,
   appendHistoryLine,
   buildCombinedHistory,
+  hintsExhausted,
   loadHistory,
   mergeReplayedEntries,
   parseHistory,
@@ -203,5 +204,22 @@ describe("appendHistoryLine", () => {
     await Promise.all(entries.map((e) => appendHistoryLine(file, e)));
     const loaded = await loadHistory(file);
     expect(loaded.sort()).toEqual(entries.sort());
+  });
+});
+
+describe("hintsExhausted", () => {
+  it("retires the hints on the threshold prompt, not before or after", () => {
+    expect(hintsExhausted(2, 3)).toBe(false);
+    expect(hintsExhausted(3, 3)).toBe(true);
+    expect(hintsExhausted(4, 3)).toBe(true);
+  });
+
+  // 0 is exhausted from prompt zero, which is what makes it "hover-only"
+  // rather than "gone": the bar's reveal override cannot tell that state
+  // apart from a session that drove past a higher threshold.
+  it("treats null as always-show and 0 as onboarding-skipped", () => {
+    expect(hintsExhausted(0, null)).toBe(false);
+    expect(hintsExhausted(9999, null)).toBe(false);
+    expect(hintsExhausted(0, 0)).toBe(true);
   });
 });

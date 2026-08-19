@@ -74,6 +74,7 @@ import {
   appendEntry,
   appendHistoryLine,
   buildCombinedHistory,
+  hintsExhausted,
   loadHistory,
   mergeReplayedEntries,
   saveHistory,
@@ -3315,6 +3316,19 @@ async function runSession(
   // set-deduped merge so reattaches don't pile up duplicates of past
   // prompts the daemon replayed again.
   let livePeerHistoryRecording = false;
+  // Push the help hints' collapse state to the screen. Called from every
+  // place `history` grows: a submitted prompt, and the attach-replay merge
+  // that folds in prompts other clients sent — which for a session this
+  // TUI has never typed in is the entire count, so without it a long-lived
+  // session would come up showing onboarding hints.
+  const syncHintsExhausted = (): void => {
+    screenRef?.setBanner({
+      hintsExhausted: hintsExhausted(
+        history.length,
+        config.tui.composer.hintTurns,
+      ),
+    });
+  };
   // Funnel: every place a new prompt becomes part of history goes
   // through here so the per-session list, the global list, the
   // dispatcher view, and both files stay in sync.
@@ -3345,6 +3359,11 @@ async function runSession(
     if (globalChanged) {
       appendHistoryLine(globalHistoryFile, trimmed).catch(() => undefined);
     }
+    // This prompt may be the one that retires the help hints. Also drops
+    // any keyboard reveal: the user has driven a turn, so whatever they
+    // were fishing for they found.
+    syncHintsExhausted();
+    screenRef?.clearHintReveal();
   };
   // Replay catch-up: history replay may have already incremented
   // pendingTurns before the dispatcher existed (notification handler
@@ -3533,7 +3552,9 @@ async function runSession(
           ? { type: "switch-session" }
           : action === "detach"
             ? { type: "exit" }
-            : { type: "show-help" };
+            : action === "toggle-options"
+              ? { type: "toggle-options" }
+              : { type: "show-help" };
       if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
         return;
       }
@@ -4121,6 +4142,10 @@ async function runSession(
     composer: config.tui.composer,
     sessionbar: config.tui.sessionbar,
   });
+  // Seeded before the first paint too: a session whose history file is
+  // already past the threshold should never flash the hints on its way to
+  // collapsing them.
+  syncHintsExhausted();
   screen.setSidebarGadgets(config.tui.sidebar.gadgets);
   screen.setSidebarWidth(config.tui.sidebar.width ?? null);
   screen.setSidebarBorder(config.tui.sidebar.border);
@@ -9271,6 +9296,7 @@ async function runSession(
       displayHistory = mergeReplayedEntries(displayHistory, replayedPromptTexts);
       dispatcher.setHistory(buildCombinedHistory(globalHistory, displayHistory));
       saveHistory(historyFile, history).catch(() => undefined);
+      syncHintsExhausted();
     }
   }
   livePeerHistoryRecording = true;

@@ -81,6 +81,7 @@ function fakeConfig(): HydraConfig {
       composer: {
         top: { left: ["status"], right: ["usage"] },
         bottom: { left: [], right: ["helpHint"] },
+        hintTurns: 3,
       },
       sessionbar: { left: ["cwd", "title"], right: ["agentModel"] },
       repaintThrottleMs: 1000,
