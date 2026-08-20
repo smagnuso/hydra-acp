@@ -5419,20 +5419,53 @@ export class SessionManager {
   // Best-effort: peek at the persisted history's first prompt and use
   // its first line (capped to 200 chars) as a session title. Returns
   // undefined if no usable prompt is found or any I/O fails.
+  //
+  // Skips what the live heuristic (Session.maybeSeedTitleFromPrompt)
+  // skips, and for the same reasons — the two paths titling one session
+  // differently is worse than either rule alone. A slash command is
+  // administrative rather than a summary; a prompt carrying
+  // `fromSession` provenance came from a peer; a `transformer:` clientId
+  // is an emitToQueue injection, which is machine traffic that never
+  // reaches the live heuristic at all (it bypasses Session.prompt).
+  //
+  // Without the slash rule, a session that opened with
+  // `/hydra workspace start` and was deliberately left untitled by the
+  // live path gets titled with the literal command text by the next cold
+  // load.
+  //
+  // Ancillary prompts (`hydra cat`, workspace state-change prompts)
+  // cannot be excluded by their own marker here: it rides `_meta` on the
+  // request and is not persisted onto the recorded `prompt_received`.
+  // Their senders stamp provenance or a synthetic clientId, which the
+  // two checks above catch.
   private async deriveTitleFromHistory(
     sessionId: string,
   ): Promise<string | undefined> {
     const history = await this.histories.load(sessionId).catch(() => []);
     for (const entry of history) {
       const params = entry.params as
-        | { update?: { sessionUpdate?: string; prompt?: unknown } }
+        | {
+            update?: {
+              sessionUpdate?: string;
+              prompt?: unknown;
+              sentBy?: { fromSession?: unknown; clientId?: unknown };
+            };
+          }
         | undefined;
       if (params?.update?.sessionUpdate !== "prompt_received") {
         continue;
       }
+      const sentBy = params.update.sentBy;
+      if (
+        typeof sentBy?.fromSession === "string" ||
+        (typeof sentBy?.clientId === "string" &&
+          sentBy.clientId.startsWith("transformer:"))
+      ) {
+        continue;
+      }
       const text = extractPromptText(params.update.prompt);
       const line = firstLine(text, 200);
-      if (line) {
+      if (line && !line.startsWith("/")) {
         return line;
       }
     }

@@ -780,15 +780,30 @@ export class Session {
   // reported to the originator as a clean "cancelled" stopReason instead of
   // a raw "connection closed" error.
   private forceCancelling = false;
-  // True once we've observed our first session/prompt; gates the
-  // first-prompt-seeded title so subsequent prompts don't churn it.
-  // Also read by SessionManager's onClose hook to decide whether to
-  // schedule a background synopsis (sessions that never received a
-  // prompt have nothing to summarize).
+  // True once we've observed our first session/prompt. Read by the idle
+  // close path (a session that never received a prompt has no
+  // conversation to preserve, so its record is deleted rather than kept
+  // cold) and by SessionManager's onClose hook to decide whether to
+  // schedule a background synopsis.
+  //
+  // Deliberately NOT the title gate: that is `_titleSeedPending`. The two
+  // were one flag until a slash command as the very first prompt made
+  // them disagree — the heuristic skips it, but the session has still
+  // received a prompt and its record must survive an idle close.
   private _firstPromptSeeded = false;
   get firstPromptSeeded(): boolean {
     return this._firstPromptSeeded;
   }
+  // True while the first-prompt title heuristic may still fire. Cleared
+  // only by a title actually landing: the heuristic's own seed,
+  // `/hydra title`, a rename, an agent-emitted session_info_update, or a
+  // title on session/new.
+  //
+  // A prompt the heuristic declines (machine traffic, a slash command, an
+  // attachment with no text) leaves this SET, so the next real prompt
+  // gets its turn. See maybeSeedTitleFromPrompt for why none of those is
+  // grounds for giving up on the session entirely.
+  private _titleSeedPending = true;
   // Wall-clock when the active prompt started, undefined when idle.
   // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
   // Also bumped/cleared by open/closeUnsolicitedTurn, so a session the
@@ -1290,6 +1305,10 @@ export class Session {
     }
     if (init.firstPromptSeeded) {
       this._firstPromptSeeded = true;
+      // Callers set this to mean "this session already has a title worth
+      // keeping" (see the field's doc on SessionInit), which is the title
+      // gate, not the had-a-prompt gate.
+      this._titleSeedPending = false;
     }
     this._interactive = init.interactive;
     this._priority = init.priority;
@@ -3166,12 +3185,14 @@ export class Session {
     // prompt_received (fires later, when the entry leaves the queue
     // head — see deviation note on broadcastPromptReceived).
     const messageId = generateMessageId();
-    // Title heuristic runs first — it needs to see firstPromptSeeded=false
-    // to actually fire. If it can extract a first line it'll set both the
-    // title AND the flag. If it can't (image-only / attachment-only / no
-    // extractable text), the title stays empty but we still need the flag
-    // set so the close-time snapshot regen gate doesn't skip the session
-    // as "had no prompt." Promotion to true is unconditional here.
+    // Title heuristic runs first — it owns `_titleSeedPending` and decides
+    // for itself whether this prompt was its one shot. Promotion of
+    // `_firstPromptSeeded` is unconditional and separate: the close-time
+    // gate asks "did this session ever get a prompt", and a prompt the
+    // heuristic declined to use is still a prompt. Folding the two
+    // together is what left a session whose first prompt was a slash
+    // command permanently untitled — painted as its own session id by
+    // every surface that falls back to one.
     this.maybeSeedTitleFromPrompt(params);
     this._firstPromptSeeded = true;
     // Any non-ancillary prompt promotes the session to interactive,
@@ -5222,6 +5243,13 @@ export class Session {
     if (!trimmed || trimmed === this.title) {
       return;
     }
+    // Any title arriving here is at least as authoritative as a guess off
+    // the next prompt: the heuristic's own seed, `/hydra title <name>`, or
+    // a rename from the picker. Closing the heuristic matters most for the
+    // slash path, where the command IS the first prompt — the heuristic
+    // deferred on the slash text, and without this the next real prompt
+    // would quietly overwrite the name the user just chose.
+    this._titleSeedPending = false;
     this.title = trimmed;
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
@@ -5244,21 +5272,39 @@ export class Session {
   // session/prompt's text. Replaces whatever was set at session/new
   // (typically an editor frame name like "Claude Agent @ hydra-acp")
   // — the first prompt is a better summary for cross-client display
-  // than the editor's static frame label. Subsequent prompts don't
-  // touch the title; that'd flap as conversations evolved.
+  // than the editor's static frame label. Once it fires, subsequent
+  // prompts don't touch the title; that'd flap as conversations evolved.
+  //
+  // "First" means the first prompt it can actually use, not literally the
+  // first one to arrive: a prompt with no seed in it defers rather than
+  // spending the one shot. `_titleSeedPending` is that state, and this
+  // method owns it.
   private maybeSeedTitleFromPrompt(params: unknown): void {
-    if (this.firstPromptSeeded) {
+    if (!this._titleSeedPending) {
       return;
     }
-    // Machine traffic is not a conversation summary. An ancillary turn
-    // (`hydra cat`, transformer-driven worker prompts) or one carrying
-    // per-prompt provenance came from a program or a peer session, not
-    // from someone describing what this session is for, so titling a
-    // session "Build 12847 failed: 3 link errors" is just wrong. Same
-    // reasoning as the slash-command skip below. Note the caller
-    // promotes _firstPromptSeeded unconditionally right after this
-    // returns, so a skip here means the session keeps whatever title
-    // session/new gave it rather than deferring to a later prompt.
+    // Every rejection below is a DEFERRAL, never a decision. The
+    // heuristic closes when it seeds and at no other time, because none
+    // of these tells you anything about the prompt that comes next:
+    //
+    //   - machine traffic: an ancillary turn (`hydra cat`,
+    //     transformer-driven worker prompts, hydra's own manufactured
+    //     state-change prompts) or one carrying per-prompt provenance
+    //     came from a program or a peer session, not from someone
+    //     describing what this session is for. Titling a session
+    //     "Build 12847 failed: 3 link errors" is just wrong — and so is
+    //     concluding from it that the human sharing the session will
+    //     never say what they are doing.
+    //   - slash command: `/hydra workspace start`, `/model gpt-5` are
+    //     administrative or routing prompts, not a summary of the work.
+    //   - no extractable text: an image or attachment with no caption.
+    //
+    // Machine-first is the ordinary shape of an isolated session, not an
+    // exotic one: entering or leaving a workspace hands the agent a
+    // manufactured prompt about the move, and `/hydra workspace start`
+    // is itself a slash command. Closing on either is what left those
+    // sessions untitled for the rest of their lives, painted as their
+    // own session id by every surface that falls back to one.
     const meta = extractHydraMeta(
       ((params ?? {}) as { _meta?: Record<string, unknown> })._meta,
     );
@@ -5268,19 +5314,10 @@ export class Session {
     const promptParams = (params ?? {}) as { prompt?: unknown };
     const text = extractPromptText(promptParams.prompt);
     const seed = firstLine(text, 200);
-    if (!seed) {
+    if (!seed || seed.startsWith("/")) {
       return;
     }
-    // Skip slash commands as title seeds. `/hydra planner create`,
-    // `/model gpt-5`, etc. are administrative or routing prompts —
-    // not the conversational summary a session title is meant to
-    // capture. Subsequent non-slash prompts can still seed (the
-    // _firstPromptSeeded flag stays false for slash-only flows so
-    // the next real prompt wins).
-    if (seed.startsWith("/")) {
-      return;
-    }
-    this._firstPromptSeeded = true;
+    this._titleSeedPending = false;
     this.setTitle(seed);
   }
 
@@ -6309,7 +6346,12 @@ export class Session {
       return;
     }
     this.title = trimmed;
+    // The agent's title wins over a guess off the next prompt. Left as a
+    // `_firstPromptSeeded` promotion too: an agent describing this session
+    // is evidence of a real upstream conversation, so an idle close should
+    // keep the record rather than delete it as never-prompted.
     this._firstPromptSeeded = true;
+    this._titleSeedPending = false;
     for (const handler of this.titleHandlers) {
       try {
         handler(trimmed);

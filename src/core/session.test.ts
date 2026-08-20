@@ -2131,6 +2131,20 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(session.title).not.toBe("Build 12847 failed: 3 link errors");
+
+      expect(session.title).toBeUndefined();
+
+      // ...and it DEFERS rather than giving up on the session. Machine
+      // traffic arriving first is the ordinary shape of an isolated
+      // session — entering or leaving a workspace hands the agent a
+      // manufactured prompt about the move — so the human's first real
+      // prompt still gets to name it.
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "now fix the parser bug" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("now fix the parser bug");
     });
 
     it("does not seed the title from a prompt carrying sentBy provenance", async () => {
@@ -2149,6 +2163,15 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(session.title).not.toBe("Heads up: I changed flush()");
+
+      // Deferred, not abandoned: a peer messaging an untitled session
+      // says nothing about whether its owner will describe it later.
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "now fix the parser bug" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("now fix the parser bug");
     });
 
     it("carries sentBy through to the prompt_received broadcast", async () => {
@@ -2472,23 +2495,82 @@ describe("Session", () => {
       });
 
       // Title comes from the explicit /hydra title arg, NOT from the
-      // raw slash text. (If the heuristic hadn't skipped, the session
-      // title would briefly be "/hydra title my explicit title" before
-      // setTitle ran with "my explicit title". The /hydra title arg
-      // path always wins via setTitle, so we can't distinguish that
-      // here — but we can verify the firstPromptSeeded flag DIDN'T
-      // flip from the slash text alone, by sending a follow-up
-      // non-slash prompt and checking it seeds.)
+      // raw slash text.
       expect(session.title).toBe("my explicit title");
 
-      // Now send a real prompt. With slash-skip working,
-      // firstPromptSeeded is still false (slash didn't seed), so this
-      // SHOULD seed the title... but setTitle from /hydra title above
-      // would have set _firstPromptSeeded true via setTitle's path.
-      // The cleaner test is to send the slash AND a non-slash and
-      // confirm firstPromptSeeded reflects the non-slash one's text.
-      // Skip this layered check — the absence of "/hydra title" as
-      // the title is sufficient evidence.
+      // And the name the user chose survives the next real prompt. The
+      // heuristic DEFERS on slash text rather than closing (so a session
+      // opened with `/hydra workspace start` can still be titled later),
+      // which means setTitle has to be what closes it — otherwise this
+      // prompt would quietly overwrite an explicit rename.
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "now fix the parser bug" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("my explicit title");
+    });
+
+    it("a slash-command first prompt defers the seed to the next real prompt", async () => {
+      // Regression: `_firstPromptSeeded` was promoted unconditionally
+      // right after the heuristic declined the slash text, so a session
+      // that opened with `/hydra workspace start` — the natural order
+      // when isolating before starting work — stayed untitled for the
+      // rest of its life, and every surface that falls back to a session
+      // id painted `sLPmk5w57fwcLiiu` where its title belonged.
+      const { session, mock } = makeSession("hydra_session_TL7", "u_TL7");
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra workspace start" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBeUndefined();
+      // Still a prompt, though: the idle close reads this to decide
+      // whether the record is a conversation worth keeping cold or an
+      // empty session to delete. Deferring the TITLE must not make a
+      // real session's record disappear.
+      expect(session.firstPromptSeeded).toBe(true);
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "now fix the parser bug" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("now fix the parser bug");
+    });
+
+    it("a text-less first prompt defers the seed to the next real prompt", async () => {
+      // Same deferral, different cause: a pasted image with no caption
+      // has no seed in it, but the person sending it is having a
+      // conversation and their next prompt does.
+      const { session, mock } = makeSession("hydra_session_TL8", "u_TL8");
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBeUndefined();
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "why is this row misaligned" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("why is this row misaligned");
     });
 
     it("/hydra title (no arg) schedules an out-of-band synopsis", async () => {

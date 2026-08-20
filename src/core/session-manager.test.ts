@@ -919,6 +919,54 @@ describe("SessionManager: history persistence", () => {
     expect(resumeParams?.title).toBe("implement the cache layer");
   });
 
+  it("skips slash commands and peer prompts when deriving a title on loadFromDisk", async () => {
+    // The live heuristic declines both (administrative, and not this
+    // person's summary of their own session), so the cold path must
+    // agree. Without the slash rule, a session that opened with
+    // `/hydra workspace start` — left untitled by the live path — gets
+    // titled with the literal command text by the next cold load.
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
+    const sessionId = live.sessionId;
+    for (const update of [
+      {
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "/hydra workspace start" }],
+      },
+      {
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "heads up: I changed flush()" }],
+        sentBy: { clientId: "c_peer", fromSession: "hydra_session_peer" },
+      },
+      {
+        // emitToQueue injection: machine traffic that bypasses
+        // Session.prompt, so the live heuristic never sees it and only
+        // this path can exclude it.
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "Workspace changed; re-read the tree." }],
+        sentBy: { clientId: "transformer:hydra-acp-observe", name: "hydra-acp-observe" },
+      },
+      {
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "now fix the parser bug" }],
+      },
+    ]) {
+      mocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update,
+      });
+    }
+    await flushHistoryWrites();
+    await live.close({ deleteRecord: false });
+
+    const metaPath = path.join(tmpHome, "sessions", sessionId, "meta.json");
+    const parsed = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    delete parsed.title;
+    await fs.writeFile(metaPath, JSON.stringify(parsed, null, 2) + "\n");
+
+    const resumeParams = await manager.loadFromDisk(sessionId);
+    expect(resumeParams?.title).toBe("now fix the parser bug");
+  });
+
   it("preserves createdAt across resurrect (regression: attachManagerHooks used to reset it)", async () => {
     const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
