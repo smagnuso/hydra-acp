@@ -2058,18 +2058,58 @@ Daemon to every attached client, whenever the armed set changes: a task is
 armed, a one-shot is discharged by a resumption, or one is cancelled via
 `TaskStop`.
 
+`tasks` is the **complete current set**, never a delta. Clients must REPLACE
+their local list with it rather than merging: a merge re-creates the very bug
+the level signal exists to kill, this time inside the client. A dropped
+notification therefore self-heals on the next one.
+
+The entry shape depends on which source produced it, and the two carry
+different keys:
+
 ```jsonc
+// Level-sourced (claude-acp). No toolCallId: the agent reports its live
+// set without attribution, and the daemon must not join it to the edge
+// stream.
 {
   "sessionId": "<id>",
   "count":     1,
-  "since":     1717012800000,   // absent when count is 0
+  "since":     1717012800000,   // absent when count is 0; min of tasks[].since
+  "tasks":     [ {
+    "taskId":   "bgzem17m0",
+    "label":    "Sleep 20 seconds then echo done",
+    "taskType": "local_bash",
+    "since":    1717012800000
+  } ]
+}
+
+// Edge-sourced (every other agent). Best-effort, and overstates.
+{
+  "sessionId": "<id>",
+  "count":     1,
+  "since":     1717012800000,
   "tasks":     [ {
     "toolCallId": "toolu_01YH6jTseLAcJS",   // the tool call that armed it
     "label":      "device run",
-    "taskId":     "bgzem17m0"               // absent until an update carries it
+    "taskId":     "bgzem17m0",              // absent until an update carries it
+    "since":      1717012800000
   } ]
 }
 ```
+
+Each entry carries its own `since`, so a client can render a per-task elapsed
+and not just the aggregate. Top-level `since` is the minimum across
+`tasks[].since`, so the two never disagree.
+
+Because `toolCallId` is absent on level-sourced entries, **key UI on `taskId`**
+and treat `toolCallId` as an optional bonus for annotating an
+already-rendered tool call.
+
+The daemon suppresses a notification only when neither the **membership** (the
+set of ids) nor `since` moved. Deliberately not keyed on `count`: with A
+(oldest) and B running, B ending as C starts leaves the count at 2 and `since`
+still on A, so a count-keyed dedup would drop the payload and leave every
+client rendering the finished B while C stayed invisible. Reordering alone is
+not a change; neither source promises a stable iteration order.
 
 `toolCallId` is the identity of the tool call that armed the watch, which is
 also the identity of the tool-call block a client has already rendered for it.
@@ -2093,6 +2133,21 @@ includes `armedTasks` and `armedSince`, the same two values the notification
 carries. Clients MUST seed from them on every attach, including reattach, and
 MUST treat `armedTasks: 0` as "clear whatever you were showing".
 
+It also includes `armedTaskList`, the set itself, with the same entries the
+notification's `tasks` carries. A client that wants to *list* running jobs
+(names, per-task elapsed) rather than badge a count seeds from this; without
+it, a mid-flight attach would know how many jobs are running but not what
+they are until the next membership change, which for a long job can be an
+hour. Same replace-don't-merge contract, and the same absent-versus-empty
+rule as `armedTasks`: `[]` means nothing is running, absent means the daemon
+is too old to say.
+
+`armedTaskList` is deliberately NOT on `session/list` rows. It carries
+agent-authored prose per entry, and attaching that to every row of every
+list response to feed a column that only ever renders `BUSY` is not worth
+the payload. The count on the row is the right granularity there; the list
+is per-session detail.
+
 The armed set is per-`Session` and in-memory only; it is never persisted. So a
 session that closes and comes back — force-cancel, crash, cold-resurrect,
 daemon restart — returns as a *new* `Session` whose armed set is empty, and it
@@ -2107,10 +2162,9 @@ clocked from an arming two incarnations earlier, while the daemon and
 report it. Clients MUST distinguish the two: reading absence as zero would
 clear a live badge on every reattach to an older daemon.
 
-Deduplicated on the rendered state: several updates for one tool call all
-carry the arming signal (a real `Monitor` sent seven), and re-arming an
-entry already counted leaves `count` and `since` unchanged, so it fires
-once.
+Deduplicated on membership plus `since`: several updates for one tool call
+all carry the arming signal (a real `Monitor` sent seven), and re-arming an
+entry already in the set moves neither, so it fires once.
 
 **Vendor coupling.** The `cause` label is derived from
 `_meta.claudeCode.toolResponse.taskId` and `rawInput.run_in_background`, which

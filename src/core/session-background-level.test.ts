@@ -99,7 +99,7 @@ describe("background-task level signal", () => {
     level(mock, [
       { task_id: "bg_a", description: "Sleep 20 seconds then echo done" },
     ]);
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { taskId: "bg_a", label: "Sleep 20 seconds then echo done", taskType: "local_bash" },
     ]);
     expect(session.armedSince).toBeGreaterThan(0);
@@ -162,7 +162,7 @@ describe("background-task level signal", () => {
     armViaEdge(mock, "toolu_oc", "opencode has no level");
     // No level has ever arrived, so the edge map is all there is and its
     // toolCallId attribution survives.
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_oc", label: "opencode has no level" },
     ]);
   });
@@ -195,7 +195,7 @@ describe("background-task level signal", () => {
     notify.mockClear();
 
     // A membership-neutral republish must not re-broadcast: the dedup key is
-    // the rendered {count, since}, and firstSeen is held steady, so this
+    // the id set plus `since`, and firstSeen is held steady, so this
     // collapses to no change rather than restarting every client's clock.
     level(mock, [{ task_id: "bg_same" }]);
     const armed = notify.mock.calls.filter(
@@ -212,8 +212,66 @@ describe("background-task level signal", () => {
       message: { type: "system", subtype: "commands_changed", commands: [] },
     });
     // Must not be mistaken for an empty level and clear the edge entry.
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_keep", label: "still armed" },
     ]);
+  });
+
+  it("stamps a per-task since from both sources", () => {
+    const { session: edgeSession, mock: edgeMock } = makeSession("s_edge");
+    armViaEdge(edgeMock, "toolu_a", "edge job");
+    const edge = edgeSession.armedBackgroundTasks;
+    expect(edge).toHaveLength(1);
+    expect(typeof edge[0]!.since).toBe("number");
+
+    const { session, mock } = makeSession("s_lvl");
+    level(mock, [{ task_id: "bg_1", description: "level job" }]);
+    const lvl = session.armedBackgroundTasks;
+    expect(typeof lvl[0]!.since).toBe("number");
+    // The aggregate must be the minimum of the per-entry stamps, or a client
+    // rendering both would show a task older than the session's own clock.
+    expect(session.armedSince).toBe(lvl[0]!.since);
+  });
+
+  it("broadcasts a same-size swap that leaves count and since unmoved", async () => {
+    const { session, mock } = makeSession();
+    const client = makeClient();
+    const notify = vi.spyOn(client.connection, "notify").mockResolvedValue(undefined);
+    void session.attach(client, "none");
+
+    // A is the oldest and stays put, so `since` never moves. B leaves as C
+    // arrives, so the count never moves either. Only membership changed.
+    // A count-keyed dedup drops this silently and every client keeps
+    // rendering the finished B while C stays invisible.
+    level(mock, [{ task_id: "A" }, { task_id: "B" }]);
+    notify.mockClear();
+    level(mock, [{ task_id: "A" }, { task_id: "C" }]);
+
+    const armed = notify.mock.calls.filter(
+      ([method]) => method === "hydra-acp/session/armed_tasks_updated",
+    );
+    expect(armed).toHaveLength(1);
+    const ids = (armed[0]![1] as { tasks: Array<{ taskId?: string }> }).tasks
+      .map((t) => t.taskId)
+      .sort();
+    expect(ids).toEqual(["A", "C"]);
+  });
+
+  it("does not rebroadcast when only the payload's ordering changes", () => {
+    const { session, mock } = makeSession();
+    const client = makeClient();
+    const notify = vi.spyOn(client.connection, "notify").mockResolvedValue(undefined);
+    void session.attach(client, "none");
+    level(mock, [{ task_id: "A" }, { task_id: "B" }]);
+    notify.mockClear();
+
+    // Neither source promises a stable iteration order, so a reshuffle is
+    // not a change and must not restart every client's render.
+    level(mock, [{ task_id: "B" }, { task_id: "A" }]);
+    expect(
+      notify.mock.calls.filter(
+        ([method]) => method === "hydra-acp/session/armed_tasks_updated",
+      ),
+    ).toEqual([]);
   });
 });

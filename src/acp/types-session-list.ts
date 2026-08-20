@@ -200,6 +200,13 @@ export interface WarmSessionMetaExtras {
   turnStartedAt?: number;
   agentCapabilities?: unknown;
   queue?: unknown[];
+  // The armed set, for a client that wants to LIST running jobs rather
+  // than badge a count. Deliberately an extra rather than a
+  // SessionListEntry field: it is per-session detail carrying agent-authored
+  // prose, and putting it on the list row would attach that prose to every
+  // row of every session/list response to feed a column that only renders
+  // BUSY. The count on the row stays the right thing for that.
+  armedTaskList?: unknown[];
   // True when this session/attach call is what brought the session
   // from cold → warm (the daemon's resurrect path ran inside the
   // handler). False/absent when attaching to an already-warm session.
@@ -336,6 +343,13 @@ export function buildHydraSessionMeta(
     }
     if (extras.resurrected === true) {
       meta.resurrected = true;
+    }
+    // Not gated on length, unlike the palette fields above. An empty array
+    // is the daemon saying "nothing is running", which is exactly what
+    // clears a client's stale panel; omitting it would make that
+    // indistinguishable from an older daemon that cannot say at all.
+    if (extras.armedTaskList !== undefined) {
+      meta.armedTaskList = extras.armedTaskList;
     }
   }
   return meta;

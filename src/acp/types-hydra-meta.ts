@@ -133,6 +133,36 @@ export interface WorkspaceInfoMeta {
   vcs?: Record<string, string>;
 }
 
+/**
+ * One background job the agent is running right now.
+ *
+ * Two sources produce these and they carry different keys. A level-sourced
+ * entry (claude-acp) has `taskId` and `taskType` but NO `toolCallId`: the
+ * agent reports its live set without attribution, and the daemon is
+ * forbidden from joining it back to the tool-call stream. An edge-sourced
+ * entry (every other agent) has `toolCallId` and is best-effort.
+ *
+ * So `toolCallId` is the wrong thing to key a UI on. Use `taskId` when
+ * present, and treat `toolCallId` purely as an optional bonus for
+ * annotating an already-rendered tool call.
+ */
+export interface HydraArmedTask {
+  /** Agent-authored, one line. Safe to render; already length-capped. */
+  label: string;
+  /** Stable identity where the agent gives one. */
+  taskId?: string;
+  /** e.g. "local_bash". Level-sourced entries only. */
+  taskType?: string;
+  /** Edge-sourced entries only; joins to a rendered tool-call block. */
+  toolCallId?: string;
+  /**
+   * When the daemon first saw THIS job, for a per-task elapsed readout.
+   * Not the agent's own start time: the level carries none, so this is
+   * later by the delivery latency (milliseconds in practice).
+   */
+  since: number;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
@@ -213,6 +243,16 @@ export interface HydraMeta {
   // A count of 0 is meaningful and distinct from absent (older daemon).
   armedTasks?: number;
   armedSince?: number;
+  // The armed set itself, so a client attaching mid-flight can paint a LIST
+  // (names, per-task elapsed) and not just a count. Same entries as the
+  // `armed_tasks_updated` notification carries, and the same replace-don't-
+  // merge contract: this is a complete set, never a delta.
+  //
+  // An empty array and an absent field are different and must stay so: empty
+  // is "nothing is running", absent is "this daemon is too old to say". A
+  // client that conflates them blanks a live panel when talking to an older
+  // daemon. Same rule as the `armedTasks: 0` case above.
+  armedTaskList?: HydraArmedTask[];
   // Daemon capability groups advertised on the initialize response so
   // capability-aware clients can probe support before calling a method
   // (rather than catching MethodNotFound). Grouped by resource to mirror
@@ -452,6 +492,30 @@ export function extractHydraMeta(
   }
   if (typeof obj.armedSince === "number" && obj.armedSince > 0) {
     out.armedSince = obj.armedSince;
+  }
+  // An empty array survives this branch and is assigned, because empty and
+  // absent mean different things (see the field doc). Entries missing the
+  // two required fields are dropped individually rather than voiding the
+  // whole list: a partial list still beats falling back to a bare count.
+  if (Array.isArray(obj.armedTaskList)) {
+    const armed: HydraArmedTask[] = [];
+    for (const raw of obj.armedTaskList) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const t = raw as Record<string, unknown>;
+      if (typeof t.label !== "string" || typeof t.since !== "number") {
+        continue;
+      }
+      armed.push({
+        label: t.label,
+        since: t.since,
+        ...(typeof t.taskId === "string" ? { taskId: t.taskId } : {}),
+        ...(typeof t.taskType === "string" ? { taskType: t.taskType } : {}),
+        ...(typeof t.toolCallId === "string" ? { toolCallId: t.toolCallId } : {}),
+      });
+    }
+    out.armedTaskList = armed;
   }
   if (Array.isArray(obj.availableCommands)) {
     const cmds: HydraAdvertisedCommand[] = [];

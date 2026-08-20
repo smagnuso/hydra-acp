@@ -354,6 +354,47 @@ describe("buildHydraSessionMeta", () => {
     expect(extractHydraMeta({ "hydra-acp": silent }).armedTasks).toBeUndefined();
   });
 
+  // The list, not just the count: a client painting running jobs by name
+  // needs to seed on attach, or a mid-flight attach knows how many are
+  // running but not what they are until the next membership change.
+  it("carries the armed task list, and keeps empty distinct from absent", () => {
+    const listed = buildHydraSessionMeta(baseEntry, {
+      armedTaskList: [
+        { taskId: "bg_1", label: "device run", taskType: "local_bash", since: 1_700_000_000_000 },
+      ],
+    });
+    expect(extractHydraMeta({ "hydra-acp": listed }).armedTaskList).toEqual([
+      { taskId: "bg_1", label: "device run", taskType: "local_bash", since: 1_700_000_000_000 },
+    ]);
+
+    // Same load-bearing case as the zero above: an empty list is the daemon
+    // saying "nothing is running", which is what clears a stale panel. A
+    // length guard in builder or parser would drop it and the panel sticks.
+    const empty = buildHydraSessionMeta(baseEntry, { armedTaskList: [] });
+    expect(empty.armedTaskList).toEqual([]);
+    expect(extractHydraMeta({ "hydra-acp": empty }).armedTaskList).toEqual([]);
+
+    const old = buildHydraSessionMeta(baseEntry);
+    expect("armedTaskList" in old).toBe(false);
+    expect(extractHydraMeta({ "hydra-acp": old }).armedTaskList).toBeUndefined();
+  });
+
+  // A malformed entry must not void the whole list: a partial list still
+  // beats falling back to a bare count.
+  it("drops unusable armed entries rather than the whole list", () => {
+    const meta = buildHydraSessionMeta(baseEntry, {
+      armedTaskList: [
+        { label: "good", since: 1_700_000_000_000 },
+        { label: "no since" },
+        { since: 1_700_000_000_001 },
+        "not an object",
+      ],
+    });
+    expect(extractHydraMeta({ "hydra-acp": meta }).armedTaskList).toEqual([
+      { label: "good", since: 1_700_000_000_000 },
+    ]);
+  });
+
   it("carries the workspace binding through to the client, not just its cwd", () => {
     // Regression, and the specific case above: cwd for an isolated
     // session is an anonymous hash directory, so a client that gets cwd

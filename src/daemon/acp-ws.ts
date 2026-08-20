@@ -3008,6 +3008,10 @@ function buildViewerResponseMeta(
     availableCommands: fromDisk.agentCommands,
     availableModes: fromDisk.agentModes,
     availableModels: fromDisk.agentModels,
+    // A cold session has no agent, so nothing can be running. Stated
+    // explicitly rather than omitted: absent would read as "daemon too old
+    // to say" and leave a panel showing the previous incarnation's jobs.
+    armedTaskList: [],
   };
   return { [HYDRA_META_KEY]: buildHydraSessionMeta(entry, extras) };
 }
@@ -3054,6 +3058,11 @@ function buildResponseMeta(
     // waiting for new prompt_queue_added notifications. Omitted entirely
     // when the queue is empty (the common case).
     queue: session.queueSnapshot(),
+    // The armed set, so a client can paint a list of running jobs on
+    // attach rather than waiting for the next membership change to learn
+    // their names. Sent even when empty: that is the signal that clears a
+    // panel left over from a previous incarnation.
+    armedTaskList: session.armedBackgroundTasks,
     ...(opts.resurrected === true ? { resurrected: true } : {}),
   };
   return mergeMeta(session.agentMeta, buildHydraSessionMeta(entry, extras));

@@ -876,7 +876,7 @@ export class Session {
   >();
   // Last {count, since} pushed to clients, so a mutation that doesn't move
   // the rendered state (re-arming a task already counted) stays silent.
-  private lastArmedBroadcast: { count: number; since: number | undefined } |
+  private lastArmedBroadcast: { key: string; since: number | undefined } |
     undefined;
   // The agent's OWN live background-task set, replaced wholesale from each
   // `background_tasks_changed` level. Where armedTasks is inference from
@@ -3746,20 +3746,34 @@ export class Session {
   // today (the TUI's armed_tasks_updated handler takes `count` and `since`
   // only), and an absent join key is the honest encoding of "the agent told
   // us this is running but not which call started it".
+  // Each entry carries its OWN `since`, so a client can render a per-task
+  // elapsed rather than only the aggregate one. Both sources have the
+  // stamp already (`firstSeen` for a level entry, `armedAt` for an edge
+  // entry) and they mean the same thing to a reader: when this daemon first
+  // knew about this job. The top-level `armedSince` stays the minimum of
+  // these, so the two never disagree.
   get armedBackgroundTasks(): Array<
-    { toolCallId?: string; label: string; taskId?: string; taskType?: string }
+    {
+      toolCallId?: string;
+      label: string;
+      taskId?: string;
+      taskType?: string;
+      since: number;
+    }
   > {
     if (this.sawBackgroundTaskLevel) {
       return [...this.liveBackgroundTasks.entries()].map(([taskId, t]) => ({
         taskId,
         label: t.description || t.taskType,
         taskType: t.taskType,
+        since: t.firstSeen,
       }));
     }
     return [...this.armedTasks.entries()].map(([toolCallId, t]) => ({
       toolCallId,
       label: t.label,
       ...(t.taskId !== undefined ? { taskId: t.taskId } : {}),
+      since: t.armedAt,
     }));
   }
 
@@ -3802,7 +3816,19 @@ export class Session {
     const tasks = this.armedBackgroundTasks;
     const count = tasks.length;
     const since = this.armedSince;
-    if (count === this.lastArmedBroadcast?.count &&
+    // Keyed on MEMBERSHIP, not the count. The count was sufficient while
+    // {count, since} was all any client rendered, but it silently drops a
+    // same-size swap: with A (oldest) and B running, B ending as C starts
+    // leaves count 2 and `since` still on A, so the payload changes while
+    // the key does not. Clients would keep showing the finished B and never
+    // see C until some later unrelated change. Sorted, because neither
+    // source promises a stable iteration order and an order-sensitive key
+    // would rebroadcast on reshuffles that change nothing.
+    const key = tasks
+      .map((t) => t.taskId ?? t.toolCallId ?? t.label)
+      .sort()
+      .join(" ");
+    if (key === this.lastArmedBroadcast?.key &&
       since === this.lastArmedBroadcast?.since) {
       return;
     }
@@ -3822,7 +3848,7 @@ export class Session {
     if (this.closed) {
       return;
     }
-    this.lastArmedBroadcast = { count, since };
+    this.lastArmedBroadcast = { key, since };
     this.broadcastQueueNotification("hydra-acp/session/armed_tasks_updated", {
       sessionId: this.sessionId,
       count,

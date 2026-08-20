@@ -704,7 +704,7 @@ describe("armed background tasks", () => {
     expect(session.turnStartedAt).toBeUndefined();
     // toolCallId is published so a client can annotate the very tool block
     // that armed this, rather than guessing which one it belongs to.
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_bg", label: "gibbon rebuild" },
     ]);
   });
@@ -753,7 +753,7 @@ describe("armed background tasks", () => {
     });
     await settleDrain();
 
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_mixed", label: "Terminal", taskId: "bg_1" },
     ]);
   });
@@ -767,7 +767,7 @@ describe("armed background tasks", () => {
         claudeCode: { toolResponse: { taskId: "bgzem17m0", timeoutMs: 2400000 } },
       },
     });
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_mon", label: "Monitor", taskId: "bgzem17m0" },
     ]);
   });
@@ -838,7 +838,7 @@ describe("armed background tasks", () => {
     // The one-shot goes, even though the resumption was attributed to the
     // Monitor. The Monitor itself stays: it fires per occurrence, so its
     // notification says the watch is alive, not that it is finished.
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_monitor", label: "Monitor", taskId: "bnrcts5np" },
     ]);
     expect(session.armedSince).toBeDefined();
@@ -880,7 +880,7 @@ describe("armed background tasks", () => {
     // First event: the watch reports progress, which wakes the session.
     agentChunk(mock, "elapsed_steps=120");
     expect(session.inUnsolicitedTurn).toBe(true);
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_mon", label: "Monitor", taskId: "b4atttz8a" },
     ]);
 
@@ -892,7 +892,7 @@ describe("armed background tasks", () => {
       sessionId: "u_agent",
       update: monitorArming,
     });
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_mon", label: "Monitor", taskId: "b4atttz8a" },
     ]);
     expect(session.armedSince).toBe(armedAt);
@@ -1173,7 +1173,7 @@ describe("armed background tasks", () => {
         "Command running in background with ID: b17okg6jd. Output is being " +
         "written to: /tmp/claude-1000/-home-smagnuson/tasks/b17okg6jd.output",
     });
-    expect(session.armedBackgroundTasks).toEqual([
+    expect(session.armedBackgroundTasks).toMatchObject([
       { toolCallId: "toolu_bg", label: "Terminal", taskId: "b17okg6jd" },
     ]);
     await stopDuringTurn(session, mock, client, "b17okg6jd");
