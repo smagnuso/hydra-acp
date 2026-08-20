@@ -1020,7 +1020,7 @@ describe("Session.swapUpstream", () => {
     const logger = { info: vi.fn(), warn: warnSpy };
 
     const store = new HistoryStore();
-    // Succeed on the first call (quiesce check in _hasOpenToolCall),
+    // Succeed on the first call (quiesce check in openToolCallIdsInHistory),
     // then reject on the second call (the swap's historyStore.load).
     vi.spyOn(store, "load")
       .mockResolvedValueOnce([])

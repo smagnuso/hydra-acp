@@ -1138,6 +1138,15 @@ All three return a short "no compacted history yet" payload until the session ha
 
 Consumers must therefore merge a call with its updates (union of `rawInput`, later values winning) and resolve the name from the **opening** event only. Taking the newest `title` yields the command text in the tool name's place. `core/history-transcript.ts` exposes `mergeToolCalls` and `normalizeToolName` for this; recall, the transcript renderer, and the compaction seed all go through them. When the resolved name turns out to be an echo of an argument, the ACP `kind` is used instead, which is why `kind` is the portable filter axis and `tool_name` is not.
 
+**Abandoned chains are closed by the daemon.** An agent that is interrupted mid-tool owes no further update for the call it dropped, so without intervention the `tool_call` stays `pending` on disk forever. When a turn ends with `stopReason` `cancelled`, `error`, or `refusal`, hydra emits a synthetic terminal update for every still-open call in that session, immediately **before** the `turn_complete` (or `turn_ended`, for an agent-initiated turn cancelled by `session/cancel`) row:
+
+```json
+{ "sessionUpdate": "tool_call_update", "toolCallId": "…", "status": "failed",
+  "_meta": { "hydra-acp": { "synthetic": true, "closedBy": "cancelled" } } }
+```
+
+`status: "failed"` because ACP's tool status vocabulary has no `cancelled`, and `failed` is what consumers already treat as terminal. `_meta["hydra-acp"].synthetic` distinguishes it from a real agent-reported failure. Two consequences: a transcript never shows a tool still running under a closed turn, and the quiesce check (which reads open chains off history and gates `/hydra workspace start|sync|clean` plus deferred compaction swaps) stops reading an interrupt as "the agent is still working". `superseded` is excluded on purpose: the agent keeps running there, with a new prompt stacked on top, and may still report those tools itself.
+
 Recorded output is read from `rawOutput` (a string for claude-acp, `{ output, metadata }` for opencode), preferring claude-acp's structured `_meta.claudeCode.toolResponse` where present so `stderr` stays distinguishable. Blob-spilled output is already rehydrated by the history store before recall sees it. Returned output is capped per call and per response; `outputTruncated` and a top-level `outputBudgetExhausted` report when a cap bit.
 
 Output reaches an agent only through an explicit recall call (`tool_calls`, or `range`, which opts in via `renderTranscript`'s `toolOutput` option). It is deliberately absent from the compaction seed and from synopsis input: a seeded agent has often just changed working directory, and a listing or `git status` captured before the move asserts state that no longer holds, where a command replays harmlessly. Commands are safe to push; results must be pulled.

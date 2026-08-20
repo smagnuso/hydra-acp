@@ -1805,10 +1805,9 @@ export class SessionManager {
           `has it to itself.`,
       );
     }
-    if (!(await session.isQuiescedForSwap())) {
-      throw new Error(
-        "the agent is still working; wait for the current turn to finish, then try again",
-      );
+    const syncBlocker = await session.quiesceBlocker();
+    if (syncBlocker !== undefined) {
+      throw new Error(syncBlocker);
     }
 
     // Git-only, and it has to say so rather than find out.
@@ -2775,10 +2774,9 @@ export class SessionManager {
             `Clean it from a session that has it to itself.`,
         );
       }
-      if (!(await session.isQuiescedForSwap())) {
-        throw new Error(
-          "the agent is still working; wait for the current turn to finish, then try again",
-        );
+      const cleanBlocker = await session.quiesceBlocker();
+      if (cleanBlocker !== undefined) {
+        throw new Error(cleanBlocker);
       }
 
       const provider = getWorkspaceProvider(ws.provider);
@@ -3814,10 +3812,9 @@ export class SessionManager {
     // re-checks this, but by then the workspace exists and the user's
     // work has been moved into it — a refusal there is not a no-op, it
     // is a mess someone has to clean up.
-    if (!(await session.isQuiescedForSwap())) {
-      throw new Error(
-        "the agent is still working; wait for the current turn to finish, then try again",
-      );
+    const startBlocker = await session.quiesceBlocker();
+    if (startBlocker !== undefined) {
+      throw new Error(startBlocker);
     }
     const caps = provider.capabilities();
 

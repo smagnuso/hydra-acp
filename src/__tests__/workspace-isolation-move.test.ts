@@ -129,7 +129,9 @@ describe("session isolation end-to-end: moving a live session", () => {
   it("refuses to start while the agent is mid-turn, without provisioning anything", async () => {
     const repo = await makeGitRepo();
     const session = await manager.create({ agentId: "claude-code", cwd: repo });
-    vi.spyOn(session, "isQuiescedForSwap").mockResolvedValue(false);
+    vi.spyOn(session, "quiesceBlocker").mockResolvedValue(
+      "the agent is still working; wait for the current turn to finish, then try again",
+    );
 
     await expect(manager.runWorkspaceAction(session.sessionId, "start", "busy")).rejects.toThrow(
       /still working/i,

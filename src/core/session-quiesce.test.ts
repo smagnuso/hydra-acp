@@ -302,3 +302,128 @@ describe("Session.isQuiescedForSwap", () => {
     expect(result).toBe(true);
   });
 });
+
+describe("Session.quiesceBlocker", () => {
+  it("names the open tool call rather than claiming the agent is working", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qb1",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qb1",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, toolCallEntry("tc-orphan", "read_file"));
+
+    const blocker = await session.quiesceBlocker();
+    // The distinction is the whole point: an orphaned chain is not a turn
+    // in flight, and telling the user to wait for one is what made this
+    // refusal read as a bug.
+    expect(blocker).toContain("never reported a result");
+    expect(blocker).not.toContain("still working");
+  });
+
+  it("returns undefined when nothing is blocking", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qb2",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qb2",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, toolCallEntry("tc-1", "read_file"));
+    await triggerUpdate(mock, toolCallUpdateEntry("tc-1", "completed"));
+
+    expect(await session.quiesceBlocker()).toBeUndefined();
+  });
+});
+
+describe("cancelled turns close their own tool chain", () => {
+  it("marks an abandoned tool call failed and leaves the session quiesced", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qc1",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qc1",
+      historyStore: store,
+    });
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    // A turn that fires a tool and is then interrupted: the agent owes no
+    // terminal update for the call it abandoned, which is exactly the
+    // shape that used to strand the chain.
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async (method: string) => {
+        if (method !== "session/prompt") {
+          return undefined;
+        }
+        mock.triggerNotification("session/update", {
+          sessionId: "agent-sess",
+          update: toolCallEntry("tc-cancelled", "execute"),
+        });
+        await new Promise((r) => setImmediate(r));
+        return { stopReason: "cancelled" };
+      },
+    );
+
+    await session.prompt(client.clientId, {
+      sessionId: "hydra_session_qc1",
+      prompt: [{ type: "text", text: "run something long" }],
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const history = await store.load("hydra_session_qc1");
+    const terminal = history.filter((e) => {
+      const u = (e.params as { update?: { sessionUpdate?: string; toolCallId?: string; status?: string } })
+        .update;
+      return (
+        u?.sessionUpdate === "tool_call_update" &&
+        u.toolCallId === "tc-cancelled" &&
+        u.status === "failed"
+      );
+    });
+    expect(terminal).toHaveLength(1);
+    expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+
+  it("lets ^C close a chain already stranded by an earlier turn", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qc2",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qc2",
+      historyStore: store,
+    });
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    await triggerUpdate(mock, toolCallEntry("tc-stranded", "execute"));
+    expect(await session.isQuiescedForSwap()).toBe(false);
+
+    // Nothing is in flight, so the keystroke has no turn to interrupt.
+    // Closing the orphan is the only thing left for it to do, and without
+    // it the refusal has no user-side remedy at all.
+    await session.cancel(client.clientId);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+});

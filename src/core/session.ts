@@ -1036,6 +1036,13 @@ export class Session {
   private toolCompletionSeen = new Map<string, string>();
   private toolCallKind = new ToolKindTracker();
   private filesEditedSeen = new Set<string>();
+  // Tool calls that have been recorded with no terminal tool_call_update
+  // yet. Fed from recordAndBroadcast, so it mirrors exactly what
+  // openToolCallIdsInHistory reads back off disk. Exists so a turn that
+  // ends without settling its tools can close them itself
+  // (closeOpenToolCalls) rather than leaving an orphan that reads as
+  // "still working" to every quiesce-gated verb.
+  private openToolCalls = new Set<string>();
   private agentChangeHandlers: Array<
     (info: {
       agentId: string;
@@ -1698,32 +1705,71 @@ export class Session {
 
   // True when the session is safe to swap upstream out from under.
   // Used by T10 to decide whether it is safe to swap the upstream
-  // session without losing in-flight work. Returns true only when:
-  // - the agent isn't being driven (no prompt in flight to it). Note
-  //   this is agentTurnInFlight, not promptInFlight: a daemon-side
-  //   slash command occupies the queue without touching the agent, and
-  //   the swap-driving commands are themselves such entries.
-  // - no tool-call chain is open (every tool_call has a corresponding
-  //   tool_call_update with status="completed"|"failed")
-  // - no mode_change or model_change transition is in progress.
-  // - the agent isn't mid-way through a turn it started by itself.
+  // session without losing in-flight work. See quiesceBlocker for the
+  // terms; this is the boolean view of it.
   async isQuiescedForSwap(): Promise<boolean> {
-    if (this.agentTurnInFlight || this.unsolicitedTurn !== undefined) {
-      return false;
+    return (await this.quiesceBlocker()) === undefined;
+  }
+
+  /**
+   * Which quiesce term is currently blocking, phrased for whoever typed
+   * the command that got refused. `undefined` means quiesced.
+   *
+   * Terms, in the order checked:
+   * - the agent is being driven (no prompt in flight to it). Note this is
+   *   agentTurnInFlight, not promptInFlight: a daemon-side slash command
+   *   occupies the queue without touching the agent, and the
+   *   swap-driving commands are themselves such entries.
+   * - the agent is mid-way through a turn it started by itself.
+   * - hydra is driving the agent outside the queue (a compaction seed, a
+   *   `/hydra agent` transcript injection).
+   * - a mode_change or model_change transition is in progress.
+   * - a tool-call chain is open (some tool_call has no tool_call_update
+   *   with status="completed"|"failed").
+   *
+   * Split out from the boolean because "the agent is still working" was
+   * the answer for all five, and four of them are invisible from a
+   * composer: the user sees an idle session and a message telling them to
+   * wait for a turn that already ended. Naming the term is the difference
+   * between "wait a second and retry" and "this is broken".
+   */
+  async quiesceBlocker(): Promise<string | undefined> {
+    if (this.agentTurnInFlight) {
+      return "the agent is still working; wait for the current turn to finish, then try again";
     }
-    // Seeds and other internal prompts drive the agent without going
-    // through the queue at all, so they need their own term here.
+    if (this.unsolicitedTurn !== undefined) {
+      return (
+        "the agent is part-way through a turn it started by itself; wait for it to " +
+        "finish or interrupt it (^C), then try again"
+      );
+    }
     if (this.internalPromptCapture !== undefined) {
-      return false;
+      return (
+        "hydra is driving the agent right now (compaction seed or transcript " +
+        "injection); this clears by itself, so try again in a moment"
+      );
     }
-    if (this.modeChangeInFlight || this.modelChangeInFlight) {
-      return false;
+    if (this.modelChangeInFlight) {
+      return "a model change is still settling; try again in a moment";
     }
-    const hasOpen = await this._hasOpenToolCall();
-    if (hasOpen) {
-      return false;
+    if (this.modeChangeInFlight) {
+      return "a mode change is still settling; try again in a moment";
     }
-    return true;
+    const open = await this.openToolCallIdsInHistory();
+    if (open.length > 0) {
+      // Kept as a blocker rather than closed on the spot, even though
+      // every other term being clear means nothing can still settle these:
+      // this is the belt-and-braces term that keeps a destructive swap out
+      // of a live tool call when the in-memory flags are wrong. The cure
+      // is closeOpenToolCalls at the turn boundary, not a check with side
+      // effects.
+      return (
+        `${open.length} tool call(s) from an earlier turn never reported a result, so the ` +
+        `session still reads as busy. ^C closes an abandoned chain; failing that it clears ` +
+        `as new history accumulates`
+      );
+    }
+    return undefined;
   }
 
   // Synchronous idle check for the onIdle dispatch path, so debounced
@@ -1895,11 +1941,9 @@ export class Session {
     note?: string;
     framing?: "compaction" | "fork" | "swap";
   }): Promise<void> {
-    const quiesced = await this.isQuiescedForSwap();
-    if (!quiesced) {
-      throw new Error(
-        "session is not quiesced for swap — wait for in-flight work to complete",
-      );
+    const blocker = await this.quiesceBlocker();
+    if (blocker !== undefined) {
+      throw new Error(`session is not quiesced for swap: ${blocker}`);
     }
     if (this.swapInFlight) {
       throw new Error("a swap is already in progress for this session");
@@ -2330,11 +2374,9 @@ export class Session {
     previousUpstreamSessionId: string;
     previousSummarizedThroughEntry?: number;
   }): Promise<void> {
-    const quiesced = await this.isQuiescedForSwap();
-    if (!quiesced) {
-      throw new Error(
-        "session is not quiesced for rollback — wait for in-flight work to complete",
-      );
+    const blocker = await this.quiesceBlocker();
+    if (blocker !== undefined) {
+      throw new Error(`session is not quiesced for rollback: ${blocker}`);
     }
 
     const loadAgent = this.loadExistingAgentSession;
@@ -2416,9 +2458,11 @@ export class Session {
   // a tool_call entry without a corresponding tool_call_update that has
   // status="completed" or status="failed". Scans at most `maxEntries`
   // entries from the end of the file to bound I/O cost.
-  private async _hasOpenToolCall(maxEntries = QUIESCE_TAIL_SCAN_ENTRIES): Promise<boolean> {
+  private async openToolCallIdsInHistory(
+    maxEntries = QUIESCE_TAIL_SCAN_ENTRIES,
+  ): Promise<string[]> {
     if (!this.historyStore) {
-      return false;
+      return [];
     }
     const history = await this.historyStore.load(this.sessionId);
     const tail = history.length > maxEntries
@@ -2451,13 +2495,7 @@ export class Session {
       }
     }
 
-    // Any pending tool_call that hasn't been resolved is open.
-    for (const id of pending) {
-      if (!resolved.has(id)) {
-        return true;
-      }
-    }
-    return false;
+    return [...pending].filter((id) => !resolved.has(id));
   }
 
   // Read the persisted history from disk. Returns [] if no history
@@ -3418,6 +3456,17 @@ export class Session {
     // the broadcast so their TUI can clear currentHeadMessageId and
     // adjust pendingTurns. For regular session/prompt entries, exclude
     // as before since the response itself carries the stopReason.
+    // A turn that did not finish cleanly abandons whatever tool was
+    // running. Ordered before the turn_complete row so history reads in
+    // sequence (tool failed, then the turn ended) and so a client
+    // replaying it never sees a turn close over a running tool.
+    if (
+      stopReason === "cancelled" ||
+      stopReason === "error" ||
+      stopReason === "refusal"
+    ) {
+      this.closeOpenToolCalls(stopReason);
+    }
     this.recordCurrentUsageSnapshot();
     this.recordAndBroadcast(
       "session/update",
@@ -3980,6 +4029,17 @@ export class Session {
     this.recordCurrentUsageSnapshot();
     if (this.closed) {
       return;
+    }
+    // Same reasoning as the requested-turn path in broadcastTurnComplete,
+    // and this is the lane where it bites hardest: an agent-initiated turn
+    // has no session/prompt to settle, so a ^C here is the only thing that
+    // ends it and nothing downstream will ever resolve its tools.
+    //
+    // "superseded" is excluded on purpose: the agent keeps running there,
+    // with the user's prompt stacked on top, and may still report those
+    // tools itself.
+    if (reason === "cancelled") {
+      this.closeOpenToolCalls("cancelled");
     }
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
@@ -4573,6 +4633,15 @@ export class Session {
     // Ordered before the agent dispatch so clients see the turn end
     // immediately rather than after the chain walk.
     this.closeUnsolicitedTurn("cancelled");
+    // ^C with nothing in flight: the only thing left to stop is a chain
+    // some earlier turn abandoned. The turn-end paths only ever see turns
+    // that are actually running, so without this the keystroke is no
+    // escape hatch for an orphan that is already stranded. Skipped while a
+    // turn is live, where the tool may still report for itself and the
+    // cancelled turn_complete will do the closing.
+    if (!this.agentTurnInFlight) {
+      this.closeOpenToolCalls("cancelled");
+    }
     // Walk the request-side transformer chain with tailKind=notification:
     // transformers that declared "request:session/cancel" intercept get
     // a chance to observe (continue), suppress (stop), or do async
@@ -7825,6 +7894,7 @@ export class Session {
     this.toolCompletionSeen.clear();
     this.toolCallKind.clear();
     this.filesEditedSeen.clear();
+    this.openToolCalls.clear();
     // markClosed is the explicit-shutdown path (close() was called,
     // user typed /hydra kill, agent exited, idle timer fired, etc.).
     // The session is going cold; clear the persisted queue so it
@@ -8188,6 +8258,89 @@ export class Session {
   //   lifecycle:file.edited — fires once per (session, path) for paths
   //     mentioned in an edit-kind tool_call/tool_call_update's
   //     locations[]. Payload: { path, toolCallId, line? }.
+  // Mirror recorded tool-call state into openToolCalls. Keyed off what is
+  // actually written to history rather than off the agent's raw stream, so
+  // an update a response transformer dropped never shows up as an open
+  // call that closeOpenToolCalls would then "close" for a chain clients
+  // never saw.
+  private noteRecordedToolCall(method: string, params: unknown): void {
+    if (method !== "session/update") {
+      return;
+    }
+    const update = (
+      params as {
+        update?: { sessionUpdate?: unknown; toolCallId?: unknown; status?: unknown };
+      } | undefined
+    )?.update;
+    if (update === undefined) {
+      return;
+    }
+    const id = typeof update.toolCallId === "string" ? update.toolCallId : "";
+    if (id.length === 0) {
+      return;
+    }
+    if (update.sessionUpdate === "tool_call") {
+      this.openToolCalls.add(id);
+      return;
+    }
+    if (update.sessionUpdate !== "tool_call_update") {
+      return;
+    }
+    if (update.status === "completed" || update.status === "failed") {
+      this.openToolCalls.delete(id);
+    }
+  }
+
+  /**
+   * Give every still-open tool call a terminal update, for a turn that
+   * ended without one.
+   *
+   * Nothing else will. The agent interrupts its query and owes no further
+   * update for the tool it abandoned, so the `tool_call` row stays
+   * `pending` on disk forever. Two things follow, and both were live bugs:
+   * the transcript goes on claiming a tool is running, and
+   * openToolCallIdsInHistory reads the orphan as an open chain, which
+   * means `isQuiescedForSwap` is false, which means `/hydra workspace
+   * start` (and sync, and clean, and every deferred compaction swap)
+   * refuses with "the agent is still working" for as long as the orphan
+   * stays inside the tail scan window. Measured: ^C during a Bash call,
+   * then `turn_complete stopReason="cancelled"` two rows later, and the
+   * tool call never resolved for the remaining 2000 entries of that
+   * session.
+   *
+   * Deliberately keyed on the in-memory set, which is unbounded, rather
+   * than on the 20-entry history tail the guard reads: closing more than
+   * the guard can currently see converges the two views instead of
+   * leaving pre-existing orphans to surface later.
+   *
+   * `failed` rather than `cancelled`: ACP's tool status vocabulary has no
+   * cancelled, and `failed` is already what the guard and every client
+   * treat as terminal.
+   */
+  private closeOpenToolCalls(reason: string): void {
+    if (this.openToolCalls.size === 0 || this.closed) {
+      return;
+    }
+    // Snapshot first: each emit below feeds noteRecordedToolCall, which
+    // mutates the set we would otherwise be iterating.
+    const ids = [...this.openToolCalls];
+    this.openToolCalls.clear();
+    for (const toolCallId of ids) {
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "failed",
+          _meta: { [HYDRA_META_KEY]: { synthetic: true, closedBy: reason } },
+        },
+      });
+    }
+    this.logger?.info(
+      `session ${this.sessionId} closed ${ids.length} open tool call(s) on ${reason}`,
+    );
+  }
+
   private maybeEmitToolEdges(params: unknown): void {
     if (!params || typeof params !== "object") {
       return;
@@ -8359,6 +8512,7 @@ export class Session {
     const recordedAt = Date.now();
     const wire = recordable ? withRecordedAt(broadcast, recordedAt) : broadcast;
     if (recordable) {
+      this.noteRecordedToolCall(method, broadcast);
       const entry: CachedNotification = {
         method,
         params: broadcast,
