@@ -1247,7 +1247,9 @@ export class SessionManager {
 
     let loadResult: Record<string, unknown> | undefined;
     try {
-      const loadMeta = buildSessionLoadMeta(params.agentId, params.currentModel);
+      const loadMeta = buildAgentSessionMeta(params.agentId, {
+        model: params.currentModel,
+      });
       loadResult = await agent.connection.request<Record<string, unknown>>(
         "session/load",
         {
@@ -4763,11 +4765,13 @@ export class SessionManager {
         | AgentCapabilities
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
+      const newMeta = buildAgentSessionMeta(params.agentId);
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
         {
           cwd: params.cwd,
           mcpServers: params.mcpServers ?? [],
+          ...(newMeta && { _meta: newMeta }),
         },
       );
       const sessionIdRaw = newResult.sessionId;
@@ -4918,7 +4922,7 @@ export class SessionManager {
         | AgentCapabilities
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
-      const loadMeta = buildSessionLoadMeta(params.agentId, undefined);
+      const loadMeta = buildAgentSessionMeta(params.agentId);
       const loadResult = await agent.connection.request<Record<string, unknown>>(
         "session/load",
         {
@@ -7554,8 +7558,11 @@ function persistedUsageToSnapshot(
   return usage ? { ...usage } : undefined;
 }
 
-// Build the _meta payload for session/load, injecting agent-specific hints
-// needed to restore session state that the agent would otherwise lose.
+// Build the _meta payload for session/new and session/load, injecting
+// agent-specific hints needed to establish or restore state the agent would
+// otherwise lose. claude-acp reads `_meta.claudeCode.options` as SDK query
+// options on both verbs (its session/load forwards the same _meta into
+// createSession), so one builder serves both.
 //
 // Per-agent notes:
 //   claude-acp: SDK resume path uses --session-id/--replay-user-messages, not
@@ -7566,15 +7573,32 @@ function persistedUsageToSnapshot(
 //   codex-acp: same bug as claude-acp (native binary, standard ACP LoadSessionRequest,
 //     no _meta extension found). Proper fix: add modelId to ACP session/load spec.
 //     TODO: inject here once codex-acp supports a _meta extension or ACP adds modelId.
-function buildSessionLoadMeta(
+//
+// Thinking capture is unconditional: without an explicit display the CLI
+// forces "omitted" for a non-interactive session, so the model streams
+// signature-only thinking blocks with empty text and no agent_thought_chunk
+// ever reaches a client. Display costs nothing — thinking is billed as output
+// tokens whether or not the text is returned — and whether captured thoughts
+// actually render is already tui.showThoughts / ^T's call, so there is no
+// second knob here.
+//
+// It rides `extraArgs` (→ `--thinking-display summarized`) rather than the
+// SDK's `thinking` option on purpose: the flag only sets the display on top of
+// whatever thinking config the model already resolved, so it stays correct on
+// models where `{type: "adaptive"}` isn't available and is ignored outright
+// when thinking is disabled.
+function buildAgentSessionMeta(
   agentId: string,
-  model: string | undefined,
+  opts: { model?: string | undefined } = {},
 ): Record<string, unknown> | undefined {
-  if (!model)
+  if (agentId !== "claude-acp")
     return undefined;
-  if (agentId === "claude-acp")
-    return { claudeCode: { options: { model } } };
-  return undefined;
+  const options: Record<string, unknown> = {
+    extraArgs: { "thinking-display": "summarized" },
+  };
+  if (opts.model)
+    options.model = opts.model;
+  return { claudeCode: { options } };
 }
 
 // Pull a "current model id" from a session/new or session/load response.

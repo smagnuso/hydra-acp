@@ -1313,6 +1313,77 @@ describe("SessionManager: history persistence", () => {
       expect(setModeCall).toBeUndefined();
     });
 
+    it("requests summarized thinking via _meta on both session/new and session/load", async () => {
+      // Without an explicit --thinking-display the CLI forces "omitted" for a
+      // non-interactive session, so claude streams signature-only thinking
+      // blocks with empty text and no agent_thought_chunk ever reaches a
+      // client. Both verbs need it: a resurrect that drops the meta comes
+      // back with thoughts silently off.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-acp")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_think" });
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({ cwd: W_CWD, agentId: "claude-acp" });
+      const sessionId = live.sessionId;
+      const newMock = localMocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+      const newCall = newMock.mock.calls.find((c) => c[0] === "session/new");
+      expect(newCall?.[1]).toMatchObject({
+        _meta: {
+          claudeCode: {
+            options: { extraArgs: { "thinking-display": "summarized" } },
+          },
+        },
+      });
+
+      await live.close({ deleteRecord: false });
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      await localManager.resurrect(resumeParams!);
+
+      const loadMock = localMocks[1]!.agent.connection.request as ReturnType<typeof vi.fn>;
+      const loadCall = loadMock.mock.calls.find((c) => c[0] === "session/load");
+      expect(loadCall?.[1]).toMatchObject({
+        _meta: {
+          claudeCode: {
+            options: { extraArgs: { "thinking-display": "summarized" } },
+          },
+        },
+      });
+      expect(callIndex).toBe(2);
+    });
+
+    it("sends no _meta to agents that don't read claudeCode options", async () => {
+      const localMocks: MockAgentControls[] = [];
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("opencode")]),
+        () => {
+          const m = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_oc" });
+          return m.agent;
+        },
+      );
+
+      await localManager.create({ cwd: W_CWD, agentId: "opencode" });
+      const newMock = localMocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+      const newCall = newMock.mock.calls.find((c) => c[0] === "session/new");
+      expect(newCall?.[1]).not.toHaveProperty("_meta");
+    });
+
     it("passes persisted model via _meta to session/load on resurrect (regression: opus[1m] silently reverted to sonnet on daemon restart)", async () => {
       // doResurrect passes _meta.claudeCode.options.model in the session/load
       // call so the agent initializes claude with --model <id> at resume time —
