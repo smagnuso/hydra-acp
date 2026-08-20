@@ -264,6 +264,59 @@ export const activityGadget: Gadget = {
 // the gadget answers "what are the tools doing", but the field holds
 // specifically the IN-FLIGHT ones, and calling it `tools` would invite
 // someone to start putting completed calls in it.
+// Background jobs the agent started that are still running.
+//
+// Complements the activity gadget rather than duplicating it: that one
+// answers "is anything running, and for how long" in a single fixed row
+// clocked off the OLDEST job; this one names them and gives each its own
+// clock, because two jobs armed in the same turn finish independently and
+// the aggregate hides which is which.
+//
+// Hidden when the list is empty, which deliberately conflates "nothing
+// running" with "daemon too old to send a list". Both should render
+// nothing, and the activity gadget still covers the count-only case from
+// `armedSince`.
+export const backgroundGadget: Gadget = {
+  id: "background",
+  title: "background",
+  relevant: (s) => s.armedTasks.length > 0,
+  versionKey: (s, ctx) => {
+    const shown = s.armedTasks.slice(0, SIDEBAR_PAGE_SIZE);
+    return (
+      `${ctx.width}|${s.armedTasks.length}|` +
+      shown
+        .map((t) => {
+          // Whole seconds only: the row shows nothing finer, and keying on
+          // raw `since` would re-render every frame to emit identical bytes.
+          const secs = Math.floor(Math.max(0, s.now - t.since) / 1000);
+          return `${t.taskId ?? t.label}:${secs}`;
+        })
+        .join(" ")
+    );
+  },
+  render: (s, ctx) => {
+    const { truncate, cellWidth } = ctx.metrics;
+    const lines: SidebarLine[] = [];
+    for (const task of s.armedTasks.slice(0, SIDEBAR_PAGE_SIZE)) {
+      const elapsed = shortDuration(Math.max(0, s.now - task.since));
+      const head = "◐ ";
+      const budget = ctx.width - cellWidth(head) - cellWidth(elapsed) - 1;
+      // The label is agent-authored prose of arbitrary length, so it is the
+      // part that gives. Falls back to the type ("local_bash") when the
+      // agent sent no description, which beats an empty row.
+      const text = task.label.length > 0 ? task.label : (task.taskType ?? "background task");
+      const body = budget < 4 ? head.trim() : `${head}${truncate(text, budget)}`;
+      lines.push(row(labelValue(body, elapsed, ctx), "status-active"));
+    }
+    if (s.armedTasks.length > SIDEBAR_PAGE_SIZE) {
+      lines.push(
+        row(`  +${s.armedTasks.length - SIDEBAR_PAGE_SIZE} more`, "muted"),
+      );
+    }
+    return lines;
+  },
+};
+
 export const toolsGadget: Gadget = {
   id: "tools",
   title: "tools",
@@ -878,6 +931,7 @@ export const resourcesGadget: Gadget = {
 // bottom up, so activity and context survive.
 export const BUILTIN_GADGETS: Gadget[] = [
   activityGadget,
+  backgroundGadget,
   contextGadget,
   queueGadget,
   todoGadget,

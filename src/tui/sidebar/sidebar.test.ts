@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import stringWidth from "string-width";
 import {
   activityGadget,
+  backgroundGadget,
   compactCount,
   contextGadget,
   displayPaths,
@@ -19,10 +20,12 @@ import {
   todoGadget,
   toolsGadget,
 } from "./gadgets.js";
-import { gadgetById, SidebarRenderer } from "./registry.js";
+import { DEFAULT_GADGET_IDS, gadgetById, SidebarRenderer } from "./registry.js";
+import { HydraConfig } from "../../core/config.js";
 import { emptySnapshot } from "./types.js";
 import type {
   SidebarAction,
+  SidebarArmedTask,
   SidebarLine,
   SidebarLiveSession,
   SidebarBorder,
@@ -177,6 +180,85 @@ describe("activity gadget", () => {
       activityGadget.versionKey({ ...base, now }, ctx());
     expect(k(5_000)).toBe(k(5_400));
     expect(k(5_000)).not.toBe(k(6_000));
+  });
+});
+
+// The default gadget list is written out twice (registry.ts for the
+// renderer, config.ts for the schema default) and core must not import from
+// tui, so nothing but this test keeps them in step. A drifted pair is
+// invisible: the renderer would know a gadget the config never names, so it
+// would silently never appear for anyone who hasn't pinned their own list —
+// which is the majority, since pinning is deliberately discouraged.
+describe("default gadget list", () => {
+  it("matches the config schema default", () => {
+    const fromConfig = HydraConfig.parse({}).tui.sidebar.gadgets;
+    expect(fromConfig).toEqual([...DEFAULT_GADGET_IDS]);
+  });
+
+  it("resolves every default id to a real gadget", () => {
+    for (const id of DEFAULT_GADGET_IDS) {
+      expect(gadgetById(id), `unknown default gadget id: ${id}`).toBeDefined();
+    }
+  });
+});
+
+describe("background gadget", () => {
+  const task = (over: Partial<SidebarArmedTask> = {}): SidebarArmedTask => ({
+    label: "Sleep 20 seconds then echo done",
+    taskId: "bg_a",
+    taskType: "local_bash",
+    since: 1_000_000 - 45_000,
+    ...over,
+  });
+
+  it("names each job and clocks it independently", () => {
+    const lines = backgroundGadget.render(
+      snap({
+        armedTasks: [
+          task(),
+          task({ taskId: "bg_b", label: "device run", since: 1_000_000 - 5_000 }),
+        ],
+      }),
+      ctx(40),
+    );
+    expect(lines).toHaveLength(2);
+    // The aggregate armedSince would have shown 45s for both. The whole
+    // point of the per-entry stamp is that these differ.
+    expect(lines[0]!.body).toContain("45s");
+    expect(lines[1]!.body).toContain("5s");
+    expect(lines[1]!.body).toContain("device run");
+  });
+
+  it("hides itself when nothing is running", () => {
+    expect(backgroundGadget.relevant(snap({ armedTasks: [] }))).toBe(false);
+    expect(backgroundGadget.relevant(snap({ armedTasks: [task()] }))).toBe(true);
+  });
+
+  it("re-renders when membership changes but the clocks do not", () => {
+    // The same-size swap: one job ends as another starts within the same
+    // second, so counts and elapsed values are identical. A versionKey
+    // built from length and timings alone would memo away a real change.
+    const before = snap({ armedTasks: [task({ taskId: "A" }), task({ taskId: "B" })] });
+    const after = snap({ armedTasks: [task({ taskId: "A" }), task({ taskId: "C" })] });
+    expect(backgroundGadget.versionKey!(before, ctx(40))).not.toBe(
+      backgroundGadget.versionKey!(after, ctx(40)),
+    );
+  });
+
+  it("falls back to the task type when the agent sent no description", () => {
+    const lines = backgroundGadget.render(
+      snap({ armedTasks: [task({ label: "" })] }),
+      ctx(40),
+    );
+    expect(lines[0]!.body).toContain("local_bash");
+  });
+
+  it("caps the list and says how many it dropped", () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      task({ taskId: `bg_${i}`, label: `job ${i}` }));
+    const lines = backgroundGadget.render(snap({ armedTasks: many }), ctx(40));
+    expect(lines).toHaveLength(6);
+    expect(lines[5]!.body).toContain("+3 more");
   });
 });
 

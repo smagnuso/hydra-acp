@@ -270,6 +270,7 @@ import {
 } from "./theme/sense.js";
 import { probeAmbiguousWidth } from "./width-probe.js";
 import type {
+  SidebarArmedTask,
   SidebarEditedFile,
   SidebarLiveSession,
   SidebarProcUsage,
@@ -363,6 +364,30 @@ export function getQuestionValueRing(question: Question): string[] {
     return [question.defaultAnswer, ...question.options];
   }
   return [question.defaultAnswer];
+}
+
+// Wire `tasks[]` (from armed_tasks_updated, or armedTaskList on attach) to
+// the sidebar shape. Entries missing the two fields a row needs are dropped
+// individually rather than voiding the list: a partial list still beats
+// falling back to the count-only activity row.
+function toSidebarArmedTasks(raw: unknown[]): SidebarArmedTask[] {
+  const out: SidebarArmedTask[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const t = item as Record<string, unknown>;
+    if (typeof t.label !== "string" || typeof t.since !== "number") {
+      continue;
+    }
+    out.push({
+      label: t.label,
+      since: t.since,
+      ...(typeof t.taskId === "string" ? { taskId: t.taskId } : {}),
+      ...(typeof t.taskType === "string" ? { taskType: t.taskType } : {}),
+    });
+  }
+  return out;
 }
 
 function truncateQuestionLabel(text: string, max: number): string {
@@ -2341,7 +2366,18 @@ async function runSession(
   // it. Pushed rather than polled because the transition that matters most
   // ("the job you were told about is gone") happens while nobody is
   // looking. See PROTOCOL.md "Agent-initiated turns".
-  const applyArmedTasks = (since: number | null): void => {
+  const applyArmedTasks = (
+    since: number | null,
+    tasks?: SidebarArmedTask[],
+  ): void => {
+    // Set BEFORE the early return below, which only guards the banner and
+    // the elapsed timer. The list moves independently of `since`: one job
+    // ending as another starts leaves the oldest job's clock untouched
+    // while the rows change completely, and returning early on an unmoved
+    // `since` would freeze the gadget showing the finished job.
+    if (tasks !== undefined) {
+      screenRef?.setSidebarSnapshot({ armedTasks: tasks });
+    }
     if (armedSince === since) {
       return;
     }
@@ -2360,10 +2396,19 @@ async function runSession(
   };
   conn.onNotification("hydra-acp/session/armed_tasks_updated", (params) => {
     if (teardownStarted) return;
-    const p = (params ?? {}) as { count?: unknown; since?: unknown };
+    const p = (params ?? {}) as {
+      count?: unknown;
+      since?: unknown;
+      tasks?: unknown;
+    };
     const count = typeof p.count === "number" ? p.count : 0;
     applyArmedTasks(
       count > 0 && typeof p.since === "number" ? p.since : null,
+      // REPLACE, never merge: the payload is the complete live set, and
+      // merging is exactly the bug the daemon-side level signal removed.
+      // An older daemon sends no `tasks`, so pass undefined and leave the
+      // gadget alone rather than blanking it.
+      Array.isArray(p.tasks) ? toSidebarArmedTasks(p.tasks) : undefined,
     );
   });
   conn.onNotification("hydra-acp/prompt_queue/held", (params) => {
@@ -3076,6 +3121,7 @@ async function runSession(
   // too old to say; both mean "don't show a running clock", and a fresh
   // client has nothing stale to preserve either way.
   let initialArmedSince: number | undefined;
+  let initialArmedTaskList: unknown[] | undefined;
   // True when the session/attach call that started this TUI is what
   // brought the session from cold → warm. Drives one-shot attach-time
   // UX (currently the compaction prompt) so re-attaches to an already
@@ -3232,6 +3278,7 @@ async function runSession(
     initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     initialArmedSince = hydraMeta.armedSince;
+    initialArmedTaskList = hydraMeta.armedTaskList;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
@@ -3318,6 +3365,7 @@ async function runSession(
     initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     initialArmedSince = hydraMeta.armedSince;
+    initialArmedTaskList = hydraMeta.armedTaskList;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
@@ -9529,7 +9577,16 @@ async function runSession(
   // reattached after the session closed kept a clock from the previous
   // incarnation indefinitely. Runs unconditionally: passing null is what
   // clears a stale value, and applyArmedTasks no-ops when nothing moved.
-  applyArmedTasks(initialArmedSince ?? null);
+  // The list seeds the same way and for the same reason. `[]` from the
+  // daemon is meaningful (nothing is running, clear the panel); absent
+  // means the daemon predates the field, so leave the gadget untouched
+  // rather than blanking it.
+  applyArmedTasks(
+    initialArmedSince ?? null,
+    initialArmedTaskList === undefined
+      ? undefined
+      : toSidebarArmedTasks(initialArmedTaskList),
+  );
 
   // Everything from here on is live. Set after the reconcile above, not
   // after the replay drain: that snap-to-zero is still accounting for
@@ -9851,6 +9908,9 @@ async function runSession(
       if (fields.armedTasks !== undefined) {
         applyArmedTasks(
           fields.armedTasks > 0 ? (fields.armedSince ?? null) : null,
+          fields.armedTaskList === undefined
+            ? undefined
+            : toSidebarArmedTasks(fields.armedTaskList),
         );
       }
     } else {

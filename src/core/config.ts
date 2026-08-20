@@ -544,9 +544,12 @@ const TuiConfig = z.object({
       border: z.enum(["none", "rule", "frame"]).default("frame"),
       gadgets: z
         .array(z.string())
+        // Must stay in step with DEFAULT_GADGET_IDS in tui/sidebar/registry.ts.
+        // Duplicated rather than imported because core must not depend on tui.
         .default([
           "activity",
           "sessions",
+          "background",
           "context",
           "queue",
           "todo",

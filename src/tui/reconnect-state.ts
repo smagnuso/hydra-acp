@@ -34,6 +34,11 @@ export interface ReattachResponseFields {
   // a mutation.
   armedSince?: number;
   armedTasks?: number;
+  // The set itself, for the background gadget. Same absent-versus-empty
+  // rule as the count: `[]` clears the panel, absent leaves it alone.
+  // Deliberately untyped here — reconnect-state is a shape extractor, and
+  // the sidebar conversion lives with the other wire converters in app.ts.
+  armedTaskList?: unknown[];
 }
 
 // Pull the fields we care about out of a session/attach response result.
@@ -67,6 +72,10 @@ export function parseReattachResponse(result: unknown): ReattachResponseFields {
       // saying nothing is armed.
       if (typeof h.armedTasks === "number" && h.armedTasks >= 0) {
         out.armedTasks = h.armedTasks;
+      }
+      // Accepts [] for the same reason.
+      if (Array.isArray(h.armedTaskList)) {
+        out.armedTaskList = h.armedTaskList;
       }
     }
   }

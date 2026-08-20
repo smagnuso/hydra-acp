@@ -74,6 +74,28 @@ export interface SidebarRunningTool {
   path?: string;
 }
 
+// One background job the agent is running right now, as the daemon reports
+// it. Distinct from SidebarRunningTool: a running tool is a call inside the
+// CURRENT turn, while this outlives its turn entirely and is the thing that
+// can wake the session up again.
+//
+// The list is a REPLACE, never a merge — see PROTOCOL.md
+// "armed_tasks_updated". Merging is what re-creates the stale-entry bug the
+// daemon-side level signal exists to kill.
+export interface SidebarArmedTask {
+  // Agent-authored one-liner ("Sleep 20 seconds then echo done").
+  label: string;
+  // Stable identity where the agent gives one. Absent for edge-inferred
+  // entries from agents that don't publish a live set.
+  taskId?: string;
+  // "local_bash" and friends. Absent on edge-inferred entries.
+  taskType?: string;
+  // When the daemon first saw THIS job, for its own elapsed column. Not
+  // shared with the others: two jobs armed in the same turn can still be
+  // seconds apart, and they finish independently.
+  since: number;
+}
+
 // Resource reading for one process tree.
 export interface SidebarProcUsage {
   label: string;
@@ -98,6 +120,12 @@ export interface SidebarSnapshot {
   // a job it started is still running and can restart it unprompted. Ranks
   // between busy and idle in the activity gadget.
   armedSince: number | null;
+  // The armed set itself, for the `background` gadget. `armedSince` above
+  // stays the aggregate the activity gadget clocks from; this is the
+  // per-job detail. Empty when nothing is running OR when the daemon is
+  // too old to send a list, which is why the gadget hides on empty rather
+  // than claiming zero.
+  armedTasks: SidebarArmedTask[];
   queued: number;
   usage: SidebarUsage;
   plan: PlanEntry[];
@@ -309,6 +337,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     busySince: null,
     lastTurnEndedAt: null,
     armedSince: null,
+    armedTasks: [],
     queued: 0,
     usage: {},
     plan: [],
