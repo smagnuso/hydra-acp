@@ -2842,6 +2842,10 @@ export class Screen {
   // computed from array indices. Returns the inclusive index range plus a
   // per-line-id map of the selected [start,end) offset window (full body
   // for interior lines) and whether the selection continues past it.
+  //
+  // Hidden lines (folded runs, and thoughts while hideThoughts is on) are
+  // excluded: they occupy no row on screen, so a drag across them never
+  // showed the user their text and the clipboard must not carry it either.
   private selectionLineBounds(): {
     loIdx: number;
     hiIdx: number;
@@ -2870,9 +2874,20 @@ export class Screen {
       number,
       { start: number; end: number; toEnd: boolean }
     >();
+    // Last visible index in the range: `toEnd` means "the selection carries
+    // on past this line", which for the trailing highlight has to be judged
+    // against the last row actually painted, not the last array slot.
+    let lastVisible = -1;
+    for (let i = hiIdx; i >= loIdx; i--) {
+      const line = this.lines[i];
+      if (line && !this.isHiddenLine(line)) {
+        lastVisible = i;
+        break;
+      }
+    }
     for (let i = loIdx; i <= hiIdx; i++) {
       const line = this.lines[i];
-      if (!line) {
+      if (!line || this.isHiddenLine(line)) {
         continue;
       }
       const id = this.lineIds.get(line);
@@ -2882,7 +2897,7 @@ export class Screen {
       const bodyLen = (line.body ?? "").length;
       const start = i === loIdx ? Math.max(0, Math.min(bodyLen, loOff)) : 0;
       const end = i === hiIdx ? Math.max(0, Math.min(bodyLen, hiOff)) : bodyLen;
-      byId.set(id, { start, end, toEnd: i < hiIdx });
+      byId.set(id, { start, end, toEnd: i < lastVisible });
     }
     return { loIdx, hiIdx, byId };
   }

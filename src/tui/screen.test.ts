@@ -3273,6 +3273,46 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("st line\nmiddle line\nlast");
   });
 
+  it("getSelectionText omits thoughts hidden by hideThoughts", () => {
+    const screen = makeTallScreen({ width: 80, height: 24 });
+    screen.appendLine({ body: "before" });
+    screen.ensureSeparator("thought");
+    screen.upsertLines("thought:0", [
+      { body: "secret reasoning", bodyStyle: "thought" },
+    ]);
+    screen.appendLine({ body: "after" });
+    screen.setHideThoughts(true);
+
+    // With thoughts hidden the two visible rows are adjacent on screen, so
+    // dragging across them must not scoop up the thought sitting between
+    // them in this.lines.
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows - 1)!;
+    const b = resolve(screen, 6, rows)!;
+    screen.setSelection(a, b);
+    expect(screen.getSelectionText()).toBe("before\nafter");
+
+    // Revealed again, the same drag span does pick it up.
+    screen.setHideThoughts(false);
+    const rows2 = visibleRows(screen);
+    const a2 = resolve(screen, 1, rows2 - 3)!;
+    const b2 = resolve(screen, 6, rows2)!;
+    screen.setSelection(a2, b2);
+    expect(screen.getSelectionText()).toBe("before\n\nsecret reasoning\nafter");
+  });
+
+  it("getSelectionText omits lines inside a collapsed run", () => {
+    const screen = makeTallScreen({ width: 80, height: 24 });
+    screen.appendLine({ body: "head" });
+    screen.appendLine({ body: "folded away", collapsed: true });
+    screen.appendLine({ body: "tail" });
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows - 1)!;
+    const b = resolve(screen, 5, rows)!;
+    screen.setSelection(a, b);
+    expect(screen.getSelectionText()).toBe("head\ntail");
+  });
+
   it("pathTokenAt parses a #L<start> fragment off a sidecar link into a line number", () => {
     const screen = makeTallScreen({ width: 120, height: 24 });
     const url = "gaming/d2d/d2d-controller.ts#L886-L923";
