@@ -878,6 +878,25 @@ export class Session {
   // the rendered state (re-arming a task already counted) stays silent.
   private lastArmedBroadcast: { count: number; since: number | undefined } |
     undefined;
+  // The agent's OWN live background-task set, replaced wholesale from each
+  // `background_tasks_changed` level. Where armedTasks is inference from
+  // edges hydra happened to see, this is ground truth from the process that
+  // owns the jobs, and it is the only source that reports a task's END.
+  //
+  // `firstSeen` is hydra's stamp, not the agent's: the level carries ids,
+  // type and description but no start time, so it has to be preserved
+  // across replacements. Re-deriving it per level would restart the
+  // client's "running for" clock on every unrelated membership change.
+  private liveBackgroundTasks = new Map<
+    string,
+    { taskType: string; description: string; firstSeen: number }
+  >();
+  // Whether a level has ever arrived from this agent process. An agent that
+  // does not speak this dialect is indistinguishable from one with nothing
+  // running, so until the first level lands the edge inference is all there
+  // is. Deliberately per-process: the SDK emits nothing at startup, so this
+  // resets with the agent (see discardArmedTasks).
+  private sawBackgroundTaskLevel = false;
   // Whether a turn has ever ended on this session in this process. Gates
   // unsolicited-turn detection: the failure mode is an agent *resuming*
   // after a turn ended, so before the first turn_complete there is nothing
@@ -1401,6 +1420,9 @@ export class Session {
   // part of a swap, this.agent has already been replaced, so we no-op
   // and don't tear the session down.
   private wireAgent(agent: AgentInstance): void {
+    // Covers agent swaps that don't route through retireAgent (a cold
+    // resurrect wires a fresh process with no predecessor to retire).
+    this.resetBackgroundTaskLevel();
     agent.connection.onNotification("session/update", (params) => {
       // /hydra slash-command sub-prompts (e.g. title regeneration)
       // run "behind the scenes" — the agent's chunks for those are
@@ -1415,6 +1437,15 @@ export class Session {
       this.maybeEmitToolEdges(params);
       // Chain runs first — no state mutation before this resolves.
       void this.runResponseChain(params);
+    });
+    // Not ACP: claude-acp's raw-SDK passthrough, which hydra subscribes to
+    // for exactly one subtype (see CLAUDE_RAW_SDK_MESSAGE_FILTER). Agents
+    // that don't speak it simply never send this, and the handler never
+    // runs. Deliberately outside the response chain: this is ambient state
+    // about the agent's own processes, not a conversation event, so it is
+    // neither transformable nor recorded in history.
+    agent.connection.onNotification("_claude/sdkMessage", (params) => {
+      this.applyBackgroundTaskLevel(params);
     });
     agent.connection.onRequest("session/request_permission", async (params) => {
       // Run the agent→client request chain first. A transformer can rewrite
@@ -3633,6 +3664,64 @@ export class Session {
     this.onArmedTasksChanged();
   }
 
+  /**
+   * Replace the live background-task set from a `background_tasks_changed`
+   * level.
+   *
+   * REPLACE semantics, per the SDK: the payload is the complete set after
+   * the change, so anything absent from it has ended. That absence is the
+   * signal hydra has never had from any other source. Every existing
+   * discharge path keys off something the agent *did* (resumed, called
+   * TaskStop), which is why a job that simply exits while the session is
+   * busy leaves its entry stranded forever.
+   *
+   * Ids only, by the SDK's explicit instruction: do NOT join these to the
+   * edge stream (`armedTasks`). The level carries no tool-call attribution,
+   * and the two id spaces are only incidentally related.
+   */
+  private applyBackgroundTaskLevel(params: unknown): void {
+    const message = (params as { message?: Record<string, unknown> } | undefined)
+      ?.message;
+    if (!message || message.subtype !== "background_tasks_changed") {
+      return;
+    }
+    const tasks = message.tasks;
+    if (!Array.isArray(tasks)) {
+      return;
+    }
+    const now = Date.now();
+    const next = new Map<
+      string,
+      { taskType: string; description: string; firstSeen: number }
+    >();
+    for (const raw of tasks) {
+      const task = raw as Record<string, unknown> | undefined;
+      const taskId = typeof task?.task_id === "string" ? task.task_id : undefined;
+      if (taskId === undefined) {
+        continue;
+      }
+      next.set(taskId, {
+        taskType: typeof task?.task_type === "string" ? task.task_type : "unknown",
+        description: typeof task?.description === "string" ? task.description : "",
+        firstSeen: this.liveBackgroundTasks.get(taskId)?.firstSeen ?? now,
+      });
+    }
+    const ended = [...this.liveBackgroundTasks.keys()].filter((id) =>
+      !next.has(id)
+    );
+    this.liveBackgroundTasks = next;
+    this.sawBackgroundTaskLevel = true;
+    this.logger?.info(
+      `session ${this.sessionId} background level: ${next.size} live` +
+        (ended.length > 0 ? ` (ended: ${ended.join(", ")})` : ""),
+    );
+    // The first level is itself a state change even when it reports zero:
+    // it switches the session from edge inference to ground truth, which
+    // can drop a stale count to 0. onArmedTasksChanged dedups on the
+    // rendered {count, since}, so a genuinely unchanged level stays quiet.
+    this.onArmedTasksChanged();
+  }
+
   // Background tasks currently armed: the agent finished its turn and
   // handed control back, but a watch it started is still pending, so the
   // session can restart itself without anyone prompting it.
@@ -3644,9 +3733,29 @@ export class Session {
   // no client can join an armed entry back to that block, so a UI cannot
   // annotate "this Monitor is still watching" on the call that started it.
   // It costs nothing to publish: the map is already keyed by it.
+  //
+  // Two sources, and the level wins outright once one has arrived. It is
+  // ground truth from the process that owns the jobs, where the edge map is
+  // inference from the subset of armings hydra happened to observe, with no
+  // way at all to see an ending. They are NOT merged: the SDK states the
+  // level carries no attribution and must not be joined to the edge stream,
+  // and mixing them would publish a count from one source beside a list from
+  // the other.
+  //
+  // So `toolCallId` is absent on level-sourced entries. No client reads it
+  // today (the TUI's armed_tasks_updated handler takes `count` and `since`
+  // only), and an absent join key is the honest encoding of "the agent told
+  // us this is running but not which call started it".
   get armedBackgroundTasks(): Array<
-    { toolCallId: string; label: string; taskId?: string }
+    { toolCallId?: string; label: string; taskId?: string; taskType?: string }
   > {
+    if (this.sawBackgroundTaskLevel) {
+      return [...this.liveBackgroundTasks.entries()].map(([taskId, t]) => ({
+        taskId,
+        label: t.description || t.taskType,
+        taskType: t.taskType,
+      }));
+    }
     return [...this.armedTasks.entries()].map(([toolCallId, t]) => ({
       toolCallId,
       label: t.label,
@@ -3658,8 +3767,21 @@ export class Session {
   // are. Clients clock their "running Xs" readout from this: the useful
   // question is how long the job has been going, not how long the user has
   // been idle since the turn ended.
+  //
+  // Level-sourced entries clock from `firstSeen`, hydra's own stamp for when
+  // it first saw the id. That is later than the true start by however long
+  // the level took to arrive (measured: milliseconds), and it is the closest
+  // honest answer available since the payload carries no start time.
   get armedSince(): number | undefined {
     let oldest: number | undefined;
+    if (this.sawBackgroundTaskLevel) {
+      for (const task of this.liveBackgroundTasks.values()) {
+        if (oldest === undefined || task.firstSeen < oldest) {
+          oldest = task.firstSeen;
+        }
+      }
+      return oldest;
+    }
     for (const task of this.armedTasks.values()) {
       if (oldest === undefined || task.armedAt < oldest) {
         oldest = task.armedAt;
@@ -3668,10 +3790,17 @@ export class Session {
     return oldest;
   }
 
-  // Called after any mutation of armedTasks. Tells attached clients, but
+  // Called after any mutation of either source. Tells attached clients, but
   // only when the derived state they render actually moved.
+  //
+  // Counts the PUBLISHED set, not `armedTasks.size`. Those diverge the moment
+  // a level arrives, and reading the raw edge map here published a count from
+  // one source beside a task list from the other: a level reporting one live
+  // job broadcast `count: 0` whenever the edge map happened to be empty, so
+  // clients were told "nothing running" while the REST view said otherwise.
   private onArmedTasksChanged(): void {
-    const count = this.armedTasks.size;
+    const tasks = this.armedBackgroundTasks;
+    const count = tasks.length;
     const since = this.armedSince;
     if (count === this.lastArmedBroadcast?.count &&
       since === this.lastArmedBroadcast?.since) {
@@ -3698,7 +3827,7 @@ export class Session {
       sessionId: this.sessionId,
       count,
       ...(since !== undefined ? { since } : {}),
-      tasks: this.armedBackgroundTasks,
+      tasks,
     });
   }
 
@@ -3729,7 +3858,19 @@ export class Session {
    */
   private async retireAgent(agent: AgentInstance, reason: string): Promise<string[]> {
     await agent.kill().catch(() => undefined);
+    this.resetBackgroundTaskLevel();
     return this.discardArmedTasks(reason);
+  }
+
+  // The level is per-process and nothing is emitted at agent startup, so a
+  // set carried across a process boundary can never be corrected: the
+  // replacement only publishes on its next membership CHANGE, and a
+  // replacement with no background work at all never publishes again. Reset
+  // to empty and to "no level seen", which falls back to edge inference
+  // until the new process says otherwise.
+  private resetBackgroundTaskLevel(): void {
+    this.liveBackgroundTasks.clear();
+    this.sawBackgroundTaskLevel = false;
   }
 
   private discardArmedTasks(reason: string): string[] {

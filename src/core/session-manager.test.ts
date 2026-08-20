@@ -1361,7 +1361,7 @@ describe("SessionManager: history persistence", () => {
       expect(setModeCall).toBeUndefined();
     });
 
-    it("requests summarized thinking via _meta on both session/new and session/load", async () => {
+    it("requests summarized thinking and the background-task level on both session/new and session/load", async () => {
       // Without an explicit --thinking-display the CLI forces "omitted" for a
       // non-interactive session, so claude streams signature-only thinking
       // blocks with empty text and no agent_thought_chunk ever reaches a
@@ -1391,6 +1391,9 @@ describe("SessionManager: history persistence", () => {
         _meta: {
           claudeCode: {
             options: { extraArgs: { "thinking-display": "summarized" } },
+            emitRawSDKMessages: [
+              { type: "system", subtype: "background_tasks_changed" },
+            ],
           },
         },
       });
@@ -1405,6 +1408,12 @@ describe("SessionManager: history persistence", () => {
         _meta: {
           claudeCode: {
             options: { extraArgs: { "thinking-display": "summarized" } },
+            // A resurrect that drops this comes back permanently blind to
+            // background-task endings, silently falling back to the edge
+            // inference that can only ever overstate.
+            emitRawSDKMessages: [
+              { type: "system", subtype: "background_tasks_changed" },
+            ],
           },
         },
       });

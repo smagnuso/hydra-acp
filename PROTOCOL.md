@@ -1937,12 +1937,64 @@ turn in flight, since the session is not finished with you. Note this makes
 armed-but-idle session is dispatched immediately rather than queued. Clients
 that need the distinction should read `busy` and `armedTasks` separately.
 
+**Two sources, and which one you get.** The count is derived either from a
+**level** signal published by the agent, or, when the agent does not publish
+one, from **edge inference** by the daemon. The level is authoritative and
+takes over permanently for a session's agent process the moment its first
+payload lands. Everything from here to the end of the edge-inference
+subsection describes the fallback; skip it for a `claude-acp` session.
+
+### Level source (`claude-acp`)
+
+`claude-acp` forwards its SDK's `background_tasks_changed` message: the
+**complete live set** after every membership change, with REPLACE semantics.
+The daemon subscribes to that one subtype by asking for it in
+`_meta.claudeCode.emitRawSDKMessages` (a filter list, not a boolean, so the
+raw-SDK firehose stays off), and receives it as an `extNotification` on
+method `_claude/sdkMessage`. Each payload entry carries `task_id`,
+`task_type` and `description`.
+
+The request rides **both `session/new` and `session/load`**, from one
+builder, and the agent honours it on both. A resurrect that dropped it would
+come back permanently blind to endings and fall back to edge inference,
+silently, so it is pinned by test on both verbs.
+
+This is the only source that can report that a task **ended**: absence from
+a payload is the ending. Measured live, an exit lands within ~10ms of the
+process actually exiting, and it arrives whether or not a turn is running.
+
+Consequences for clients:
+
+- `armedTasks` and `armedSince` are accurate rather than best-effort, and
+  can go **down** without any turn boundary.
+- `armedSince` is the daemon's first sighting of the id, not the agent's
+  start time; the payload carries no start time. The gap is the level's
+  delivery latency (milliseconds).
+- Level-sourced entries in `tasks[]` have **no `toolCallId`** and carry
+  `taskType` instead. The SDK states the payload has no attribution and must
+  not be correlated with the edge stream, so the daemon does not join them.
+  Treat `toolCallId` as optional on every entry.
+- The level is **per process**: nothing is emitted at agent startup. The
+  daemon resets to the empty set on every agent (re)start and waits for the
+  next membership change. A session that resurrects while a job is running
+  therefore understates until something changes, which is the opposite of
+  the edge path's failure direction.
+
+### Edge inference (every other agent)
+
 The count is **best-effort and must not be relied on**, and it errs toward
 overstating. A single notification can batch several tasks while only one gets
 attributed to the resulting turn. Notification delivery also waits for a turn
 boundary, so a task can fire long after its nominal timeout (the trace has one
 armed with `timeoutMs: 3600000` delivered 3h51m later, batched with three
 others).
+
+The defining limitation, and the reason the level exists: **every discharge
+path keys off something the agent did** (resumed, called `TaskStop`), because
+a completion never crosses the wire. A job that simply exits while the agent
+is busy with an unrelated turn has its notification absorbed by that turn, so
+no resumption fires and nothing ever clears the entry. Observed in the wild
+at 2h43m and counting, on a `sleep 120`.
 
 **Entries never expire on a clock.** They leave the set only on a signal from
 the agent. The agent's reported `timeoutMs` is not read at all: it answers "how

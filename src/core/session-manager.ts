@@ -7617,18 +7617,41 @@ function persistedUsageToSnapshot(
 // whatever thinking config the model already resolved, so it stays correct on
 // models where `{type: "adaptive"}` isn't available and is ignored outright
 // when thinking is disabled.
+//
+// `emitRawSDKMessages` opts into the one SDK message that answers "is
+// background work actually running" (see BackgroundTaskLevel). It is a
+// filter list, not a boolean, so this subscribes to that subtype alone
+// rather than the whole raw firehose.
+
+// A from-source or otherwise renamed claude-acp still speaks claude-acp's
+// _meta dialect, so match the family rather than the exact registry id.
+// Without this a `claude-acp-dev` session silently loses thinking capture,
+// model injection, and the background-task level.
+function isClaudeAcpFamily(agentId: string): boolean {
+  return agentId === "claude-acp" || agentId.startsWith("claude-acp-");
+}
+
+const CLAUDE_RAW_SDK_MESSAGE_FILTER = [
+  { type: "system", subtype: "background_tasks_changed" },
+];
+
 function buildAgentSessionMeta(
   agentId: string,
   opts: { model?: string | undefined } = {},
 ): Record<string, unknown> | undefined {
-  if (agentId !== "claude-acp")
+  if (!isClaudeAcpFamily(agentId))
     return undefined;
   const options: Record<string, unknown> = {
     extraArgs: { "thinking-display": "summarized" },
   };
   if (opts.model)
     options.model = opts.model;
-  return { claudeCode: { options } };
+  return {
+    claudeCode: {
+      options,
+      emitRawSDKMessages: CLAUDE_RAW_SDK_MESSAGE_FILTER,
+    },
+  };
 }
 
 // Pull a "current model id" from a session/new or session/load response.
