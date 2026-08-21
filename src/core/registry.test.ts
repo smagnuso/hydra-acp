@@ -918,6 +918,21 @@ describe("config.agents extends", () => {
     ).toBe("opencode-ai@1.2.3");
   });
 
+  it("listAgents includes extendsChain for a derived agent, not the base", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": { extends: "opencode", env: { X: "1" } },
+    });
+    const listed = await listAgents(registry);
+    const derived = listed.agents.find((a) => a.id === "opencode-home");
+    const base = listed.agents.find((a) => a.id === "opencode");
+    // Clients (e.g. the TUI composer preview) resolve per-agent config
+    // maps like defaultModels via this chain — see
+    // lookupInheritedAgentValue. Losing it here silently breaks that
+    // resolution for every derived agent.
+    expect(derived?.extendsChain).toEqual(["opencode-home", "opencode"]);
+    expect(base?.extendsChain).toBeUndefined();
+  });
+
   it("drops a broken entry from the catalog instead of failing the list", async () => {
     const errors: string[] = [];
     const registry = new Registry(

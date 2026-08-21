@@ -155,6 +155,14 @@ export function agentChainRoot(agent: ResolvedAgent): string {
   return chain && chain.length > 0 ? chain[chain.length - 1]! : agent.id;
 }
 
+// Narrower than ResolvedAgent so callers that only have an id plus a
+// resolved chain (e.g. the TUI's AgentListEntry-derived agent list, which
+// isn't a full ResolvedAgent) can use lookupInheritedAgentValue too.
+export interface AgentChainRef {
+  id: string;
+  extendsChain?: string[];
+}
+
 // Most-specific-wins lookup over a config map keyed by agent id
 // (defaultModels, agentOverrides): try the agent's own id, then each id it
 // extends, in order. `from` is the key that actually matched, so callers
@@ -162,7 +170,7 @@ export function agentChainRoot(agent: ResolvedAgent): string {
 // for and leaving them hunting for a setting they never wrote.
 export function lookupInheritedAgentValue<T>(
   map: Record<string, T> | undefined,
-  agent: ResolvedAgent,
+  agent: AgentChainRef,
 ): { value: T; from: string } | undefined {
   if (!map) {
     return undefined;
@@ -629,6 +637,10 @@ export interface AgentListEntry {
   // Where this entry came from: "local" → config.agents (shadows any
   // same-id registry entry); "registry" → the network registry document.
   source: "local" | "registry";
+  // Inheritance chain, most specific first (see ResolvedAgent). Lets a
+  // client resolve per-agent config maps like defaultModels correctly for
+  // a derived agent instead of only checking its own id.
+  extendsChain?: string[];
   // Optional onboarding hints (T4) — surfaced so the TUI can paint a
   // helpful AUTH_REQUIRED banner without a second round trip.
   onboarding?: {
@@ -670,8 +682,13 @@ export async function listAgents(registry: Registry): Promise<AgentListResult> {
     doc = { version: "local-only", agents: [] };
   }
   const localIds = new Set(local.map((a) => a.id));
-  // Local agents shadow registry entries of the same id.
-  const merged = [...local, ...doc.agents.filter((a) => !localIds.has(a.id))];
+  // Local agents shadow registry entries of the same id. Typed as
+  // ResolvedAgent[] (registry-only entries satisfy it structurally, since
+  // extendsChain/installId are optional) so extendsChain is readable below.
+  const merged: ResolvedAgent[] = [
+    ...local,
+    ...doc.agents.filter((a) => !localIds.has(a.id)),
+  ];
   const agents = await Promise.all(
     merged.map(async (a) => ({
       id: a.id,
@@ -680,6 +697,7 @@ export async function listAgents(registry: Registry): Promise<AgentListResult> {
       description: a.description,
       distributions: Object.keys(a.distribution),
       installed: await agentInstallState(a),
+      ...(a.extendsChain ? { extendsChain: a.extendsChain } : {}),
       source: localIds.has(a.id)
         ? ("local" as const)
         : ("registry" as const),

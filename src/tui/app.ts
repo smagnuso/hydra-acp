@@ -59,6 +59,7 @@ export {
 };
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { paths, shortenHomePath } from "../core/paths.js";
+import { lookupInheritedAgentValue } from "../core/registry.js";
 import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
@@ -5687,15 +5688,28 @@ async function runSession(
         // every attach / cycle; see the ViewPrefs field docs.
         const composerAgentId =
           viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
-        const composerModel = composerAgentId
-          ? (viewPrefs.lastChosenModel ?? config.defaultModels?.[composerAgentId])
-          : undefined;
         let availableAgents: Awaited<ReturnType<typeof listAgents>> = [];
         try {
           availableAgents = await listAgents(target);
         } catch {
           // ignore
         }
+        // defaultModels is keyed by agent id, and an agent derived via
+        // config.agents `extends` usually has no entry of its own — walk
+        // the inheritance chain most-specific-first, same as
+        // session-manager.ts does when it actually seeds a session's
+        // model, so the composer preview matches what a new session
+        // would use.
+        const composerAgentEntry = composerAgentId
+          ? availableAgents.find((a) => a.id === composerAgentId)
+          : undefined;
+        const composerModel = composerAgentId
+          ? (viewPrefs.lastChosenModel ??
+              lookupInheritedAgentValue(config.defaultModels, {
+                id: composerAgentId,
+                extendsChain: composerAgentEntry?.extendsChain,
+              })?.value)
+          : undefined;
         const choice: PickerResult = await pickSession(term, {
           cwd: resolvedCwd,
           sessions,
@@ -10160,9 +10174,6 @@ async function resolveSession(
     const sessions = await listSessions(target, { includeNonInteractive: true });
     const composerAgentId =
       viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
-    const composerModel = composerAgentId
-      ? (viewPrefs.lastChosenModel ?? config.defaultModels?.[composerAgentId])
-      : undefined;
     // Fetch the agent list once so the picker's click-to-switch-agent
     // modal has something to show. Best-effort: if the daemon is
     // unreachable we omit — the click just becomes a no-op.
@@ -10172,6 +10183,21 @@ async function resolveSession(
     } catch {
       // ignore
     }
+    // defaultModels is keyed by agent id, and an agent derived via
+    // config.agents `extends` usually has no entry of its own — walk the
+    // inheritance chain most-specific-first, same as session-manager.ts
+    // does when it actually seeds a session's model, so the composer
+    // preview matches what a new session would use.
+    const composerAgentEntry = composerAgentId
+      ? availableAgents.find((a) => a.id === composerAgentId)
+      : undefined;
+    const composerModel = composerAgentId
+      ? (viewPrefs.lastChosenModel ??
+          lookupInheritedAgentValue(config.defaultModels, {
+            id: composerAgentId,
+            extendsChain: composerAgentEntry?.extendsChain,
+          })?.value)
+      : undefined;
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
@@ -10635,10 +10661,14 @@ async function ensureAgentForNew(
     return "back";
   }
   opts.agentId = result.agentId;
+  const chosenAgentEntry = agents.find((a) => a.id === result.agentId);
   rememberComposerAgent(
     viewPrefs,
     result.agentId,
-    config.defaultModels?.[result.agentId],
+    lookupInheritedAgentValue(config.defaultModels, {
+      id: result.agentId,
+      extendsChain: chosenAgentEntry?.extendsChain,
+    })?.value,
   );
   if (result.persist) {
     try {

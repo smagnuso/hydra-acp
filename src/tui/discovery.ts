@@ -222,6 +222,11 @@ export interface DiscoveredAgent {
   id: string;
   name: string;
   description?: string;
+  // Inheritance chain, most specific first — lets callers resolve
+  // per-agent config maps like defaultModels correctly for a derived
+  // agent (e.g. one added via `agent add --extends`) instead of only
+  // checking its own id. See ResolvedAgent / lookupInheritedAgentValue.
+  extendsChain?: string[];
   onboarding?: {
     command?: string;
     url?: string;
@@ -310,6 +315,7 @@ export async function listAgents(
       id: string;
       name: string;
       description?: string;
+      extendsChain?: string[];
       onboarding?: { command?: string; url?: string; description?: string };
     }>;
   };
@@ -320,6 +326,7 @@ export async function listAgents(
     id: a.id,
     name: a.name,
     description: a.description,
+    ...(a.extendsChain ? { extendsChain: a.extendsChain } : {}),
     ...(a.onboarding ? { onboarding: a.onboarding } : {}),
   }));
 }
