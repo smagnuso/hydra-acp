@@ -1314,8 +1314,45 @@ The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything
 | `model` | `string` | One-shot model id applied via `session/set_model` at agent bootstrap. Ignored on resurrect. |
 | `mcpStdin` | `boolean` | Allocate a `SessionStreamBuffer` and inject a `hydra-acp-stdin` HTTP MCP descriptor into the agent's `mcpServers`. Used by `hydra cat --stream`. |
 | `interactive` | `boolean` | Initial value for the session's interactivity tristate. `cat` sets `false`; everything else leaves it undefined so the first user prompt promotes it to `true`. |
-| `resume` | `SessionResumeHints` | `{ upstreamSessionId, agentId, cwd, title?, agentArgs? }` — populated by the shim's reconnect path so the daemon can resurrect the session against the right agent. |
+| `resume` | `SessionResumeHints` | `{ upstreamSessionId, agentId, cwd, title?, agentArgs? }` — populated by the shim's reconnect path so the daemon can resurrect the session against the right agent. **Advisory, not authoritative**: see [Stale resume hints](#stale-resume-hints). |
 | `workspace` | `WorkspaceRequest` | Run this session in an isolated workspace instead of directly in `cwd`. See [Workspace isolation](#workspace-isolation). |
+
+### Stale resume hints
+
+`resume` hints exist for one case: the daemon rotated a session's upstream
+and was killed before persisting it. There the reconnecting client's view
+genuinely is fresher than the record, so its `upstreamSessionId` and
+`agentId` override what's on disk.
+
+They do **not** override a rotation the daemon completed. Compaction, agent
+switch and workspace enter/leave all mint a new upstream, and no wire event
+tells an attached client its cached id has changed — so a client that
+reconnects after one still offers the pre-rotation id. Honoring it would
+resurrect the session on the old upstream and then hand that id back in the
+attach response, leaving client and daemon agreed on a session the daemon
+had deliberately left. A compaction "reverted" this way is
+indistinguishable from a deliberate rollback except that it emits no
+`compaction_phase: rolled_back` and leaves nothing to repair from.
+
+So the daemon checks each hint against the session record's
+`upstreamGenerations` chain:
+
+- id **is** the record's current upstream → honored.
+- id **absent** from the chain → honored. This is the crash-before-flush
+  case; the client knows something disk doesn't.
+- id **present but not current** → **ignored**, and the record wins for
+  every identity field. Such an id names a generation the session
+  demonstrably left, which means disk knows about a rotation the hint
+  predates.
+
+Only provable staleness costs a hint its authority; an unrecognized id is
+still trusted. A dropped hint is logged at `warn` (`session/attach ignoring
+stale resume hint …`) and is otherwise invisible to the client — the attach
+succeeds, on the correct upstream.
+
+Clients holding a cached `upstreamSessionId` should refresh it from the
+`_meta["hydra-acp"].upstreamSessionId` that rides every `usage_update`,
+rather than relying on this guard.
 
 ### Workspace isolation
 

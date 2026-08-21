@@ -30,6 +30,7 @@ import {
   buildHydraSessionMeta,
   type WarmSessionMetaExtras,
   type SessionListEntry,
+  type SessionResumeHints,
   type InitializeResult,
   type SessionListResult,
   JsonRpcErrorCodes,
@@ -1602,8 +1603,17 @@ export function registerAcpWsEndpoint(
         // identity fields (upstream id / cwd / agent) — the originating
         // client's view is fresher than what was on disk last write.
         const fromDisk = await deps.manager.loadFromDisk(lookupId);
+        const hintDecision = await decideResumeHint(
+          lookupId,
+          hydraHints,
+          fromDisk?.upstreamSessionId,
+          deps.manager,
+        );
+        if (hintDecision.kind === "ignore") {
+          app.log.warn(hintDecision.logMessage);
+        }
         let resurrectParams = fromDisk;
-        if (hydraHints) {
+        if (hydraHints && hintDecision.kind === "honor") {
           // Identity fields come from the hints (they're fresher than disk);
           // snapshot fields (currentUsage, agentModes, agentModels, etc.) must
           // flow through from disk so cumulativeCost and other restored state
@@ -2732,8 +2742,62 @@ function buildModelsPayload(
 //     pathological case where the agent never told us a current model
 //     and the requested id isn't valid either (genuinely nothing to
 //     fall back to).
+// Whether a session/attach resume hint may override what's on disk.
+//
+// A reconnecting client sends the upstream id it last saw, and the
+// resurrect path prefers it over the record on the theory that the
+// client's view is fresher than the last flush. That's right for the
+// case hints exist for — a daemon killed before persisting — and
+// exactly backwards for a rotation the DAEMON performed. Compaction,
+// agent switch and workspace enter/leave all mint a new upstream
+// without ever telling the client, so its hint still names the
+// pre-rotation session. Taking it silently undoes the rotation: the
+// session resurrects on the old upstream, the response hands that id
+// back to the client, and both sides settle on it with no error, no
+// rollback event, and nothing left to repair from. A compaction dies
+// this way at the next daemon restart, which is how two of them were
+// lost before this guard existed.
+//
+// `upstreamGenerations` breaks the tie. An id recorded there that is
+// not the current one is a generation this session has demonstrably
+// moved off, so disk knows about a rotation the hint predates and is
+// the fresher of the two. An id absent from the chain is still
+// honored — that's the crash-before-flush case, where the client
+// really does know something disk doesn't. Only provable staleness
+// costs a hint its authority.
+//
 // The handler in registerAcpWsEndpoint is the only production
 // consumer; tests drive it directly to avoid spinning a WebSocket.
+export type ResumeHintDecision =
+  | { kind: "none" }
+  | { kind: "honor" }
+  | { kind: "ignore"; logMessage: string };
+
+export async function decideResumeHint(
+  lookupId: string,
+  hints: SessionResumeHints | undefined,
+  recordUpstreamSessionId: string | undefined,
+  manager: SessionManager,
+): Promise<ResumeHintDecision> {
+  if (!hints) {
+    return { kind: "none" };
+  }
+  const retired = await manager.isRetiredGeneration(
+    lookupId,
+    hints.upstreamSessionId,
+  );
+  if (!retired) {
+    return { kind: "honor" };
+  }
+  return {
+    kind: "ignore",
+    logMessage:
+      `session/attach ignoring stale resume hint sessionId=${lookupId} ` +
+      `hintUpstream=${hints.upstreamSessionId} ` +
+      `recordUpstream=${recordUpstreamSessionId} (retired generation)`,
+  };
+}
+
 export type SetModelDecision =
   // `modelId` is the id to forward — equal to the requested id for an
   // exact match or passthrough, or the advertised id a fuzzy request

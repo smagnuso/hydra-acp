@@ -6644,6 +6644,40 @@ export class SessionManager {
     return record !== undefined;
   }
 
+  /**
+   * True when `upstreamSessionId` names a generation this session has
+   * already left.
+   *
+   * A resurrect hint carries the upstream id its client last saw, and the
+   * attach path prefers it over disk on the theory that a client's view is
+   * fresher than the last flush. That holds for the case the hint exists
+   * for — a daemon killed before persisting — and inverts for every
+   * rotation the DAEMON performs: compaction, agent switch, workspace
+   * enter/leave. The client is never told the id changed, so its hint
+   * still names the pre-rotation session, and taking it silently undoes
+   * the rotation. A compaction reverted this way looks exactly like a
+   * deliberate rollback minus the events, and both sides end up agreeing
+   * on the stale id, so nothing downstream can detect or repair it.
+   *
+   * The trail in `upstreamGenerations` settles it: an id that appears
+   * there but is not the current one is, by construction, a generation
+   * this session moved off. An id that appears NOWHERE stays trusted —
+   * that's the crash-before-flush case, where the client really does know
+   * something disk doesn't.
+   */
+  async isRetiredGeneration(
+    sessionId: string,
+    upstreamSessionId: string,
+  ): Promise<boolean> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    if (!record || record.upstreamSessionId === upstreamSessionId) {
+      return false;
+    }
+    return (record.upstreamGenerations ?? []).some(
+      (gen) => gen.upstreamSessionId === upstreamSessionId,
+    );
+  }
+
   // Public retitle entry point that works on live AND cold sessions.
   // - Live: routes through Session.retitle so attached clients receive
   //   a session_info_update broadcast (and persistTitle fires from the

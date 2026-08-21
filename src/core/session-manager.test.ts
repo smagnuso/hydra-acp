@@ -4923,6 +4923,84 @@ describe("appendUpstreamGeneration", () => {
   });
 });
 
+// A resume hint naming an upstream the session has already rotated off
+// used to win over disk, silently undoing the rotation. Compaction is
+// where it bit: the daemon swapped to a compacted upstream, a restart
+// resurrected on the client's pre-compaction hint, and the session came
+// back at full context with no error and no rollback event.
+describe("SessionManager.isRetiredGeneration", () => {
+  async function writeRecord(
+    sessionId: string,
+    upstreamSessionId: string,
+    generations: { upstreamSessionId: string; agentId: string; endedAt?: string }[],
+  ): Promise<SessionManager> {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    await store.write({
+      sessionId,
+      upstreamSessionId,
+      agentId: "claude-code",
+      cwd: WORK_CWD,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      upstreamGenerations: generations,
+      attentionFlags: [],
+    });
+    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+      throw new Error("no agent spawn expected");
+    });
+  }
+
+  it("reports an upstream the session rotated off as retired", async () => {
+    const sessionId = "hydra_" + "r".repeat(24);
+    const mgr = await writeRecord(sessionId, "ses_compacted", [
+      { upstreamSessionId: "ses_old", agentId: "claude-code", endedAt: "2026-08-02T00:00:00.000Z" },
+      { upstreamSessionId: "ses_compacted", agentId: "claude-code" },
+    ]);
+    expect(await mgr.isRetiredGeneration(sessionId, "ses_old")).toBe(true);
+  });
+
+  it("does not report the current upstream as retired", async () => {
+    const sessionId = "hydra_" + "s".repeat(24);
+    const mgr = await writeRecord(sessionId, "ses_compacted", [
+      { upstreamSessionId: "ses_old", agentId: "claude-code", endedAt: "2026-08-02T00:00:00.000Z" },
+      { upstreamSessionId: "ses_compacted", agentId: "claude-code" },
+    ]);
+    expect(await mgr.isRetiredGeneration(sessionId, "ses_compacted")).toBe(false);
+  });
+
+  // An id that reappears later in the chain (a rollback returns to an
+  // earlier upstream) is current, not retired, even though an EARLIER
+  // entry for the same id carries an endedAt. Keying off endedAt alone
+  // would misread it and drop a hint that is in fact correct.
+  it("does not report a re-entered upstream as retired", async () => {
+    const sessionId = "hydra_" + "t".repeat(24);
+    const mgr = await writeRecord(sessionId, "ses_old", [
+      { upstreamSessionId: "ses_old", agentId: "claude-code", endedAt: "2026-08-02T00:00:00.000Z" },
+      { upstreamSessionId: "ses_compacted", agentId: "claude-code", endedAt: "2026-08-03T00:00:00.000Z" },
+      { upstreamSessionId: "ses_old", agentId: "claude-code" },
+    ]);
+    expect(await mgr.isRetiredGeneration(sessionId, "ses_old")).toBe(false);
+  });
+
+  // The crash-before-flush case hints exist for: the daemon rotated but
+  // died before persisting, so the client knows an id disk has never
+  // seen. Unrecognized must stay trusted or the guard breaks the very
+  // recovery path it sits in.
+  it("does not report an upstream absent from the chain as retired", async () => {
+    const sessionId = "hydra_" + "u".repeat(24);
+    const mgr = await writeRecord(sessionId, "ses_old", [
+      { upstreamSessionId: "ses_old", agentId: "claude-code" },
+    ]);
+    expect(await mgr.isRetiredGeneration(sessionId, "ses_never_persisted")).toBe(false);
+  });
+
+  it("reports false when no record exists", async () => {
+    const mgr = await writeRecord("hydra_" + "v".repeat(24), "ses_x", []);
+    expect(await mgr.isRetiredGeneration("hydra_" + "z".repeat(24), "ses_x")).toBe(false);
+  });
+});
+
 afterAll(() => {
   rmSync(WORK_CWD, { recursive: true, force: true });
   rmSync(W_CWD, { recursive: true, force: true });

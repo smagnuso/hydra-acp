@@ -6,6 +6,7 @@ import {
 } from "../__tests__/test-utils.js";
 import {
   decideSetModel,
+  decideResumeHint,
   handleAuthenticate,
   handleTransformerAttach,
   handleAttentionSet,
@@ -183,6 +184,77 @@ function makeSessionWithModels(
   });
   return session;
 }
+
+// Minimal stand-in exposing only isRetiredGeneration, which is all
+// decideResumeHint consults.
+function fakeGenerationManager(retired: Set<string>): SessionManager {
+  return {
+    isRetiredGeneration: async (
+      _sessionId: string,
+      upstreamSessionId: string,
+    ): Promise<boolean> => retired.has(upstreamSessionId),
+  } as unknown as SessionManager;
+}
+
+describe("decideResumeHint", () => {
+  const hints = {
+    upstreamSessionId: "ses_precompaction",
+    agentId: "claude-acp",
+    cwd: "/work",
+  };
+
+  it("honors a hint naming the upstream the record is already on", async () => {
+    const decision = await decideResumeHint(
+      "sess_1",
+      { ...hints, upstreamSessionId: "ses_current" },
+      "ses_current",
+      fakeGenerationManager(new Set()),
+    );
+    expect(decision.kind).toBe("honor");
+  });
+
+  // The compaction revert. The daemon rotated to a compacted upstream,
+  // restarted, and the reconnecting shim offered the pre-compaction id
+  // it had cached since before the swap. Honoring it put the session
+  // back on the full context with no error and no rollback event.
+  it("ignores a hint naming a generation the session already left", async () => {
+    const decision = await decideResumeHint(
+      "sess_1",
+      hints,
+      "ses_compacted",
+      fakeGenerationManager(new Set(["ses_precompaction"])),
+    );
+    expect(decision.kind).toBe("ignore");
+    if (decision.kind === "ignore") {
+      expect(decision.logMessage).toContain("ses_precompaction");
+      expect(decision.logMessage).toContain("ses_compacted");
+    }
+  });
+
+  // Crash-before-flush: the daemon rotated but died before persisting,
+  // so the client holds an id the record has never seen. This is the
+  // case hints exist for and must keep working — the guard fires only
+  // on ids the chain can PROVE were left behind.
+  it("honors a hint the record has never seen", async () => {
+    const decision = await decideResumeHint(
+      "sess_1",
+      { ...hints, upstreamSessionId: "ses_unflushed" },
+      "ses_old",
+      fakeGenerationManager(new Set(["ses_retired"])),
+    );
+    expect(decision.kind).toBe("honor");
+  });
+
+  it("reports none when the attach carried no hints", async () => {
+    const decision = await decideResumeHint(
+      "sess_1",
+      undefined,
+      "ses_current",
+      fakeGenerationManager(new Set(["ses_precompaction"])),
+    );
+    expect(decision.kind).toBe("none");
+  });
+});
 
 describe("decideSetModel", () => {
   it("returns no_op (resync) when modelId is not in availableModels but the session has a current model", () => {
