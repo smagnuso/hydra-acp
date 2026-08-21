@@ -21,6 +21,7 @@ import {
   extractPromptText,
   findMessageIdIndex,
   firstLine,
+  parseConfigOptionValues,
   parseModelsList,
   parseModesList,
   stripHydraSessionPrefix,
@@ -95,6 +96,7 @@ import type {
   AdvertisedCommand,
   AdvertisedMode,
   AdvertisedModel,
+  ConfigOption,
 } from "./hydra-commands.js";
 import { resolveModelId } from "./model-resolve.js";
 import {
@@ -1097,6 +1099,7 @@ export class SessionManager {
       currentMode: fresh.initialMode,
       agentModes: fresh.initialModes,
       agentModels: fresh.initialModels,
+      agentConfigOptions: fresh.initialConfigOptions,
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
       originatingClient: params.originatingClient,
@@ -1337,6 +1340,9 @@ export class SessionManager {
     this.logger?.info(
       `resurrect: sessionId=${params.hydraSessionId} persistedModel=${JSON.stringify(params.currentModel)} agentReportedModel=${JSON.stringify(agentReportedModel)} advertisedModels=${JSON.stringify(advertisedModels?.map((m) => m.modelId))}`,
     );
+    const advertisedConfigOptions = nonEmptyOrUndefined(
+      extractInitialConfigOptions(loadResult ?? {}),
+    );
 
     // The set_mode call above may have prompted the agent to emit fresh
     // session/update notifications. Drop them before wireAgent so they
@@ -1418,6 +1424,7 @@ export class SessionManager {
       // restarts (quota resets, rollouts), so meta.json is intentionally
       // treated as a cold fallback here, not the authoritative source.
       agentModels: advertisedModels,
+      agentConfigOptions: advertisedConfigOptions,
       summarizedThroughEntry: params.summarizedThroughEntry,
       compactionState: params.compactionState,
       // Only gate the first-prompt title heuristic when we actually have
@@ -1552,6 +1559,7 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       agentModels: advertisedModels,
+      agentConfigOptions: fresh.initialConfigOptions,
       summarizedThroughEntry: params.summarizedThroughEntry,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
@@ -4758,6 +4766,7 @@ export class SessionManager {
     initialModels?: AdvertisedModel[];
     initialModes?: AdvertisedMode[];
     initialMode?: string;
+    initialConfigOptions?: ConfigOption[];
     modelVerb?: ModelVerb;
   }> {
     const agentDef = await this.registry.getAgent(params.agentId);
@@ -4889,6 +4898,7 @@ export class SessionManager {
       }
       const initialModes = extractInitialModes(newResult);
       const initialMode = extractInitialCurrentMode(newResult);
+      const initialConfigOptions = extractInitialConfigOptions(newResult);
       return {
         agent,
         upstreamSessionId: sessionIdRaw,
@@ -4898,6 +4908,8 @@ export class SessionManager {
         initialModels: initialModels.length > 0 ? initialModels : undefined,
         initialModes: initialModes.length > 0 ? initialModes : undefined,
         initialMode,
+        initialConfigOptions:
+          initialConfigOptions.length > 0 ? initialConfigOptions : undefined,
         modelVerb,
       };
     } catch (err) {
@@ -4975,6 +4987,9 @@ export class SessionManager {
       const initialModels = nonEmptyOrUndefined(extractInitialModels(loadResult));
       const initialModes = extractInitialModes(loadResult);
       const initialMode = extractInitialCurrentMode(loadResult);
+      const initialConfigOptions = nonEmptyOrUndefined(
+        extractInitialConfigOptions(loadResult),
+      );
       return {
         agent,
         upstreamSessionId,
@@ -4984,6 +4999,7 @@ export class SessionManager {
         initialModels,
         initialModes: initialModes.length > 0 ? initialModes : undefined,
         initialMode,
+        initialConfigOptions,
         modelVerb: inferModelVerbFromResult(loadResult),
       };
     } catch (err) {
@@ -8050,6 +8066,50 @@ function findConfigOptionEntry(
     }
   }
   return undefined;
+}
+
+// Pull every agent-advertised config dimension OTHER than model/mode/agent
+// from a session/new or session/load response's top-level `configOptions`
+// (the same array findConfigOptionEntry looks up by id). "model"/"mode" are
+// hydra-owned and already have dedicated extractors; "agent" is hydra's own
+// backend selector, so an agent that also uses that id (e.g. a persona
+// picker) is not harvested under it. Unlike extractInitialModels/Modes this
+// doesn't consult nested `models`/`modes` objects or `_meta` — those shapes
+// don't apply to arbitrary agent dimensions, only to the two hydra already
+// special-cases.
+export function extractInitialConfigOptions(
+  result: Record<string, unknown>,
+): ConfigOption[] {
+  const list = result.configOptions;
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: ConfigOption[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const entry = raw as Record<string, unknown>;
+    const id = asString(entry.id);
+    if (!id || id === "model" || id === "mode" || id === "agent") {
+      continue;
+    }
+    const options = parseConfigOptionValues(entry.options);
+    if (options.length === 0) {
+      continue;
+    }
+    const description = asString(entry.description);
+    out.push({
+      id,
+      name: asString(entry.name) ?? id,
+      ...(description ? { description } : {}),
+      category: asString(entry.category) ?? "other",
+      type: "select",
+      currentValue: asString(entry.currentValue) ?? options[0]!.value,
+      options,
+    });
+  }
+  return out;
 }
 
 function nonEmptyOrUndefined<T>(arr: T[]): T[] | undefined {

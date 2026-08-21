@@ -323,6 +323,57 @@ describe("SessionManager.resurrect", () => {
     expect(session.agentMeta).toEqual({ "agent-vendor": { sequence: 7 } });
   });
 
+  it("captures a non-model/mode config option from session/load's configOptions, category and description intact", async () => {
+    const configOptMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({
+            configOptions: [
+              {
+                id: "effort",
+                name: "Effort",
+                description: "Reasoning effort level",
+                category: "thought_level",
+                currentValue: "default",
+                options: [
+                  { value: "default", name: "Default" },
+                  { value: "high", name: "High" },
+                ],
+              },
+              // Ids hydra owns must never be re-harvested under themselves.
+              { id: "model", currentValue: "x", options: [{ value: "x" }] },
+              { id: "mode", currentValue: "y", options: [{ value: "y" }] },
+              { id: "agent", currentValue: "z", options: [{ value: "z" }] },
+            ],
+          });
+        return m.agent;
+      },
+    );
+    const session = await configOptMgr.resurrect({
+      hydraSessionId: "sess_cfg_load",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: W_CWD,
+    });
+    const effort = session.buildConfigOptions().find((o) => o.id === "effort");
+    expect(effort).toBeDefined();
+    expect(effort?.category).toBe("thought_level");
+    expect(effort?.description).toBe("Reasoning effort level");
+    expect(effort?.options.map((v) => v.value)).toEqual(["default", "high"]);
+    // The reserved ids' own harvested entries never surface under those
+    // ids (hydra's own model/mode/agent entries in buildConfigOptions()
+    // are separate and always present regardless of what the agent sent).
+    const agentOwnedIds = ["model", "mode", "agent"];
+    expect(
+      session.buildConfigOptions().filter((o) => agentOwnedIds.includes(o.id)),
+    ).toHaveLength(3);
+  });
+
   it("does not let the first prompt after resurrect clobber the persisted title", async () => {
     const titledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -4013,6 +4064,53 @@ describe("SessionManager.create: captures child authMethods on AgentInstance", (
     await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
 
     expect(mock.agent.authMethods).toBeUndefined();
+  });
+});
+
+describe("SessionManager.create: initial config options beyond model/mode", () => {
+  it("captures a non-model/mode config option from session/new's configOptions, category and description intact", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_cfg_new",
+        configOptions: [
+          {
+            id: "fast",
+            name: "Fast mode",
+            description: "Trade quality for speed",
+            category: "model_config",
+            currentValue: "off",
+            options: [
+              { value: "off", name: "Off" },
+              { value: "on", name: "On", description: "Faster responses" },
+            ],
+          },
+          // Ids hydra owns must never be re-harvested under themselves.
+          { id: "model", currentValue: "x", options: [{ value: "x" }] },
+          { id: "mode", currentValue: "y", options: [{ value: "y" }] },
+          { id: "agent", currentValue: "z", options: [{ value: "z" }] },
+        ],
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    const session = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    const fast = session.buildConfigOptions().find((o) => o.id === "fast");
+    expect(fast).toBeDefined();
+    expect(fast?.category).toBe("model_config");
+    expect(fast?.description).toBe("Trade quality for speed");
+    expect(fast?.options.find((v) => v.value === "on")?.description).toBe(
+      "Faster responses",
+    );
+    const agentOwnedIds = ["model", "mode", "agent"];
+    expect(
+      session.buildConfigOptions().filter((o) => agentOwnedIds.includes(o.id)),
+    ).toHaveLength(3);
   });
 });
 

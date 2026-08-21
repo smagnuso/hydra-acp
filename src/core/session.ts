@@ -148,6 +148,9 @@ export interface SpawnReplacementAgentResult {
   initialModels?: AdvertisedModel[];
   initialMode?: string;
   initialModes?: AdvertisedMode[];
+  // Config dimensions beyond model/mode the new agent advertised (e.g.
+  // "effort", "fast"), for the same re-advertise-on-swap reason.
+  initialConfigOptions?: ConfigOption[];
   // Which verb this agent takes for model changes, inferred from the
   // shape of its session/new response (see core/model-verb.ts).
   // Undefined when the response advertised no models at all.
@@ -264,6 +267,10 @@ export interface SessionInit {
   agentCommands?: AdvertisedCommand[];
   agentModes?: AdvertisedMode[];
   agentModels?: AdvertisedModel[];
+  // Config dimensions the agent advertised beyond model/mode (e.g.
+  // "effort", "fast"), harvested from session/new or session/load.
+  // model/mode/agent are excluded — hydra owns those ids.
+  agentConfigOptions?: ConfigOption[];
   // Suppress the first-prompt title heuristic. Set by SessionManager
   // when resurrecting a session whose title is already meaningful (from
   // a prior life's prompt seed, /hydra title, or background synopsis) —
@@ -1319,6 +1326,9 @@ export class Session {
     if (init.agentModels && init.agentModels.length > 0) {
       this.agentAdvertisedModels = [...init.agentModels];
     }
+    if (init.agentConfigOptions && init.agentConfigOptions.length > 0) {
+      this.agentAdvertisedConfigOptions = [...init.agentConfigOptions];
+    }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     // Wire the transformer-chain `session.idle` lifecycle event onto the
@@ -2283,6 +2293,7 @@ export class Session {
       this.currentMode = fresh.initialMode;
       this.setAgentAdvertisedModels(fresh.initialModels ?? []);
       this.setAgentAdvertisedModes(fresh.initialModes ?? []);
+      this.agentAdvertisedConfigOptions = fresh.initialConfigOptions ?? [];
     }
 
     // Re-broadcast config options and commands under the new upstream.
@@ -5594,100 +5605,161 @@ export class Session {
       return true;
     }
     for (const raw of list) {
-      if (!raw || typeof raw !== "object") {
+      this.applyOneConfigOptionEntry(raw);
+    }
+    // config_option_update is a state-update kind — like
+    // available_models_update/available_modes_update, it's always a full
+    // snapshot of the agent's non-model/mode dimensions (mirrors
+    // broadcastConfigOptions, which always emits the complete list). An
+    // id previously cached but absent here means the agent stopped
+    // offering it (e.g. claude-acp drops "effort" for a model with no
+    // reasoning levels), so drop it rather than leaving a stale picker
+    // on screen.
+    const seenIds = new Set(
+      list
+        .filter(
+          (r): r is Record<string, unknown> => !!r && typeof r === "object",
+        )
+        .map((r) => (typeof r.id === "string" ? r.id.trim() : undefined))
+        .filter(
+          (id): id is string =>
+            !!id && id !== "model" && id !== "mode" && id !== "agent",
+        ),
+    );
+    this.agentAdvertisedConfigOptions = this.agentAdvertisedConfigOptions.filter(
+      (o) => seenIds.has(o.id),
+    );
+    return true;
+  }
+
+  // session/set_config_option's reply carries the agent's actual applied
+  // value for an id hydra doesn't own (e.g. "effort") — the only word on
+  // the new value, since agents answering this call emit no separate
+  // config_option_update notification. Unlike the notification path,
+  // this never prunes: the issue that motivated this method documents
+  // agents answering with "an updated snapshot" but not whether that's
+  // the full non-model/mode set or just the one id that changed, and
+  // wasn't verified against a live agent — wrongly dropping an option a
+  // client still has on screen is worse than leaving a currentValue
+  // briefly stale, so this only ever adds or updates. Model/mode/agent
+  // entries are ignored: this call is only reached for ids the setter's
+  // own model/mode/agent switch cases don't already own.
+  applyAgentConfigOptionResponse(response: unknown): void {
+    const list = (response as { configOptions?: unknown } | undefined)
+      ?.configOptions;
+    if (!Array.isArray(list)) {
+      return;
+    }
+    for (const raw of list) {
+      const id = (raw as { id?: unknown } | null)?.id;
+      if (id === "model" || id === "mode" || id === "agent") {
         continue;
       }
-      const opt = raw as {
-        id?: unknown;
-        currentValue?: unknown;
-        options?: unknown;
-      };
-      if (opt.id === "model") {
-        const models = parseModelsList(opt.options);
-        if (models.length > 0) {
-          this.setAgentAdvertisedModels(models);
-        }
-        const cv = opt.currentValue;
-        if (typeof cv === "string") {
-          const trimmed = cv.trim();
-          if (trimmed && trimmed !== this.currentModel) {
-            this.logger?.info(
-              `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
-            );
-            // Delegate to applyModelChange so the daemon also emits a
-            // spec-shaped current_model_update. claude-acp/opencode carry
-            // the new model only in this non-spec config_option_update;
-            // clients that don't render it (notably the TUI) would
-            // otherwise stay pinned to the agent's earlier stale value.
-            this.applyModelChange(trimmed);
-          }
-        }
-      } else if (opt.id === "mode") {
-        const modes = parseModesList(opt.options);
-        if (modes.length > 0) {
-          this.setAgentAdvertisedModes(modes);
-        }
-        const cv = opt.currentValue;
-        if (typeof cv === "string") {
-          const trimmed = cv.trim();
-          if (trimmed && trimmed !== this.currentMode) {
-            this.logger?.info(
-              `live config_option_update(mode): sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
-            );
-            // Mirror the model branch: emit a spec-shaped
-            // current_mode_update so mode-only clients (the TUI) repaint.
-            this.applyModeChange(trimmed);
-          }
-        }
-      } else if (typeof opt.id === "string" && opt.id.trim()) {
-        // Non-standard config option (e.g. "effort", "thought_level").
-        // Store it so buildConfigOptions can surface it alongside
-        // model/mode/agent — agents advertise these only in the
-        // config_option_update payload, never via a dedicated channel.
-        const id = opt.id.trim();
-        const options = parseModelsList(opt.options);
-        if (options.length > 0) {
-          const modeList = parseModesList(opt.options);
-          const valueOpts: ConfigOptionValue[] = modeList.length > 0
-            ? modeList.map((m) => ({
-                value: m.id,
-                name: m.name ?? m.id,
-              }))
-            : options.map((m) => ({
-                value: m.modelId,
-                name: m.name ?? m.modelId,
-              }));
-          const rawName = (opt as { name?: unknown }).name;
-          const name = typeof rawName === "string" && rawName.trim() ? rawName.trim() : id;
-          const rawCv = opt.currentValue;
-          const currentValue =
-            typeof rawCv === "string" && rawCv.trim()
-              ? rawCv.trim()
-              : valueOpts[0]?.value ?? "";
-          const existing = this.agentAdvertisedConfigOptions.findIndex(
-            (o) => o.id === id,
+      this.applyOneConfigOptionEntry(raw);
+    }
+  }
+
+  private applyOneConfigOptionEntry(raw: unknown): void {
+    if (!raw || typeof raw !== "object") {
+      return;
+    }
+    const opt = raw as {
+      id?: unknown;
+      name?: unknown;
+      category?: unknown;
+      description?: unknown;
+      currentValue?: unknown;
+      options?: unknown;
+    };
+    if (opt.id === "model") {
+      const models = parseModelsList(opt.options);
+      if (models.length > 0) {
+        this.setAgentAdvertisedModels(models);
+      }
+      const cv = opt.currentValue;
+      if (typeof cv === "string") {
+        const trimmed = cv.trim();
+        if (trimmed && trimmed !== this.currentModel) {
+          this.logger?.info(
+            `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
           );
-          if (existing >= 0) {
-            const updated = { ...this.agentAdvertisedConfigOptions[existing]! };
-            updated.options = valueOpts;
-            if (typeof rawCv === "string" && rawCv.trim()) {
-              updated.currentValue = rawCv.trim();
-            }
-            this.agentAdvertisedConfigOptions[existing] = updated;
-          } else {
-            this.agentAdvertisedConfigOptions.push({
-              id,
-              name,
-              category: "other",
-              type: "select",
-              currentValue,
-              options: valueOpts,
-            });
-          }
+          // Delegate to applyModelChange so the daemon also emits a
+          // spec-shaped current_model_update. claude-acp/opencode carry
+          // the new model only in this non-spec config_option_update;
+          // clients that don't render it (notably the TUI) would
+          // otherwise stay pinned to the agent's earlier stale value.
+          this.applyModelChange(trimmed);
         }
       }
+      return;
     }
-    return true;
+    if (opt.id === "mode") {
+      const modes = parseModesList(opt.options);
+      if (modes.length > 0) {
+        this.setAgentAdvertisedModes(modes);
+      }
+      const cv = opt.currentValue;
+      if (typeof cv === "string") {
+        const trimmed = cv.trim();
+        if (trimmed && trimmed !== this.currentMode) {
+          this.logger?.info(
+            `live config_option_update(mode): sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+          );
+          // Mirror the model branch: emit a spec-shaped
+          // current_mode_update so mode-only clients (the TUI) repaint.
+          this.applyModeChange(trimmed);
+        }
+      }
+      return;
+    }
+    if (typeof opt.id !== "string" || !opt.id.trim()) {
+      return;
+    }
+    // Non-standard config option (e.g. "effort", "thought_level"). Store
+    // it so buildConfigOptions can surface it alongside model/mode/agent
+    // — agents advertise these only in the config_option_update payload
+    // (or a session/set_config_option reply), never via a dedicated
+    // channel.
+    const id = opt.id.trim();
+    const valueOpts = parseConfigOptionValues(opt.options);
+    if (valueOpts.length === 0) {
+      return;
+    }
+    const rawName = opt.name;
+    const name =
+      typeof rawName === "string" && rawName.trim() ? rawName.trim() : id;
+    const rawCategory = opt.category;
+    const category =
+      typeof rawCategory === "string" && rawCategory.trim()
+        ? rawCategory.trim()
+        : "other";
+    const rawDescription = opt.description;
+    const description =
+      typeof rawDescription === "string" && rawDescription.trim()
+        ? rawDescription.trim()
+        : undefined;
+    const rawCv = opt.currentValue;
+    const currentValue =
+      typeof rawCv === "string" && rawCv.trim()
+        ? rawCv.trim()
+        : valueOpts[0]!.value;
+    const built: ConfigOption = {
+      id,
+      name,
+      category,
+      type: "select",
+      currentValue,
+      options: valueOpts,
+      ...(description ? { description } : {}),
+    };
+    const existing = this.agentAdvertisedConfigOptions.findIndex(
+      (o) => o.id === id,
+    );
+    if (existing >= 0) {
+      this.agentAdvertisedConfigOptions[existing] = built;
+    } else {
+      this.agentAdvertisedConfigOptions.push(built);
+    }
   }
 
   private maybeApplyAgentMode(params: unknown): boolean {
@@ -7192,11 +7264,12 @@ export class Session {
       }
       return { stopReason: "end_turn" };
     }
-    await this.forwardRequest("session/set_config_option", {
+    const response = await this.forwardRequest("session/set_config_option", {
       sessionId: this.sessionId,
       configId: id,
       value: resolvedValue,
     });
+    this.applyAgentConfigOptionResponse(response);
     return { stopReason: "end_turn" };
   }
 
@@ -7665,6 +7738,7 @@ export class Session {
     this.currentMode = fresh.initialMode;
     this.setAgentAdvertisedModels(fresh.initialModels ?? []);
     this.setAgentAdvertisedModes(fresh.initialModes ?? []);
+    this.agentAdvertisedConfigOptions = fresh.initialConfigOptions ?? [];
     // Killing the old agent rejects any in-flight session/prompt bound to
     // its (already-captured) connection — that's how a stuck turn ends.
     // Restart and force-cancel both land here. The transcript replay
@@ -9672,6 +9746,39 @@ export function parseModesList(list: unknown): AdvertisedMode[] {
       mode.description = r.description;
     }
     out.push(mode);
+  }
+  return out;
+}
+
+// Parse a config_option_update entry's `options` list into
+// ConfigOptionValue[], for agent-advertised dimensions other than
+// model/mode (e.g. "effort", "fast"). Accepts `{ value|id, name?,
+// description? }`. Malformed entries are dropped rather than failing the
+// whole list, mirroring parseModelsList/parseModesList.
+export function parseConfigOptionValues(list: unknown): ConfigOptionValue[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: ConfigOptionValue[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const r = raw as Record<string, unknown>;
+    const value =
+      (typeof r.value === "string" && r.value.trim()) ||
+      (typeof r.id === "string" && r.id.trim()) ||
+      undefined;
+    if (!value) {
+      continue;
+    }
+    const name =
+      typeof r.name === "string" && r.name.trim() ? r.name.trim() : value;
+    const v: ConfigOptionValue = { value, name };
+    if (typeof r.description === "string" && r.description.length > 0) {
+      v.description = r.description;
+    }
+    out.push(v);
   }
   return out;
 }

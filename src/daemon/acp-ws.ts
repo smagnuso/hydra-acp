@@ -2329,7 +2329,7 @@ export function registerAcpWsEndpoint(
           }
           break;
         }
-        default:
+        default: {
           // Anything else in the snapshot came from the agent's own
           // configOptions (effort, thought_level, whatever it invents), so
           // it's the agent's to apply: forward it. This mirrors the text
@@ -2337,11 +2337,20 @@ export function registerAcpWsEndpoint(
           // the tail case. Without it a dimension hydra advertises as
           // settable is refused over WS but accepted via
           // `/hydra config <id> <value>`.
-          await session.forwardRequest("session/set_config_option", {
-            sessionId: params.sessionId,
-            configId: params.configId,
-            value: params.value,
-          });
+          const response = await session.forwardRequest(
+            "session/set_config_option",
+            {
+              sessionId: params.sessionId,
+              configId: params.configId,
+              value: params.value,
+            },
+          );
+          // The agent's reply is the only word on the new value — it
+          // emits no separate config_option_update notification for this
+          // call. Without applying it here, the snapshot below would echo
+          // back whatever was already cached instead of what was just set.
+          session.applyAgentConfigOptionResponse(response);
+        }
       }
       return { configOptions: session.buildConfigOptions() };
     });

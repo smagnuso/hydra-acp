@@ -1187,6 +1187,10 @@ Inference picks the **lead** verb only. A `MethodNotFound` rejection still trigg
 
 Transformers should declare **both** `request:session/set_model` and `request:session/set_config_option` if they care about model changes, and must tolerate seeing a rejected `session/set_model` followed by an accepted `session/set_config_option` for a single client-initiated change.
 
+**Config options beyond model/mode.** An agent may advertise dimensions of its own — claude-agent-acp's reasoning-effort picker, a fast-mode toggle, whatever it invents — on `session/new`, `session/load`, or a later `config_option_update`. Hydra harvests every entry in the agent's `configOptions` array, not just `model`/`mode`, and re-exposes it verbatim (`id`, `name`, `description`, `category`, `currentValue`, `options`) through `session.buildConfigOptions()`, appended after hydra's own `model`/`mode`/`agent` entries. `model`, `mode`, and `agent` are reserved ids — hydra owns those three dimensions, so an agent advertising under one of those ids (e.g. its own persona picker also called `"agent"`) is not re-harvested there; it stays invisible under that id. Setting one of the pass-through ids via `session/set_config_option` forwards the request to the agent unchanged (the daemon has no idea what "effort: high" means) and applies whatever the agent's reply reports as the new state, since these agents answer the call directly rather than following up with a `config_option_update` notification.
+
+`category` is how a client is expected to recognize what a dimension *means*, independent of its `id` or `name` — agent-shell, for instance, finds claude-agent-acp's effort picker by `category: "thought_level"` alone. The vocabulary: `model`/`mode` (hydra's own two dimensions), any reserved spec string an agent defines, an agent's own `_`-prefixed custom category, or hydra's `_hydra_*` namespace (currently just `_hydra_agent`, hydra's backend selector). An agent-advertised dimension with no `category` on the wire is surfaced as `"other"` rather than dropped.
+
 ### Agent discovery
 
 #### Request: `hydra-acp/agents/list`

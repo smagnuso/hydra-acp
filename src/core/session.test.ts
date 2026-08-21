@@ -807,10 +807,12 @@ describe("Session", () => {
             {
               id: "effort",
               name: "Effort",
+              description: "Reasoning effort level",
+              category: "thought_level",
               currentValue: "default",
               options: [
                 { value: "default", name: "Default" },
-                { value: "high", name: "High" },
+                { value: "high", name: "High", description: "Slower, more thorough" },
               ],
             },
           ],
@@ -822,6 +824,14 @@ describe("Session", () => {
         .buildConfigOptions()
         .find((o) => o.id === "effort");
       expect(effort?.options.map((v) => v.value)).toEqual(["default", "high"]);
+      // category/description must survive verbatim — a relabeled-to-"other"
+      // category is invisible to clients that dispatch on it (agent-shell
+      // finds this picker by category:"thought_level" alone).
+      expect(effort?.category).toBe("thought_level");
+      expect(effort?.description).toBe("Reasoning effort level");
+      expect(effort?.options.find((v) => v.value === "high")?.description).toBe(
+        "Slower, more thorough",
+      );
 
       const requestSpy = vi
         .spyOn(session.agent.connection, "request")
@@ -837,6 +847,136 @@ describe("Session", () => {
         configId: "effort",
         value: "high",
       });
+    });
+
+    it("defaults category to \"other\" when the wire payload omits it", async () => {
+      const { session, mock } = makeSession("sess_eff_nocat", "u_eff_nocat");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_nocat",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "fast", currentValue: "off", options: [{ value: "off" }, { value: "on" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      const fast = session.buildConfigOptions().find((o) => o.id === "fast");
+      expect(fast?.category).toBe("other");
+    });
+
+    it("refreshes category/description/name on a later update for the same id", async () => {
+      const { session, mock } = makeSession("sess_eff_refresh", "u_eff_refresh");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_refresh",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", name: "Effort", category: "other", currentValue: "low", options: [{ value: "low" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_refresh",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            {
+              id: "effort",
+              name: "Reasoning Effort",
+              category: "thought_level",
+              currentValue: "low",
+              options: [{ value: "low" }],
+            },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      const effort = session.buildConfigOptions().find((o) => o.id === "effort");
+      expect(effort?.category).toBe("thought_level");
+      expect(effort?.name).toBe("Reasoning Effort");
+    });
+
+    it("drops an agent-advertised config option omitted from a later full snapshot", async () => {
+      const { session, mock } = makeSession("sess_eff_prune", "u_eff_prune");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_prune",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", currentValue: "low", options: [{ value: "low" }] },
+            { id: "fast", currentValue: "off", options: [{ value: "off" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      expect(
+        session.buildConfigOptions().map((o) => o.id),
+      ).toEqual(expect.arrayContaining(["effort", "fast"]));
+
+      // claude-agent-acp rebuilds "effort" per model; a model with no
+      // reasoning levels sends a snapshot that simply omits it.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_prune",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "fast", currentValue: "off", options: [{ value: "off" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      const ids = session.buildConfigOptions().map((o) => o.id);
+      expect(ids).not.toContain("effort");
+      expect(ids).toContain("fast");
+    });
+
+    it("applyAgentConfigOptionResponse upserts without pruning ids missing from the reply", async () => {
+      const { session, mock } = makeSession("sess_eff_reply", "u_eff_reply");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_reply",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", currentValue: "low", options: [{ value: "low" }, { value: "high" }] },
+            { id: "fast", currentValue: "off", options: [{ value: "off" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      // The setter's reply only echoes the one id that changed — unlike a
+      // config_option_update notification, this must NOT prune "fast",
+      // since the reply shape (single value vs full snapshot) isn't
+      // verified against a live agent.
+      session.applyAgentConfigOptionResponse({
+        configOptions: [
+          { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
+        ],
+      });
+      const opts = session.buildConfigOptions();
+      expect(opts.find((o) => o.id === "effort")?.currentValue).toBe("high");
+      expect(opts.map((o) => o.id)).toContain("fast");
+    });
+
+    it("applyAgentConfigOptionResponse ignores model/mode/agent entries and non-array payloads", () => {
+      const { session } = makeSession("sess_eff_reply2", "u_eff_reply2");
+      const before = session.buildConfigOptions();
+      session.applyAgentConfigOptionResponse({
+        configOptions: [{ id: "model", currentValue: "should-not-apply", options: [] }],
+      });
+      session.applyAgentConfigOptionResponse(undefined);
+      session.applyAgentConfigOptionResponse({ notConfigOptions: [] });
+      expect(session.buildConfigOptions()).toEqual(before);
     });
 
     it("captures availableModes + currentMode from a config_option_update (id=mode)", async () => {
