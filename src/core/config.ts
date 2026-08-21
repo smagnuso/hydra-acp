@@ -549,7 +549,7 @@ const TuiConfig = z.object({
         .default([
           "activity",
           "sessions",
-          "background",
+          "tasks",
           "context",
           "queue",
           "todo",

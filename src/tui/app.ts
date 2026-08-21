@@ -1987,7 +1987,7 @@ async function runSession(
   let unsolicitedTurnOpen = false;
   // Epoch ms the oldest still-armed background task was armed, or null.
   // Pushed by hydra-acp/session/armed_tasks_updated and seeded from the
-  // attach snapshot; drives the composer's "Running Xs" and the sidebar's
+  // attach snapshot; drives the composer's "Waiting Xs" and the sidebar's
   // running branch.
   let armedSince: number | null = null;
   // Timer that periodically polls the daemon for the current session's
@@ -2012,7 +2012,7 @@ async function runSession(
       }
       if (sessionBusySince === null) {
         // Not mid-turn, but a background task is still running: nudge the
-        // banner so the "Running Xs" clock advances. The elapsed field
+        // banner so the "Waiting Xs" clock advances. The elapsed field
         // derives that from armedSince itself, and paintRow no-ops when
         // the rendered text hasn't changed, so an empty set is enough.
         if (armedSince !== null) {
@@ -2102,7 +2102,7 @@ async function runSession(
       lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
       // Keep ticking when a background task is still armed: the banner
-      // flips to "Running Xs" and that clock has to keep moving.
+      // flips to "Waiting Xs" and that clock has to keep moving.
       if (sessionElapsedTimer !== null && armedSince === null) {
         clearInterval(sessionElapsedTimer);
         sessionElapsedTimer = null;
@@ -8401,7 +8401,7 @@ async function runSession(
             // task outlives the turn that started it.
             busy: s.busy === true,
             armed: (s.armedTasks ?? 0) > 0,
-            waiting: s.awaitingInput === true,
+            blocked: s.awaitingInput === true,
           });
         }
         screen.setSidebarSnapshot({ liveSessions: entries });
@@ -9131,7 +9131,7 @@ async function runSession(
     // treats the session as busy here (turnStartedAt is set, the session
     // list reads BUSY), and without mirroring that the composer and sidebar
     // fall through to Ready / idle at the exact moment work starts: the
-    // armed task is consumed by this resumption, so the "Running" label
+    // armed task is consumed by this resumption, so the "Waiting" label
     // goes away and nothing replaces it.
     //
     // Routed through adjustPendingTurns rather than poking the banner

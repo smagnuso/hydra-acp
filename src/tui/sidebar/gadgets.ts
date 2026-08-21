@@ -222,7 +222,7 @@ export const activityGadget: Gadget = {
     if (s.armedSince !== null) {
       return [
         row(
-          labelValue("◐ running", shortDuration(s.now - s.armedSince), ctx),
+          labelValue("◐ waiting", shortDuration(s.now - s.armedSince), ctx),
           "status-active",
         ),
       ];
@@ -276,9 +276,9 @@ export const activityGadget: Gadget = {
 // running" with "daemon too old to send a list". Both should render
 // nothing, and the activity gadget still covers the count-only case from
 // `armedSince`.
-export const backgroundGadget: Gadget = {
-  id: "background",
-  title: "background",
+export const tasksGadget: Gadget = {
+  id: "tasks",
+  title: "tasks",
   relevant: (s) => s.armedTasks.length > 0,
   versionKey: (s, ctx) => {
     const shown = s.armedTasks.slice(0, SIDEBAR_PAGE_SIZE);
@@ -291,7 +291,7 @@ export const backgroundGadget: Gadget = {
           const secs = Math.floor(Math.max(0, s.now - t.since) / 1000);
           return `${t.taskId ?? t.label}:${secs}`;
         })
-        .join(" ")
+        .join("\u0000")
     );
   },
   render: (s, ctx) => {
@@ -780,14 +780,14 @@ export function formatCpu(fraction: number | undefined): string {
 //
 //   ● working / ◐ background task running / ○ quiet — the same three glyphs
 //   the activity gadget uses at the top of this very column ("● thinking" /
-//   "◐ running" / "○ idle"), so a glyph means the same thing whether it
+//   "◐ waiting" / "○ idle"), so a glyph means the same thing whether it
 //   describes this session or another. ◐ shares ●'s yellow: both are the
 //   session doing work, and the shape carries the difference (a turn is in
 //   flight vs. the agent handed the turn back but armed a job that can wake
 //   it up). Without it an armed session read as quiet here while `hydra
 //   session list` and the picker called it BUSY.
 //
-//   ◦ in the cell to its left when something is waiting on you, blank
+//   ◦ in the cell to its left when something is blocked on you, blank
 //   otherwise. Matches the picker's and `hydra session list`'s "WARM◦",
 //   which likewise hangs the marker off the RIGHT of the text. A different
 //   shape from the busy/quiet pair, so the two axes can't be confused.
@@ -805,15 +805,15 @@ export function formatCpu(fraction: number | undefined): string {
 const BUSY_MARK = "●";
 const RUNNING_MARK = "◐";
 const IDLE_MARK = "○";
-const WAITING_MARK = "◦";
+const BLOCKED_MARK = "◦";
 
 export const sessionsGadget: Gadget = {
   id: "sessions",
   title: "sessions",
   pageSize: SIDEBAR_PAGE_SIZE,
   relevant: (s) => s.liveSessions.length > 0,
-  // Only when folded. Open, a "1 waiting" counter restates what the rows
-  // already say — waiting sorts to the top and each row carries its own
+  // Only when folded. Open, a "1 blocked" counter restates what the rows
+  // already say — blocked sorts to the top and each row carries its own
   // marker — so it just competed with them for the eye. Folded, the rows are
   // gone and this is the only thing left that can tell you something is
   // blocked on you.
@@ -821,15 +821,15 @@ export const sessionsGadget: Gadget = {
     if (!folded) {
       return undefined;
     }
-    const waiting = s.liveSessions.filter((p) => p.waiting).length;
-    return waiting > 0 ? `${waiting} waiting` : `${s.liveSessions.length} live`;
+    const blocked = s.liveSessions.filter((p) => p.blocked).length;
+    return blocked > 0 ? `${blocked} blocked` : `${s.liveSessions.length} live`;
   },
   versionKey: (s, ctx) =>
     `${ctx.width}|` +
     s.liveSessions
       .map(
         (p) =>
-          `${p.waiting ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}` +
+          `${p.blocked ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}` +
           `:${p.sessionId}:${p.label}`,
       )
       .join("\u0000"),
@@ -841,11 +841,11 @@ export const sessionsGadget: Gadget = {
     // most-recently-used first, and a list that reshuffles under the pointer
     // is worse than one that doesn't move.
     const rank = (e: SidebarLiveSession): number =>
-      (e.waiting ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
+      (e.blocked ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
     const sorted = [...s.liveSessions].sort((a, b) => rank(a) - rank(b));
     return sorted.map((entry) => {
       const working = entry.busy || entry.armed;
-      const marker = `${entry.waiting ? WAITING_MARK : " "}${
+      const marker = `${entry.blocked ? BLOCKED_MARK : " "}${
         entry.busy ? BUSY_MARK : entry.armed ? RUNNING_MARK : IDLE_MARK
       }`;
       const markerWidth = cellWidth(marker);
@@ -866,27 +866,30 @@ export const sessionsGadget: Gadget = {
         //
         // What changed, and why: the label used to carry state for every case.
         // Quiet sessions took `status-idle`, and idle is the common case, so the
-        // list as a whole read as dim and unimportant. Worse, `status-waiting`
-        // resolves to the same muted grey as idle, so a session actually blocked
-        // on you was dimmed too — despite the comment here once claiming it
-        // stayed bright. Only busy was ever really highlighted, and then only by
-        // accident: its style was undefined and the painter falls back to
-        // `prefixStyle ?? bodyStyle`, so it inherited the marker's colour.
+        // list as a whole read as dim and unimportant. Worse, the blocked
+        // token resolved to the same muted grey as idle, so a session actually
+        // blocked on you was dimmed too — despite the comment here once
+        // claiming it stayed bright. Only busy was ever really highlighted,
+        // and then only by accident: its style was undefined and the painter
+        // falls back to `prefixStyle ?? bodyStyle`, so it inherited the
+        // marker's colour.
         //
-        // Now it is deliberate. Busy is loud, everything else is legible, and
-        // idle-versus-waiting is left to the marker, which carries it as both a
-        // glyph and a colour.
+        // Now it is deliberate, and blocked no longer leans on the marker
+        // alone: `status-blocked` is its own yellow, so the one row that
+        // needs you is separable from the ones that do not without hunting
+        // for a ◦.
         prefixStyle: working ? "status-active" : "sidebar-value",
         body: marker,
-        // Shares status-active with the banner and the activity gadget, so the
-        // three surfaces cannot drift apart. Waiting has its own token rather
-        // than falling through to idle: it renders the same today, but it is a
-        // distinct state. Deliberately not red — red means failure everywhere
-        // else, and a session on a permission prompt hasn't failed.
+        // Shares status-active with the banner and the activity gadget, so
+        // the three surfaces cannot drift apart. Blocked has its own token
+        // and its own colour: it is the one state here that needs the user,
+        // so it should not have to share a shade with anything. Deliberately
+        // not red: red means failure everywhere else, and a session on a
+        // permission prompt hasn't failed.
         bodyStyle: working
           ? "status-active"
-          : entry.waiting
-            ? "status-waiting"
+          : entry.blocked
+            ? "status-blocked"
             : "status-idle",
         doubleAction: { action: "open-session", value: entry.sessionId },
         item: true,
@@ -931,7 +934,7 @@ export const resourcesGadget: Gadget = {
 // bottom up, so activity and context survive.
 export const BUILTIN_GADGETS: Gadget[] = [
   activityGadget,
-  backgroundGadget,
+  tasksGadget,
   contextGadget,
   queueGadget,
   todoGadget,

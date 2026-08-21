@@ -4,7 +4,7 @@
 // it happened to observe: a tool call carrying run_in_background, a
 // resumption it could attribute, a TaskStop. Every one of those is an
 // ADD or a guess. None of them can report that a job ENDED, because the
-// completion notification never crosses the ACP wire at all — claude-acp
+// completion notification never crosses the ACP wire at all: claude-acp
 // injects it into the model's context and tells nobody.
 //
 // So the set could only drift upward. The observable bug: arm a background
@@ -168,7 +168,7 @@ describe("background-task level signal", () => {
   });
 
   // Updating internal state is only half the job: a client that already
-  // painted "◐ running" is push-driven and will keep painting it until the
+  // painted "◐ waiting" is push-driven and will keep painting it until the
   // daemon says otherwise. The ending has to reach the wire.
   it("tells attached clients when the level moves, including down to zero", () => {
     const { session, mock } = makeSession();

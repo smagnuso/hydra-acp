@@ -180,7 +180,7 @@ describe("chrome bars", () => {
   // Not "Thinking" (nothing is) and not plain "Ready" (it can restart
   // itself), so it gets its own word, clocked from when the job started
   // rather than from the turn end.
-  it("renders Running while a background task is armed", () => {
+  it("renders Waiting while a background task is armed", () => {
     const r = render(120, {
       session: { title: undefined, usage: undefined },
       banner: {
@@ -190,12 +190,12 @@ describe("chrome bars", () => {
         armedSince: Date.now() - 62_000,
       },
     });
-    expect(r.top).toContain("Running 1m 2s");
+    expect(r.top).toContain("Waiting 1m 2s");
     expect(r.top).not.toContain("Ready");
     expect(r.top).not.toContain("Thinking");
   });
 
-  it("prefers Thinking over Running when a turn is actually in flight", () => {
+  it("prefers Thinking over Waiting when a turn is actually in flight", () => {
     const r = render(120, {
       session: { title: undefined, usage: undefined },
       banner: {
@@ -206,7 +206,7 @@ describe("chrome bars", () => {
       },
     });
     expect(r.top).toContain("Thinking 1m 2s");
-    expect(r.top).not.toContain("Running");
+    expect(r.top).not.toContain("Waiting");
   });
 
   it("returns to Ready once the armed task clears", () => {
@@ -215,7 +215,7 @@ describe("chrome bars", () => {
       banner: { queued: 0, status: "ready", elapsedMs: undefined },
     });
     expect(r.top).toContain("Ready");
-    expect(r.top).not.toContain("Running");
+    expect(r.top).not.toContain("Waiting");
   });
 
   it("records click ranges for the hint chunks", () => {

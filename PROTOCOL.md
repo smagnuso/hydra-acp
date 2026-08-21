@@ -2154,7 +2154,7 @@ daemon restart — returns as a *new* `Session` whose armed set is empty, and it
 will never announce that: `armed_tasks_updated` fires only on a mutation, and
 an empty set at construction is not one. A client relying on push alone
 therefore holds its last-known count forever across any such event. Observed:
-a session force-cancelled mid-turn whose TUI showed `◐ running 2h 36m`,
+a session force-cancelled mid-turn whose TUI showed `◐ waiting 2h 36m`,
 clocked from an arming two incarnations earlier, while the daemon and
 `hydra session list` both correctly reported nothing armed.
 

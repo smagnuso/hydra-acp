@@ -346,7 +346,7 @@ interface BannerState {
   // Epoch ms the oldest still-armed background task was armed. A modifier
   // on status="ready", not a status: the session is idle and will take a
   // prompt, but a job it started is still running and can restart it.
-  // Renders as "Running Xs". See PROTOCOL.md "Agent-initiated turns".
+  // Renders as "Waiting Xs". See PROTOCOL.md "Agent-initiated turns".
   armedSince?: number;
 }
 

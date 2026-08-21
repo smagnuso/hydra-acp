@@ -87,7 +87,7 @@ export interface BannerInfo {
   // Epoch ms when the oldest still-armed background task was armed, or
   // undefined when none are. A modifier on `ready` rather than a status of
   // its own: the agent really is idle and really will take a prompt, it
-  // just also has a job running that can restart it. Drives the "Running"
+  // just also has a job running that can restart it. Drives the "Waiting"
   // label and clocks its elapsed from the job's start.
   armedSince?: number;
 }

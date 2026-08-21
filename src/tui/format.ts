@@ -112,7 +112,7 @@ export type Style =
   | "status-ready"
   | "status-idle"
   | "status-active"
-  | "status-waiting"
+  | "status-blocked"
   | "status-queued"
   | "status-alert"
   | "status-cold"

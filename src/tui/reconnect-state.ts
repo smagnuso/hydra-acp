@@ -36,7 +36,7 @@ export interface ReattachResponseFields {
   armedTasks?: number;
   // The set itself, for the background gadget. Same absent-versus-empty
   // rule as the count: `[]` clears the panel, absent leaves it alone.
-  // Deliberately untyped here — reconnect-state is a shape extractor, and
+  // Deliberately untyped here: reconnect-state is a shape extractor, and
   // the sidebar conversion lives with the other wire converters in app.ts.
   armedTaskList?: unknown[];
 }

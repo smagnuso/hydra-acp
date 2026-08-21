@@ -47,8 +47,8 @@ status-idle                      ESC[2maESC[96mbESC[0mcESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 status-active                    ESC[93maESC[96mbESC[0mcESC[39m
 status-active [hover]            ESC[93maESC[96mbESC[0mcESC[39m
-status-waiting                   ESC[2maESC[96mbESC[0mcESC[22m
-status-waiting [hover]           ESC[2maESC[96mbESC[0mcESC[22m
+status-blocked                   ESC[33maESC[96mbESC[0mcESC[39m
+status-blocked [hover]           ESC[33maESC[96mbESC[0mcESC[39m
 status-queued                    ESC[93maESC[96mbESC[0mcESC[39m
 status-queued [hover]            ESC[93maESC[96mbESC[0mcESC[39m
 status-alert                     ESC[91maESC[96mbESC[0mcESC[39m
@@ -136,8 +136,8 @@ status-idle                      ESC[2ma^Cb^:cESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 status-active                    ESC[93ma^Cb^:cESC[39m
 status-active [hover]            ESC[93ma^Cb^:cESC[39m
-status-waiting                   ESC[2ma^Cb^:cESC[22m
-status-waiting [hover]           ESC[2ma^Cb^:cESC[22m
+status-blocked                   ESC[33ma^Cb^:cESC[39m
+status-blocked [hover]           ESC[33ma^Cb^:cESC[39m
 status-queued                    ESC[93ma^Cb^:cESC[39m
 status-queued [hover]            ESC[93ma^Cb^:cESC[39m
 status-alert                     ESC[91ma^Cb^:cESC[39m
@@ -225,8 +225,8 @@ status-idle                      ESC[2ma^^KESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 status-active                    ESC[93ma^^KESC[39m
 status-active [hover]            ESC[93ma^^KESC[39m
-status-waiting                   ESC[2ma^^KESC[22m
-status-waiting [hover]           ESC[2ma^^KESC[22m
+status-blocked                   ESC[33ma^^KESC[39m
+status-blocked [hover]           ESC[33ma^^KESC[39m
 status-queued                    ESC[93ma^^KESC[39m
 status-queued [hover]            ESC[93ma^^KESC[39m
 status-alert                     ESC[91ma^^KESC[39m
@@ -314,8 +314,8 @@ status-idle                      ESC[2mXyESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
 status-active                    ESC[93mXyESC[39m
 status-active [hover]            ESC[93mXyESC[39m
-status-waiting                   ESC[2mXyESC[22m
-status-waiting [hover]           ESC[2mXyESC[22m
+status-blocked                   ESC[33mXyESC[39m
+status-blocked [hover]           ESC[33mXyESC[39m
 status-queued                    ESC[93mXyESC[39m
 status-queued [hover]            ESC[93mXyESC[39m
 status-alert                     ESC[91mXyESC[39m
@@ -403,8 +403,8 @@ status-idle                      ESC[2maESC[96mbESC[0mcESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 status-active                    ESC[93maESC[96mbESC[0mcESC[39m
 status-active [hover]            ESC[93maESC[96mbESC[0mcESC[39m
-status-waiting                   ESC[2maESC[96mbESC[0mcESC[22m
-status-waiting [hover]           ESC[2maESC[96mbESC[0mcESC[22m
+status-blocked                   ESC[33maESC[96mbESC[0mcESC[39m
+status-blocked [hover]           ESC[33maESC[96mbESC[0mcESC[39m
 status-queued                    ESC[93maESC[96mbESC[0mcESC[39m
 status-queued [hover]            ESC[93maESC[96mbESC[0mcESC[39m
 status-alert                     ESC[91maESC[96mbESC[0mcESC[39m
@@ -492,8 +492,8 @@ status-idle                      ESC[2ma^Cb^:cESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 status-active                    ESC[93ma^Cb^:cESC[39m
 status-active [hover]            ESC[93ma^Cb^:cESC[39m
-status-waiting                   ESC[2ma^Cb^:cESC[22m
-status-waiting [hover]           ESC[2ma^Cb^:cESC[22m
+status-blocked                   ESC[33ma^Cb^:cESC[39m
+status-blocked [hover]           ESC[33ma^Cb^:cESC[39m
 status-queued                    ESC[93ma^Cb^:cESC[39m
 status-queued [hover]            ESC[93ma^Cb^:cESC[39m
 status-alert                     ESC[91ma^Cb^:cESC[39m
@@ -581,8 +581,8 @@ status-idle                      ESC[2ma^^KESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 status-active                    ESC[93ma^^KESC[39m
 status-active [hover]            ESC[93ma^^KESC[39m
-status-waiting                   ESC[2ma^^KESC[22m
-status-waiting [hover]           ESC[2ma^^KESC[22m
+status-blocked                   ESC[33ma^^KESC[39m
+status-blocked [hover]           ESC[33ma^^KESC[39m
 status-queued                    ESC[93ma^^KESC[39m
 status-queued [hover]            ESC[93ma^^KESC[39m
 status-alert                     ESC[91ma^^KESC[39m
@@ -670,8 +670,8 @@ status-idle                      ESC[2mXyESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
 status-active                    ESC[93mXyESC[39m
 status-active [hover]            ESC[93mXyESC[39m
-status-waiting                   ESC[2mXyESC[22m
-status-waiting [hover]           ESC[2mXyESC[22m
+status-blocked                   ESC[33mXyESC[39m
+status-blocked [hover]           ESC[33mXyESC[39m
 status-queued                    ESC[93mXyESC[39m
 status-queued [hover]            ESC[93mXyESC[39m
 status-alert                     ESC[91mXyESC[39m

@@ -50,7 +50,7 @@ const ALL_STYLES: (Style | undefined)[] = [
   "status-ready",
   "status-idle",
   "status-active",
-  "status-waiting",
+  "status-blocked",
   "status-queued",
   "status-alert",
   "status-cold",
@@ -213,7 +213,7 @@ describe("hover banding", () => {
       "sidebar-rule",
       "sidebar-title",
       "status-active",
-      "status-waiting",
+      "status-blocked",
       "status-queued",
     ] as const) {
       const { term, take } = createCapturingTerminal("xterm-256color");
@@ -273,8 +273,10 @@ describe("tokens split out of dim / system / info", () => {
         "muted",
         "tool-output",
         "status-idle",
-        // Renders like idle today; a distinct state, split so it can diverge.
-        "status-waiting",
+        // `status-blocked` used to sit here, on the note that it was "split so
+        // it can diverge". It has: blocked-on-the-user now renders yellow, so
+        // the row that needs you no longer reads as the same grey as the rows
+        // that don't.
         "git-untracked",
         // Split out of `muted` so the sidebar frame can be tinted without
         // touching transcript rules and provenance tags.

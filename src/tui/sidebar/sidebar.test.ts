@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import stringWidth from "string-width";
 import {
   activityGadget,
-  backgroundGadget,
+  tasksGadget,
   compactCount,
   contextGadget,
   displayPaths,
@@ -141,7 +141,7 @@ describe("activity gadget", () => {
   // Between thinking and idle: the agent handed the turn back, but a job
   // it started is still going and can wake it up unprompted. Showing
   // "idle 12m" there is the misleading case this exists to fix.
-  it("shows running, clocked from the job start, while a task is armed", () => {
+  it("shows waiting, clocked from the job start, while a task is armed", () => {
     const lines = activityGadget.render(
       snap({
         armedSince: 1_000_000 - 92_000,
@@ -150,19 +150,19 @@ describe("activity gadget", () => {
       ctx(),
     );
     expect(lines).toHaveLength(1);
-    expect(lines[0]!.body).toContain("running");
+    expect(lines[0]!.body).toContain("waiting");
     // From the arming, not the turn end: 1m32s, not 4m10s.
     expect(lines[0]!.body).toContain("1m 32s");
     expect(lines[0]!.body).not.toContain("idle");
   });
 
-  it("prefers thinking over running when a turn is in flight", () => {
+  it("prefers thinking over waiting when a turn is in flight", () => {
     const lines = activityGadget.render(
       snap({ busySince: 1_000_000 - 1_000, armedSince: 1_000_000 - 600_000 }),
       ctx(),
     );
     expect(lines[0]!.body).toContain("thinking");
-    expect(lines[0]!.body).not.toContain("running");
+    expect(lines[0]!.body).not.toContain("waiting");
   });
 
   it("falls back to idle once the armed task clears", () => {
@@ -171,7 +171,7 @@ describe("activity gadget", () => {
       ctx(),
     );
     expect(lines[0]!.body).toContain("idle");
-    expect(lines[0]!.body).not.toContain("running");
+    expect(lines[0]!.body).not.toContain("waiting");
   });
 
   it("re-renders once per whole second, not per millisecond", () => {
@@ -187,7 +187,7 @@ describe("activity gadget", () => {
 // renderer, config.ts for the schema default) and core must not import from
 // tui, so nothing but this test keeps them in step. A drifted pair is
 // invisible: the renderer would know a gadget the config never names, so it
-// would silently never appear for anyone who hasn't pinned their own list —
+// would silently never appear for anyone who hasn't pinned their own list,
 // which is the majority, since pinning is deliberately discouraged.
 describe("default gadget list", () => {
   it("matches the config schema default", () => {
@@ -202,7 +202,7 @@ describe("default gadget list", () => {
   });
 });
 
-describe("background gadget", () => {
+describe("tasks gadget", () => {
   const task = (over: Partial<SidebarArmedTask> = {}): SidebarArmedTask => ({
     label: "Sleep 20 seconds then echo done",
     taskId: "bg_a",
@@ -212,7 +212,7 @@ describe("background gadget", () => {
   });
 
   it("names each job and clocks it independently", () => {
-    const lines = backgroundGadget.render(
+    const lines = tasksGadget.render(
       snap({
         armedTasks: [
           task(),
@@ -230,8 +230,8 @@ describe("background gadget", () => {
   });
 
   it("hides itself when nothing is running", () => {
-    expect(backgroundGadget.relevant(snap({ armedTasks: [] }))).toBe(false);
-    expect(backgroundGadget.relevant(snap({ armedTasks: [task()] }))).toBe(true);
+    expect(tasksGadget.relevant(snap({ armedTasks: [] }))).toBe(false);
+    expect(tasksGadget.relevant(snap({ armedTasks: [task()] }))).toBe(true);
   });
 
   it("re-renders when membership changes but the clocks do not", () => {
@@ -240,13 +240,13 @@ describe("background gadget", () => {
     // built from length and timings alone would memo away a real change.
     const before = snap({ armedTasks: [task({ taskId: "A" }), task({ taskId: "B" })] });
     const after = snap({ armedTasks: [task({ taskId: "A" }), task({ taskId: "C" })] });
-    expect(backgroundGadget.versionKey!(before, ctx(40))).not.toBe(
-      backgroundGadget.versionKey!(after, ctx(40)),
+    expect(tasksGadget.versionKey!(before, ctx(40))).not.toBe(
+      tasksGadget.versionKey!(after, ctx(40)),
     );
   });
 
   it("falls back to the task type when the agent sent no description", () => {
-    const lines = backgroundGadget.render(
+    const lines = tasksGadget.render(
       snap({ armedTasks: [task({ label: "" })] }),
       ctx(40),
     );
@@ -256,7 +256,7 @@ describe("background gadget", () => {
   it("caps the list and says how many it dropped", () => {
     const many = Array.from({ length: 8 }, (_, i) =>
       task({ taskId: `bg_${i}`, label: `job ${i}` }));
-    const lines = backgroundGadget.render(snap({ armedTasks: many }), ctx(40));
+    const lines = tasksGadget.render(snap({ armedTasks: many }), ctx(40));
     expect(lines).toHaveLength(6);
     expect(lines[5]!.body).toContain("+3 more");
   });
@@ -589,8 +589,8 @@ describe("folded title notes", () => {
     new SidebarRenderer(ids).render(
       snap({
         liveSessions: [
-          { sessionId: "a", label: "alpha", busy: false, armed: false, waiting: true },
-          { sessionId: "b", label: "beta", busy: false, armed: false, waiting: false },
+          { sessionId: "a", label: "alpha", busy: false, armed: false, blocked: true },
+          { sessionId: "b", label: "beta", busy: false, armed: false, blocked: false },
         ],
         editedFiles: [{ path: "/repo/a.ts" }, { path: "/repo/b.ts" }],
       }),
@@ -598,9 +598,9 @@ describe("folded title notes", () => {
     );
 
   it("shows the sessions count on the folded title and not the open one", () => {
-    expect(rowText(render(["sessions"], [])[0]!)).not.toContain("waiting");
+    expect(rowText(render(["sessions"], [])[0]!)).not.toContain("blocked");
     const folded = rowText(render(["sessions"], ["sessions"])[0]!);
-    expect(folded).toContain("1 waiting");
+    expect(folded).toContain("1 blocked");
     // The fold marker still rides at the end.
     expect(folded.trimEnd().endsWith("+")).toBe(true);
   });
@@ -1314,13 +1314,13 @@ describe("quantizeDuration", () => {
 describe("sessions gadget", () => {
   const live = (
     label: string,
-    opts: { busy?: boolean; armed?: boolean; waiting?: boolean } = {},
+    opts: { busy?: boolean; armed?: boolean; blocked?: boolean } = {},
   ): SidebarLiveSession => ({
     sessionId: `hydra_session_${label}`,
     label,
     busy: opts.busy === true,
     armed: opts.armed === true,
-    waiting: opts.waiting === true,
+    blocked: opts.blocked === true,
   });
 
   it("hides itself when there are no other live sessions", () => {
@@ -1335,9 +1335,9 @@ describe("sessions gadget", () => {
     const lines = sessionsGadget.render(
       snap({
         liveSessions: [
-          live("both", { busy: true, waiting: true }),
+          live("both", { busy: true, blocked: true }),
           live("justbusy", { busy: true }),
-          live("justwaiting", { waiting: true }),
+          live("justwaiting", { blocked: true }),
           live("quiet"),
         ],
       }),
@@ -1369,7 +1369,7 @@ describe("sessions gadget", () => {
     expect(armed.bodyStyle).toBe(busy.bodyStyle);
     expect(armed.body).not.toBe(busy.body);
     // The waiting cell is independent of it, like it is of busy.
-    expect(row(live("both", { armed: true, waiting: true })).body).toBe("◦◐");
+    expect(row(live("both", { armed: true, blocked: true })).body).toBe("◦◐");
   });
 
   // A turn in flight outranks a mere armed task, and an armed task outranks
@@ -1382,8 +1382,8 @@ describe("sessions gadget", () => {
           live("quiet"),
           live("justarmed", { armed: true }),
           live("justbusy", { busy: true }),
-          live("justwaiting", { waiting: true }),
-          live("both", { busy: true, waiting: true }),
+          live("justwaiting", { blocked: true }),
+          live("both", { busy: true, blocked: true }),
         ],
       }),
       ctx(26),
@@ -1402,7 +1402,7 @@ describe("sessions gadget", () => {
   // is two cells whether or not the ◦ is there, so the bubbles line up.
   it("keeps labels flush left and bubbles in one column", () => {
     const lines = sessionsGadget.render(
-      snap({ liveSessions: [live("aaa", { waiting: true }), live("bbb")] }),
+      snap({ liveSessions: [live("aaa", { blocked: true }), live("bbb")] }),
       ctx(26),
     );
     for (const line of lines) {
@@ -1417,7 +1417,7 @@ describe("sessions gadget", () => {
   // The labels are values, like the agent and model in the info gadget, and read
   // the same whatever the session is doing. They used to carry the state: idle
   // took `status-idle`, which is the common case, so the list read as dim and
-  // unimportant — and `status-waiting` is the same muted grey, so a session
+  // unimportant — and `status-blocked` was the same muted grey, so a session
   // blocked on the user was dimmed too. State belongs to the marker, which
   // carries it as both a glyph and a colour.
   it("keeps busy loud and leaves the rest legible", () => {
@@ -1431,7 +1431,7 @@ describe("sessions gadget", () => {
     // Neither may be `status-idle`, which is what made the list look dim, nor
     // undefined, which would silently inherit the marker's colour.
     expect(labelStyle(live("quiet"))).toBe("sidebar-value");
-    expect(labelStyle(live("w", { waiting: true }))).toBe("sidebar-value");
+    expect(labelStyle(live("w", { blocked: true }))).toBe("sidebar-value");
   });
 
   // What the labels stopped carrying, the marker must still carry — otherwise
@@ -1443,7 +1443,7 @@ describe("sessions gadget", () => {
       live("quiet"),
       live("b", { busy: true }),
       live("r", { armed: true }),
-      live("w", { waiting: true }),
+      live("w", { blocked: true }),
     ].map((e) => `${row(e).body}|${row(e).bodyStyle}`);
     expect(new Set(states).size).toBe(states.length);
   });
@@ -1458,12 +1458,12 @@ describe("sessions gadget", () => {
     // than tool-status-running — a peer session being in a turn is not a tool
     // call. Waiting has its own token even though it renders like idle.
     expect(bubbleStyle(live("b", { busy: true }))).toBe("status-active");
-    expect(bubbleStyle(live("w", { waiting: true }))).toBe("status-waiting");
+    expect(bubbleStyle(live("w", { blocked: true }))).toBe("status-blocked");
     expect(bubbleStyle(live("quiet"))).toBe("status-idle");
     for (const e of [
       live("b", { busy: true }),
-      live("w", { waiting: true }),
-      live("both", { busy: true, waiting: true }),
+      live("w", { blocked: true }),
+      live("both", { busy: true, blocked: true }),
     ]) {
       const line = sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
       expect([line.bodyStyle, line.prefixStyle]).not.toContain("tool-status-fail");
@@ -1475,7 +1475,7 @@ describe("sessions gadget", () => {
   // action the sessionbar's btw session-id chunk uses.
   it("carries an open-session action, and no link span", () => {
     const line = sessionsGadget.render(
-      snap({ liveSessions: [live("blocked", { waiting: true })] }),
+      snap({ liveSessions: [live("blocked", { blocked: true })] }),
       ctx(26),
     )[0]!;
     expect(line.doubleAction).toEqual({
@@ -1491,15 +1491,15 @@ describe("sessions gadget", () => {
   // The counter is folded-only. Open, the rows already sort waiting first
   // and carry their own markers; folded, it is the only thing left that can
   // say something is blocked on you.
-  it("notes the waiting count only when folded", () => {
+  it("notes the blocked count only when folded", () => {
     const s = snap({
-      liveSessions: [live("a", { waiting: true }), live("b", { busy: true })],
+      liveSessions: [live("a", { blocked: true }), live("b", { busy: true })],
     });
     expect(sessionsGadget.titleNote!(s, ctx(26), false)).toBeUndefined();
-    expect(sessionsGadget.titleNote!(s, ctx(26), true)).toBe("1 waiting");
+    expect(sessionsGadget.titleNote!(s, ctx(26), true)).toBe("1 blocked");
   });
 
-  it("falls back to the live count when nothing is waiting, folded", () => {
+  it("falls back to the live count when nothing is blocked, folded", () => {
     const s = snap({
       liveSessions: [live("a", { busy: true }), live("b")],
     });
@@ -1510,7 +1510,7 @@ describe("sessions gadget", () => {
     for (const width of [14, 20, 26]) {
       for (const line of sessionsGadget.render(
         snap({
-          liveSessions: [live("a-very-long-session-title-indeed", { waiting: true })],
+          liveSessions: [live("a-very-long-session-title-indeed", { blocked: true })],
         }),
         ctx(width),
       )) {

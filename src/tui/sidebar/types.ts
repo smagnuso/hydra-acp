@@ -79,7 +79,7 @@ export interface SidebarRunningTool {
 // CURRENT turn, while this outlives its turn entirely and is the thing that
 // can wake the session up again.
 //
-// The list is a REPLACE, never a merge — see PROTOCOL.md
+// The list is a REPLACE, never a merge. See PROTOCOL.md
 // "armed_tasks_updated". Merging is what re-creates the stale-entry bug the
 // daemon-side level signal exists to kill.
 export interface SidebarArmedTask {
@@ -285,10 +285,14 @@ export interface SidebarLiveSession {
   // mid-turn one does not. Mirrors `armedSince` above, which says the same
   // thing about THIS session for the activity gadget.
   armed: boolean;
-  // Something is blocked on the user here — an outstanding permission
-  // request or agent question, or a flag raised by an extension. See
+  // Something is blocked on the user here: an outstanding permission
+  // request or agent question, or a flag raised by an extension. Named for
+  // what it demands (you must act) rather than for the session's posture,
+  // which is what "waiting" described and why it collided with the
+  // background-task state that needs nothing from anyone. The wire field is
+  // still `awaitingInput`; this is the display-side name. See
   // Session.awaitingInput.
-  waiting: boolean;
+  blocked: boolean;
 }
 
 export interface Gadget {

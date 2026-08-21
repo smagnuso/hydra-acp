@@ -1275,7 +1275,7 @@ describe("context figure after a compaction swap", () => {
 // A swap kills the process that owned any armed background work. Both
 // discharge paths (a resumption, or a TaskStop tool call) require that
 // process, so an arming surviving the swap can never leave the map: the
-// session reports "◐ running" with a climbing timer forever, for work
+// session reports "◐ waiting" with a climbing timer forever, for work
 // nothing is doing.
 describe("armed background tasks across a rotation", () => {
   const armMonitor = async (

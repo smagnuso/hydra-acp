@@ -34,10 +34,16 @@ export interface FieldDef {
 // places that name this state (the sidebar's `● thinking` and the
 // scrollback block's `thinking · Xs`); the composer was the odd one out.
 //
-// "Running" is a separate word for a separate thing: the agent is idle and
+// "Waiting" is a separate word for a separate thing: the agent is idle and
 // will take a prompt, but a background task it started is still going and
 // can restart it. Folding that into "Thinking" would be wrong twice over,
-// since nothing is thinking and the session is not busy.
+// since nothing is thinking and the session is not busy. It is the SESSION
+// that is waiting; the job is the thing running.
+//
+// Distinct from BLOCKED (the sidebar `sessions` gadget, `awaitingInput` on
+// the wire), which means the session cannot advance until the user does
+// something. Waiting needs nothing from anyone; blocked needs you. That
+// split is why the two words are not interchangeable here.
 function armedAndIdle(ctx: FieldContext): boolean {
   return ctx.banner.status === "ready" && ctx.banner.armedSince !== undefined;
 }
@@ -53,7 +59,7 @@ function statusLabel(ctx: FieldContext): { label: string; token: ThemeToken } {
   } else if (status === "busy") {
     label = "Thinking";
   } else if (armedAndIdle(ctx)) {
-    label = "Running";
+    label = "Waiting";
   } else {
     label = status.charAt(0).toUpperCase() + status.slice(1);
   }

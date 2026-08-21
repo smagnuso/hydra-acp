@@ -1007,7 +1007,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // flight — which spans reasoning, text streaming AND tool execution, since
   // it is driven by pendingTurns going 0->1 — but it also covers a background
   // task the agent armed and handed the turn back on, which both the activity
-  // gadget ("◐ running") and the live-session rows paint with it. The glyph
+  // gadget ("◐ waiting") and the live-session rows paint with it. The glyph
   // carries which of the two it is; the colour only says "still going".
   // It is deliberately not called "thinking": that is only the label
   // the activity gadget prints, and naming the token after it would invite
@@ -1024,13 +1024,21 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // differ only by surface: ready is the separator's headline, at full
   // brightness because the normal case should not draw the eye; idle is one
   // sidebar row among many, so it recedes. A wart, kept knowingly.
-  // role: fg / muted / active / muted / active / error / cold
+  // role: fg / muted / active / warn / active / error / cold
   "status-ready": { layers: [...roles.fg] },
   "status-active": { layers: [...roles.active] },
-  // Blocked on the user, e.g. sitting on a permission prompt. Deliberately
-  // not red: red means failure everywhere else and a waiting session has not
-  // failed. Renders like idle today but is a distinct state and now tunable.
-  "status-waiting": { layers: [...roles.muted] },
+  // Blocked on the user: an outstanding permission request or agent
+  // question. The row cannot advance until you do something, which is what
+  // separates it from `status-active` (the session is working, leave it
+  // alone) and from the background-task case (it proceeds on its own).
+  //
+  // `warn` rather than `muted`: it used to render as the same grey as idle,
+  // so the one row that needed the user looked exactly like the rows that
+  // did not, and the ◦ marker carried the whole signal. Plain yellow, not
+  // the bright yellow of `active`, so working and blocked stay separable at
+  // a glance. Deliberately not red: red means failure everywhere else, and
+  // a session sitting on a permission prompt has not failed.
+  "status-blocked": { layers: [...roles.warn] },
   // Prompts typed but not yet sent. Not active — pending — but it earns the
   // accent because it is outstanding work the user should notice.
   "status-queued": { layers: [...roles.active] },

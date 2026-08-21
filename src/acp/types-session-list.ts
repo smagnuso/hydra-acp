@@ -295,7 +295,7 @@ export function buildHydraSessionMeta(
   // never announces it, since onArmedTasksChanged only fires on a mutation.
   // Without these two fields the client keeps a "running" clock from the
   // previous incarnation forever; observed on a session force-cancelled
-  // mid-turn, whose TUI showed "◐ running 2h 36m" against a daemon
+  // mid-turn, whose TUI showed "◐ waiting 2h 36m" against a daemon
   // reporting zero.
   //
   // `armedTasks` is emitted even when 0, and that zero is the whole point:

@@ -24,15 +24,15 @@ import type {
 // `sessions` sits second on purpose: it's a navigation target, so it has
 // to live at a position that doesn't move as the gadgets above and below
 // it come and go.
-// `background` sits below `sessions`, not next to `activity` where it
-// belongs by subject: it hides itself when nothing is running, and putting
-// a self-hiding gadget ABOVE `sessions` would move that navigation target
-// every time a background job starts or stops — the exact churn the note
-// above forbids.
+//
+// `tasks` sits below it for the same reason, rather than next to
+// `activity` where it belongs by subject: it hides itself when nothing is
+// running, so placing it above `sessions` would shift that target every
+// time a background job starts or stops.
 export const DEFAULT_GADGET_IDS = [
   "activity",
   "sessions",
-  "background",
+  "tasks",
   "context",
   "queue",
   "todo",
