@@ -7,7 +7,7 @@
 // `hydra daemon start --foreground` still runs the daemon in-process
 // via runDaemonStart for dev ergonomics; this entry is only used for
 // the detached-spawn path that end users hit.
-import { loadConfig } from "./core/config.js";
+import { loadGlobalConfig } from "./core/config.js";
 import { ensureServiceToken } from "./core/service-token.js";
 import { startDaemon } from "./daemon/server.js";
 
@@ -15,7 +15,12 @@ async function main(): Promise<void> {
   process.title = "hydra-acp-daemon";
   const { installGlobalTlsTrust } = await import("./core/tls-trust.js");
   installGlobalTlsTrust();
-  const config = await loadConfig();
+  // Global, never a directory overlay: the daemon outlives the cwd it was
+  // launched from. HYDRA_ACP_HOME still applies (it's inherited through
+  // spawnDaemonDetached's scrubInheritedEnv), so a `home` set by a
+  // directory config does re-root this process — that's the one knob
+  // meant to cross the boundary.
+  const config = await loadGlobalConfig();
   const serviceToken = await ensureServiceToken();
   const handle = await startDaemon(config, serviceToken);
   process.stdout.write(

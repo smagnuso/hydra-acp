@@ -7,7 +7,7 @@ import {
   readDaemonPidFile,
   type DaemonPidInfo,
 } from "../../core/daemon-pidfile.js";
-import { loadConfig } from "../../core/config.js";
+import { loadConfig, loadGlobalConfig } from "../../core/config.js";
 import { ensureServiceToken } from "../../core/service-token.js";
 import { startDaemon } from "../../daemon/server.js";
 import {
@@ -24,7 +24,12 @@ import { runLogTail } from "./log-tail.js";
 export async function runDaemonStart(
   flags: Record<string, string | boolean> = {},
 ): Promise<void> {
-  const config = await loadConfig();
+  // Global, not the client's directory overlay: the --foreground branch
+  // below BECOMES the long-lived daemon in this process, and a daemon
+  // configured from whatever directory it happened to be started in would
+  // behave differently from a detached one. A `home` from a directory
+  // config still applies, via HYDRA_ACP_HOME.
+  const config = await loadGlobalConfig();
   const serviceToken = await ensureServiceToken();
   if (await pingHealth(config)) {
     const info = await readPidFile();

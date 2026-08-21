@@ -5,7 +5,7 @@
 // defaults don't trigger false-positive "config changed" warnings.
 
 import { createHash } from "node:crypto";
-import { loadConfig, type HydraConfig } from "./config.js";
+import { loadGlobalConfig, type HydraConfig } from "./config.js";
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -35,7 +35,11 @@ export function computeConfigDigest(config: HydraConfig): string {
 
 export async function loadCurrentConfigDigest(): Promise<string | undefined> {
   try {
-    const config = await loadConfig();
+    // Deliberately the GLOBAL config: this digest is compared against what
+    // a running daemon booted with, and a per-cwd overlay never reached
+    // that daemon. Hashing the merged config would report a mismatch for
+    // every invocation inside a directory that has a `.hydra-acp.json`.
+    const config = await loadGlobalConfig();
     return computeConfigDigest(config);
   } catch {
     return undefined;

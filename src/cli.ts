@@ -154,6 +154,25 @@ async function main(): Promise<void> {
   // each call site having to opt in.
   const { installGlobalTlsTrust } = await import("./core/tls-trust.js");
   installGlobalTlsTrust();
+
+  // Resolve `.hydra-acp.json` before anything reads config or paths. A
+  // `home` key re-roots HYDRA_ACP_HOME here, and paths.ts derives every
+  // path from that env var on each call, so this has to land first —
+  // including before the shim/launch branch below, which reads the token.
+  //
+  // Only the CLI does this. The daemon (daemon-entry, and the
+  // --foreground branch of `daemon start`) reads loadGlobalConfig so a
+  // per-cwd overlay can never configure a process that outlives the cwd.
+  {
+    const { applyDirectoryConfig, formatDirectoryConfigNotices } = await import(
+      "./core/directory-config.js"
+    );
+    const applied = await applyDirectoryConfig(process.cwd());
+    for (const line of formatDirectoryConfigNotices(applied.notices)) {
+      process.stderr.write(line + "\n");
+    }
+  }
+
   const argv = process.argv.slice(2);
 
   const launchIdx = argv.indexOf("launch");

@@ -4,6 +4,10 @@ import { z } from "zod";
 import { paths } from "./paths.js";
 import { writeServiceToken } from "./service-token.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
+import {
+  currentDirectoryOverlay,
+  deepMergeConfig,
+} from "./directory-config.js";
 
 const REGISTRY_URL_DEFAULT =
   "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -930,11 +934,31 @@ export async function migrateLegacyAuthToken(): Promise<void> {
   );
 }
 
-export async function loadConfig(): Promise<HydraConfig> {
+// The global config, with no directory overlay applied. This is what the
+// DAEMON must use — it is long-lived and per-machine, so a per-cwd overlay
+// would be meaningless there — and what computeConfigDigest must hash, or
+// every invocation inside a directory that has a `.hydra-acp.json` would
+// report a spurious "config changed since the daemon started".
+export async function loadGlobalConfig(): Promise<HydraConfig> {
   // Heal legacy layout before reading config.json so the parse sees the
   // post-migration shape rather than a stale snapshot.
   await migrateLegacyAuthToken();
   return HydraConfig.parse(await readConfigFile());
+}
+
+// The client view: global config plus any `.hydra-acp.json` overlay
+// installed by applyDirectoryConfig. Identical to loadGlobalConfig when
+// no overlay is installed, which is always the case in the daemon.
+//
+// Raw-config WRITERS (updateRawConfig and everything built on it) go
+// through readConfigFile directly and never see the overlay, so a
+// directory-scoped value can't get written back into config.json by an
+// unrelated `hydra agent set`.
+export async function loadConfig(): Promise<HydraConfig> {
+  await migrateLegacyAuthToken();
+  const raw = await readConfigFile();
+  const overlay = currentDirectoryOverlay();
+  return HydraConfig.parse(overlay ? deepMergeConfig(raw, overlay) : raw);
 }
 
 export async function writeConfig(config: HydraConfig): Promise<void> {
