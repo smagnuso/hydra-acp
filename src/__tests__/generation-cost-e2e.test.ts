@@ -147,6 +147,24 @@ describe("generation cost stamping e2e", () => {
       (
         session as unknown as { cumulativeCost: number }
       ).cumulativeCost = PRIOR_CUMULATIVE;
+      // The chain has to agree, or the fixture describes a session whose
+      // one and only generation spent the prior total too — and the
+      // difference would correctly bill all of it here. Stamping the
+      // opening figure is what "already rotated once" means on disk.
+      {
+        const s = (
+          manager as unknown as {
+            store: {
+              read: (id: string) => Promise<SessionRecord | undefined>;
+              write: (r: SessionRecord) => Promise<void>;
+            };
+          }
+        ).store;
+        const rec = (await s.read(sessionId))!;
+        const gens = [...(rec.upstreamGenerations ?? [])];
+        gens[0] = { ...gens[0]!, lifetimeCostAtStart: PRIOR_CUMULATIVE };
+        await s.write({ ...rec, upstreamGenerations: gens });
+      }
 
       const oldReqMock = oldAgents[0]!.agent.connection.request as ReturnType<
         typeof vi.fn
@@ -227,6 +245,138 @@ describe("generation cost stamping e2e", () => {
 
       // --- the collapsed lifetime view is unchanged by the rotation ---
       expect(swapped.currentUsage?.costAmount).toBeCloseTo(lifetimeBefore!, 8);
+
+      await manager.flushHistoryWrites();
+    },
+    30_000,
+  );
+
+  // The undercount, reproduced.
+  //
+  // A generation goes cold mid-life (daemon restart, or the 1h idle
+  // timeout) and resumes on a fresh agent process whose ledger restarts
+  // at $0. reconcileCostLedger banks the retained spend into
+  // cumulativeCost, and costAmount — the figure that used to be stamped
+  // — restarts small. The generation's bill was therefore only its
+  // final segment.
+  //
+  // Simulated here by driving reconcileCostLedger directly rather than
+  // tearing down a daemon: the unit under test is what the generation
+  // gets billed once the ledger has been re-based, and the re-base is
+  // the same call either way.
+  it(
+    "bills a generation for spend banked before a mid-life ledger re-base",
+    async () => {
+      const FIRST_SEGMENT = 40; // spent, then re-based away by a resurrect
+      const SECOND_SEGMENT = 6.5; // all the last process ever reports
+
+      let spawnCount = 0;
+      const oldAgents: ReturnType<typeof makeMockAgent>[] = [];
+
+      const manager = new SessionManager(
+        fakeRegistry(),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+          const reqMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          if (spawnCount === 0) {
+            oldAgents.push(m);
+            reqMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: `u_initial_${spawnCount++}` });
+            return m.agent;
+          }
+          reqMock.mockImplementation(async (method: string) => {
+            if (method === "session/new") {
+              return { sessionId: `fresh_${spawnCount++}` };
+            }
+            return {};
+          });
+          return m.agent;
+        },
+        undefined,
+        { compaction: { tailK: 5 } },
+      );
+
+      const session = await manager.create({
+        cwd: WORK_CWD,
+        agentId: "claude-code",
+      });
+      const sessionId = session.sessionId;
+      const originalUpstream = session.upstreamSessionId;
+
+      const stream = makeControlledStream();
+      const conn = new JsonRpcConnection(stream);
+      await session.attach({ clientId: "c1", connection: conn }, "full");
+
+      const oldReqMock = oldAgents[0]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      for (const text of ["a", "b"]) {
+        oldReqMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+        await session.prompt("c1", { prompt: [{ type: "text", text }] });
+      }
+
+      const report = async (amount: number): Promise<void> => {
+        oldAgents[0]!.triggerNotification("session/update", {
+          sessionId: originalUpstream,
+          update: {
+            sessionUpdate: "usage_update",
+            used: 5000,
+            size: 200000,
+            cost: { amount, currency: "USD" },
+          },
+        });
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+      };
+
+      await report(FIRST_SEGMENT);
+
+      // The session goes cold and comes back: a new process resumes the
+      // SAME upstream and reports from $0 again.
+      (
+        session as unknown as { armCostLedgerProbe: () => void }
+      ).armCostLedgerProbe();
+      await report(SECOND_SEGMENT);
+
+      // Lifetime is intact — that part was never broken.
+      expect(session.currentUsage?.costAmount).toBeCloseTo(
+        FIRST_SEGMENT + SECOND_SEGMENT,
+        8,
+      );
+      // ...but the live per-process figure has forgotten the first
+      // segment, which is exactly what used to get stamped.
+      expect(
+        (session as unknown as { _currentUsage?: { costAmount?: number } })
+          ._currentUsage?.costAmount,
+      ).toBeCloseTo(SECOND_SEGMENT, 8);
+
+      await manager.flushHistoryWrites();
+      mockCompaction.mockResolvedValue({ synopsis: makeArtifact() });
+      (
+        manager as unknown as {
+          synopsisCoordinator: { scheduleCompaction: (id: string) => void };
+        }
+      ).synopsisCoordinator.scheduleCompaction(sessionId);
+
+      await waitFor(() => {
+        const current = manager.get(sessionId);
+        return !!current && current.upstreamSessionId !== originalUpstream;
+      }, 15_000);
+
+      await manager.flushMetaWrites();
+      const store = (
+        manager as unknown as {
+          store: { read: (id: string) => Promise<SessionRecord | undefined> };
+        }
+      ).store;
+      const gens = (await store.read(sessionId))!.upstreamGenerations ?? [];
+      const retiring = gens.find(
+        (g) => g.upstreamSessionId === originalUpstream,
+      );
+
+      // The whole generation, not just the segment the last process saw.
+      expect(retiring!.cost).toBeCloseTo(FIRST_SEGMENT + SECOND_SEGMENT, 8);
 
       await manager.flushHistoryWrites();
     },

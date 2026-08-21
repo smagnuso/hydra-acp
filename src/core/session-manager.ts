@@ -8201,6 +8201,10 @@ export interface UpstreamRotationFacts {
   // Spend and final context occupancy of the generation being closed.
   retiredCost?: number;
   retiredUsed?: number;
+  // Lifetime spend at the rotation instant. Closes the retiring
+  // generation's bill (by difference against its own opening figure)
+  // and opens the incoming one's.
+  lifetimeCost?: number;
   // Opening context occupancy of the generation being opened. Only the
   // swap path knows this (it read the seed's own figure); a rollback or
   // restart resumes an upstream that has not reported yet, and passes
@@ -8217,7 +8221,27 @@ export function appendUpstreamGeneration(
   now: string = new Date().toISOString(),
   facts: UpstreamRotationFacts = {},
 ): UpstreamGeneration[] {
-  const { retiredCost, retiredUsed, startedUsed, reason, runId } = facts;
+  const { retiredCost, retiredUsed, startedUsed, lifetimeCost, reason, runId } = facts;
+
+  // What the generation being closed actually cost.
+  //
+  // Prefer the lifetime difference: `retiredCost` is whatever the last
+  // agent process reported, and a generation outlives many processes
+  // (every cold resurrect starts one whose ledger restarts at $0), so on
+  // its own it under-reports by however long the generation lived. The
+  // difference is immune to that because the lifetime total is conserved
+  // across every re-base.
+  //
+  // Falls back to retiredCost when the retiring entry predates
+  // lifetimeCostAtStart, and clamps at 0: the two figures come from
+  // different instants, and a rotation that banks nothing must not
+  // produce a negative bill from float drift.
+  const closingCost = (retiring: UpstreamGeneration): number | undefined => {
+    if (lifetimeCost !== undefined && retiring.lifetimeCostAtStart !== undefined) {
+      return Math.max(0, lifetimeCost - retiring.lifetimeCostAtStart);
+    }
+    return retiredCost;
+  };
   const seeded: UpstreamGeneration[] =
     prev.upstreamGenerations && prev.upstreamGenerations.length > 0
       ? [...prev.upstreamGenerations]
@@ -8234,11 +8258,10 @@ export function appendUpstreamGeneration(
     if (seeded.length >= 2) {
       const retiring = seeded[seeded.length - 2];
       if (retiring) {
+        const cost = closingCost(retiring);
         seeded[seeded.length - 2] = {
           ...retiring,
-          ...(retiredCost !== undefined && retiring.cost === undefined
-            ? { cost: retiredCost }
-            : {}),
+          ...(cost !== undefined && retiring.cost === undefined ? { cost } : {}),
           ...(retiredUsed !== undefined && retiring.usedAtEnd === undefined
             ? { usedAtEnd: retiredUsed }
             : {}),
@@ -8254,7 +8277,8 @@ export function appendUpstreamGeneration(
     // this entry without one.
     if (
       (reason !== undefined && last.reason === undefined) ||
-      (startedUsed !== undefined && last.usedAtStart === undefined)
+      (startedUsed !== undefined && last.usedAtStart === undefined) ||
+      (lifetimeCost !== undefined && last.lifetimeCostAtStart === undefined)
     ) {
       seeded[seeded.length - 1] = {
         ...last,
@@ -8264,6 +8288,13 @@ export function appendUpstreamGeneration(
         ...(startedUsed !== undefined && last.usedAtStart === undefined
           ? { usedAtStart: startedUsed }
           : {}),
+        // Without this back-fill an entry opened by the racing persist
+        // never gets an opening figure, so when IT retires there is
+        // nothing to difference and the undercount returns for that
+        // generation.
+        ...(lifetimeCost !== undefined && last.lifetimeCostAtStart === undefined
+          ? { lifetimeCostAtStart: lifetimeCost }
+          : {}),
       };
     }
     return seeded;
@@ -8272,12 +8303,15 @@ export function appendUpstreamGeneration(
     seeded[seeded.length - 1] = {
       ...last,
       endedAt: now,
-      // Stamp the retiring generation's spend while we still know it. A
-      // rollback re-enters an upstream, so a later stint on the same
-      // upstream gets its own entry and its own cost — consumers must sum
-      // per entry for time attribution but dedupe by upstream id when
-      // joining an external per-session ledger.
-      ...(retiredCost !== undefined ? { cost: retiredCost } : {}),
+      // Close out the retiring generation's bill. A rollback re-enters an
+      // upstream, so a later stint on the same upstream gets its own
+      // entry and its own cost — consumers must sum per entry for time
+      // attribution but dedupe by upstream id when joining an external
+      // per-session ledger.
+      ...((): { cost?: number } => {
+        const cost = closingCost(last);
+        return cost !== undefined ? { cost } : {};
+      })(),
       // Same reasoning for the closing context figure: it is only
       // knowable at the instant of rotation, because the live snapshot
       // it comes from is about to be reset for the incoming generation.
@@ -8291,6 +8325,9 @@ export function appendUpstreamGeneration(
     ...(reason !== undefined ? { reason } : {}),
     ...(runId !== undefined ? { runId } : {}),
     ...(startedUsed !== undefined ? { usedAtStart: startedUsed } : {}),
+    // The other end of the difference. Recorded on the entry being
+    // OPENED, and read back when that entry is the one retiring.
+    ...(lifetimeCost !== undefined ? { lifetimeCostAtStart: lifetimeCost } : {}),
   });
   return seeded;
 }

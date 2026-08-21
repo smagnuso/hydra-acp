@@ -2266,6 +2266,32 @@ that synthesis finished, not that the agent was replaced. A client clearing a
 
 **Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed. `converged` is the exception in one direction only: it deliberately writes **no** terminal `compactionState`, because a successful swap clears that field and re-writing it would resurrect state whose absence is what "no compaction in progress" means. The durable record of a successful compaction is the `upstreamGenerations` entry, not `compactionState`.
 
+#### Per-generation cost
+
+An entry's `cost` is the spend on that generation, derived as
+`lifetimeTotalAtClose - lifetimeCostAtStart` — the session's lifetime spend
+differenced across the generation's span, not a figure any agent reports.
+
+It has to be derived, because no per-generation figure exists to read.
+`currentUsage.costAmount` looks like one and isn't: it tracks the agent
+**process**, and a generation outlives many of them. Every cold resurrect —
+a daemon restart, or the 1h idle timeout, which fires all day on a session
+nobody is typing into — starts a process whose ledger restarts at $0, and
+the retained spend is re-based into `cumulativeCost` mid-generation.
+Stamping `costAmount` at rotation therefore recorded only the spend since
+the **last** resurrect. On the session that surfaced this, that was $106
+stamped against $543 actually spent.
+
+The lifetime total is the one quantity immune to that: conserved across
+every re-base, monotonic, already persisted. `cumulativeCost` still means
+"spend on retired generations", and it is the sum of their `cost` values
+for any chain with no gaps.
+
+`lifetimeCostAtStart` is absent on generations opened before it existed;
+those keep their old under-counted `cost`, and there is no way to recover
+the real figure after the fact. `cost` itself is absent on the live entry
+and on any generation closed by a daemon restart rather than a rotation.
+
 #### Per-generation context figures
 
 Each `upstreamGenerations` entry carries `usedAtStart` and `usedAtEnd`: the

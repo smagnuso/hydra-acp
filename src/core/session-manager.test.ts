@@ -4906,6 +4906,66 @@ describe("appendUpstreamGeneration", () => {
     expect(out[1]!.reason).toBe("compaction");
   });
 
+  // The undercount this replaced: retiredCost is the last agent
+  // PROCESS's spend, and a generation outlives many of them (every cold
+  // resurrect starts one whose ledger restarts at $0). Differencing the
+  // lifetime total ignores how many times that happened.
+  //
+  // Numbers are the real ones from the session that surfaced it: the
+  // generation opened at a lifetime $753.15, closed at $776.07, and the
+  // last process reported only $4.46 of the $22.92 it actually spent.
+  it("bills a generation by lifetime difference, not the last process's report", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_1",
+      upstreamGenerations: [
+        {
+          upstreamSessionId: "ses_1",
+          agentId: "opencode",
+          startedAt: "2026-08-21T04:52:33.650Z",
+          lifetimeCostAtStart: 753.1468367499999,
+        },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-08-21T16:26:02.000Z", {
+      retiredCost: 4.459696,
+      lifetimeCost: 776.0713949999999,
+      reason: "compaction",
+    });
+    expect(out[0]!.cost).toBeCloseTo(22.9245582, 6);
+    // And the incoming generation opens where the outgoing one closed,
+    // so no spend can fall into the gap between two entries.
+    expect(out[1]!.lifetimeCostAtStart).toBe(776.0713949999999);
+  });
+
+  // Back-compat: a generation opened before the opening figure existed
+  // has nothing to difference against, so it keeps the old behaviour
+  // rather than reporting a wrong number or none at all.
+  it("falls back to the reported cost when the retiring entry has no opening figure", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", {
+      retiredCost: 361.11,
+      lifetimeCost: 999.99,
+    });
+    expect(out[0]!.cost).toBe(361.11);
+    expect(out[1]!.lifetimeCostAtStart).toBe(999.99);
+  });
+
+  // The two figures are read at different instants, so float drift (or a
+  // rotation that banks nothing) must not produce a negative bill.
+  it("never bills a negative amount", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_1",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", lifetimeCostAtStart: 10.000000002 },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", {
+      lifetimeCost: 10,
+    });
+    expect(out[0]!.cost).toBe(0);
+  });
+
   // A rollback or restart resumes an upstream whose context the agent
   // has not reported yet. Omitting startedUsed must leave the field
   // absent, not write the 0 the usage snapshot was just reset to — 0
@@ -4954,6 +5014,9 @@ describe("appendUpstreamGeneration", () => {
         upstreamSessionId: "ses_first",
         agentId: "opencode",
         startedAt: "2026-08-01T00:00:00.000Z",
+        // A session at creation has spent nothing, so its first
+        // generation's bill can be differenced from an exact zero.
+        lifetimeCostAtStart: 0,
       },
     ]);
   });

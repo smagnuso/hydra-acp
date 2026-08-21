@@ -1086,6 +1086,13 @@ export class Session {
       // the retiring generation entry so the figure survives the history
       // ring evicting that generation's usage_update rows.
       retiredCost?: number;
+      // Lifetime spend at the rotation instant. Supersedes retiredCost
+      // for any generation that recorded its own opening figure: the
+      // difference between the two is the generation's true bill,
+      // whereas retiredCost is only the slice since the last cold
+      // resurrect. retiredCost stays on the payload as the fallback for
+      // chains that predate the opening figure.
+      lifetimeCost?: number;
       // Context occupancy of that same retiring upstream, captured in the
       // same breath and for the same reason: accumulateAndResetCost is
       // about to zero the live snapshot for the incoming generation, and
@@ -1119,6 +1126,11 @@ export class Session {
   // resurrect banks no cost), and folding them into one optional would
   // drop the figure that IS known.
   private retiringGenerationUsed: number | undefined;
+  // Lifetime spend at the rotation instant. Closes out the retiring
+  // generation's bill and opens the incoming one's, so both ends of the
+  // chain are differenced against the same number and no spend can fall
+  // between two generations.
+  private rotationLifetimeCost: number | undefined;
   // Last available_commands_update we observed from the agent. Stored
   // so we can re-broadcast a merged (hydra ∪ agent) list whenever
   // either half changes, and persisted to meta.json so a fresh attach
@@ -5851,12 +5863,15 @@ export class Session {
     this.retiringGenerationCost = undefined;
     const retiredUsed = this.retiringGenerationUsed;
     this.retiringGenerationUsed = undefined;
+    const lifetimeCost = this.rotationLifetimeCost;
+    this.rotationLifetimeCost = undefined;
     for (const handler of this.agentChangeHandlers) {
       try {
         handler({
           agentId: this.agentId,
           upstreamSessionId: this.upstreamSessionId,
           ...(retiredCost !== undefined ? { retiredCost } : {}),
+          ...(lifetimeCost !== undefined ? { lifetimeCost } : {}),
           ...(retiredUsed !== undefined ? { retiredUsed } : {}),
           ...(startedUsed !== undefined ? { startedUsed } : {}),
           ...(reason !== undefined ? { reason } : {}),
@@ -5911,6 +5926,16 @@ export class Session {
     if (typeof used === "number" && used > 0) {
       this.retiringGenerationUsed = used;
     }
+    // Lifetime spend at this exact instant, which is what the retiring
+    // generation's cost is differenced against.
+    //
+    // Pinned here rather than read at notifyAgentChange time because the
+    // two are not the same moment: on the swap path the seed prompt runs
+    // in between and the replacement agent reports its own cost, which
+    // would land on the OUTGOING generation's bill. `amount` has already
+    // been folded into cumulativeCost above and costAmount is about to
+    // be zeroed, so cumulativeCost alone is the whole total right now.
+    this.rotationLifetimeCost = this.cumulativeCost;
     const next: UsageSnapshot = {
       used: 0,
       cumulativeCost: this.cumulativeCost,

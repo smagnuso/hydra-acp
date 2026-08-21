@@ -218,6 +218,28 @@ export const UpstreamGeneration = z.object({
   // becomes unrecoverable from the transcript. Absent on the live entry
   // (still accruing) and on generations retired before this field existed.
   cost: z.number().nonnegative().optional(),
+  // The session's lifetime spend at the instant this generation began.
+  // `cost` above is derived from it: lifetimeAtClose - lifetimeCostAtStart.
+  //
+  // Needed because no per-generation spend figure exists to capture.
+  // `currentUsage.costAmount` looks like one and isn't: it tracks the
+  // agent PROCESS, and a generation outlives many of them. Every cold
+  // resurrect (daemon restart, and the 1h idle timeout, which fires all
+  // day on a session nobody is typing into) spawns a process whose
+  // ledger restarts at $0, and reconcileCostLedger re-bases costAmount
+  // mid-generation. Stamping it at rotation therefore recorded only the
+  // spend since the LAST resurrect — measured at $106 stamped against
+  // $543 actually spent on the session that surfaced this.
+  //
+  // The lifetime total is the one quantity that survives all of that:
+  // conserved across every re-base, monotonic, and already persisted.
+  // Differencing it is indifferent to how many processes a generation
+  // burned through.
+  //
+  // Absent on generations opened before this field existed, whose `cost`
+  // keeps its old (under-counted) meaning; there is no way to recover
+  // the figure after the fact, so they are left as they are.
+  lifetimeCostAtStart: z.number().nonnegative().optional(),
   // Context-window occupancy at the two ends of this generation's life,
   // in tokens. Each generation is a SEPARATE upstream session with its
   // own window, so these do not form a running total across the chain:
@@ -578,10 +600,26 @@ export function recordFromMemorySession(args: {
   // An import-pending record carries upstreamSessionId="" as a sentinel
   // (no upstream exists yet); it gets its first entry when the first
   // attach bootstraps a real agent session.
+  // The seeded entry gets an opening spend figure only when the record
+  // demonstrably has not spent anything yet, which is true at creation
+  // and false for a legacy record being back-filled on its first write.
+  // For the legacy case both available answers are wrong — 0 bills the
+  // whole session to this one generation, the current total bills it
+  // nothing — so it abstains and that generation keeps the old
+  // last-agent-process figure. New sessions get an exact chain.
+  const lifetimeSoFar =
+    (args.currentUsage?.cumulativeCost ?? 0) + (args.currentUsage?.costAmount ?? 0);
   const upstreamGenerations =
     args.upstreamGenerations ??
     (args.upstreamSessionId
-      ? [{ upstreamSessionId: args.upstreamSessionId, agentId: args.agentId, startedAt: createdAt }]
+      ? [
+          {
+            upstreamSessionId: args.upstreamSessionId,
+            agentId: args.agentId,
+            startedAt: createdAt,
+            ...(lifetimeSoFar === 0 ? { lifetimeCostAtStart: 0 } : {}),
+          },
+        ]
       : []);
   return {
     sessionId: args.sessionId,
