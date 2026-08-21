@@ -5254,6 +5254,178 @@ describe("Session", () => {
     });
   });
 
+  describe("Session.steer", () => {
+    it("forwards natively when a turn is in flight and the agent supports steering, records a user_message_chunk (not prompt_received) on injected", async () => {
+      const { session, mock } = makeSession("hydra_session_steer1", "u_steer1");
+      const { client } = makeClient();
+      const { client: observer, stream: observerStream } = makeClient();
+      session.attach(client, "full");
+      session.attach(observer, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementationOnce(() => new Promise(() => undefined)); // M1 never resolves in this test
+      requestMock.mockResolvedValueOnce({ outcome: "injected" });
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_steer1",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      observerStream.sent.length = 0;
+
+      const result = await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer1",
+        prompt: [{ type: "text", text: "actually, do X instead" }],
+      });
+
+      expect(result).toEqual({ outcome: "injected" });
+      expect(requestMock).toHaveBeenCalledWith(
+        "_session/steering",
+        expect.objectContaining({ sessionId: "u_steer1" }),
+      );
+      // Broadcasts exclude the originating client, so check the bystander.
+      const chunk = observerStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "user_message_chunk",
+      );
+      expect(chunk).toBeDefined();
+      expect(
+        (chunk!.params as { update: { _meta?: unknown } }).update._meta,
+      ).toEqual({ "hydra-acp": { compatFor: "prompt_received" } });
+      const promptReceived = observerStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "prompt_received",
+      );
+      expect(promptReceived).toBeUndefined();
+    });
+
+    it("does not record a user_message_chunk when the native reply is startedNewTurn (race case)", async () => {
+      const { session, mock } = makeSession("hydra_session_steer2", "u_steer2");
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementationOnce(() => new Promise(() => undefined));
+      requestMock.mockResolvedValueOnce({ outcome: "startedNewTurn" });
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_steer2",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      stream.sent.length = 0;
+
+      const result = await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer2",
+        prompt: [{ type: "text", text: "redirect" }],
+      });
+
+      expect(result).toEqual({ outcome: "startedNewTurn" });
+      const chunk = stream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "user_message_chunk",
+      );
+      expect(chunk).toBeUndefined();
+    });
+
+    it("falls back to amend (cancel-and-resubmit) when a turn is in flight but the agent doesn't support native steering", async () => {
+      const { session, mock } = makeSession("hydra_session_steer3", "u_steer3");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      mock.agent.steeringSupported = false;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+      let resolveM1: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveM1 = r)),
+      );
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_steer3",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const result = await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer3",
+        prompt: [{ type: "text", text: "redirect" }],
+      });
+
+      expect(result).toEqual({ outcome: "startedNewTurn" });
+      // amendOnHead's cancel-and-resubmit fired, not a native steering call.
+      expect(requestMock).not.toHaveBeenCalledWith(
+        "_session/steering",
+        expect.anything(),
+      );
+      expect(notifyMock).toHaveBeenCalledWith("session/cancel", {
+        sessionId: "u_steer3",
+      });
+      resolveM1?.({ stopReason: "cancelled" });
+    });
+
+    it("treats an idle session as a normal new prompt", async () => {
+      const { session, mock } = makeSession("hydra_session_steer4", "u_steer4");
+      const { client } = makeClient();
+      const { client: observer, stream: observerStream } = makeClient();
+      session.attach(client, "full");
+      session.attach(observer, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      const result = await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer4",
+        prompt: [{ type: "text", text: "hello" }],
+      });
+
+      expect(result).toEqual({ outcome: "startedNewTurn" });
+      expect(requestMock).toHaveBeenCalledWith(
+        "session/prompt",
+        expect.objectContaining({ sessionId: "u_steer4" }),
+      );
+      const promptReceived = observerStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "prompt_received",
+      );
+      expect(promptReceived).toBeDefined();
+    });
+
+    it("returns promptRequired without enqueueing anything when the caller opts into it on an idle session", async () => {
+      const { session, mock } = makeSession("hydra_session_steer5", "u_steer5");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+
+      const result = await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer5",
+        prompt: [{ type: "text", text: "hello" }],
+        _meta: { steering: { idleBehavior: "promptRequired" } },
+      });
+
+      expect(result).toEqual({ outcome: "promptRequired", reason: "noRunningTurn" });
+      expect(requestMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe("extension slash-command dispatch", () => {
     function makeSessionWithRegistry(registry: ExtensionCommandRegistry) {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });

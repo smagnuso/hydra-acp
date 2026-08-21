@@ -323,6 +323,53 @@ describe("SessionManager.resurrect", () => {
     expect(session.agentMeta).toEqual({ "agent-vendor": { sequence: 7 } });
   });
 
+  it("captures agent.steeringSupported from initialize's _meta.steering.supported on resurrect", async () => {
+    const steeringMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({
+            protocolVersion: 1,
+            _meta: { steering: { supported: true } },
+          })
+          .mockResolvedValueOnce({ sessionId: "u" });
+        return m.agent;
+      },
+    );
+    const session = await steeringMgr.resurrect({
+      hydraSessionId: "sess_steer",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: W_CWD,
+    });
+    expect(session.agent.steeringSupported).toBe(true);
+  });
+
+  it("defaults agent.steeringSupported to false when initialize's _meta omits it", async () => {
+    const noSteeringMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u" });
+        return m.agent;
+      },
+    );
+    const session = await noSteeringMgr.resurrect({
+      hydraSessionId: "sess_nosteer",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: W_CWD,
+    });
+    expect(session.agent.steeringSupported).toBe(false);
+  });
+
   it("captures a non-model/mode config option from session/load's configOptions, category and description intact", async () => {
     const configOptMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -4111,6 +4158,43 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
     expect(
       session.buildConfigOptions().filter((o) => agentOwnedIds.includes(o.id)),
     ).toHaveLength(3);
+  });
+});
+
+describe("SessionManager.create: agent.steeringSupported capture", () => {
+  it("captures agent.steeringSupported from initialize's _meta.steering.supported on a fresh session", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        _meta: { steering: { supported: true } },
+      })
+      .mockResolvedValueOnce({ sessionId: "u_steer_new" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    const session = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    expect(session.agent.steeringSupported).toBe(true);
+  });
+
+  it("defaults agent.steeringSupported to false for an agent that doesn't advertise it", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_nosteer_new" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    const session = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    expect(session.agent.steeringSupported).toBe(false);
   });
 });
 

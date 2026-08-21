@@ -111,6 +111,41 @@ export const AmendPromptResult = z.object({
 });
 export type AmendPromptResult = z.infer<typeof AmendPromptResult>;
 
+// _session/steering — the pre-standard mid-turn steering extension
+// shipped by claude-agent-acp and codex-acp (the real spec proposal,
+// agentclientprotocol/agent-client-protocol#1261, is still open). Shape
+// is the union of both adapters': codex-acp's SessionSteerRequest has no
+// idleBehavior field at all, claude-agent-acp's carries it under
+// _meta.steering.idleBehavior. Hydra never forwards this verbatim to an
+// idle session (see Session.steer), so idleBehavior only matters for
+// hydra's OWN dispatch decision, not for what an agent receives.
+export const SteeringParams = z.object({
+  sessionId: z.string(),
+  prompt: z.array(z.unknown()),
+  _meta: z
+    .object({
+      steering: z
+        .object({
+          idleBehavior: z.literal("promptRequired").optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+});
+export type SteeringParams = z.infer<typeof SteeringParams>;
+
+// Union of both adapters' outcome literals. Hydra only ever synthesizes
+// "startedNewTurn" (idle-enqueue or amend-cancel-resubmit, both of which
+// genuinely start a new turn) or "promptRequired" (idle + the caller
+// explicitly asked to have the prompt handed back rather than
+// auto-consumed) itself — "injected" and "failed" only ever come from a
+// native agent's own reply.
+export const SteeringResult = z.object({
+  outcome: z.enum(["injected", "startedNewTurn", "promptRequired", "failed"]),
+  reason: z.literal("noRunningTurn").optional(),
+});
+export type SteeringResult = z.infer<typeof SteeringResult>;
+
 // hydra-acp/prompt/amended notification — dedicated linkage event
 // fired after a successful amend. Carries both messageIds and the
 // amendment content so subscribers that want to render the M1→M2

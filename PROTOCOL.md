@@ -1655,6 +1655,82 @@ The race between target completion and amend arrival is resolved deterministical
 
 Successful amends broadcast a `hydra-acp/prompt/amended` notification — see below.
 
+#### Request: `_session/steering`
+
+Mid-turn steering: redirect the agent while it's still working, instead of
+queuing behind the current turn. This is a **pre-standard extension**, not
+core ACP — the real spec proposal
+([agent-client-protocol#1261](https://github.com/agentclientprotocol/agent-client-protocol/pull/1261))
+is still open. claude-agent-acp and codex-acp both already ship it; hydra
+proxies it rather than defining its own shape, so this is the union of
+both adapters':
+
+```jsonc
+// params
+{
+  "sessionId": "<id>",
+  "prompt":    [ /* ACP prompt array */ ],
+  "_meta": {                                  // optional
+    "steering": { "idleBehavior": "promptRequired" }  // optional; see below
+  }
+}
+// result
+{
+  "outcome": "injected" | "startedNewTurn" | "promptRequired" | "failed",
+  "reason":  "noRunningTurn"   // present only with outcome "promptRequired"
+}
+```
+
+Hydra advertises `_meta.steering.supported: true` **unconditionally** on
+`initialize` — as a sibling of `_meta["hydra-acp"]`, the same place the
+underlying agents put it, so a client written against either adapter's
+own extension recognizes hydra's advertisement without translation. This
+is deliberately the same pattern as `agentCapabilities.auth.logout`
+(advertised before any agent is chosen, resolved per-session at call
+time) — but for steering it's not just optimistic, it's always true:
+hydra always has a working path, described below.
+
+**Dispatch rule.** Forwarding this verbatim to the underlying agent
+regardless of session state is dangerous: steering an *idle* session
+makes the agent start a turn hydra never asked for, with no
+`_claude/origin` stamp to close it, and (codex-acp has no opt-out) no way
+to prevent it. So hydra forwards natively **only** when a turn is already
+in flight *and* the live agent advertised native support (captured from
+its own `initialize._meta.steering.supported`) — in that case the steer
+rides as a second concurrent request into a turn hydra is already
+tracking normally, so nothing new needs closing. Every other case — idle,
+or an agent that doesn't support the extension — is handled entirely by
+hydra itself:
+
+- **Turn in flight, agent doesn't support it:** cancel the running turn
+  and splice the steer content in as the next one to run, via the same
+  machinery `hydra-acp/prompt/amend` uses on the current head.
+- **Idle:** treated as an ordinary new prompt (`session/prompt`), unless
+  the request explicitly set `_meta.steering.idleBehavior: "promptRequired"`,
+  in which case hydra returns `{"outcome": "promptRequired", "reason": "noRunningTurn"}`
+  and consumes nothing, mirroring claude-agent-acp's own opt-out.
+
+Both hydra-synthesized fallback paths report `"outcome": "startedNewTurn"`
+— honestly, since the steer content starts a genuinely new turn in both
+cases rather than joining one in progress. `"injected"` and `"failed"`
+only ever come back verbatim from a native agent's own reply.
+
+A landed steer that joins the running turn (`outcome: "injected"`) is
+recorded as a `user_message_chunk` (the same compat-shim shape used
+elsewhere, `_meta.hydra-acp.compatFor: "prompt_received"`), never as
+`prompt_received` itself — the turn boundary didn't move, so announcing a
+new one would misinform every other attached client.
+
+**Known accepted gap.** A narrow race remains: hydra checks for an
+in-flight turn, decides to forward natively, but the agent's own turn
+happens to settle in the gap before it processes the steer. The agent
+then replies `"startedNewTurn"` on its own initiative — which reopens the
+same unsolicited-turn safety net (and the same imperfect-closing
+behavior) that motivated this whole design. This is a timing race, not
+a guaranteed outcome on every idle steer the way naive forwarding was;
+closing it fully would require dedicated turn-tracking for this one path,
+which this design deliberately avoids.
+
 #### Notification: `hydra-acp/prompt_queue/added`
 
 Daemon → every attached client. Fires when a new prompt is enqueued (including new turns from any client).

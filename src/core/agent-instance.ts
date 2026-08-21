@@ -52,6 +52,10 @@ export class AgentInstance {
   // returns before initialize runs, so the field is filled in after
   // construction rather than via the constructor signature.
   authMethods?: AuthMethod[];
+  // Whether this agent process advertised the pre-standard `_session/
+  // steering` extension via `_meta.steering.supported` on its initialize
+  // response. Same fill-in-after-construction rationale as authMethods.
+  steeringSupported?: boolean;
   private child: ChildProcess;
   // Diagnostic: pid of the child process. Undefined until the OS assigns
   // one, which happens synchronously at spawn time in practice.

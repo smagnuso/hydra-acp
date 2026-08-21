@@ -21,6 +21,7 @@ import {
   SessionListParams,
   SessionNewParams,
   SessionPromptParams,
+  SteeringParams,
   UpdatePromptParams,
   extractHydraMeta,
   HYDRA_META_KEY,
@@ -2060,6 +2061,26 @@ export function registerAcpWsEndpoint(
       return session.amendPrompt(att.clientId, params);
     });
 
+    // _session/steering: the pre-standard mid-turn steering extension
+    // (claude-agent-acp, codex-acp). Deliberately its own handler, NOT
+    // routed through the default forwarder below (which would forward
+    // verbatim regardless of session state) — Session.steer() decides
+    // per-call whether to forward natively or fall back to hydra's own
+    // amend/queue machinery, and that decision must never be skipped.
+    connection.onRequest("_session/steering", async (raw) => {
+      const params = SteeringParams.parse(raw);
+      denyIfReadonly(params.sessionId, "_session/steering");
+      const att = state.attached.get(params.sessionId);
+      if (!att) {
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          "not attached to session",
+        );
+      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
+      return session.steer(att.clientId, params);
+    });
+
     // session/resume: attach without replaying prior turns. Same
     // request/response shape as session/load; the only difference is
     // that we don't stream the buffered `replay` notifications. Used
@@ -3219,31 +3240,44 @@ function buildInitializeResult(): InitializeResult {
     // unconditional method-availability flags. (Named `prompt`/`agents`,
     // not `promptCapabilities`/`agentCapabilities` — those are ACP spec
     // names with different meanings.)
-    _meta: mergeMeta(undefined, {
-      prompt: {
-        queueing: true,
-        cancelling: true,
-        updating: true,
-        amending: true,
-        pipelining: false,
-      },
-      agents: {
-        list: true,
-        installProgress: true,
-      },
-      session: {
-        // Extras beyond the standard session/fork RFD, all available on
-        // hydra-acp/session/fork. Capability-aware clients probe here to
-        // decide whether to expose UI for arbitrary-turn forks, agent
-        // swap on fork, and synthesis vs verbatim history transfer.
-        fork: {
-          forkAt: true,
-          agentSwap: true,
-          synthesis: true,
-          model: true,
+    _meta: {
+      ...mergeMeta(undefined, {
+        prompt: {
+          queueing: true,
+          cancelling: true,
+          updating: true,
+          amending: true,
+          pipelining: false,
         },
-      },
-    }),
+        agents: {
+          list: true,
+          installProgress: true,
+        },
+        session: {
+          // Extras beyond the standard session/fork RFD, all available on
+          // hydra-acp/session/fork. Capability-aware clients probe here to
+          // decide whether to expose UI for arbitrary-turn forks, agent
+          // swap on fork, and synthesis vs verbatim history transfer.
+          fork: {
+            forkAt: true,
+            agentSwap: true,
+            synthesis: true,
+            model: true,
+          },
+        },
+      }),
+      // Pre-standard `_session/steering` extension (claude-agent-acp,
+      // codex-acp). Lives at the top level of _meta, a sibling of
+      // "hydra-acp", because that's where the extension itself puts it —
+      // steering-aware clients check _meta.steering.supported verbatim,
+      // the same place they'd look talking to either agent directly.
+      // Advertised unconditionally, before any agent is chosen, same
+      // rationale as agentCapabilities.auth.logout above: hydra always
+      // has a working path (forward natively, or fall back to its own
+      // amend/queue machinery — see Session.steer), so this is truthful
+      // regardless of which agent ends up behind the session.
+      steering: { supported: true },
+    },
   };
 }
 

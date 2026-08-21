@@ -1245,6 +1245,7 @@ export class SessionManager {
         | AgentCapabilities
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
+      agent.steeringSupported = parseSteeringSupported(initResult);
     } catch (err) {
       await agent.kill().catch(() => undefined);
       throw enrichAuthRequired(err, agent);
@@ -4480,6 +4481,7 @@ export class SessionManager {
       throw enrichAuthRequired(err, agent);
     }
     agent.authMethods = parseAuthMethods(initResult.authMethods);
+    agent.steeringSupported = parseSteeringSupported(initResult);
 
     const caps = (initResult.agentCapabilities ?? {}) as {
       sessionCapabilities?: { list?: unknown };
@@ -4804,6 +4806,7 @@ export class SessionManager {
         | AgentCapabilities
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
+      agent.steeringSupported = parseSteeringSupported(initResult);
       const newMeta = buildAgentSessionMeta(params.agentId);
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
@@ -4973,6 +4976,7 @@ export class SessionManager {
         | AgentCapabilities
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
+      agent.steeringSupported = parseSteeringSupported(initResult);
       const loadMeta = buildAgentSessionMeta(params.agentId);
       const loadResult = await agent.connection.request<Record<string, unknown>>(
         "session/load",
@@ -5116,6 +5120,7 @@ export class SessionManager {
         },
       );
       agent.authMethods = parseAuthMethods(initResult.authMethods);
+      agent.steeringSupported = parseSteeringSupported(initResult);
     } catch (err) {
       await agent.kill().catch(() => undefined);
       throw enrichAuthRequired(err, agent);
@@ -7992,6 +7997,16 @@ export function enrichBringupFailure(
     }
   }
   return next;
+}
+
+// Read the pre-standard `_session/steering` capability flag off a raw
+// initialize response's top-level _meta (not agentCapabilities/authMethods
+// — nothing else on the initialize response is read from _meta today).
+// Absent or malformed shapes are treated as unsupported.
+function parseSteeringSupported(initResult: Record<string, unknown>): boolean {
+  const meta = initResult._meta as Record<string, unknown> | undefined;
+  const steering = meta?.steering as Record<string, unknown> | undefined;
+  return steering?.supported === true;
 }
 
 // Validate and narrow a raw initialize.authMethods payload to the

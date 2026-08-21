@@ -100,6 +100,8 @@ import type {
   PromptAmendedParams,
   PromptOriginator,
   PromptQueueEntry as PromptQueueSnapshotEntry,
+  SteeringParams,
+  SteeringResult,
   UpdatePromptResult,
 } from "../acp/types.js";
 import { JsonRpcErrorCodes, extractHydraMeta, withRecordedAt } from "../acp/types.js";
@@ -4787,6 +4789,112 @@ export class Session {
       reason: "ok",
       messageId: newMessageId,
     };
+  }
+
+  // _session/steering — the pre-standard mid-turn steering extension
+  // (claude-agent-acp, codex-acp). Forwarding this verbatim to an agent
+  // regardless of session state is what makes the naive implementation
+  // dangerous: steering an IDLE session makes the agent start a turn
+  // hydra never asked for, with no `_claude/origin` stamp to close it
+  // and (for codex-acp) no opt-out to prevent it.
+  //
+  // The rule here sidesteps that entirely: native-forward ONLY when a
+  // turn is already in flight (already tracked by the normal queue/
+  // currentEntry machinery — the steer just becomes a second concurrent
+  // message into a turn hydra already knows how to close) AND the live
+  // agent actually advertised support. Every other case — idle, or an
+  // agent that doesn't support the extension — routes through hydra's
+  // own amend/queue machinery, which never opens a turn hydra doesn't
+  // already track. That also means hydra's own outcome for both fallback
+  // branches is honestly "startedNewTurn" (a genuinely new turn starts
+  // in both cases), never "injected" — that literal only ever comes back
+  // verbatim from a native agent's own reply.
+  async steer(clientId: string, params: SteeringParams): Promise<SteeringResult> {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      throw withCode(
+        new Error("client not attached"),
+        JsonRpcErrorCodes.SessionNotFound,
+      );
+    }
+
+    const turnInFlight =
+      this.currentEntry?.kind === "user" && !this.currentEntry.cancelled;
+
+    if (turnInFlight && this.agent.steeringSupported) {
+      const response = await this.forwardRequest("_session/steering", params);
+      const outcome = (response as { outcome?: unknown } | undefined)?.outcome;
+      const result: SteeringResult =
+        outcome === "injected" || outcome === "startedNewTurn" ||
+        outcome === "promptRequired" || outcome === "failed"
+          ? (response as SteeringResult)
+          : { outcome: "failed" };
+      if (result.outcome === "injected") {
+        // The turn's boundary didn't change — record what was said, but
+        // NOT as prompt_received, which would tell every attached client
+        // a new turn just started when none did.
+        this.recordSteerAsUserMessageChunk(params.prompt, clientId);
+      }
+      // A reply of "startedNewTurn"/"failed" here means the agent's own
+      // turn settled in the narrow race between hydra's currentEntry
+      // check and the agent processing this request — hydra's existing
+      // generic unsolicited-turn handling (noteAgentActivity /
+      // openUnsolicitedTurn) picks up whatever the agent does next, same
+      // as any other unprompted agent activity. Not special-cased here.
+      return result;
+    }
+
+    if (turnInFlight) {
+      // Agent doesn't support native steering: cancel the running turn
+      // and splice the steer content in as the next one to run, via the
+      // same machinery `hydra-acp/prompt/amend` already uses.
+      this.amendOnHead(
+        client,
+        params.prompt,
+        this.currentEntry!.messageId,
+        false,
+      );
+      return { outcome: "startedNewTurn" };
+    }
+
+    // Idle: nothing to inject into. An explicit promptRequired request
+    // is honored literally — some callers may want "hand it back, don't
+    // auto-consume" — otherwise this is just a normal new prompt.
+    if (params._meta?.steering?.idleBehavior === "promptRequired") {
+      return { outcome: "promptRequired", reason: "noRunningTurn" };
+    }
+    await this.prompt(clientId, {
+      sessionId: params.sessionId,
+      prompt: params.prompt,
+    });
+    return { outcome: "startedNewTurn" };
+  }
+
+  // Compat-shim recording for a steer that landed inside the live turn
+  // (native-forward, outcome "injected"). Mirrors the user_message_chunk
+  // block in broadcastPromptReceived, minus prompt_received itself —
+  // nothing about the turn boundary changed, so announcing a new turn
+  // would be a lie to every other attached client.
+  private recordSteerAsUserMessageChunk(
+    prompt: unknown[],
+    excludeClientId: string,
+  ): void {
+    const text = extractPromptText(prompt);
+    if (text.length === 0) {
+      return;
+    }
+    this.recordAndBroadcast(
+      "session/update",
+      {
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text },
+          _meta: { "hydra-acp": { compatFor: "prompt_received" } },
+        },
+      },
+      excludeClientId,
+    );
   }
 
   // Send the amendment as a plain follow-up prompt — used when the

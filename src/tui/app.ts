@@ -3059,6 +3059,14 @@ async function runSession(
   // Shift+Enter affordance — without daemon support the chord falls
   // through to plain session/prompt.
   let daemonSupportsAmend = false;
+  // Set from _meta.steering.supported on the SAME initialize response —
+  // but at the true top level of _meta, a sibling of _meta["hydra-acp"],
+  // not inside it. That's where the underlying agents (claude-agent-acp,
+  // codex-acp) put their own advertisement, and hydra mirrors the same
+  // location so it isn't a hydra-specific field. False here just means
+  // an old daemon that predates _session/steering; steerPrompt also
+  // handles a live MethodNotFound the same way.
+  let daemonSupportsSteering = false;
   try {
     const initResult = (await conn.request("initialize", {
       protocolVersion: ACP_PROTOCOL_VERSION,
@@ -3072,7 +3080,9 @@ async function runSession(
       agentCapabilities?: {
         promptCapabilities?: { image?: boolean };
       };
-      _meta?: Record<string, unknown>;
+      _meta?: Record<string, unknown> & {
+        steering?: { supported?: unknown };
+      };
     };
     agentInfoName = initResult?.agentInfo?.name;
     const imageCap =
@@ -3082,6 +3092,7 @@ async function runSession(
     }
     const hydraMeta = extractHydraMeta(initResult?._meta ?? undefined);
     daemonSupportsAmend = hydraMeta.prompt?.amending === true;
+    daemonSupportsSteering = initResult?._meta?.steering?.supported === true;
   } catch {
     // initialize is optional from the daemon's perspective; proceed regardless.
   }
@@ -6060,7 +6071,7 @@ async function runSession(
         // pref; the swap happens here so the input layer stays a pure
         // state machine. Seeded from config; the ^O dialog flips it live.
         if (viewPrefs.defaultEnterAction === "amend") {
-          amendPrompt(effect.text, effect.attachments, effect.displayText);
+          steerPrompt(effect.text, effect.attachments, effect.displayText);
         } else {
           enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         }
@@ -6069,7 +6080,7 @@ async function runSession(
         if (viewPrefs.defaultEnterAction === "amend") {
           enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         } else {
-          amendPrompt(effect.text, effect.attachments, effect.displayText);
+          steerPrompt(effect.text, effect.attachments, effect.displayText);
         }
         return;
       case "queue-edit": {
@@ -6614,6 +6625,105 @@ async function runSession(
       .catch((err: Error) => {
         popEcho();
         screen.notify(`amend failed: ${err.message}`);
+        dispatcher.setBuffer(text, attachments);
+        screen.refreshPrompt();
+      });
+  };
+
+  // "Interrupt the current turn with this text" — the entry point for
+  // both defaultEnterAction routes that used to call amendPrompt
+  // directly. Prefers the daemon's _session/steering (mid-turn steering)
+  // over amendPrompt's cancel-and-resubmit: when a turn is running and
+  // the live agent supports it, the daemon injects into the SAME turn
+  // instead of killing and restarting it. amendPrompt remains the
+  // fallback — for a daemon build that predates this method, and for a
+  // live MethodNotFound from one that hasn't picked it up yet.
+  const steerPrompt = (
+    text: string,
+    attachments: Attachment[],
+    displayText?: string,
+  ): void => {
+    screen.scrollToBottom();
+    if (handleBuiltinCommand(text)) {
+      return;
+    }
+    recordHistoryEntry(text, displayText);
+    if (!daemonSupportsSteering) {
+      amendPrompt(text, attachments, displayText);
+      return;
+    }
+    const blocks: Array<Record<string, unknown>> = [];
+    if (text.length > 0) {
+      blocks.push({ type: "text", text });
+    }
+    for (const a of attachments) {
+      blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
+    }
+    const echo: PendingEcho = {
+      text,
+      displayText: displayText ?? text,
+      attachments,
+      flushed: false,
+    };
+    pendingEchoes.push(echo);
+    const popEcho = (): void => {
+      const idx = pendingEchoes.indexOf(echo);
+      if (idx >= 0) {
+        pendingEchoes.splice(idx, 1);
+      }
+      if (echo.messageId !== undefined) {
+        ownPendingByMid.delete(echo.messageId);
+      }
+    };
+    conn
+      .request("_session/steering", {
+        sessionId: resolvedSessionId,
+        prompt: blocks,
+      })
+      .then((raw) => {
+        const res = raw as { outcome?: string };
+        if (res.outcome === "injected") {
+          // Nothing was enqueued server-side — no prompt_queue_added/
+          // removed pair will ever arrive for this echo. Flush it here,
+          // mirroring exactly what prompt_queue_removed{started} does
+          // for the normal path.
+          const idx = pendingEchoes.indexOf(echo);
+          if (idx >= 0) {
+            pendingEchoes.splice(idx, 1);
+          }
+          echo.flushed = true;
+          appendRender({
+            kind: "user-text",
+            text: echo.displayText,
+            attachments: echo.attachments,
+          });
+          currentTurnEcho = echo;
+          return;
+        }
+        if (res.outcome === "startedNewTurn") {
+          // Either amendOnHead's cancel-resubmit or an idle enqueue ran
+          // server-side — both genuinely create a new queue entry, so
+          // leave the echo in pendingEchoes; prompt_queue_added/removed
+          // will bind and flush it exactly like enqueuePrompt's flow.
+          adjustPendingTurns(1, "self");
+          return;
+        }
+        // "failed" (native forward errored — resolved, not thrown, per
+        // codex-acp's own convention) or an unrecognized outcome.
+        popEcho();
+        screen.notify("steering failed");
+        dispatcher.setBuffer(text, attachments);
+        screen.refreshPrompt();
+      })
+      .catch((err: Error & { code?: number }) => {
+        if (err.code === -32601) {
+          // Stale daemon that hasn't picked up _session/steering yet.
+          popEcho();
+          amendPrompt(text, attachments, displayText);
+          return;
+        }
+        popEcho();
+        screen.notify(`steering failed: ${err.message}`);
         dispatcher.setBuffer(text, attachments);
         screen.refreshPrompt();
       });
