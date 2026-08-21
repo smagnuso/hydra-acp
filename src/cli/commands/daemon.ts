@@ -213,7 +213,13 @@ export async function runDaemonStatus(): Promise<void> {
     localDigest !== undefined &&
     health.configDigest === localDigest;
 
-  if (versionMatch && configMatch) {
+  // Tier-"warn" keys the daemon snapshotted at boot and can't re-read.
+  // Distinct from a digest mismatch, which now means only that the daemon
+  // is BOUND differently than config.json describes. Drift is advisory:
+  // the daemon is healthy and everything else already re-read itself.
+  const drifted = health.driftedKeys ?? [];
+
+  if (versionMatch && configMatch && drifted.length === 0) {
     process.stdout.write(`Version: ${HYDRA_VERSION}\n`);
     return;
   }
@@ -235,7 +241,14 @@ export async function runDaemonStatus(): Promise<void> {
   if (versionMatch && !configMatch) {
     process.stdout.write(
       warn(
-        "Config changed since daemon started — run `hydra-acp daemon restart` to apply.\n",
+        "Daemon is bound differently than config.json describes (host/port/TLS) — run `hydra-acp daemon restart` to apply.\n",
+      ),
+    );
+  }
+  if (drifted.length > 0) {
+    process.stdout.write(
+      warn(
+        `These settings changed since the daemon started and need a restart to apply: ${drifted.join(", ")}.\n`,
       ),
     );
   }

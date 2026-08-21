@@ -34,6 +34,7 @@ import { startAgentSyncScheduler } from "../core/agent-sync-scheduler.js";
 import { startSessionGc } from "../core/session-gc.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import { computeConfigDigest } from "../core/config-digest.js";
+import { startConfigReloader } from "../core/config-reload.js";
 import { SessionTokenStore } from "../core/session-tokens.js";
 import {
   bearerAuth,
@@ -87,6 +88,13 @@ export async function startDaemon(
   // spawned. Done here rather than in the CLI verb so embedders that call
   // startDaemon() directly get the same filtering.
   setExtraScrubbedEnv(config.daemon.scrubEnv);
+
+  // The most recent successfully-parsed config, replaced wholesale by the
+  // reloader at the bottom of this function. `config` stays as the BOOT
+  // config — drift is measured against it, and restart-tier values (the
+  // bound host/port) describe this process regardless of later edits.
+  // Anything that should track tier-"live" edits reads liveConfig.
+  let liveConfig: HydraConfig = config;
 
   // ~/.hydra-acp/tls/cert.pem etc. — expand leading ~ / $HOME so a
   // portable config.json works regardless of the user's home dir.
@@ -231,7 +239,17 @@ export async function startDaemon(
     tokenRegistry: processRegistry,
   });
 
-  registerHealthRoutes(app, HYDRA_VERSION, computeConfigDigest(config));
+  // Tier-"warn" keys that have drifted from what we booted with. Kept in
+  // a mutable holder so the reloader below can update it after routes are
+  // registered; health reports it so a client can say "these won't apply
+  // until you restart" instead of the daemon going silently stale.
+  let driftedKeys: string[] = [];
+  registerHealthRoutes(
+    app,
+    HYDRA_VERSION,
+    computeConfigDigest(config),
+    () => driftedKeys,
+  );
   const mcpTokenRegistry = new McpTokenRegistry();
   const extensionMcp = new ExtensionMcpRegistry();
   // Captured lazily by handlers that need to mint MCP descriptors.
@@ -249,34 +267,40 @@ export async function startDaemon(
     daemonOriginCached = `http://127.0.0.1:${port}`;
     return daemonOriginCached;
   };
-  registerSessionRoutes(
-    app,
-    manager,
-    {
-      agentId: config.defaultAgent,
-      cwd: config.defaultCwd,
-      publicHost: config.daemon.publicHost,
-      host: config.daemon.host,
-      port: config.daemon.port,
-      compaction: config.compaction,
-    },
-    { extensionMcp, mcpTokenRegistry, getDaemonOrigin },
-  );
+  // Mutated in place by the config reloader. The route handlers read
+  // `defaults.agentId` / `defaults.cwd` per request rather than
+  // destructuring at registration, so replacing the fields here is enough
+  // to make those two keys tier-"live".
+  const sessionRouteDefaults = {
+    agentId: config.defaultAgent,
+    cwd: config.defaultCwd,
+    publicHost: config.daemon.publicHost,
+    host: config.daemon.host,
+    port: config.daemon.port,
+    compaction: config.compaction,
+  };
+  registerSessionRoutes(app, manager, sessionRouteDefaults, {
+    extensionMcp,
+    mcpTokenRegistry,
+    getDaemonOrigin,
+  });
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
   registerTransformerRoutes(app, transformers);
-  registerConfigRoutes(app, {
-    defaultAgent: config.defaultAgent,
-    defaultCwd: config.defaultCwd,
-    defaultModels: { ...config.defaultModels },
-    ...(config.synopsisAgent !== undefined
-      ? { synopsisAgent: config.synopsisAgent }
+  // Reads liveConfig so the reported defaults track what the daemon would
+  // actually use, rather than what it booted with.
+  registerConfigRoutes(app, () => ({
+    defaultAgent: liveConfig.defaultAgent,
+    defaultCwd: liveConfig.defaultCwd,
+    defaultModels: { ...liveConfig.defaultModels },
+    ...(liveConfig.synopsisAgent !== undefined
+      ? { synopsisAgent: liveConfig.synopsisAgent }
       : {}),
-    ...(config.synopsisModel !== undefined
-      ? { synopsisModel: config.synopsisModel }
+    ...(liveConfig.synopsisModel !== undefined
+      ? { synopsisModel: liveConfig.synopsisModel }
       : {}),
-    defaultTransformers: [...config.defaultTransformers],
-  });
+    defaultTransformers: [...liveConfig.defaultTransformers],
+  }));
   registerAuthRoutes(app, {
     store: sessionTokenStore,
     rateLimiter: authRateLimiter,
@@ -441,7 +465,30 @@ export async function startDaemon(
         })
       : undefined;
 
+  // Push tier-"live" config into the running daemon when config.json
+  // changes, so `defaultAgent`, `defaultModels`, `agents` and friends no
+  // longer need a restart. See core/config-tiers for the classification
+  // and why a forgotten key fails the build rather than going silently
+  // stale. Tier-"warn" keys can't be applied, so they surface as drift on
+  // /v1/health instead.
+  const stopConfigReload = startConfigReloader({
+    bootConfig: config,
+    apply: (next) => {
+      liveConfig = next;
+      registry.setConfig(next);
+      manager.setLiveConfig({ defaultModels: next.defaultModels });
+      sessionRouteDefaults.agentId = next.defaultAgent;
+      sessionRouteDefaults.cwd = next.defaultCwd;
+      setExtraScrubbedEnv(next.daemon.scrubEnv);
+    },
+    onDrift: (keys) => {
+      driftedKeys = keys;
+    },
+    logger: agentLogger,
+  });
+
   const shutdown = async (): Promise<void> => {
+    stopConfigReload();
     if (stopSessionGc) {
       stopSessionGc();
     }

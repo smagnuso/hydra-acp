@@ -7,6 +7,7 @@ import type { HydraConfig } from "./config.js";
 import { computeConfigDigest } from "./config-digest.js";
 import { scrubInheritedEnv, setExtraScrubbedEnv } from "./scrub-env.js";
 import { isProcessAlive, readDaemonPidFile } from "./daemon-pidfile.js";
+import { paths } from "./paths.js";
 import type { RemoteTarget } from "./remote-target.js";
 
 // Read the daemon's pidfile to learn the plain-HTTP loopback URL it's
@@ -43,9 +44,21 @@ export async function probeDaemon(config: HydraConfig): Promise<DaemonProbe> {
   if (!health) {
     return "missing";
   }
+  // Identity first, and exactly: a daemon rooted in a different
+  // HYDRA_ACP_HOME reads a different auth token and a different session
+  // store, which is the case the WS handshake would fail on. Reported
+  // directly since this field exists rather than inferred from a hash of
+  // unrelated settings.
+  if (health.home !== undefined && health.home !== paths.home()) {
+    return "mismatch";
+  }
   if (health.configDigest === undefined) {
     return "mismatch";
   }
+  // Only restart-tier keys are in the digest, so this now means "the
+  // daemon is bound differently than your config describes" rather than
+  // "some setting changed". Everything else either re-reads (tier live)
+  // or is reported as drift (tier warn).
   return health.configDigest === computeConfigDigest(config)
     ? "match"
     : "mismatch";
@@ -106,6 +119,14 @@ export async function pingHealth(_config: HydraConfig): Promise<boolean> {
 export interface DaemonHealth {
   version?: string;
   configDigest?: string;
+  // The daemon's resolved HYDRA_ACP_HOME. Absent from daemons older than
+  // this field, which probeDaemon treats as "can't tell" and falls back
+  // to the digest for.
+  home?: string;
+  // Tier-"warn" keys that differ from what the daemon booted with.
+  // Advisory: the daemon is healthy, these just won't apply until it
+  // restarts. Absent on older daemons.
+  driftedKeys?: string[];
 }
 
 export async function fetchDaemonHealth(
@@ -131,11 +152,17 @@ export async function fetchDaemonHealth(
     const body = (await response.json()) as {
       version?: unknown;
       configDigest?: unknown;
+      home?: unknown;
+      driftedKeys?: unknown;
     };
     return {
       version: typeof body.version === "string" ? body.version : undefined,
       configDigest:
         typeof body.configDigest === "string" ? body.configDigest : undefined,
+      home: typeof body.home === "string" ? body.home : undefined,
+      driftedKeys: Array.isArray(body.driftedKeys)
+        ? body.driftedKeys.filter((k): k is string => typeof k === "string")
+        : undefined,
     };
   } catch {
     return undefined;

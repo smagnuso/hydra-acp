@@ -251,6 +251,19 @@ export class Registry {
     return this.cache?.fetchedAt;
   }
 
+  // Swap the config backing agent resolution. Every read of `this.config`
+  // is per-call (findLocalDef, localAgents, applyOverride, the registry
+  // url/ttl/pinned checks), so a replacement takes effect on the next
+  // getAgent without touching the fetched-document cache — a config edit
+  // shouldn't force a network refetch.
+  //
+  // Only affects FUTURE spawns. A session already running an agent keeps
+  // its process until it restarts, which is the same way defaultModels
+  // has always behaved on resurrect.
+  setConfig(next: HydraConfig): void {
+    this.config = next;
+  }
+
   async getAgent(id: string): Promise<ResolvedAgent | undefined> {
     return this.resolveAgent(id, []);
   }

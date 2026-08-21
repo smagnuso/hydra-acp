@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { overlayLimitedKeys } from "./config-tiers.js";
 
 // Directory-scoped config: a `.hydra-acp.json` anywhere between the
 // current directory and $HOME layers onto ~/.hydra-acp/config.json for
@@ -42,23 +43,13 @@ export const HOME_KEY = "home";
 // its own; this is a backstop against a pathological mount.
 const MAX_WALK_DEPTH = 64;
 
-// Top-level HydraConfig keys read by the daemon rather than the client.
-// Merging one of these into a directory config parses fine and then does
-// nothing, because the daemon never sees the overlay.
-export const DAEMON_OWNED_KEYS: readonly string[] = [
-  "agents",
-  "agentOverrides",
-  "registry",
-  "npmRegistry",
-  "extensions",
-  "transformers",
-  "defaultTransformers",
-  "synopsisAgent",
-  "synopsisModel",
-  "compaction",
-  "compressToolContent",
-  "disableWorkspaceSnapshots",
-];
+// Which keys an overlay can't fully apply comes from the shared tier
+// table (core/config-tiers), not a second hand-written list here. The
+// classification has one home, so it can't drift from what the config
+// digest and the daemon's reload path believe.
+export const DAEMON_OWNED_KEYS: readonly string[] = overlayLimitedKeys().map(
+  (k) => k.key,
+);
 
 export interface DirectoryConfigLayer {
   // Absolute path to the file, for diagnostics.
@@ -179,24 +170,22 @@ export async function findDirectoryConfigs(
 export function directoryConfigNotices(
   layers: readonly DirectoryConfigLayer[],
 ): DirectoryConfigNotice[] {
+  const limited = new Map(overlayLimitedKeys().map((k) => [k.key, k]));
   const out: DirectoryConfigNotice[] = [];
   for (const layer of layers) {
     for (const key of Object.keys(layer.data)) {
-      if (DAEMON_OWNED_KEYS.includes(key)) {
-        out.push({
-          file: layer.file,
-          key,
-          message: `\`${key}\` is read by the daemon, which loads config.json at startup, so it has no effect in a directory config`,
-        });
+      const limit = limited.get(key);
+      if (!limit) {
+        continue;
       }
-      if (key === "daemon") {
-        out.push({
-          file: layer.file,
-          key,
-          message:
-            "`daemon` only changes which daemon this client dials; a daemon started from here still binds config.json's host/port. Use `home` for a separate daemon",
-        });
-      }
+      // "partial" keys do something, just not everything — say which,
+      // rather than lumping them in with keys that are inert. The table
+      // supplies the reason; the consequence is stated here.
+      const message =
+        limit.effect === "partial"
+          ? `\`${key}\` ${limit.note}`
+          : `\`${key}\` is ${limit.note}, so it has no effect in a directory config`;
+      out.push({ file: layer.file, key, message });
     }
   }
   return out;

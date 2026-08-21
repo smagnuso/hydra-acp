@@ -5525,6 +5525,15 @@ export class SessionManager {
   // Snapshot of which agent versions are currently in use by live
   // sessions, keyed by agentId. Read by the registry-fetch prune sweep
   // so it can skip install dirs that still back a running process.
+  // Replace the tier-"live" values this manager was constructed with.
+  // Read per session/new, so a change lands on the next created session;
+  // sessions already running keep what they were created with.
+  setLiveConfig(next: { defaultModels?: Record<string, string> }): void {
+    if (next.defaultModels) {
+      this.defaultModels = next.defaultModels;
+    }
+  }
+
   activeAgentVersions(): Map<string, Set<string>> {
     const out = new Map<string, Set<string>>();
     for (const session of this.sessions.values()) {

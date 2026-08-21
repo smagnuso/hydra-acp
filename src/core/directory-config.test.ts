@@ -133,12 +133,22 @@ describe("directoryConfigNotices", () => {
   it("says nothing about keys the client actually reads", () => {
     expect(
       directoryConfigNotices([
-        {
-          file: "/x/.hydra-acp.json",
-          data: { defaultAgent: "a", defaultModels: {}, tui: {} },
-        },
+        { file: "/x/.hydra-acp.json", data: { defaultAgent: "a", tui: {}, defaultCwd: "/x" } },
       ]),
     ).toEqual([]);
+  });
+
+  it("flags a partially-effective key as partial rather than inert", () => {
+    // defaultModels does something — it sets what the composer displays —
+    // but the TUI only sends `model` on session/new when one was chosen
+    // explicitly, so the created session still gets the daemon's value.
+    // Reporting it as "no effect" would be wrong in the other direction.
+    const notices = directoryConfigNotices([
+      { file: "/x/.hydra-acp.json", data: { defaultModels: {} } },
+    ]);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.message).not.toMatch(/no effect/);
+    expect(notices[0]?.message).toMatch(/composer displays/);
   });
 });
 
