@@ -2,7 +2,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { z } from "zod";
 import { paths } from "./paths.js";
-import { expandHome, type HydraConfig } from "./config.js";
+import {
+  expandHome,
+  type HydraConfig,
+  type LocalAgentConfig,
+} from "./config.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 import {
   currentPlatformKey,
@@ -100,6 +104,55 @@ export const RegistryAgent = z.object({
 });
 export type RegistryAgent = z.infer<typeof RegistryAgent>;
 
+// A RegistryAgent after config.agents `extends` resolution. The extra
+// fields are synthesized locally and are deliberately NOT part of the
+// zod schema above — nothing in the network registry document may set
+// them, since `installId` feeds a filesystem path.
+export interface ResolvedAgent extends RegistryAgent {
+  // Identity used to key install dirs, which would otherwise be the agent
+  // id. A derived agent that only layers env on its base must share the
+  // base's install dir rather than download a second identical copy, so
+  // this is the nearest ancestor at or above the agent that last changed
+  // the distribution. Undefined means "same as id".
+  installId?: string;
+  // Inheritance chain, most specific first: [id, base, base's base, …].
+  // Canonical ids as resolved (so `extends: "pi"` records `pi-acp`), which
+  // is what lets per-agent config maps be walked most-specific-first.
+  extendsChain?: string[];
+}
+
+// Depth cap on `extends`. Cycles are caught exactly by the stack check;
+// this is the backstop for a chain that is merely absurd.
+const MAX_AGENT_EXTENDS_DEPTH = 8;
+
+// The install identity for an agent: what `paths.agent*InstallDir` should
+// be keyed on. Derived agents that share a base's distribution share its
+// install dir.
+export function agentInstallId(agent: ResolvedAgent): string {
+  return agent.installId ?? agent.id;
+}
+
+// Most-specific-wins lookup over a config map keyed by agent id
+// (defaultModels, agentOverrides): try the agent's own id, then each id it
+// extends, in order. `from` is the key that actually matched, so callers
+// can name it in diagnostics rather than reporting the id the user asked
+// for and leaving them hunting for a setting they never wrote.
+export function lookupInheritedAgentValue<T>(
+  map: Record<string, T> | undefined,
+  agent: ResolvedAgent,
+): { value: T; from: string } | undefined {
+  if (!map) {
+    return undefined;
+  }
+  for (const key of agent.extendsChain ?? [agent.id]) {
+    const value = map[key];
+    if (value !== undefined) {
+      return { value, from: key };
+    }
+  }
+  return undefined;
+}
+
 export const RegistryDocument = z.object({
   version: z.string(),
   agents: z.array(RegistryAgent),
@@ -123,6 +176,10 @@ export interface RegistryOptions {
   // and the TTL-driven refetch inside load()). The callback's errors are
   // swallowed so a faulty hook can never wedge a registry refresh.
   onFetched?: (doc: RegistryDocument) => void | Promise<void>;
+  // Fires when a config.agents entry can't be resolved during
+  // resolvedLocalAgents() — a broken `extends`. The catalog drops the
+  // entry and keeps going; this is how the reason reaches daemon.log.
+  onResolveError?: (agentId: string, err: Error) => void;
 }
 
 export class Registry {
@@ -171,16 +228,52 @@ export class Registry {
     return this.cache?.fetchedAt;
   }
 
-  async getAgent(id: string): Promise<RegistryAgent | undefined> {
+  async getAgent(id: string): Promise<ResolvedAgent | undefined> {
+    return this.resolveAgent(id, []);
+  }
+
+  // `stack` carries the derived ids already being resolved, innermost
+  // last, so an `extends` cycle is caught exactly rather than by depth
+  // alone (and can name the loop in the error).
+  private async resolveAgent(
+    id: string,
+    stack: string[],
+  ): Promise<ResolvedAgent | undefined> {
     // Config-defined local agents shadow the registry — check them first
     // so a user can override a broken registry agent by id.
-    const locals = this.localAgents();
-    const local =
-      locals.find((a) => a.id === id) ??
-      // Implied `-acp` suffix (see below) also shadows the registry.
-      locals.find((a) => a.id.toLowerCase() === `${id.toLowerCase()}-acp`);
+    const local = this.findLocalDef(id);
     if (local) {
-      return local;
+      if (local.def.extends === undefined) {
+        return {
+          ...synthesizeLocalAgent(local.id, local.def),
+          extendsChain: [local.id],
+        };
+      }
+      if (stack.includes(local.id)) {
+        throw new Error(
+          `agent ${local.id}: extends cycle (${[...stack, local.id].join(" -> ")})`,
+        );
+      }
+      if (stack.length + 1 >= MAX_AGENT_EXTENDS_DEPTH) {
+        throw new Error(
+          `agent ${local.id}: extends chain deeper than ${MAX_AGENT_EXTENDS_DEPTH} (${[...stack, local.id].join(" -> ")})`,
+        );
+      }
+      // Recurse through the same resolution so a base named by its
+      // shorthand resolves the way `--agent` would (`extends: "pi"` →
+      // `pi-acp`), and so chains of derived agents compose.
+      const base = await this.resolveAgent(local.def.extends, [
+        ...stack,
+        local.id,
+      ]);
+      if (!base) {
+        throw new Error(
+          `agent ${local.id}: extends ${JSON.stringify(local.def.extends)}, which is not a known agent`,
+        );
+      }
+      // applyOverride last so a packageSpec pin on the *derived* id wins
+      // over one inherited from the base.
+      return this.applyOverride(deriveAgent(local.id, local.def, base));
     }
     const doc = await this.load();
     const exact = doc.agents.find((a) => a.id === id);
@@ -219,43 +312,81 @@ export class Registry {
     return undefined;
   }
 
+  // Locate a config.agents entry by id, applying the same implied `-acp`
+  // shorthand the registry lookup below uses.
+  private findLocalDef(
+    id: string,
+  ): { id: string; def: LocalAgentConfig } | undefined {
+    const agents = this.config.agents ?? {};
+    const exact = agents[id];
+    if (exact) {
+      return { id, def: exact };
+    }
+    const lc = id.toLowerCase();
+    for (const [key, def] of Object.entries(agents)) {
+      if (key.toLowerCase() === `${lc}-acp`) {
+        return { id: key, def };
+      }
+    }
+    return undefined;
+  }
+
   // Synthesize RegistryAgent entries from config.agents. These carry an
   // `exec` distribution and a fixed "local" version key (no install dir).
   // `~/...` and `$HOME/...` are expanded in the command and args so users
   // can write portable entries pointing at scripts under their home dir.
+  //
+  // Entries using `extends` are omitted: their distribution comes from a
+  // base that may only be resolvable asynchronously (registry load), and
+  // synthesizing one here would default its command to the agent id and
+  // produce a bogus `exec` entry. Callers that need those resolved go
+  // through resolvedLocalAgents().
   localAgents(): RegistryAgent[] {
-    return Object.entries(this.config.agents ?? {}).map(([id, def]) => ({
-      id,
-      name: def.name ?? id,
-      description: def.description,
-      version: "local",
-      distribution: {
-        exec: {
-          // Default the command to the agent id (like extensions default
-          // theirs to the extension name) — resolved off PATH at spawn.
-          command: expandHome(def.command ?? id),
-          args: def.args?.map(expandHome),
-          env: def.env,
-        },
-      },
-    }));
+    return Object.entries(this.config.agents ?? {})
+      .filter(([, def]) => def.extends === undefined)
+      .map(([id, def]) => synthesizeLocalAgent(id, def));
+  }
+
+  // Every config.agents entry, with `extends` resolved. A single broken
+  // entry (cycle, unknown base) is dropped with a log line rather than
+  // failing the whole catalog — the agent list is also how a user would
+  // go looking for what they broke.
+  async resolvedLocalAgents(): Promise<ResolvedAgent[]> {
+    const out: ResolvedAgent[] = [];
+    for (const id of Object.keys(this.config.agents ?? {})) {
+      try {
+        const resolved = await this.resolveAgent(id, []);
+        if (resolved) {
+          out.push(resolved);
+        }
+      } catch (err) {
+        this.options.onResolveError?.(id, err as Error);
+      }
+    }
+    return out;
   }
 
   // Apply a config.agentOverrides[id] pin to a registry agent: swap the
   // npx package spec and key the install dir on the pinned version so it
   // never collides with the floating "current" install. No-op when the
   // agent has no override or isn't npx-distributed.
-  private applyOverride(agent: RegistryAgent): RegistryAgent {
-    const override = this.config.agentOverrides?.[agent.id];
-    if (!override?.packageSpec || !agent.distribution.npx) {
-      return agent;
+  private applyOverride(agent: ResolvedAgent): ResolvedAgent {
+    const withChain: ResolvedAgent = agent.extendsChain
+      ? agent
+      : { ...agent, extendsChain: [agent.id] };
+    const override = this.config.agentOverrides?.[withChain.id];
+    if (!override?.packageSpec || !withChain.distribution.npx) {
+      return withChain;
     }
     return {
-      ...agent,
+      ...withChain,
       version: versionKeyFromSpec(override.packageSpec),
+      // Pinning a different package makes this a distinct install, so it
+      // stops sharing whatever install dir it inherited.
+      installId: withChain.id,
       distribution: {
-        ...agent.distribution,
-        npx: { ...agent.distribution.npx, package: override.packageSpec },
+        ...withChain.distribution,
+        npx: { ...withChain.distribution.npx, package: override.packageSpec },
       },
     };
   }
@@ -326,6 +457,98 @@ export interface SpawnPlan {
   // ensureNpmPackage already use, so the prune sweep can identify
   // which install dirs are owned by live agents.
   version: string;
+  // Identity the install dir is keyed on — the agent's own id, unless it
+  // derives from another agent without changing the distribution, in
+  // which case it shares the base's install. Carried here so the prune
+  // sweep sees the same identity the installer used; keying the live-agent
+  // set on the derived id instead would leave a shared dir unprotected.
+  // Optional so a hand-built plan (tests, fixtures) can omit it; consumers
+  // fall back to the agent id.
+  installId?: string;
+}
+
+// A config.agents entry that defines its own command, as a RegistryAgent.
+// `~/...` and `$HOME/...` are expanded so users can write portable entries
+// pointing at scripts under their home dir.
+function synthesizeLocalAgent(
+  id: string,
+  def: LocalAgentConfig,
+): RegistryAgent {
+  return {
+    id,
+    name: def.name ?? id,
+    description: def.description,
+    version: "local",
+    distribution: {
+      exec: {
+        // Default the command to the agent id (like extensions default
+        // theirs to the extension name) — resolved off PATH at spawn.
+        command: expandHome(def.command ?? id),
+        args: def.args?.map(expandHome),
+        env: def.env,
+      },
+    },
+  };
+}
+
+// Layer `env` / `args` onto whichever distribution kinds the base
+// actually uses, so a derived agent can set an env var without knowing
+// how its base is packaged (and keeps working if the registry later
+// switches that agent from npx to binary). env merges, args replace.
+function mergeIntoDistribution(
+  base: RegistryAgent["distribution"],
+  def: LocalAgentConfig,
+): RegistryAgent["distribution"] {
+  const args = def.args?.map(expandHome);
+  const overlay = <T extends { args?: string[]; env?: Record<string, string> }>(
+    target: T,
+  ): T => ({
+    ...target,
+    ...(args ? { args } : {}),
+    ...(def.env ? { env: { ...target.env, ...def.env } } : {}),
+  });
+  return {
+    ...(base.npx ? { npx: overlay(base.npx) } : {}),
+    ...(base.uvx ? { uvx: overlay(base.uvx) } : {}),
+    ...(base.exec ? { exec: overlay(base.exec) } : {}),
+    ...(base.binary
+      ? {
+          // Per-platform map: overlay each target that's actually present.
+          binary: Object.fromEntries(
+            Object.entries(base.binary).map(([platform, target]) => [
+              platform,
+              target ? overlay(target) : target,
+            ]),
+          ),
+        }
+      : {}),
+  };
+}
+
+// Build a derived agent from a config.agents entry and its resolved base.
+// Objects merge, scalars and arrays replace, the derived entry wins.
+function deriveAgent(
+  id: string,
+  def: LocalAgentConfig,
+  base: ResolvedAgent,
+): ResolvedAgent {
+  // A command REPLACES the inherited distribution rather than merging
+  // into it. planSpawn checks npx/binary/uvx before exec, so leaving the
+  // base's distribution alongside a new exec would silently spawn the
+  // base agent and quietly ignore the command.
+  const replacesDistribution = def.command !== undefined;
+  return {
+    ...base,
+    id,
+    name: def.name ?? base.name,
+    description: def.description ?? base.description,
+    version: replacesDistribution ? "local" : base.version,
+    distribution: replacesDistribution
+      ? synthesizeLocalAgent(id, def).distribution
+      : mergeIntoDistribution(base.distribution, def),
+    installId: replacesDistribution ? id : (base.installId ?? base.id),
+    extendsChain: [id, ...(base.extendsChain ?? [base.id])],
+  };
 }
 
 // Derive an install-dir version key from a pinned package spec. For
@@ -389,9 +612,16 @@ export interface AgentListResult {
 // creating a session. Backs both the REST endpoint and the ACP method
 // so the two surfaces never drift.
 export async function listAgents(registry: Registry): Promise<AgentListResult> {
-  // Tolerate registry doubles (tests) that don't implement localAgents.
-  const local =
-    typeof registry.localAgents === "function" ? registry.localAgents() : [];
+  // Tolerate registry doubles (tests) that don't implement either hook.
+  // resolvedLocalAgents is preferred because it also covers config.agents
+  // entries that use `extends` — localAgents() skips those, since their
+  // distribution isn't knowable without resolving the base.
+  const local: ResolvedAgent[] =
+    typeof registry.resolvedLocalAgents === "function"
+      ? await registry.resolvedLocalAgents()
+      : typeof registry.localAgents === "function"
+        ? registry.localAgents()
+        : [];
   // When the registry is unreachable and the user only relies on local
   // agents, still surface those rather than failing the whole list.
   let doc: RegistryDocument;
@@ -428,13 +658,14 @@ export async function listAgents(registry: Registry): Promise<AgentListResult> {
 }
 
 export async function agentInstallState(
-  agent: RegistryAgent,
+  agent: ResolvedAgent,
 ): Promise<AgentInstallState> {
   const platformKey = currentPlatformKey();
   if (!platformKey) {
     return "no";
   }
   const version = agent.version ?? "current";
+  const installId = agentInstallId(agent);
   // Local exec agents are always "installed" — there's nothing to fetch.
   if (agent.distribution.exec) {
     return "yes";
@@ -443,7 +674,7 @@ export async function agentInstallState(
     const target = pickBinaryTarget(agent.distribution.binary, platformKey);
     if (target?.cmd) {
       const cmdPath = path.resolve(
-        paths.agentInstallDir(agent.id, platformKey, version),
+        paths.agentInstallDir(installId, platformKey, version),
         target.cmd,
       );
       if (await fileExists(cmdPath)) {
@@ -454,7 +685,7 @@ export async function agentInstallState(
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
     const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
-    const installDir = paths.agentNpmInstallDir(agent.id, platformKey, version);
+    const installDir = paths.agentNpmInstallDir(installId, platformKey, version);
     const binPath = path.join(installDir, "node_modules", ".bin", bin);
     if (await fileExists(binPath)) {
       return "yes";
@@ -485,7 +716,7 @@ async function fileExists(p: string): Promise<boolean> {
 // forwarded the same ACP subcommand the registry already supplies — opencode's
 // `acp acp` invocation died with -32603 once session/new ran.
 export async function planSpawn(
-  agent: RegistryAgent,
+  agent: ResolvedAgent,
   callerArgs: string[] = [],
   options: {
     npmRegistry?: string;
@@ -493,6 +724,7 @@ export async function planSpawn(
   } = {},
 ): Promise<SpawnPlan> {
   const version = agent.version ?? "current";
+  const installId = agentInstallId(agent);
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
     const tail = callerArgs.length > 0 ? callerArgs : (npx.args ?? []);
@@ -506,12 +738,13 @@ export async function planSpawn(
         args: ["-y", npx.package, ...tail],
         env: npx.env ?? {},
         version,
+        installId,
       };
     }
     const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
     const npmCb = options.onInstallProgress;
     const binPath = await ensureNpmPackage({
-      agentId: agent.id,
+      agentId: installId,
       version,
       packageSpec: npx.package,
       bin,
@@ -525,6 +758,7 @@ export async function planSpawn(
       args: tail,
       env: npx.env ?? {},
       version,
+      installId,
     };
   }
   if (agent.distribution.binary) {
@@ -536,7 +770,7 @@ export async function planSpawn(
     }
     const binCb = options.onInstallProgress;
     const cmdPath = await ensureBinary({
-      agentId: agent.id,
+      agentId: installId,
       version,
       target,
       onProgress: binCb
@@ -549,6 +783,7 @@ export async function planSpawn(
       args: tail,
       env: target.env ?? {},
       version,
+      installId,
     };
   }
   if (agent.distribution.uvx) {
@@ -559,6 +794,7 @@ export async function planSpawn(
       args: [uvx.package, ...tail],
       env: uvx.env ?? {},
       version,
+      installId,
     };
   }
   if (agent.distribution.exec) {
@@ -569,6 +805,7 @@ export async function planSpawn(
       args: tail,
       env: exec.env ?? {},
       version,
+      installId,
     };
   }
   throw new Error(`Agent ${agent.id} has no usable distribution method.`);

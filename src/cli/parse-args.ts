@@ -65,6 +65,9 @@ const KNOWN_VALUE_FLAGS = new Set([
   "dir",
   "drip-speed",
   "env",
+  // `hydra agent add <id> --extends <base>`: derive from another agent
+  // instead of defining a distribution from scratch.
+  "extends",
   "from",
   "from-label",
   "from-session",

@@ -7,7 +7,9 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { homedir } from "node:os";
 import {
+  agentInstallId,
   agentInstallState,
+  lookupInheritedAgentValue,
   Registry,
   listAgents,
   planSpawn,
@@ -766,3 +768,208 @@ function runArchive(cmd: string, args: string[]): Promise<void> {
     });
   });
 }
+
+const EXTENDS_FIXTURE: { agents: RegistryAgent[] } = {
+  agents: [
+    {
+      id: "opencode",
+      name: "opencode",
+      description: "from the registry",
+      version: "1.2.3",
+      distribution: {
+        npx: {
+          package: "opencode-ai@1.2.3",
+          args: ["acp"],
+          env: { OPENCODE_BASE: "1" },
+        },
+      },
+    },
+    {
+      id: "pi-acp",
+      name: "pi",
+      distribution: { npx: { package: "pi-acp@0.1.0" } },
+    },
+  ],
+};
+
+function extendsRegistry(agents: HydraConfig["agents"]): Registry {
+  const registry = new Registry({ ...fakeConfig(), agents });
+  seedCache(registry, EXTENDS_FIXTURE);
+  return registry;
+}
+
+describe("config.agents extends", () => {
+  it("merges env onto the base distribution and keeps the base's package", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": {
+        extends: "opencode",
+        env: { OPENCODE_CONFIG_DIR: "/tmp/home" },
+      },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(a?.id).toBe("opencode-home");
+    expect(a?.distribution.npx?.package).toBe("opencode-ai@1.2.3");
+    expect(a?.distribution.npx?.env).toEqual({
+      OPENCODE_BASE: "1",
+      OPENCODE_CONFIG_DIR: "/tmp/home",
+    });
+    // Not overridden, so inherited verbatim.
+    expect(a?.distribution.npx?.args).toEqual(["acp"]);
+    expect(a?.description).toBe("from the registry");
+  });
+
+  it("lets the derived entry win on a key the base also sets", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": {
+        extends: "opencode",
+        name: "opencode (home)",
+        env: { OPENCODE_BASE: "0" },
+        args: ["acp", "--verbose"],
+      },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(a?.name).toBe("opencode (home)");
+    expect(a?.distribution.npx?.env).toEqual({ OPENCODE_BASE: "0" });
+    // Arrays replace rather than append.
+    expect(a?.distribution.npx?.args).toEqual(["acp", "--verbose"]);
+  });
+
+  it("shares the base's install dir when only env is layered", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": {
+        extends: "opencode",
+        env: { OPENCODE_CONFIG_DIR: "/tmp/home" },
+      },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(agentInstallId(a!)).toBe("opencode");
+  });
+
+  it("replaces the distribution when the derived entry sets a command", async () => {
+    const registry = extendsRegistry({
+      "opencode-dev": {
+        extends: "opencode",
+        command: "/tmp/acp-dev.sh",
+      },
+    });
+    const a = await registry.getAgent("opencode-dev");
+    // The trap this guards: planSpawn checks npx before exec, so an
+    // inherited npx left in place would silently spawn the base agent
+    // and ignore the command entirely.
+    expect(a?.distribution.npx).toBeUndefined();
+    expect(a?.distribution.exec?.command).toBe("/tmp/acp-dev.sh");
+    const plan = await planSpawn(a!);
+    expect(plan.command).toBe("/tmp/acp-dev.sh");
+    // Its own command means its own install identity.
+    expect(agentInstallId(a!)).toBe("opencode-dev");
+  });
+
+  it("resolves a base named by its shorthand, and records the canonical id", async () => {
+    const registry = extendsRegistry({
+      "pi-home": { extends: "pi", env: { PI_CODING_AGENT_DIR: "/tmp/pi" } },
+    });
+    const a = await registry.getAgent("pi-home");
+    expect(a?.extendsChain).toEqual(["pi-home", "pi-acp"]);
+  });
+
+  it("composes through a chain of derived agents", async () => {
+    const registry = extendsRegistry({
+      "pi-dev": { extends: "pi-acp", command: "/tmp/pi-dev.sh" },
+      "pi-local": { extends: "pi-dev", name: "pi (local)" },
+    });
+    const a = await registry.getAgent("pi-local");
+    expect(a?.extendsChain).toEqual(["pi-local", "pi-dev", "pi-acp"]);
+    expect(a?.name).toBe("pi (local)");
+    expect(a?.distribution.exec?.command).toBe("/tmp/pi-dev.sh");
+  });
+
+  it("throws on an extends cycle rather than recursing forever", async () => {
+    const registry = extendsRegistry({
+      a: { extends: "b" },
+      b: { extends: "a" },
+    });
+    await expect(registry.getAgent("a")).rejects.toThrow(/extends cycle/);
+  });
+
+  it("throws a named error when the base does not resolve", async () => {
+    const registry = extendsRegistry({
+      orphan: { extends: "no-such-agent" },
+    });
+    await expect(registry.getAgent("orphan")).rejects.toThrow(
+      /extends "no-such-agent"/,
+    );
+  });
+
+  it("omits extends entries from localAgents but resolves them in resolvedLocalAgents", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": { extends: "opencode", env: { X: "1" } },
+      standalone: { command: "/tmp/standalone" },
+    });
+    // localAgents() is sync and can't resolve a base, so a derived entry
+    // there would synthesize a bogus exec command from the agent id.
+    expect(registry.localAgents().map((a) => a.id)).toEqual(["standalone"]);
+    const resolved = await registry.resolvedLocalAgents();
+    expect(resolved.map((a) => a.id).sort()).toEqual([
+      "opencode-home",
+      "standalone",
+    ]);
+    expect(
+      resolved.find((a) => a.id === "opencode-home")?.distribution.npx?.package,
+    ).toBe("opencode-ai@1.2.3");
+  });
+
+  it("drops a broken entry from the catalog instead of failing the list", async () => {
+    const errors: string[] = [];
+    const registry = new Registry(
+      {
+        ...fakeConfig(),
+        agents: {
+          broken: { extends: "no-such-agent" },
+          fine: { command: "/tmp/fine" },
+        },
+      },
+      { onResolveError: (id) => errors.push(id) },
+    );
+    seedCache(registry, EXTENDS_FIXTURE);
+    const resolved = await registry.resolvedLocalAgents();
+    expect(resolved.map((a) => a.id)).toEqual(["fine"]);
+    expect(errors).toEqual(["broken"]);
+    const listed = await listAgents(registry);
+    expect(listed.agents.map((a) => a.id)).toContain("fine");
+    expect(listed.agents.map((a) => a.id)).not.toContain("broken");
+  });
+});
+
+describe("lookupInheritedAgentValue", () => {
+  it("prefers the most specific entry and reports which key matched", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": { extends: "opencode", env: { X: "1" } },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(
+      lookupInheritedAgentValue(
+        { opencode: "base-model", "opencode-home": "own-model" },
+        a!,
+      ),
+    ).toEqual({ value: "own-model", from: "opencode-home" });
+  });
+
+  it("walks up to the base when the derived agent has no entry", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": { extends: "opencode", env: { X: "1" } },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(lookupInheritedAgentValue({ opencode: "base-model" }, a!)).toEqual({
+      value: "base-model",
+      from: "opencode",
+    });
+  });
+
+  it("returns undefined when nothing in the chain has a value", async () => {
+    const registry = extendsRegistry({
+      "opencode-home": { extends: "opencode", env: { X: "1" } },
+    });
+    const a = await registry.getAgent("opencode-home");
+    expect(lookupInheritedAgentValue({ other: "x" }, a!)).toBeUndefined();
+  });
+});

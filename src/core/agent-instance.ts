@@ -39,6 +39,10 @@ export class AgentInstance {
   // Version this process was spawned from — used by the registry-fetch
   // prune sweep to skip install dirs belonging to a live agent.
   readonly version: string;
+  // Identity this agent's install dir is keyed on. Differs from agentId
+  // only for agents derived via config.agents `extends` that share their
+  // base's install; the prune sweep matches on this, not on agentId.
+  readonly installId: string;
   readonly cwd: string;
   readonly connection: JsonRpcConnection;
   // Child agent's advertised authMethods from its initialize response.
@@ -66,6 +70,7 @@ export class AgentInstance {
   private constructor(opts: AgentInstanceOptions, child: ChildProcess) {
     this.agentId = opts.agentId;
     this.version = opts.plan.version;
+    this.installId = opts.plan.installId ?? opts.agentId;
     this.cwd = opts.cwd;
     this.child = child;
     this.stderrTailBytes = opts.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;

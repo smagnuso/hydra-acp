@@ -108,12 +108,27 @@ const RegistryConfig = z.object({
 // config.agents; a local agent with the same id as a registry agent
 // shadows the registry entry.
 const LocalAgentConfig = z.object({
+  // Derive from another agent (registry or local) instead of defining a
+  // distribution from scratch. The base is resolved through the same
+  // lookup as `--agent`, so the implied `-acp` suffix works
+  // (`extends: "pi"` finds `pi-acp`). Everything below is then layered on
+  // top: objects merge, scalars and arrays replace, this entry wins.
+  //
+  // Prefer naming the canonical base id. Per-agent config maps keyed by
+  // agent id (defaultModels, agentOverrides) walk this chain most-specific
+  // first, and that walk matches ids as written.
+  extends: z.string().optional(),
   name: z.string().optional(),
   description: z.string().optional(),
   // Optional: defaults to the agent id (the config.agents key), mirroring
   // how extensions default their command to the extension name. Set it
   // when the executable differs from the id, or to point at an absolute
   // path / wrapper script.
+  //
+  // With `extends`, setting this REPLACES the inherited distribution
+  // rather than merging into it. planSpawn checks npx/binary/uvx before
+  // exec, so leaving an inherited npx or binary distribution in place
+  // alongside this command would silently spawn the base agent instead.
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),

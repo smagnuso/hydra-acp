@@ -481,16 +481,47 @@ export async function runAgentsPin(
   );
 }
 
-// `hydra agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...` —
-// define (or update) a local agent that bypasses the registry. Mirrors
-// `extensions add`. With no --command the executable defaults to <id>.
+// Would `agentId extends base` close a loop? Walks the existing chain
+// upward from `base`; reaching `agentId` means the new edge completes a
+// cycle. Worth catching here because the alternative is a config that
+// looks fine until the next session/new throws out of getAgent.
+async function extendsCycleFrom(
+  agentId: string,
+  base: string,
+): Promise<string[] | undefined> {
+  const config = await loadConfig();
+  const agents = config.agents ?? {};
+  const chain = [agentId];
+  const seen = new Set<string>();
+  let cur: string | undefined = base;
+  while (cur !== undefined) {
+    chain.push(cur);
+    if (cur === agentId) {
+      return chain;
+    }
+    if (seen.has(cur)) {
+      // A pre-existing loop between other entries. Not the one we'd be
+      // introducing, so don't blame this command for it.
+      return undefined;
+    }
+    seen.add(cur);
+    cur = agents[cur]?.extends;
+  }
+  return undefined;
+}
+
+// `hydra agent add <id> [--extends BASE] [--command CMD] [--args A,B,C]
+// [--env K=V]...` — define (or update) a local agent. Without --extends it
+// bypasses the registry entirely and the executable defaults to <id>; with
+// --extends it derives from another agent, inheriting that agent's
+// distribution and any per-agent config keyed by the base's id.
 export async function runAgentsAdd(
   agentId: string | undefined,
   argv: string[],
 ): Promise<void> {
   if (!agentId) {
     process.stderr.write(
-      "Usage: hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...\n",
+      "Usage: hydra-acp agent add <id> [--extends BASE] [--command CMD] [--args A,B,C] [--env K=V]...\n",
     );
     process.exit(2);
     return;
@@ -503,8 +534,22 @@ export async function runAgentsAdd(
     return;
   }
   const parsed = parseAddFlags(argv, "agent");
+  const base = parsed.extendsBase;
+  if (base !== undefined) {
+    const cycle = await extendsCycleFrom(agentId, base);
+    if (cycle) {
+      process.stderr.write(
+        `Cannot add ${agentId}: --extends ${base} would create a cycle (${cycle.join(" -> ")}).\n`,
+      );
+      process.exit(2);
+      return;
+    }
+  }
   const command = parsed.command as string | undefined;
   const def: LocalAgentConfig = {};
+  if (base !== undefined) {
+    def.extends = base;
+  }
   if (command !== undefined) {
     def.command = command;
   }
@@ -515,10 +560,21 @@ export async function runAgentsAdd(
     def.env = parsed.env;
   }
   await setLocalAgent(agentId, def);
-  const shown = command ?? `${agentId} (default — resolved off PATH)`;
+  const shown =
+    command ??
+    (base !== undefined
+      ? `inherited from ${base}`
+      : `${agentId} (default — resolved off PATH)`);
   process.stdout.write(
     `Local agent ${agentId} → ${shown}${parsed.args.length > 0 ? " " + parsed.args.join(" ") : ""}\n`,
   );
+  if (base !== undefined && command !== undefined) {
+    // Worth saying out loud: this is the one merge rule that isn't
+    // "child wins on this key", it drops the base's distribution whole.
+    process.stdout.write(
+      `  --command replaces ${base}'s distribution rather than merging into it.\n`,
+    );
+  }
   process.stdout.write(
     "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
   );

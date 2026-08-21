@@ -4,6 +4,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { currentPlatformKey } from "../../core/binary-install.js";
 import { paths } from "../../core/paths.js";
 import { canonicalAgentId, runAgentsUninstall } from "./agents.js";
+import { parseAddFlags } from "./_shared.js";
 
 const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -79,5 +80,42 @@ describe("canonicalAgentId", () => {
   it("returns undefined on ambiguous prefix with no -acp sibling", () => {
     expect(canonicalAgentId("c", known)).toBeUndefined();
     expect(canonicalAgentId("nope", known)).toBeUndefined();
+  });
+});
+
+describe("parseAddFlags --extends", () => {
+  it("parses an agent base id", () => {
+    const parsed = parseAddFlags(["--extends", "opencode"], "agent");
+    expect(parsed.extendsBase).toBe("opencode");
+  });
+
+  it("is undefined when not passed", () => {
+    expect(parseAddFlags(["--command", "x"], "agent").extendsBase).toBeUndefined();
+  });
+
+  it("exits when --extends has no value", () => {
+    expect(() => parseAddFlags(["--extends"], "agent")).toThrow(
+      "process.exit(2)",
+    );
+  });
+
+  it("is rejected for extensions and transformers, which have no inheritance", () => {
+    expect(() => parseAddFlags(["--extends", "x"], "extension")).toThrow(
+      "process.exit(2)",
+    );
+    expect(() => parseAddFlags(["--extends", "x"], "transformer")).toThrow(
+      "process.exit(2)",
+    );
+    expect(stderrSpy).toHaveBeenCalledWith("Unknown flag: --extends\n");
+  });
+
+  it("still parses env and args alongside it", () => {
+    const parsed = parseAddFlags(
+      ["--extends", "opencode", "--env", "A=1", "--args", "acp,--x"],
+      "agent",
+    );
+    expect(parsed.extendsBase).toBe("opencode");
+    expect(parsed.env).toEqual({ A: "1" });
+    expect(parsed.args).toEqual(["acp", "--x"]);
   });
 });

@@ -177,6 +177,9 @@ export interface ParsedAddFlags {
   // Only meaningful for extensions/transformers. Always present so
   // callers can destructure uniformly.
   enabled: boolean;
+  // Only meaningful for `agent add` — the base agent to derive from.
+  // Undefined for extensions/transformers, which have no inheritance.
+  extendsBase: string | undefined;
 }
 
 export function parseAddFlags(
@@ -191,6 +194,7 @@ export function parseAddFlags(
   let argList: string[] = [];
   const env: Record<string, string> = {};
   let enabled = true;
+  let extendsBase: string | undefined;
   let i = 0;
   while (i < argv.length) {
     const tok = argv[i];
@@ -231,6 +235,16 @@ export function parseAddFlags(
       i += 2;
       continue;
     }
+    if (tok === "--extends" && kind === "agent") {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        process.stderr.write("--extends requires an agent id\n");
+        process.exit(2);
+      }
+      extendsBase = v;
+      i += 2;
+      continue;
+    }
     if (tok === "--disabled" && kind !== "agent") {
       enabled = false;
       i += 1;
@@ -239,7 +253,7 @@ export function parseAddFlags(
     process.stderr.write(`Unknown flag: ${tok}\n`);
     process.exit(2);
   }
-  return { command, args: argList, env, enabled };
+  return { command, args: argList, env, enabled, extendsBase };
 }
 
 export function splitShellWords(s: string): string[] {

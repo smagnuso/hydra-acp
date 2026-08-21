@@ -8,6 +8,7 @@ import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-setting
 import {
   Registry,
   listAgents,
+  lookupInheritedAgentValue,
   planSpawn,
   type AgentInstallProgressCallback,
   type SpawnPlan,
@@ -4787,7 +4788,16 @@ export class SessionManager {
       // Which verb this agent takes for model changes, read off the shape
       // of its model advertisement (see core/model-verb.ts).
       const modelVerb = inferModelVerbFromResult(newResult);
-      const desired = params.model ?? this.defaultModels[params.agentId];
+      // defaultModels is keyed by agent id, and an agent derived via
+      // config.agents `extends` usually has no entry of its own. Walk the
+      // inheritance chain most-specific-first so `opencode-home` picks up
+      // `defaultModels[opencode]` rather than silently landing on whatever
+      // the agent defaults to.
+      const inheritedModel = lookupInheritedAgentValue(
+        this.defaultModels,
+        agentDef,
+      );
+      const desired = params.model ?? inheritedModel?.value;
       if (desired && desired !== initialModel) {
         // Resolve against the agent's advertised model list when we have
         // one. Surfaces config typos (e.g. defaultModels[opencode] set to
@@ -4805,7 +4815,7 @@ export class SessionManager {
         const where =
           params.model !== undefined
             ? `model=${JSON.stringify(desired)}`
-            : `defaultModels[${params.agentId}]=${JSON.stringify(desired)}`;
+            : `defaultModels[${inheritedModel?.from ?? params.agentId}]=${JSON.stringify(desired)}`;
         if (resolution.kind === "exact" || resolution.kind === "none") {
           // Only adopt the desired id if the agent actually accepted it;
           // a rejection leaves the session on the agent's own default.
@@ -5486,7 +5496,10 @@ export class SessionManager {
   activeAgentVersions(): Map<string, Set<string>> {
     const out = new Map<string, Set<string>>();
     for (const session of this.sessions.values()) {
-      const id = session.agent.agentId;
+      // Install identity, not agentId: a derived agent sharing its base's
+      // install dir must protect that dir under the base's name, which is
+      // what the on-disk directory is called.
+      const id = session.agent.installId;
       const version = session.agent.version;
       let set = out.get(id);
       if (!set) {
