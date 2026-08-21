@@ -28,6 +28,16 @@ export interface Rotation {
   at?: string;
   endedAt?: string;
   cost?: number;
+  // The context span this rotation crossed: `usedBefore` is the
+  // retiring generation's final occupancy, `usedAfter` the entering
+  // generation's opening one.
+  //
+  // Deliberately NOT named usedAtStart/usedAtEnd like the underlying
+  // schema fields, because a rotation straddles two generations and
+  // those names would read as two ends of one. `usedBefore` is lifted
+  // off the PREVIOUS entry's usedAtEnd.
+  usedBefore?: number;
+  usedAfter?: number;
   // Recorded at rotation time. Authoritative when present.
   reason?: UpstreamGenerationReason;
   // The compaction run that produced this swap, when known.
@@ -56,6 +66,18 @@ export interface CompactionRun {
   swaps: number;
   // Summed across the run's swaps. Absent when no swap recorded a cost.
   cost?: number;
+  // What the run actually achieved: the context it compacted away from,
+  // and the context it landed on.
+  //
+  // `before` is the FIRST swap's retiring figure and `after` is the
+  // LAST swap's opening one, so a multi-swap run reads end to end
+  // rather than reporting only its final hop. The intermediate seeds a
+  // retry discarded are not interesting; the span is.
+  //
+  // Either can be absent. A generation closed by a daemon restart banks
+  // no figure, and a run whose swaps predate these fields has neither.
+  usedBefore?: number;
+  usedAfter?: number;
   // True when the run's last swap is the generation still live.
   current: boolean;
 }
@@ -99,6 +121,11 @@ export function readCompactionHistory(
       ...(gen.startedAt !== undefined ? { at: gen.startedAt } : {}),
       ...(gen.endedAt !== undefined ? { endedAt: gen.endedAt } : {}),
       ...(gen.cost !== undefined ? { cost: gen.cost } : {}),
+      ...(gen.usedAtStart !== undefined ? { usedAfter: gen.usedAtStart } : {}),
+      // The figure a rotation retires was stamped on the generation
+      // BEFORE it. Lifting it here is what lets a run report the span it
+      // compacted away from without every consumer re-walking the chain.
+      ...(prev.usedAtEnd !== undefined ? { usedBefore: prev.usedAtEnd } : {}),
       ...(gen.reason !== undefined ? { reason: gen.reason } : {}),
       ...(gen.runId !== undefined ? { runId: gen.runId } : {}),
     };
@@ -152,6 +179,12 @@ function groupIntoRuns(compactions: ReadonlyArray<Rotation>): CompactionRun[] {
       if (c.cost !== undefined) {
         open.cost = (open.cost ?? 0) + c.cost;
       }
+      // usedAfter tracks the LAST swap (where the run left the session);
+      // usedBefore stays on the first (where the run started). A retry's
+      // discarded intermediate seed is not the run's outcome.
+      if (c.usedAfter !== undefined) {
+        open.usedAfter = c.usedAfter;
+      }
       continue;
     }
     runs.push({
@@ -159,6 +192,8 @@ function groupIntoRuns(compactions: ReadonlyArray<Rotation>): CompactionRun[] {
       upstreamSessionId: c.upstreamSessionId,
       swaps: 1,
       ...(c.cost !== undefined ? { cost: c.cost } : {}),
+      ...(c.usedBefore !== undefined ? { usedBefore: c.usedBefore } : {}),
+      ...(c.usedAfter !== undefined ? { usedAfter: c.usedAfter } : {}),
       current: c.endedAt === undefined,
     });
     openRunId = c.runId;
@@ -188,6 +223,32 @@ export function formatRotationTime(iso: string | undefined): string {
  * whether "never been compacted" is the right message given the rest of
  * the state it knows about.
  */
+// "868k", "79.2k", "512". Tokens are read for magnitude, not audited to
+// the unit, and a compaction row exists to answer "did this help" at a
+// glance — six-digit exact figures make that comparison slower, not
+// more precise.
+function formatTokens(n: number): string {
+  if (n < 1000) {
+    return String(n);
+  }
+  const k = n / 1000;
+  return k < 100 ? `${k.toFixed(1)}k` : `${Math.round(k)}k`;
+}
+
+// "868k → 79.2k" for a run whose span is fully known.
+//
+// Renders nothing unless BOTH ends are present. A half-known span reads
+// as a claim about the other end ("→ 79.2k" invites "from what?"), and
+// the honest answer is that the figure was never recorded — a
+// restart-closed generation banks nothing. Silence beats a dangling
+// arrow, and the run's upstream id is still printed either way.
+function formatSpan(run: CompactionRun): string {
+  if (run.usedBefore === undefined || run.usedAfter === undefined) {
+    return "";
+  }
+  return `  ${formatTokens(run.usedBefore)} → ${formatTokens(run.usedAfter)}`;
+}
+
 export function formatCompactionHistory(history: CompactionHistory): string[] {
   const { runs, unknownCount } = history;
   const lines: string[] = [];
@@ -195,6 +256,7 @@ export function formatCompactionHistory(history: CompactionHistory): string[] {
   if (runs.length > 0) {
     lines.push(runs.length === 1 ? "Compacted 1 time:" : `Compacted ${runs.length} times:`);
     for (const r of runs) {
+      const span = formatSpan(r);
       const cost = r.cost !== undefined ? `  $${r.cost.toFixed(2)}` : "";
       const live = r.current ? "  (current)" : "";
       // Surfaced because it explains an otherwise baffling observation:
@@ -203,7 +265,7 @@ export function formatCompactionHistory(history: CompactionHistory): string[] {
       // would claim the user compacted twice.
       const swaps = r.swaps > 1 ? `  (${r.swaps} swaps)` : "";
       lines.push(
-        `  ${formatRotationTime(r.at)}  ${r.upstreamSessionId}${cost}${swaps}${live}`,
+        `  ${formatRotationTime(r.at)}  ${r.upstreamSessionId}${span}${cost}${swaps}${live}`,
       );
     }
   }

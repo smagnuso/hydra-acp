@@ -4763,7 +4763,7 @@ describe("appendUpstreamGeneration", () => {
   // usage_update rows are eventually discarded. Stamping the retiring
   // generation's cost at rotation is what makes that spend survive.
   it("stamps the retiring generation's cost when it is rotated away", () => {
-    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", 361.11);
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", { retiredCost: 361.11 });
     expect(out[0]!.cost).toBe(361.11);
     expect(out[1]!.cost).toBeUndefined();   // still live, still accruing
   });
@@ -4780,7 +4780,7 @@ describe("appendUpstreamGeneration", () => {
         { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
       ],
     };
-    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:01.000Z", 361.11);
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:01.000Z", { retiredCost: 361.11 });
     expect(out).toHaveLength(2);
     expect(out[0]!.cost).toBe(361.11);
   });
@@ -4794,8 +4794,7 @@ describe("appendUpstreamGeneration", () => {
       "opencode",
       "ses_2",
       "2026-06-02T00:00:00.000Z",
-      undefined,
-      "compaction",
+      { reason: "compaction" },
     );
     expect(out[0]!.reason).toBeUndefined();
     expect(out[1]!.reason).toBe("compaction");
@@ -4824,8 +4823,7 @@ describe("appendUpstreamGeneration", () => {
       "opencode",
       "ses_2",
       "2026-06-02T00:00:01.000Z",
-      undefined,
-      "compaction",
+      { reason: "compaction" },
     );
     expect(out).toHaveLength(2);
     expect(out[1]!.reason).toBe("compaction");
@@ -4850,8 +4848,7 @@ describe("appendUpstreamGeneration", () => {
       "opencode",
       "ses_2",
       "2026-06-03T00:00:00.000Z",
-      undefined,
-      "compaction",
+      { reason: "compaction" },
     );
     expect(out[1]!.reason).toBe("workspace-enter");
   });
@@ -4865,8 +4862,60 @@ describe("appendUpstreamGeneration", () => {
         { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
       ],
     };
-    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-03T00:00:00.000Z", 361.11);
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-03T00:00:00.000Z", { retiredCost: 361.11 });
     expect(out[0]!.cost).toBe(99);
+  });
+
+  // The context figures are stamped on opposite entries: what the old
+  // generation ended holding goes on the one closing, what the new one
+  // opens holding on the one beginning. Getting these backwards would
+  // render every compaction as a no-op span.
+  it("stamps usedAtEnd on the retiring generation and usedAtStart on the new one", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", {
+      retiredUsed: 868556,
+      startedUsed: 79193,
+      reason: "compaction",
+    });
+    expect(out[0]!.usedAtEnd).toBe(868556);
+    expect(out[0]!.usedAtStart).toBeUndefined();
+    expect(out[1]!.usedAtStart).toBe(79193);
+    expect(out[1]!.usedAtEnd).toBeUndefined(); // still live, still growing
+  });
+
+  // Same race the cost back-fill covers: a routine persist can append
+  // the new entry first, with neither figure. The rotation's own call
+  // arrives second holding both and must fill them in rather than
+  // no-op because the entry already exists.
+  it("back-fills both context figures when a routine persist won the race", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z" },
+        { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:01.000Z", {
+      retiredUsed: 868556,
+      startedUsed: 79193,
+      reason: "compaction",
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]!.usedAtEnd).toBe(868556);
+    expect(out[1]!.usedAtStart).toBe(79193);
+    expect(out[1]!.reason).toBe("compaction");
+  });
+
+  // A rollback or restart resumes an upstream whose context the agent
+  // has not reported yet. Omitting startedUsed must leave the field
+  // absent, not write the 0 the usage snapshot was just reset to — 0
+  // would render as a compaction to nothing.
+  it("records no usedAtStart when the rotation could not observe one", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", {
+      retiredUsed: 868556,
+    });
+    expect(out[0]!.usedAtEnd).toBe(868556);
+    expect(out[1]!.usedAtStart).toBeUndefined();
   });
 
   // recordFromMemorySession seeds a fresh chain when upstreamGenerations

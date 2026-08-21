@@ -232,4 +232,134 @@ describe("generation cost stamping e2e", () => {
     },
     30_000,
   );
+
+  // The context figures ride the same wiring as cost but are captured at
+  // two different instants — the retiring one just before
+  // accumulateAndResetCost zeroes the snapshot, the opening one from the
+  // seed prompt's own usage report several awaits later. Nothing below
+  // Session sees both, so only an e2e run proves they land on the right
+  // entries.
+  it(
+    "stamps the context span across a compaction swap into meta.json",
+    async () => {
+      const RETIRING_USED = 868556;
+      const SEED_USED = 79193;
+
+      let spawnCount = 0;
+      const oldAgents: ReturnType<typeof makeMockAgent>[] = [];
+
+      const manager = new SessionManager(
+        fakeRegistry(),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+          const reqMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          if (spawnCount === 0) {
+            oldAgents.push(m);
+            reqMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: `u_initial_${spawnCount++}` });
+            return m.agent;
+          }
+          // The replacement agent reports its post-seed context while the
+          // seed prompt is still in flight, which is how a real agent
+          // tells hydra how big the synopsis landed.
+          reqMock.mockImplementation(async (method: string) => {
+            if (method === "session/new") {
+              return { sessionId: `fresh_${spawnCount++}` };
+            }
+            if (method === "session/prompt") {
+              m.triggerNotification("session/update", {
+                sessionId: `fresh_${spawnCount}`,
+                update: {
+                  sessionUpdate: "usage_update",
+                  used: SEED_USED,
+                  size: 1000000,
+                },
+              });
+              return { stopReason: "end_turn" };
+            }
+            return {};
+          });
+          return m.agent;
+        },
+        undefined,
+        { compaction: { tailK: 5 } },
+      );
+
+      const session = await manager.create({
+        cwd: WORK_CWD,
+        agentId: "claude-code",
+      });
+      const sessionId = session.sessionId;
+      const originalUpstream = session.upstreamSessionId;
+
+      const stream = makeControlledStream();
+      const conn = new JsonRpcConnection(stream);
+      await session.attach({ clientId: "c1", connection: conn }, "full");
+
+      const oldReqMock = oldAgents[0]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      for (const text of ["a", "b", "c"]) {
+        oldReqMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+        await session.prompt("c1", { prompt: [{ type: "text", text }] });
+      }
+
+      // The session fills up. This is the figure the compaction is about
+      // to shed, and the only place it will ever be written down.
+      oldAgents[0]!.triggerNotification("session/update", {
+        sessionId: originalUpstream,
+        update: {
+          sessionUpdate: "usage_update",
+          used: RETIRING_USED,
+          size: 1000000,
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(session.currentUsage?.used).toBe(RETIRING_USED);
+
+      await manager.flushHistoryWrites();
+
+      mockCompaction.mockResolvedValue({ synopsis: makeArtifact() });
+      (
+        manager as unknown as {
+          synopsisCoordinator: { scheduleCompaction: (id: string) => void };
+        }
+      ).synopsisCoordinator.scheduleCompaction(sessionId);
+
+      await waitFor(() => {
+        const current = manager.get(sessionId);
+        return !!current && current.upstreamSessionId !== originalUpstream;
+      }, 15_000);
+
+      await manager.flushMetaWrites();
+      const store = (
+        manager as unknown as {
+          store: { read: (id: string) => Promise<SessionRecord | undefined> };
+        }
+      ).store;
+      const gens = (await store.read(sessionId))!.upstreamGenerations ?? [];
+
+      const retiring = gens.find(
+        (g) => g.upstreamSessionId === originalUpstream,
+      );
+      expect(retiring?.usedAtEnd).toBe(RETIRING_USED);
+      // The retiring entry is where the session ENDED, never where a
+      // later one started; a swapped pair here would render every
+      // compaction as a flat span.
+      expect(retiring?.usedAtStart).toBeUndefined();
+
+      const current = gens[gens.length - 1]!;
+      expect(current.usedAtStart).toBe(SEED_USED);
+      expect(current.usedAtEnd).toBeUndefined();
+
+      // And the live snapshot agrees, so the status bar and the record
+      // can't disagree about what just happened.
+      expect(manager.get(sessionId)!.currentUsage?.used).toBe(SEED_USED);
+
+      await manager.flushHistoryWrites();
+    },
+    30_000,
+  );
 });

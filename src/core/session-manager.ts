@@ -5246,14 +5246,12 @@ export class SessionManager {
         () => undefined,
       );
     });
-    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost, reason, runId }) => {
+    session.onAgentChange(({ agentId, upstreamSessionId, ...facts }) => {
       void this.persistAgentChange(
         session.sessionId,
         agentId,
         upstreamSessionId,
-        retiredCost,
-        reason,
-        runId,
+        facts,
       ).catch(() => undefined);
     });
     session.onModelChange((model) => {
@@ -6852,9 +6850,7 @@ export class SessionManager {
     sessionId: string,
     agentId: string,
     upstreamSessionId: string,
-    retiredCost?: number,
-    reason?: UpstreamGenerationReason,
-    runId?: string,
+    facts: UpstreamRotationFacts = {},
   ): Promise<void> {
     await this.mutateRecord(sessionId, { agentId, upstreamSessionId }, undefined, (prev) => ({
       upstreamGenerations: appendUpstreamGeneration(
@@ -6862,9 +6858,7 @@ export class SessionManager {
         agentId,
         upstreamSessionId,
         undefined,
-        retiredCost,
-        reason,
-        runId,
+        facts,
       ),
     }));
   }
@@ -8199,15 +8193,31 @@ async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {
 // upstream (a resurrect that reloads the same agent session) is not a
 // new generation and must not double-append, or cost attribution would
 // count that upstream twice.
+// Everything the rotation itself knows and a routine persist doesn't.
+// Grouped rather than trailing positionally: only the rotation caller
+// supplies any of it, and a call site passing the fifth of seven
+// positional optionals is unreadable.
+export interface UpstreamRotationFacts {
+  // Spend and final context occupancy of the generation being closed.
+  retiredCost?: number;
+  retiredUsed?: number;
+  // Opening context occupancy of the generation being opened. Only the
+  // swap path knows this (it read the seed's own figure); a rollback or
+  // restart resumes an upstream that has not reported yet, and passes
+  // nothing rather than claim 0.
+  startedUsed?: number;
+  reason?: UpstreamGenerationReason;
+  runId?: string;
+}
+
 export function appendUpstreamGeneration(
   prev: SessionRecord,
   agentId: string,
   upstreamSessionId: string,
   now: string = new Date().toISOString(),
-  retiredCost?: number,
-  reason?: UpstreamGenerationReason,
-  runId?: string,
+  facts: UpstreamRotationFacts = {},
 ): UpstreamGeneration[] {
+  const { retiredCost, retiredUsed, startedUsed, reason, runId } = facts;
   const seeded: UpstreamGeneration[] =
     prev.upstreamGenerations && prev.upstreamGenerations.length > 0
       ? [...prev.upstreamGenerations]
@@ -8221,22 +8231,39 @@ export function appendUpstreamGeneration(
     // routine persist (mergeForPersistence) beat us to the append and
     // closed the previous entry without a cost — it has no retiredCost to
     // pass. Back-fill it here so the figure isn't lost to that race.
-    if (retiredCost !== undefined && seeded.length >= 2) {
+    if (seeded.length >= 2) {
       const retiring = seeded[seeded.length - 2];
-      if (retiring && retiring.cost === undefined) {
-        seeded[seeded.length - 2] = { ...retiring, cost: retiredCost };
+      if (retiring) {
+        seeded[seeded.length - 2] = {
+          ...retiring,
+          ...(retiredCost !== undefined && retiring.cost === undefined
+            ? { cost: retiredCost }
+            : {}),
+          ...(retiredUsed !== undefined && retiring.usedAtEnd === undefined
+            ? { usedAtEnd: retiredUsed }
+            : {}),
+        };
       }
     }
     // Same race, for the reason: the routine persist knows only that the
     // upstream rotated, never why, so it pushes a reasonless entry. The
     // rotation's own call arrives second and is the only caller that
     // knows the cause — back-fill rather than drop it, or the reason is
-    // lost to whichever write happened to land first.
-    if (reason !== undefined && last.reason === undefined) {
+    // lost to whichever write happened to land first. usedAtStart rides
+    // along for the same reason: the persist that won the race opened
+    // this entry without one.
+    if (
+      (reason !== undefined && last.reason === undefined) ||
+      (startedUsed !== undefined && last.usedAtStart === undefined)
+    ) {
       seeded[seeded.length - 1] = {
         ...last,
-        reason,
-        ...(runId !== undefined ? { runId } : {}),
+        ...(reason !== undefined && last.reason === undefined
+          ? { reason, ...(runId !== undefined ? { runId } : {}) }
+          : {}),
+        ...(startedUsed !== undefined && last.usedAtStart === undefined
+          ? { usedAtStart: startedUsed }
+          : {}),
       };
     }
     return seeded;
@@ -8251,6 +8278,10 @@ export function appendUpstreamGeneration(
       // per entry for time attribution but dedupe by upstream id when
       // joining an external per-session ledger.
       ...(retiredCost !== undefined ? { cost: retiredCost } : {}),
+      // Same reasoning for the closing context figure: it is only
+      // knowable at the instant of rotation, because the live snapshot
+      // it comes from is about to be reset for the incoming generation.
+      ...(retiredUsed !== undefined ? { usedAtEnd: retiredUsed } : {}),
     };
   }
   seeded.push({
@@ -8259,6 +8290,7 @@ export function appendUpstreamGeneration(
     startedAt: now,
     ...(reason !== undefined ? { reason } : {}),
     ...(runId !== undefined ? { runId } : {}),
+    ...(startedUsed !== undefined ? { usedAtStart: startedUsed } : {}),
   });
   return seeded;
 }

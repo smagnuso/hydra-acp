@@ -2266,6 +2266,48 @@ that synthesis finished, not that the agent was replaced. A client clearing a
 
 **Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed. `converged` is the exception in one direction only: it deliberately writes **no** terminal `compactionState`, because a successful swap clears that field and re-writing it would resurrect state whose absence is what "no compaction in progress" means. The durable record of a successful compaction is the `upstreamGenerations` entry, not `compactionState`.
 
+#### Per-generation context figures
+
+Each `upstreamGenerations` entry carries `usedAtStart` and `usedAtEnd`: the
+context-window occupancy, in tokens, when that generation was entered and
+when it was rotated away.
+
+**These are not cumulative.** Every generation is a separate upstream
+session with its own window, so the chain is a sawtooth, not a ladder — a
+compaction exists precisely so that the new entry's `usedAtStart` is far
+below the previous entry's `usedAtEnd`:
+
+```
+u_first    usedAtStart: 0        usedAtEnd: 868556
+u_second   usedAtStart: 79193    usedAtEnd: 923708     <- compaction
+u_third    usedAtStart: 80112    usedAtEnd: —          <- live
+```
+
+The one exception is a **re-entered** upstream. A rollback resumes a session
+where it left off, so its new entry opens at that upstream's prior
+occupancy rather than at a seed-sized figure. A re-entry and a failed
+compaction are indistinguishable from the id alone and are told apart by
+this pair.
+
+Either field may be absent, and absent never means zero:
+
+- `usedAtEnd` is absent on the live entry (still accruing), and on any
+  generation closed by a **daemon restart** rather than a rotation — the
+  in-memory Session is what reports the figure, and a killed daemon
+  reports nothing. Same reason `cost` is absent on those entries.
+- `usedAtStart` is absent whenever the opening figure was never observed:
+  a rollback or restart resumes an upstream that has not reported usage
+  yet. The daemon deliberately does not record the `0` its own snapshot
+  holds at that instant, because `0` would read as an empty context on a
+  session holding a full one.
+
+`/hydra compact status` renders a run as `869k → 79.2k`, and renders no
+span at all when either end is missing rather than emit a half-open one.
+
+These fields exist because nothing else retains the numbers: `currentUsage`
+is a single snapshot of the live generation and is overwritten at each
+rotation, and the `usage_update` rows in `history.jsonl` are a ring buffer.
+
 ### session/update — workspace lifecycle
 
 Emitted while a session moves into or out of an isolated workspace, or has its

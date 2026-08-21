@@ -218,6 +218,29 @@ export const UpstreamGeneration = z.object({
   // becomes unrecoverable from the transcript. Absent on the live entry
   // (still accruing) and on generations retired before this field existed.
   cost: z.number().nonnegative().optional(),
+  // Context-window occupancy at the two ends of this generation's life,
+  // in tokens. Each generation is a SEPARATE upstream session with its
+  // own window, so these do not form a running total across the chain:
+  // a compaction's whole purpose is that usedAtStart is far below the
+  // previous generation's usedAtEnd. Read a pair as one sawtooth tooth,
+  // never as a ladder step.
+  //
+  // Recorded because nothing else keeps them. `currentUsage` holds a
+  // single snapshot of the LIVE generation and is overwritten at every
+  // rotation, and the usage_update rows in history.jsonl age out of the
+  // ring buffer — so without these, whether a compaction actually
+  // reduced anything is unrecoverable an hour later.
+  //
+  // usedAtStart: occupancy once the generation is seeded and ready for
+  // its first real turn (the synopsis seed for a compaction). Absent
+  // when the opening figure was never observed — a rollback or restart
+  // resumes an upstream whose context the agent has not yet reported,
+  // and 0 there would read as "empty" when the session is anything but.
+  usedAtStart: z.number().nonnegative().optional(),
+  // usedAtEnd: last occupancy observed before rotating away. Absent on
+  // the live entry (still accruing) and on any generation closed by a
+  // daemon restart rather than a rotation, which banks nothing.
+  usedAtEnd: z.number().nonnegative().optional(),
   // True when this entry was reconstructed after the fact rather than
   // recorded at rotation time (e.g. by matching externalized tool blobs
   // against the agent's own ledger). Reconstruction cannot certify

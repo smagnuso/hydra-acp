@@ -293,3 +293,116 @@ describe("multi-swap runs", () => {
     expect(h.runs).toHaveLength(3);
   });
 });
+
+// The span is the whole reason these fields exist: it answers "did the
+// compaction do anything" without re-deriving it from history.jsonl,
+// which is a ring buffer and will have dropped the rows.
+describe("context span", () => {
+  const compacted = [
+    gen({ upstreamSessionId: "u_pre", usedAtEnd: 868556 }),
+    gen({
+      upstreamSessionId: "u_post",
+      reason: "compaction",
+      startedAt: "2026-08-21T04:51:10.188Z",
+      usedAtStart: 79193,
+    }),
+  ];
+
+  it("reads the span across the rotation boundary", () => {
+    const h = readCompactionHistory(compacted, 15074);
+    expect(h.runs[0]!.usedBefore).toBe(868556);
+    expect(h.runs[0]!.usedAfter).toBe(79193);
+  });
+
+  it("renders the span on the run row", () => {
+    const lines = formatCompactionHistory(readCompactionHistory(compacted, 15074));
+    expect(lines[1]).toContain("869k → 79.2k");
+  });
+
+  // A revert is the failure this was built to make visible: the session
+  // came back on the upstream it had just left, at the size it had just
+  // shed. Reading "869k → 869k" says so at a glance.
+  it("makes a revert legible rather than plausible", () => {
+    const lines = formatCompactionHistory(
+      readCompactionHistory(
+        [
+          gen({ upstreamSessionId: "u_pre", usedAtEnd: 868556 }),
+          gen({
+            upstreamSessionId: "u_post",
+            reason: "compaction",
+            startedAt: "2026-08-21T04:51:10.188Z",
+            usedAtStart: 868556,
+          }),
+        ],
+        15074,
+      ),
+    );
+    expect(lines[1]).toContain("869k → 869k");
+  });
+
+  // Half a span is a question, not an answer: "→ 79.2k" reads as a
+  // claim about a figure nobody recorded. A restart-closed generation
+  // banks nothing, and that is common enough to matter.
+  it("renders no span when only one end is known", () => {
+    const lines = formatCompactionHistory(
+      readCompactionHistory(
+        [
+          gen({ upstreamSessionId: "u_pre" }),
+          gen({
+            upstreamSessionId: "u_post",
+            reason: "compaction",
+            startedAt: "2026-08-21T04:51:10.188Z",
+            usedAtStart: 79193,
+          }),
+        ],
+        15074,
+      ),
+    );
+    expect(lines[1]).not.toContain("→");
+    expect(lines[1]).toContain("u_post");
+  });
+
+  // A retry's discarded middle seed is not the outcome. The run should
+  // report where it started and where it actually left the session.
+  it("spans a multi-swap run end to end, not just its last hop", () => {
+    const h = readCompactionHistory(
+      [
+        gen({ upstreamSessionId: "u_pre", usedAtEnd: 900000 }),
+        gen({
+          upstreamSessionId: "u_mid",
+          reason: "compaction",
+          runId: "run1",
+          startedAt: "2026-08-19T22:06:56.172Z",
+          endedAt: "2026-08-19T22:08:13.736Z",
+          usedAtStart: 120000,
+          usedAtEnd: 130000,
+        }),
+        gen({
+          upstreamSessionId: "u_final",
+          reason: "compaction",
+          runId: "run1",
+          startedAt: "2026-08-19T22:08:13.736Z",
+          usedAtStart: 82000,
+        }),
+      ],
+      11646,
+    );
+    expect(h.runs).toHaveLength(1);
+    expect(h.runs[0]!.usedBefore).toBe(900000);
+    expect(h.runs[0]!.usedAfter).toBe(82000);
+  });
+
+  it("leaves pre-existing rows without figures untouched", () => {
+    const lines = formatCompactionHistory(
+      readCompactionHistory(
+        [
+          gen({ upstreamSessionId: "u_pre" }),
+          gen({ upstreamSessionId: "u_post", reason: "compaction", startedAt: "2026-08-19T10:00:00Z", cost: 4.5 }),
+        ],
+        500,
+      ),
+    );
+    expect(lines[1]).toContain("$4.50");
+    expect(lines[1]).not.toContain("→");
+  });
+});

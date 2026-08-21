@@ -1086,6 +1086,18 @@ export class Session {
       // the retiring generation entry so the figure survives the history
       // ring evicting that generation's usage_update rows.
       retiredCost?: number;
+      // Context occupancy of that same retiring upstream, captured in the
+      // same breath and for the same reason: accumulateAndResetCost is
+      // about to zero the live snapshot for the incoming generation, and
+      // nothing else keeps the old figure.
+      retiredUsed?: number;
+      // Opening occupancy of the generation being entered. Supplied only
+      // by the swap path, which learns it from the seed prompt's own
+      // usage report. A rollback or restart resumes an upstream that has
+      // not reported yet, so it passes nothing — recording the reset 0
+      // there would claim an empty context for a session holding a full
+      // one, which is the exact misreading these fields exist to prevent.
+      startedUsed?: number;
       // Why the rotation happened. This is the ONLY point in the pipeline
       // that knows: by the time SessionManager persists, a compaction
       // swap, a workspace move and an agent switch are the same shape.
@@ -1100,6 +1112,13 @@ export class Session {
   // notification. Not persisted directly — it only has to live long
   // enough to reach the generation entry.
   private retiringGenerationCost: number | undefined;
+  // Same lifecycle as retiringGenerationCost: set by
+  // accumulateAndResetCost, consumed and cleared by the next
+  // agentChange notification. Tracked separately because a generation
+  // can end with a context but no spend (a swap immediately after a
+  // resurrect banks no cost), and folding them into one optional would
+  // drop the figure that IS known.
+  private retiringGenerationUsed: number | undefined;
   // Last available_commands_update we observed from the agent. Stored
   // so we can re-broadcast a merged (hydra ∪ agent) list whenever
   // either half changes, and persisted to meta.json so a fresh attach
@@ -2264,7 +2283,7 @@ export class Session {
     // onCompactionSwapHook so meta.json's upstreamSessionId is updated
     // before the breadcrumb is written (the breadcrumb references the
     // previous id, not the current).
-    this.notifyAgentChange("swapUpstream", generationReason, opts.runId);
+    this.notifyAgentChange("swapUpstream", generationReason, opts.runId, seedUsed);
     // Persist the moved watermark. Not gated on crossAgent: a cross-agent
     // swap advances it too, and recall's gates read the record either way.
     if (opts.summarizedThroughEntry !== undefined && this.persistWatermarkHook) {
@@ -5823,15 +5842,23 @@ export class Session {
     context: string,
     reason?: UpstreamGenerationReason,
     runId?: string,
+    // Opening context size of the generation being entered. Only
+    // swapUpstream can supply it (from the seed's usage report); every
+    // other rotation path omits it rather than pass the placeholder 0.
+    startedUsed?: number,
   ): void {
     const retiredCost = this.retiringGenerationCost;
     this.retiringGenerationCost = undefined;
+    const retiredUsed = this.retiringGenerationUsed;
+    this.retiringGenerationUsed = undefined;
     for (const handler of this.agentChangeHandlers) {
       try {
         handler({
           agentId: this.agentId,
           upstreamSessionId: this.upstreamSessionId,
           ...(retiredCost !== undefined ? { retiredCost } : {}),
+          ...(retiredUsed !== undefined ? { retiredUsed } : {}),
+          ...(startedUsed !== undefined ? { startedUsed } : {}),
           ...(reason !== undefined ? { reason } : {}),
           ...(runId !== undefined ? { runId } : {}),
         });
@@ -5872,6 +5899,17 @@ export class Session {
     if (amount) {
       this.cumulativeCost += amount;
       this.retiringGenerationCost = amount;
+    }
+    // Read before `next` overwrites it with 0. This is the last instant
+    // the outgoing generation's context size exists anywhere: the
+    // snapshot is per-life, and the usage_update rows it came from are
+    // in a ring buffer. Guarded on `> 0` rather than `!== undefined` so
+    // a second reset with no turn in between (accumulateAndResetCost is
+    // reachable twice without an agentChange) doesn't overwrite a real
+    // figure with the 0 the first reset just wrote.
+    const used = this._currentUsage?.used;
+    if (typeof used === "number" && used > 0) {
+      this.retiringGenerationUsed = used;
     }
     const next: UsageSnapshot = {
       used: 0,
