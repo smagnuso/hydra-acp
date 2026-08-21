@@ -2135,7 +2135,7 @@ export function registerAcpWsEndpoint(
       }
       evictPriorAttachment(state, session, session.sessionId);
       const client = bindClientToSession(connection, session, state);
-      const { entries: replay } = await session.attach(client, "pending_only");
+      const { entries: replay } = await session.attach(client, "full");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,

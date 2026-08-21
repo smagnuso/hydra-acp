@@ -1028,8 +1028,8 @@ describe("Session", () => {
     });
 
     it("includes synthetic state snapshots (but no history) for historyPolicy=pending_only", async () => {
-      // pending_only is what session/load (agent-shell's resume path)
-      // uses — the client has its own conversation history but still
+      // pending_only is what session/resume (agent-shell's minimal-verbosity
+      // path) uses — the client has its own conversation history but still
       // needs current state pushed so a third-party ACP client sees
       // model/usage/commands/title without depending on hydra's _meta.
       const { session, mock } = makeSession("sess_po", "u_po");

@@ -2798,10 +2798,11 @@ export class Session {
       return Promise.resolve({ entries: [], appliedPolicy: historyPolicy });
     }
     // "pending_only" gets snapshot state but no conversation history.
-    // Callers using this policy (notably session/load — agent-shell's
-    // resume path) already have their own conversation history but
-    // still need current model/mode/usage/commands/title to render
-    // correctly, since those are filtered from on-disk history.
+    // Callers using this policy (notably session/resume, and a
+    // reconnecting client's own session/attach) already have their own
+    // conversation history but still need current
+    // model/mode/usage/commands/title to render correctly, since those
+    // are filtered from on-disk history.
     if (historyPolicy === "pending_only") {
       return Promise.resolve({
         entries: this.buildStateSnapshotReplay(),
