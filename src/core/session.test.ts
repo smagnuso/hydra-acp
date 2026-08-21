@@ -5295,7 +5295,7 @@ describe("Session", () => {
       expect(chunk).toBeDefined();
       expect(
         (chunk!.params as { update: { _meta?: unknown } }).update._meta,
-      ).toEqual({ "hydra-acp": { compatFor: "prompt_received" } });
+      ).toEqual({ "hydra-acp": { steered: true } });
       const promptReceived = observerStream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
@@ -5337,6 +5337,115 @@ describe("Session", () => {
             ?.sessionUpdate === "user_message_chunk",
       );
       expect(chunk).toBeUndefined();
+    });
+
+    it("closes a steer-detached turn on its own terminal instead of leaving the session BUSY forever", async () => {
+      // The race: steer() reads turnInFlight as true (M1's session/prompt
+      // hasn't resolved yet from hydra's side), but by the time the agent
+      // handles the _session/steering request, M1's own turn has actually
+      // ended — the agent takes its idle branch and detaches a fresh turn,
+      // replying startedNewTurn. That detached turn's content is user-lane
+      // (kind:"human"), which autonomousTurnTerminal never treats as an
+      // ending signal, so without steerCaused tracking the session would
+      // read BUSY forever.
+      const { session, mock } = makeSession("hydra_session_steer6", "u_steer6");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      let resolveM1: ((v: unknown) => void) | undefined;
+      let resolveSteer: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveM1 = r)),
+      );
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveSteer = r)),
+      );
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_steer6",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const steerPromise = session.steer(client.clientId, {
+        sessionId: "hydra_session_steer6",
+        prompt: [{ type: "text", text: "redirect" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // M1 actually finishes agent-side while the steering request is still
+      // outstanding.
+      resolveM1?.({ stopReason: "end_turn" });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(session.inUnsolicitedTurn).toBe(false);
+
+      resolveSteer?.({ outcome: "startedNewTurn" });
+      const result = await steerPromise;
+      expect(result).toEqual({ outcome: "startedNewTurn" });
+
+      // The detached turn's own content, streamed with no prompt in flight.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_steer6",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "redirected work" },
+        },
+      });
+      expect(session.inUnsolicitedTurn).toBe(true);
+
+      // Its terminal rides the same carrier as any user turn's end.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_steer6",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 42,
+          _meta: { "_claude/origin": { kind: "human" } },
+        },
+      });
+
+      expect(session.inUnsolicitedTurn).toBe(false);
+    });
+
+    it("does not mistake an unrelated background-task turn for a steer-caused one", async () => {
+      // Guards against a fix that closes on ANY human-lane terminal while an
+      // unsolicited turn is open, which would reintroduce the exact bug
+      // autonomousTurnTerminal's kind check exists to avoid.
+      const { session, mock } = makeSession("hydra_session_steer7", "u_steer7");
+      const { client } = makeClient();
+      session.attach(client, "full");
+
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      await session.prompt(client.clientId, {
+        sessionId: "hydra_session_steer7",
+        prompt: [{ type: "text", text: "first turn" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // Agent resumes on its own — no steer() was ever involved.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_steer7",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "background work" },
+        },
+      });
+      expect(session.inUnsolicitedTurn).toBe(true);
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_steer7",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 7,
+          _meta: { "_claude/origin": { kind: "human" } },
+        },
+      });
+      expect(session.inUnsolicitedTurn).toBe(true);
     });
 
     it("falls back to amend (cancel-and-resubmit) when a turn is in flight but the agent doesn't support native steering", async () => {

@@ -829,8 +829,20 @@ export class Session {
       messageId: string;
       startedAt: number;
       cause: { toolCallId: string; label: string } | undefined;
+      // True when this turn was opened right after steer() sent a native
+      // forward and got back "startedNewTurn" — see pendingSteerDetach.
+      steerCaused: boolean;
     }
     | undefined;
+  // Armed by steer() just before forwarding to _session/steering while it
+  // believes a turn is in flight, cleared once the reply confirms whether
+  // the belief was right. If the belief was stale (the real turn had
+  // already ended agent-side), the agent detaches a fresh turn instead of
+  // injecting and replies "startedNewTurn" — that detached turn is
+  // user-lane (stamped kind:"human"), so autonomousTurnTerminal never fires
+  // for it. Set before the request, not after the reply, because the
+  // detached turn's first notification can arrive before the reply does.
+  private pendingSteerDetach = false;
   // Set when a queue entry superseded an unsolicited turn that was still
   // running. The agent is now inside a lane it started by itself, with our
   // prompt injected on top, and claude-acp owes exactly one SDK result for
@@ -3613,7 +3625,14 @@ export class Session {
     // Deliberately ahead of the state-update filter below, which would drop
     // it: usage_update is the carrier claude-acp stamps the origin onto, and
     // an autonomous origin is the authoritative end of the turn.
-    if (autonomousTurnTerminal(envelope)) {
+    //
+    // steerCausedTurnTerminal is the narrow exception to "a human-lane
+    // terminal never ends an unsolicited turn": when hydra itself caused
+    // this specific detached turn via a steer, its content is necessarily
+    // user-lane, and hydra already knows no other prompt is in flight — so
+    // this usage_update can only be that turn ending, not some unrelated
+    // user turn's terminal racing in from outside.
+    if (autonomousTurnTerminal(envelope) || this.steerCausedTurnTerminal(envelope)) {
       if (this.unsolicitedTurn !== undefined) {
         this.closeUnsolicitedTurn("completed");
         return;
@@ -3640,6 +3659,22 @@ export class Session {
       return;
     }
     this.openUnsolicitedTurn();
+  }
+
+  // True only for the usage_update that ends a turn hydra knows it caused
+  // by steering into what turned out to be a stale "turn in flight" belief.
+  // Scoped to `unsolicitedTurn.steerCaused` specifically, not "any human-lane
+  // usage_update while an unsolicited turn is open" — the latter would
+  // reintroduce the bug autonomousTurnTerminal's kind check exists to avoid
+  // (an unrelated user turn's terminal closing an agent-initiated one).
+  private steerCausedTurnTerminal(envelope: unknown): boolean {
+    if (this.unsolicitedTurn?.steerCaused !== true) {
+      return false;
+    }
+    const update = (envelope as { update?: Record<string, unknown> } | undefined)
+      ?.update;
+    return !!update && typeof update === "object" &&
+      update.sessionUpdate === "usage_update";
   }
 
   // Harvest the background task an agent update announces, so an
@@ -4106,7 +4141,9 @@ export class Session {
       messageId: generateMessageId(),
       startedAt,
       cause,
+      steerCaused: this.pendingSteerDetach,
     };
+    this.pendingSteerDetach = false;
     this.unsolicitedTurn = turn;
     this.promptStartedAt = startedAt;
     this.logger?.info(
@@ -4822,13 +4859,32 @@ export class Session {
       this.currentEntry?.kind === "user" && !this.currentEntry.cancelled;
 
     if (turnInFlight && this.agent.steeringSupported) {
-      const response = await this.forwardRequest("_session/steering", params);
+      // Armed before the request goes out, not after it resolves: if the
+      // agent's own turn ended just before this arrived, the detached
+      // turn's first notification can beat this request's response back
+      // to us. See pendingSteerDetach and steerCausedTurnTerminal.
+      this.pendingSteerDetach = true;
+      let response: unknown;
+      try {
+        response = await this.forwardRequest("_session/steering", params);
+      } catch (err) {
+        this.pendingSteerDetach = false;
+        throw err;
+      }
       const outcome = (response as { outcome?: unknown } | undefined)?.outcome;
       const result: SteeringResult =
         outcome === "injected" || outcome === "startedNewTurn" ||
         outcome === "promptRequired" || outcome === "failed"
           ? (response as SteeringResult)
           : { outcome: "failed" };
+      // Only "startedNewTurn" means the detach actually happened — leave the
+      // flag armed for openUnsolicitedTurn to consume in that case; every
+      // other outcome means hydra's belief was correct, so there is no
+      // detached turn coming and the flag must not linger to mislabel some
+      // unrelated later one.
+      if (result.outcome !== "startedNewTurn") {
+        this.pendingSteerDetach = false;
+      }
       if (result.outcome === "injected") {
         // The turn's boundary didn't change — record what was said, but
         // NOT as prompt_received, which would tell every attached client
@@ -4875,6 +4931,15 @@ export class Session {
   // block in broadcastPromptReceived, minus prompt_received itself —
   // nothing about the turn boundary changed, so announcing a new turn
   // would be a lie to every other attached client.
+  //
+  // Stamped `steered: true`, deliberately NOT `compatFor: "prompt_received"`:
+  // that stamp means "this duplicates a prompt_received that also went out",
+  // which is what mapUserText and history-search key off to drop it as a
+  // redundant echo. No prompt_received ever accompanies a steer, so reusing
+  // that stamp made this the ONLY record of the steer and then discarded it
+  // in both readers — invisible to every attached client but the steering
+  // client itself (which renders its own local echo), and absent from
+  // history search and replay.
   private recordSteerAsUserMessageChunk(
     prompt: unknown[],
     excludeClientId: string,
@@ -4890,7 +4955,7 @@ export class Session {
         update: {
           sessionUpdate: "user_message_chunk",
           content: { type: "text", text },
-          _meta: { "hydra-acp": { compatFor: "prompt_received" } },
+          _meta: { "hydra-acp": { steered: true } },
         },
       },
       excludeClientId,

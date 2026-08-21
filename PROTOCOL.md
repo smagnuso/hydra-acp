@@ -1716,20 +1716,32 @@ cases rather than joining one in progress. `"injected"` and `"failed"`
 only ever come back verbatim from a native agent's own reply.
 
 A landed steer that joins the running turn (`outcome: "injected"`) is
-recorded as a `user_message_chunk` (the same compat-shim shape used
-elsewhere, `_meta.hydra-acp.compatFor: "prompt_received"`), never as
-`prompt_received` itself — the turn boundary didn't move, so announcing a
-new one would misinform every other attached client.
+recorded as a `user_message_chunk`, never as `prompt_received` itself —
+the turn boundary didn't move, so announcing a new one would misinform
+every other attached client. Stamped `_meta.hydra-acp.steered: true`,
+deliberately **not** the `compatFor: "prompt_received"` shape used
+elsewhere: that stamp means "duplicates a `prompt_received` that also
+went out", which is what `mapUserText` and history search key off to
+drop it as a redundant echo. No `prompt_received` ever accompanies a
+steer, so reusing that stamp made this the only record of the steer and
+then discarded it in both readers.
 
-**Known accepted gap.** A narrow race remains: hydra checks for an
-in-flight turn, decides to forward natively, but the agent's own turn
-happens to settle in the gap before it processes the steer. The agent
-then replies `"startedNewTurn"` on its own initiative — which reopens the
-same unsolicited-turn safety net (and the same imperfect-closing
-behavior) that motivated this whole design. This is a timing race, not
-a guaranteed outcome on every idle steer the way naive forwarding was;
-closing it fully would require dedicated turn-tracking for this one path,
-which this design deliberately avoids.
+**Narrow race, now closed.** hydra checks for an in-flight turn, decides
+to forward natively, but the agent's own turn can settle in the gap
+before it processes the steer — the agent then replies
+`"startedNewTurn"` on its own initiative, detaching a fresh turn instead
+of injecting. That detached turn's content is user-lane (`kind: "human"`
+on its terminal `usage_update`), which the generic unsolicited-turn
+close never treats as an ending signal, so left alone this would read
+BUSY forever. Hydra tracks the possibility from just before it sends
+the native-forward request (a notification for the detached turn can
+arrive before the reply does) and marks whichever unsolicited turn opens
+next as caused by this steer specifically. A `usage_update` closes that
+one turn regardless of lane — hydra already knows no other prompt is in
+flight, so it can only be this turn ending, not an unrelated user turn's
+terminal racing in from outside. Every other unsolicited turn (a
+genuine agent-initiated resumption) still requires an autonomous
+`_claude/origin` kind to close, unchanged.
 
 #### Notification: `hydra-acp/prompt_queue/added`
 
