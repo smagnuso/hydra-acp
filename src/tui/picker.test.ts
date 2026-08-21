@@ -45,6 +45,25 @@ vi.mock("./term-host/index.js", () => ({
   terminalHost: () => (hostAvailable ? { id: "testhost" } : null),
 }));
 
+// ^O's directory prompt and the composer label's agent prompt both paint
+// their own modals over the picker. The specs below only care about what
+// the picker does with their results, so both are stubbed with a value
+// the test sets first.
+let nextCwdPick: string | null = null;
+vi.mock("./import-cwd-prompt.js", () => ({
+  promptForImportCwd: async () =>
+    nextCwdPick === null
+      ? { kind: "cancel" as const }
+      : { kind: "ok" as const, path: nextCwdPick },
+}));
+let nextAgentPick: string | null = null;
+vi.mock("./agent-prompt.js", () => ({
+  promptForAgent: async () =>
+    nextAgentPick === null
+      ? { kind: "cancel" as const }
+      : { kind: "select" as const, agentId: nextAgentPick, persist: false },
+}));
+
 // Views over the recorded calls, so the existing specs keep reading the way
 // they did before the two entry points became one discriminated union.
 const attachCalls = {
@@ -114,6 +133,12 @@ function makePicker(opts: {
   // overflow a box (e.g. the scrollable info overlay) shrink it.
   width?: number;
   height?: number;
+  composerAgentId?: string;
+  composerModel?: string;
+  availableAgents?: Array<{ id: string }>;
+  onCwdChange?: (
+    cwd: string,
+  ) => Promise<{ agentId?: string; model?: string; notice?: string }>;
 }): KeyDriver {
   let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
   let onMouse: ((name: string, data?: { x?: number; y?: number }) => void) | null = null;
@@ -181,6 +206,21 @@ function makePicker(opts: {
       ? { currentSessionId: opts.currentSessionId }
       : {}),
     ...(opts.prefs !== undefined ? { prefs: opts.prefs } : {}),
+    ...(opts.composerAgentId !== undefined
+      ? { composerAgentId: opts.composerAgentId }
+      : {}),
+    ...(opts.composerModel !== undefined
+      ? { composerModel: opts.composerModel }
+      : {}),
+    ...(opts.availableAgents !== undefined
+      ? {
+          availableAgents:
+            opts.availableAgents as unknown as Parameters<
+              typeof pickSession
+            >[1]["availableAgents"],
+        }
+      : {}),
+    ...(opts.onCwdChange !== undefined ? { onCwdChange: opts.onCwdChange } : {}),
   });
 
   return {
@@ -1576,5 +1616,135 @@ describe("^t opens the selected session in a new terminal-host tab", () => {
       "hydra_session_a",
       "hydra_session_b",
     ]);
+  });
+});
+
+// ^O changes the directory a new session will be created in, and the
+// composer's "agent•model" is a preview of what that session will use —
+// so a `.hydra-acp.json` in the destination tree has to be able to move
+// it. The resolution itself lives in tui/composer-agent.ts; what's
+// asserted here is that the picker asks, and honors the answer.
+describe("^O re-resolves the composer's agent•model", () => {
+  const flush = async (): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  afterEach(() => {
+    nextCwdPick = null;
+    nextAgentPick = null;
+  });
+
+  it("asks for the new cwd and repaints the answer", async () => {
+    const seen: string[] = [];
+    nextCwdPick = "/home/me/work/other";
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "opencode",
+      composerModel: "grok",
+      onCwdChange: async (cwd) => {
+        seen.push(cwd);
+        return { agentId: "claude-acp", model: "opus" };
+      },
+    });
+    drv.press("CTRL_O");
+    await flush();
+    expect(seen).toEqual(["/home/me/work/other"]);
+    expect(drv.output()).toContain("claude-acp•opus");
+  });
+
+  it("clears a stale model when the new tree names none", async () => {
+    nextCwdPick = "/home/me/work/other";
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "claude-acp",
+      composerModel: "opus",
+      onCwdChange: async () => ({ agentId: "claude-acp" }),
+    });
+    drv.press("CTRL_O");
+    await flush();
+    drv.clearOutput();
+    // Force a full repaint so the label is in this window's transcript.
+    drv.press("CTRL_L");
+    await flush();
+    expect(drv.output()).toContain("claude-acp");
+    expect(drv.output()).not.toContain("opus");
+  });
+
+  it("does not ask when the cwd is unchanged", async () => {
+    let calls = 0;
+    nextCwdPick = "/home/me/work/project";
+    const drv = makePicker({
+      sessions: [session({})],
+      cwd: "/home/me/work/project",
+      composerAgentId: "opencode",
+      onCwdChange: async () => {
+        calls += 1;
+        return {};
+      },
+    });
+    drv.press("CTRL_O");
+    await flush();
+    expect(calls).toBe(0);
+  });
+
+  it("keeps the previous label when the resolve fails", async () => {
+    nextCwdPick = "/home/me/work/other";
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "opencode",
+      composerModel: "grok",
+      onCwdChange: async () => {
+        throw new Error("nope");
+      },
+    });
+    drv.press("CTRL_O");
+    await flush();
+    expect(drv.output()).toContain("opencode•grok");
+  });
+
+  it("surfaces a notice in the status line", async () => {
+    nextCwdPick = "/home/me/work/other";
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "opencode",
+      onCwdChange: async () => ({
+        agentId: "opencode",
+        notice: "that directory sets home: /tmp/elsewhere",
+      }),
+    });
+    drv.press("CTRL_O");
+    await flush();
+    expect(drv.output()).toContain("that directory sets home: /tmp/elsewhere");
+  });
+
+  it("stops asking once the user has picked an agent explicitly", async () => {
+    // A deliberate in-picker choice outranks any directory default — the
+    // directory config is a default, not an override of the user.
+    let calls = 0;
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "opencode",
+      availableAgents: [{ id: "opencode" }, { id: "claude-acp" }],
+      onCwdChange: async () => {
+        calls += 1;
+        return { agentId: "from-directory" };
+      },
+    });
+    // Hover then click the top-right agent label to open the (stubbed)
+    // agent prompt. x=75 lands inside "─ opencode " on an 80-col screen.
+    nextAgentPick = "claude-acp";
+    drv.mouse("MOUSE_MOTION", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 75, 1);
+    await flush();
+    expect(drv.output()).toContain("claude-acp");
+
+    nextCwdPick = "/home/me/work/other";
+    drv.press("CTRL_O");
+    await flush();
+    expect(calls).toBe(0);
+    expect(drv.output()).not.toContain("from-directory");
   });
 });

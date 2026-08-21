@@ -70,6 +70,20 @@ export interface AppliedDirectoryConfig {
   home?: string;
 }
 
+export interface ResolvedDirectoryConfig {
+  layers: DirectoryConfigLayer[];
+  notices: DirectoryConfigNotice[];
+  // The merged layers with `home` stripped: what an overlay for this cwd
+  // would contain. Raw JSON, not schema-validated — callers read the one
+  // or two keys they care about and type-guard them.
+  merged: Record<string, unknown>;
+  // `home` as written, expanded and resolved. REQUESTED, not applied:
+  // resolveDirectoryConfig touches no process state, so a caller asking
+  // about some other directory can report the request without re-rooting
+  // itself. applyDirectoryConfig is what actually honors it.
+  homeRequest?: string;
+}
+
 function expandTilde(p: string): string {
   if (p === "~") {
     return os.homedir();
@@ -222,21 +236,15 @@ export function setDirectoryOverlay(
 export async function applyDirectoryConfig(
   cwd: string = process.cwd(),
 ): Promise<AppliedDirectoryConfig> {
-  const { layers, notices } = await findDirectoryConfigs(cwd);
-  notices.push(...directoryConfigNotices(layers));
+  const { layers, notices, merged, homeRequest } =
+    await resolveDirectoryConfig(cwd);
   if (layers.length === 0) {
     setDirectoryOverlay(undefined);
     return { layers, notices };
   }
 
-  let merged: Record<string, unknown> = {};
-  for (const layer of layers) {
-    merged = deepMergeConfig(merged, layer.data);
-  }
-
   let home: string | undefined;
-  const rawHome = merged[HOME_KEY];
-  if (typeof rawHome === "string" && rawHome.length > 0) {
+  if (homeRequest !== undefined) {
     // An explicitly exported HYDRA_ACP_HOME wins. Env beats config file by
     // convention, and more concretely: a directory config is ambient
     // (it applies to any cwd under it, including a temp dir something else
@@ -253,9 +261,35 @@ export async function applyDirectoryConfig(
         message: `\`home\` ignored: HYDRA_ACP_HOME is already set to ${explicit}`,
       });
     } else {
-      home = path.resolve(expandTilde(rawHome));
+      home = homeRequest;
       process.env.HYDRA_ACP_HOME = home;
     }
+  }
+
+  setDirectoryOverlay(Object.keys(merged).length > 0 ? merged : undefined);
+  return { layers, notices, ...(home !== undefined ? { home } : {}) };
+}
+
+// The read half of applyDirectoryConfig: walk, merge, and interpret
+// `home`, without installing anything. Split out because a long-lived
+// client can need the answer for a cwd it is not running in — the TUI
+// picker's ^O re-resolves the composer's agent/model preview for the
+// directory the user just switched to, and must not re-root the process
+// it is already talking to a daemon from.
+export async function resolveDirectoryConfig(
+  cwd: string = process.cwd(),
+): Promise<ResolvedDirectoryConfig> {
+  const { layers, notices } = await findDirectoryConfigs(cwd);
+  notices.push(...directoryConfigNotices(layers));
+  let merged: Record<string, unknown> = {};
+  for (const layer of layers) {
+    merged = deepMergeConfig(merged, layer.data);
+  }
+
+  let homeRequest: string | undefined;
+  const rawHome = merged[HOME_KEY];
+  if (typeof rawHome === "string" && rawHome.length > 0) {
+    homeRequest = path.resolve(expandTilde(rawHome));
   } else if (rawHome !== undefined) {
     notices.push({
       file: layers[layers.length - 1]!.file,
@@ -265,8 +299,12 @@ export async function applyDirectoryConfig(
   }
   delete merged[HOME_KEY];
 
-  setDirectoryOverlay(Object.keys(merged).length > 0 ? merged : undefined);
-  return { layers, notices, ...(home !== undefined ? { home } : {}) };
+  return {
+    layers,
+    notices,
+    merged,
+    ...(homeRequest !== undefined ? { homeRequest } : {}),
+  };
 }
 
 // Human-readable lines for the client to print on stderr.

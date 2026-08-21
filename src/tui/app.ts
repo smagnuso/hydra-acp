@@ -120,6 +120,7 @@ import { canonicalAgentId } from "../cli/commands/agents.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
+import { composerAgentForCwd } from "./composer-agent.js";
 import {
   promptAuthRequiredBanner,
   runAuthRetryLoop,
@@ -5680,36 +5681,32 @@ async function runSession(
         // for everything and let prefs.filters.includeNonInteractive decide
         // what to render.
         const sessions = await listSessions(target, { includeNonInteractive: true });
-        // Match the initial-picker formula so the composer's top-right
-        // "agent•model" reflects what a fresh session from this composer
-        // would use — independent of which session the user is currently
-        // attached to. viewPrefs wins over opts.agentId precisely because
-        // opts.agentId is rewritten to the attached session's agent on
-        // every attach / cycle; see the ViewPrefs field docs.
-        const composerAgentId =
-          viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
         let availableAgents: Awaited<ReturnType<typeof listAgents>> = [];
         try {
           availableAgents = await listAgents(target);
         } catch {
           // ignore
         }
-        // defaultModels is keyed by agent id, and an agent derived via
-        // config.agents `extends` usually has no entry of its own — walk
-        // the inheritance chain most-specific-first, same as
-        // session-manager.ts does when it actually seeds a session's
-        // model, so the composer preview matches what a new session
-        // would use.
-        const composerAgentEntry = composerAgentId
-          ? availableAgents.find((a) => a.id === composerAgentId)
-          : undefined;
-        const composerModel = composerAgentId
-          ? (viewPrefs.lastChosenModel ??
-              lookupInheritedAgentValue(config.defaultModels, {
-                id: composerAgentId,
-                extendsChain: composerAgentEntry?.extendsChain,
-              })?.value)
-          : undefined;
+        // Same formula as the initial picker, so the composer's top-right
+        // "agent•model" reflects what a fresh session from this composer
+        // would use — independent of which session the user is currently
+        // attached to. opts.agentId sits low in that precedence precisely
+        // because it is rewritten to the attached session's agent on
+        // every attach / cycle; see the ViewPrefs field docs.
+        const resolveComposerFor = (
+          forCwd: string,
+        ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
+          composerAgentForCwd({
+            cwd: forCwd,
+            config,
+            prefs: viewPrefs,
+            ...(opts.agentId !== undefined
+              ? { fallbackAgentId: opts.agentId }
+              : {}),
+            availableAgents,
+          });
+        const { agentId: composerAgentId, model: composerModel } =
+          await resolveComposerFor(resolvedCwd);
         const choice: PickerResult = await pickSession(term, {
           cwd: resolvedCwd,
           sessions,
@@ -5723,6 +5720,7 @@ async function runSession(
           onComposerAgentChange: (agentId, model) => {
             rememberComposerAgent(viewPrefs, agentId, model);
           },
+          onCwdChange: resolveComposerFor,
         });
         if (choice.kind === "abort") {
           // finally restarts the screen.
@@ -10172,8 +10170,6 @@ async function resolveSession(
   while (true) {
     // Picker manages its own interactive-only filter; ask for everything.
     const sessions = await listSessions(target, { includeNonInteractive: true });
-    const composerAgentId =
-      viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
     // Fetch the agent list once so the picker's click-to-switch-agent
     // modal has something to show. Best-effort: if the daemon is
     // unreachable we omit — the click just becomes a no-op.
@@ -10183,21 +10179,18 @@ async function resolveSession(
     } catch {
       // ignore
     }
-    // defaultModels is keyed by agent id, and an agent derived via
-    // config.agents `extends` usually has no entry of its own — walk the
-    // inheritance chain most-specific-first, same as session-manager.ts
-    // does when it actually seeds a session's model, so the composer
-    // preview matches what a new session would use.
-    const composerAgentEntry = composerAgentId
-      ? availableAgents.find((a) => a.id === composerAgentId)
-      : undefined;
-    const composerModel = composerAgentId
-      ? (viewPrefs.lastChosenModel ??
-          lookupInheritedAgentValue(config.defaultModels, {
-            id: composerAgentId,
-            extendsChain: composerAgentEntry?.extendsChain,
-          })?.value)
-      : undefined;
+    const resolveComposerFor = (
+      forCwd: string,
+    ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
+      composerAgentForCwd({
+        cwd: forCwd,
+        config,
+        prefs: viewPrefs,
+        ...(opts.agentId !== undefined ? { fallbackAgentId: opts.agentId } : {}),
+        availableAgents,
+      });
+    const { agentId: composerAgentId, model: composerModel } =
+      await resolveComposerFor(cwd);
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
@@ -10213,6 +10206,7 @@ async function resolveSession(
       onComposerAgentChange: (agentId, model) => {
         rememberComposerAgent(viewPrefs, agentId, model);
       },
+      onCwdChange: resolveComposerFor,
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),

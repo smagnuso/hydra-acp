@@ -91,15 +91,17 @@ export const CONFIG_TIERS: { [K in keyof HydraConfig]-?: ConfigKeyTier } = {
   // omit them.
   defaultAgent: { reload: "live", overlay: "effective" },
   defaultCwd: { reload: "live", overlay: "effective" },
-  // Partial on purpose: the TUI only sends `model` at session/new when
-  // one was explicitly chosen, so an overlay fixes the composer's
-  // displayed default but the daemon still applies its own value to the
-  // created session. Wiring the create path would make this "effective".
+  // Partial on purpose, but only for the paths that skip the picker.
+  // Sessions created from the picker composer DO get the overlay's
+  // model: tui/composer-agent.ts resolves it per-cwd and the picker
+  // sends it on session/new alongside the agent. A direct
+  // `hydra --new` / `hydra "<prompt>"` sends `model` only from an
+  // explicit --model flag, so there the daemon's value still wins.
   defaultModels: {
     reload: "live",
     overlay: "partial",
     overlayNote:
-      "sets the model the composer displays, but the session is created with the daemon's value unless a model is chosen explicitly",
+      "applies to sessions started from the picker composer; a direct `hydra --new` still uses the daemon's value unless --model is passed",
   },
 
   // --- warn: snapshotted at boot, drift reported ----------------------

@@ -191,10 +191,9 @@ export interface PickOptions {
   // (default agent + its configured default model). Both are optional:
   // if agentId is undefined, the label is omitted entirely; if only
   // model is undefined, we show just the agent id. Callers derive these
-  // from `viewPrefs.lastChosenAgent ?? opts.agentId ??
-  // config.defaultAgent` and `viewPrefs.lastChosenModel ??
-  // config.defaultModels[agentId]` — viewPrefs first, because opts.agentId
-  // is rewritten to the attached session's agent on every switch.
+  // via composerAgentForCwd (tui/composer-agent.ts), which owns the
+  // precedence rule; the cwd matters because a `.hydra-acp.json` in the
+  // tree can set either key. See onCwdChange.
   //
   // The label is also click-actionable: clicking on it opens an agent
   // picker (see availableAgents). A change here overrides the seed and
@@ -215,6 +214,21 @@ export interface PickOptions {
   // out) is still remembered by the caller's session-wide prefs. Without
   // this, the choice only reached the caller on the "new" result.
   onComposerAgentChange?: (agentId: string, model: string | undefined) => void;
+  // Called after ^O moves the picker's cwd, to re-resolve the composer's
+  // agent•model for the new directory. Not cosmetic: makeNewResult sends
+  // both values on session/new alongside the new cwd, so without this a
+  // ^O into a tree with its own `.hydra-acp.json` creates the session
+  // with the previous directory's agent.
+  //
+  // Skipped once the user has picked an agent from the composer label in
+  // this picker — an explicit choice outranks any directory default. The
+  // caller resolves; `notice` is anything it saw but deliberately did not
+  // act on, shown in the status line.
+  onCwdChange?: (cwd: string) => Promise<{
+    agentId?: string;
+    model?: string;
+    notice?: string;
+  }>;
 }
 
 // Picker filter state. `filters` is its own nested bag so future
@@ -868,6 +882,10 @@ export async function pickSession(
   // the caller launches with the picked agent.
   let composerAgentId = opts.composerAgentId;
   let composerModel = opts.composerModel;
+  // True once the user has committed an agent in the click-to-switch
+  // modal. An explicit pick outranks a directory default, so ^O stops
+  // re-resolving the label after one.
+  let composerAgentExplicit = false;
   const composerAgentModelLabel = (): string => {
     const a = composerAgentId;
     if (!a) {
@@ -2280,10 +2298,34 @@ export async function pickSession(
       return out;
     };
 
-    // ^p opens a directory prompt. On accept, currentCwd updates and the
-    // composer title + cwd-only filter follow. On Esc, cwd is unchanged.
-    // The prompt manages its own grabInput / key listeners, so we have
-    // to detach the picker's grab while it runs and re-attach after.
+    // Re-derive the composer's agent•model from the directory we just
+    // moved to. Both are assigned together when the caller resolves an
+    // agent: switching from a tree that names a model to one that does
+    // not has to clear the stale model, not keep painting it.
+    const refreshComposerAgentForCwd = async (): Promise<void> => {
+      if (composerAgentExplicit || !opts.onCwdChange) {
+        return;
+      }
+      try {
+        const next = await opts.onCwdChange(currentCwd);
+        if (next.agentId !== undefined) {
+          composerAgentId = next.agentId;
+          composerModel = next.model;
+        }
+        if (next.notice !== undefined) {
+          transientStatus = next.notice;
+        }
+      } catch {
+        // Keep the previous label rather than blanking it: a failed
+        // re-resolve is not evidence that there is no agent.
+      }
+    };
+
+    // ^O opens a directory prompt. On accept, currentCwd updates and the
+    // composer title + cwd-only filter + agent•model label follow. On
+    // Esc, cwd is unchanged. The prompt manages its own grabInput / key
+    // listeners, so we have to detach the picker's grab while it runs
+    // and re-attach after.
     const openCwdPrompt = async (): Promise<void> => {
       uninstallGrab();
       painter.clearCache();
@@ -2309,6 +2351,7 @@ export async function pickSession(
         // cwd, then re-run filters (cwd-only depends on currentCwd too).
         allSessions = sortSessions(allSessions, currentCwd);
         applyFilter();
+        await refreshComposerAgentForCwd();
       }
       if (!resolved) {
         renderFromScratch();
@@ -2341,6 +2384,9 @@ export async function pickSession(
       }
       if (result.kind === "select") {
         composerAgentId = result.agentId;
+        // Deliberate, in-picker choice: from here on ^O leaves the label
+        // alone rather than replacing it with a directory default.
+        composerAgentExplicit = true;
         // When the agent changes, the model tracks whatever's configured
         // as the default for the new agent (or clears if none). If the
         // user wants a specific model, `hydra agent set <id> <model>`

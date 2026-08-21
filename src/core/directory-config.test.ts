@@ -9,6 +9,7 @@ import {
   deepMergeConfig,
   directoryConfigNotices,
   findDirectoryConfigs,
+  resolveDirectoryConfig,
   setDirectoryOverlay,
 } from "./directory-config.js";
 
@@ -139,16 +140,55 @@ describe("directoryConfigNotices", () => {
   });
 
   it("flags a partially-effective key as partial rather than inert", () => {
-    // defaultModels does something — it sets what the composer displays —
-    // but the TUI only sends `model` on session/new when one was chosen
-    // explicitly, so the created session still gets the daemon's value.
-    // Reporting it as "no effect" would be wrong in the other direction.
+    // defaultModels does apply to sessions started from the picker
+    // composer, but a direct `hydra --new` sends no model, so the created
+    // session gets the daemon's value there. Reporting it as "no effect"
+    // would be wrong in the other direction.
     const notices = directoryConfigNotices([
       { file: "/x/.hydra-acp.json", data: { defaultModels: {} } },
     ]);
     expect(notices).toHaveLength(1);
     expect(notices[0]?.message).not.toMatch(/no effect/);
-    expect(notices[0]?.message).toMatch(/composer displays/);
+    expect(notices[0]?.message).toMatch(/picker composer/);
+  });
+});
+
+describe("resolveDirectoryConfig", () => {
+  it("returns the merged layers without installing an overlay", async () => {
+    await writeConfigAt(root, { defaultAgent: "outer", tui: { mouse: true } });
+    const dir = path.join(root, "inner");
+    await writeConfigAt(dir, { defaultAgent: "inner" });
+
+    const resolved = await resolveDirectoryConfig(dir);
+    expect(resolved.merged).toEqual({
+      defaultAgent: "inner",
+      tui: { mouse: true },
+    });
+    expect(currentDirectoryOverlay()).toBeUndefined();
+  });
+
+  it("reports `home` without touching HYDRA_ACP_HOME", async () => {
+    // The whole reason this function exists: a long-lived client asking
+    // about some other directory must not re-root itself.
+    const pinned = path.join(root, "pinned-home");
+    process.env.HYDRA_ACP_HOME = pinned;
+    const dir = path.join(root, "personal");
+    const wanted = path.join(root, "hydra-personal");
+    await writeConfigAt(dir, { home: wanted, defaultAgent: "claude-home" });
+
+    const resolved = await resolveDirectoryConfig(dir);
+    expect(resolved.homeRequest).toBe(wanted);
+    expect(process.env.HYDRA_ACP_HOME).toBe(pinned);
+    expect(resolved.merged).toEqual({ defaultAgent: "claude-home" });
+  });
+
+  it("returns empty layers and no merge when there is no file", async () => {
+    const dir = path.join(root, "empty");
+    await fs.mkdir(dir, { recursive: true });
+    const resolved = await resolveDirectoryConfig(dir);
+    expect(resolved.layers).toEqual([]);
+    expect(resolved.merged).toEqual({});
+    expect(resolved.homeRequest).toBeUndefined();
   });
 });
 
