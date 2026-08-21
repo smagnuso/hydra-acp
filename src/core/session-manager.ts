@@ -7,6 +7,7 @@ import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./ag
 import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
 import {
   Registry,
+  agentChainRoot,
   listAgents,
   lookupInheritedAgentValue,
   planSpawn,
@@ -4496,13 +4497,30 @@ export class SessionManager {
     }
     await agent.kill().catch(() => undefined);
 
+    // Dedupe on the session STORE, not the agent id. Sibling agents that
+    // derive from the same base read the same agent-side store, so keying
+    // on agentId let each one import the whole store again under fresh
+    // hydra ids. Both sides of the comparison normalize through
+    // agentChainRoot so the result doesn't depend on which sibling synced
+    // first — walking up from only the syncing agent would dedupe
+    // dev-after-base but not base-after-dev.
+    //
+    // Only the KEY normalizes. The record below keeps its real agentId,
+    // because resurrect has to spawn that agent's actual command.
+    const storeKeys = new Map<string, string>();
+    const selfKey = agentChainRoot(agentDef);
+    storeKeys.set(agentId, selfKey);
+
     const existing = new Set<string>();
     for (const live of this.sessions.values()) {
-      existing.add(`${live.agentId}::${live.upstreamSessionId}`);
+      const key = await this.agentStoreKey(live.agentId, storeKeys);
+      existing.add(`${key}::${live.upstreamSessionId}`);
     }
     const stored = await this.store.list().catch(() => []);
     for (const rec of stored) {
-      existing.add(`${rec.agentId}::${rec.upstreamSessionId}`);
+      existing.add(
+        `${await this.agentStoreKey(rec.agentId, storeKeys)}::${rec.upstreamSessionId}`,
+      );
       // RETIRED generations count as known too.
       //
       // Every swap — compaction, workspace enter, workspace leave, agent
@@ -4519,7 +4537,9 @@ export class SessionManager {
       // The trail needs no new state; appendUpstreamGeneration has been
       // recording it all along.
       for (const gen of rec.upstreamGenerations ?? []) {
-        existing.add(`${gen.agentId}::${gen.upstreamSessionId}`);
+        existing.add(
+          `${await this.agentStoreKey(gen.agentId, storeKeys)}::${gen.upstreamSessionId}`,
+        );
       }
     }
 
@@ -4538,7 +4558,7 @@ export class SessionManager {
     const synced: SessionRecord[] = [];
     let skipped = 0;
     for (const entry of entries) {
-      const dedupeKey = `${agentId}::${entry.sessionId}`;
+      const dedupeKey = `${selfKey}::${entry.sessionId}`;
       if (existing.has(dedupeKey)) {
         skipped += 1;
         continue;
@@ -4551,16 +4571,28 @@ export class SessionManager {
       // gone unless the agent reports activity newer than what we
       // recorded at delete time, which we take as "user revived this
       // conversation in the agent" and resurrect.
-      const tombstone = await this.tombstones
-        .read(agentId, entry.sessionId)
+      // Store-keyed like the dedupe above, so deleting a session owned by
+      // one sibling suppresses it for every agent reading the same store.
+      // The raw agentId is a fallback for tombstones written before the
+      // key was normalized; only consulted for derived agents, where the
+      // two keys actually differ.
+      let tombstoneKey = selfKey;
+      let tombstone = await this.tombstones
+        .read(tombstoneKey, entry.sessionId)
         .catch(() => undefined);
+      if (!tombstone && selfKey !== agentId) {
+        tombstoneKey = agentId;
+        tombstone = await this.tombstones
+          .read(tombstoneKey, entry.sessionId)
+          .catch(() => undefined);
+      }
       if (tombstone) {
         if (!shouldResurrectFromUpstream(tombstone, entry.updatedAt)) {
           skipped += 1;
           continue;
         }
         await this.tombstones
-          .remove(agentId, entry.sessionId)
+          .remove(tombstoneKey, entry.sessionId)
           .catch(() => undefined);
         this.logger?.info(
           `syncFromAgent: resurrecting tombstoned ${agentId}/${entry.sessionId} (upstream updatedAt advanced past ${tombstone.upstreamUpdatedAt ?? "<unset>"})`,
@@ -6441,6 +6473,33 @@ export class SessionManager {
    * another elsewhere), so each is tombstoned under its OWN agentId
    * rather than the record's current one.
    */
+  // Resolve an agent id to its session-store key (see agentChainRoot),
+  // memoized across one caller's run so a store full of records doesn't
+  // re-resolve the same handful of ids. Falls back to the id itself when
+  // the agent can't be resolved — unknown, or a broken `extends` — so one
+  // bad config entry degrades to today's per-agent-id behavior instead of
+  // throwing out of a sync or a delete.
+  private async agentStoreKey(
+    agentId: string,
+    memo: Map<string, string>,
+  ): Promise<string> {
+    const hit = memo.get(agentId);
+    if (hit !== undefined) {
+      return hit;
+    }
+    let key = agentId;
+    try {
+      const def = await this.registry.getAgent(agentId);
+      if (def) {
+        key = agentChainRoot(def);
+      }
+    } catch {
+      // Unresolvable agent: keep the raw id.
+    }
+    memo.set(agentId, key);
+    return key;
+  }
+
   private async tombstoneAllGenerations(
     sessionId: string,
     current: {
@@ -6468,10 +6527,13 @@ export class SessionManager {
       upstreamSessionId: current.upstreamSessionId,
     });
     const deletedAt = new Date().toISOString();
+    // Written under the store key, matching how syncFromAgent reads them.
+    // Generations can span agents, so each pair resolves on its own.
+    const storeKeys = new Map<string, string>();
     for (const pair of pairs.values()) {
       await this.tombstones
         .add({
-          agentId: pair.agentId,
+          agentId: await this.agentStoreKey(pair.agentId, storeKeys),
           upstreamSessionId: pair.upstreamSessionId,
           deletedAt,
           upstreamUpdatedAt: current.upstreamUpdatedAt,
@@ -6551,9 +6613,20 @@ export class SessionManager {
     agentId: string,
     upstreamSessionId: string,
   ): Promise<boolean> {
-    const t = await this.tombstones
-      .read(agentId, upstreamSessionId)
-      .catch(() => undefined);
+    // Must use the same store key tombstoneAllGenerations writes under, or
+    // a delete made through one sibling agent stops gating an attach that
+    // arrives naming another. Raw agentId stays as a fallback for
+    // tombstones written before the key was normalized.
+    const storeKey = await this.agentStoreKey(agentId, new Map());
+    const t =
+      (await this.tombstones
+        .read(storeKey, upstreamSessionId)
+        .catch(() => undefined)) ??
+      (storeKey !== agentId
+        ? await this.tombstones
+            .read(agentId, upstreamSessionId)
+            .catch(() => undefined)
+        : undefined);
     return t?.reason === "user";
   }
 

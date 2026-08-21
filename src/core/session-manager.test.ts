@@ -4982,3 +4982,94 @@ describe("matchesCwdFilter", () => {
     expect(matchesCwdFilter("/anything", { cwd: "/x", workspace: undefined })).toBe(false);
   });
 });
+
+describe("SessionManager.syncFromAgent store-keyed dedupe", () => {
+  // Two agent ids that derive from the same base read the same agent-side
+  // session store, so `session/list` returns identical entries for both.
+  // Dedupe has to collapse them or each import re-mints the whole store.
+  function derivedAgent(id: string, chain: string[]): RegistryAgent {
+    return {
+      id,
+      name: id,
+      distribution: { npx: { package: "claude-code" } },
+      extendsChain: chain,
+    } as RegistryAgent;
+  }
+
+  const AGENTS: RegistryAgent[] = [
+    derivedAgent("claude-code", ["claude-code"]),
+    derivedAgent("claude-code-dev", ["claude-code-dev", "claude-code"]),
+    derivedAgent("unrelated", ["unrelated"]),
+  ];
+
+  function syncManagerFor(
+    agentId: string,
+    sessions: Array<{ sessionId: string; cwd: string }>,
+  ): SessionManager {
+    const mock = makeMockAgent({ agentId, cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock.mockResolvedValueOnce({
+      protocolVersion: 1,
+      agentCapabilities: { sessionCapabilities: { list: {} } },
+    });
+    requestMock.mockResolvedValueOnce({ sessions });
+    return new SessionManager(fakeRegistry(AGENTS), () => mock.agent);
+  }
+
+  async function seedRecord(agentId: string, upstreamSessionId: string): Promise<void> {
+    const { SessionStore } = await import("./session-store.js");
+    await new SessionStore().write({
+      sessionId: `hydra_session_${agentId}_${upstreamSessionId}`,
+      cwd: "/projects/a",
+      agentId,
+      upstreamSessionId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      attentionFlags: [],
+    });
+  }
+
+  it("skips a session the base agent already imported", async () => {
+    await seedRecord("claude-code", "u_one");
+    const manager = syncManagerFor("claude-code-dev", [
+      { sessionId: "u_one", cwd: "/projects/a" },
+      { sessionId: "u_new", cwd: "/projects/b" },
+    ]);
+    const { synced, skipped } = await manager.syncFromAgent("claude-code-dev");
+    expect(skipped).toBe(1);
+    expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_new"]);
+  });
+
+  it("skips a session a DERIVED agent already imported, syncing the base", async () => {
+    // The order that a walk-up-only fix would miss: the base's chain never
+    // mentions its descendants, so normalizing both sides is what makes
+    // this symmetric.
+    await seedRecord("claude-code-dev", "u_one");
+    const manager = syncManagerFor("claude-code", [
+      { sessionId: "u_one", cwd: "/projects/a" },
+      { sessionId: "u_new", cwd: "/projects/b" },
+    ]);
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(skipped).toBe(1);
+    expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_new"]);
+  });
+
+  it("still imports when an unrelated agent holds the same upstream id", async () => {
+    // Different store, so a colliding id is a genuinely different session.
+    await seedRecord("unrelated", "u_one");
+    const manager = syncManagerFor("claude-code", [
+      { sessionId: "u_one", cwd: "/projects/a" },
+    ]);
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(skipped).toBe(0);
+    expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_one"]);
+  });
+
+  it("records the real agentId, not the store key, so resurrect spawns the right agent", async () => {
+    const manager = syncManagerFor("claude-code-dev", [
+      { sessionId: "u_only", cwd: "/projects/a" },
+    ]);
+    const { synced } = await manager.syncFromAgent("claude-code-dev");
+    expect(synced[0]?.agentId).toBe("claude-code-dev");
+  });
+});

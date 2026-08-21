@@ -132,6 +132,29 @@ export function agentInstallId(agent: ResolvedAgent): string {
   return agent.installId ?? agent.id;
 }
 
+// Which session store an agent reads from, approximated by the root of
+// its `extends` chain.
+//
+// Two agent ids that derive from the same base usually read the same
+// agent-side session store: `claude-acp-dev` swaps the command but still
+// reads `~/.claude`, so `session/list` returns exactly what `claude-acp`
+// returns. Anything that dedupes upstream sessions per agent id must key
+// on this instead, or each sibling imports the whole store again under a
+// fresh hydra id.
+//
+// It is an approximation in one direction only: a derived agent that
+// repoints its config dir (`claude-home` with CLAUDE_CONFIG_DIR) has a
+// genuinely separate store but still reports its base's root. That is
+// harmless as long as agents mint session ids unique across stores — they
+// are UUIDs in every agent we ship — because a false match needs two
+// disjoint stores to produce the same id. If an agent ever turns up with
+// ids that are only unique *within* a store, this needs a real store
+// identity rather than the chain root.
+export function agentChainRoot(agent: ResolvedAgent): string {
+  const chain = agent.extendsChain;
+  return chain && chain.length > 0 ? chain[chain.length - 1]! : agent.id;
+}
+
 // Most-specific-wins lookup over a config map keyed by agent id
 // (defaultModels, agentOverrides): try the agent's own id, then each id it
 // extends, in order. `from` is the key that actually matched, so callers
