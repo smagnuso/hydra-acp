@@ -1327,6 +1327,78 @@ describe("POST /v1/sessions extension MCP injection", () => {
   });
 });
 
+describe("POST /v1/sessions honors a directory `.hydra-acp.json`", () => {
+  // Encodes the bug report: a session created via a cwd-bearing REST call
+  // (Slack `!session`) with no explicit agentId used to always land on the
+  // daemon's global config.defaultAgent, silently ignoring a
+  // `.hydra-acp.json` between that cwd and $HOME.
+  let app: FastifyInstance;
+  let manager: SessionManager;
+  let mocks: MockAgentControls[];
+  let baseUrl: string;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fsPromises.mkdtemp(
+      path.join(os.tmpdir(), "hydra-sessions-dirconfig-"),
+    );
+    await fsPromises.writeFile(
+      path.join(dir, ".hydra-acp.json"),
+      JSON.stringify({ defaultAgent: "claude-personal" }),
+      "utf8",
+    );
+    mocks = [];
+    manager = new SessionManager(
+      fakeRegistry([
+        fakeRegistryAgent("claude-code"),
+        fakeRegistryAgent("claude-personal"),
+      ]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-personal", cwd: dir });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: `u_${mocks.length}` });
+        return m.agent;
+      },
+    );
+    app = Fastify();
+    registerSessionRoutes(app, manager, { agentId: "claude-code", cwd: "/w" });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const addr = app.server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await manager.closeAll().catch(() => undefined);
+    await app.close();
+    await fsPromises.rm(dir, { recursive: true, force: true });
+  });
+
+  it("uses the directory's defaultAgent when the request omits agentId", async () => {
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: dir }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { agentId: string };
+    expect(body.agentId).toBe("claude-personal");
+  });
+
+  it("still prefers an explicit agentId over the directory default", async () => {
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: dir, agentId: "claude-code" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { agentId: string };
+    expect(body.agentId).toBe("claude-code");
+  });
+});
+
 describe("session routes: compaction endpoints", () => {
   let harness: Harness;
 

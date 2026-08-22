@@ -313,3 +313,55 @@ export function formatDirectoryConfigNotices(
 ): string[] {
   return notices.map((n) => `hydra-acp: ${n.file}: ${n.message}`);
 }
+
+export function stringField(
+  obj: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const v = obj[key];
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+export function stringMapField(
+  obj: Record<string, unknown>,
+  key: string,
+): Record<string, string> | undefined {
+  const v = obj[key];
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [k, value] of Object.entries(v)) {
+    if (typeof value === "string") {
+      out[k] = value;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export interface DirectorySessionDefaults {
+  agentId?: string;
+  models?: Record<string, string>;
+}
+
+// The daemon-side counterpart to composerAgentForCwd's directory read: any
+// session-creation path that has a finalized cwd can call this to get the
+// same `defaultAgent` / `defaultModels` a `.hydra-acp.json` between that cwd
+// and $HOME would hand the TUI picker. Callers still apply their own
+// precedence (an explicit agentId in the request always wins).
+export async function resolveDirectorySessionDefaults(
+  cwd: string,
+): Promise<DirectorySessionDefaults> {
+  let merged: Record<string, unknown> = {};
+  try {
+    merged = (await resolveDirectoryConfig(cwd)).merged;
+  } catch {
+    return {};
+  }
+  const agentId = stringField(merged, "defaultAgent");
+  const models = stringMapField(merged, "defaultModels");
+  return {
+    ...(agentId !== undefined ? { agentId } : {}),
+    ...(models !== undefined ? { models } : {}),
+  };
+}

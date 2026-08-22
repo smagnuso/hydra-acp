@@ -10,6 +10,7 @@ import {
   directoryConfigNotices,
   findDirectoryConfigs,
   resolveDirectoryConfig,
+  resolveDirectorySessionDefaults,
   setDirectoryOverlay,
 } from "./directory-config.js";
 
@@ -140,16 +141,16 @@ describe("directoryConfigNotices", () => {
   });
 
   it("flags a partially-effective key as partial rather than inert", () => {
-    // defaultModels does apply to sessions started from the picker
-    // composer, but a direct `hydra --new` sends no model, so the created
-    // session gets the daemon's value there. Reporting it as "no effect"
-    // would be wrong in the other direction.
+    // defaultModels applies to WS session/new and child_session/spawn, but
+    // POST /v1/sessions has no model field at all, so the created session
+    // gets the daemon's value there. Reporting it as "no effect" would be
+    // wrong in the other direction.
     const notices = directoryConfigNotices([
       { file: "/x/.hydra-acp.json", data: { defaultModels: {} } },
     ]);
     expect(notices).toHaveLength(1);
     expect(notices[0]?.message).not.toMatch(/no effect/);
-    expect(notices[0]?.message).toMatch(/picker composer/);
+    expect(notices[0]?.message).toMatch(/session\/new/);
   });
 });
 
@@ -189,6 +190,34 @@ describe("resolveDirectoryConfig", () => {
     expect(resolved.layers).toEqual([]);
     expect(resolved.merged).toEqual({});
     expect(resolved.homeRequest).toBeUndefined();
+  });
+});
+
+describe("resolveDirectorySessionDefaults", () => {
+  it("returns defaultAgent and defaultModels from the nearest overlay", async () => {
+    await writeConfigAt(root, {
+      defaultAgent: "claude-personal",
+      defaultModels: { "claude-personal": "claude-opus-4-7" },
+    });
+    const dir = path.join(root, "cli");
+    await fs.mkdir(dir, { recursive: true });
+
+    const defaults = await resolveDirectorySessionDefaults(dir);
+    expect(defaults).toEqual({
+      agentId: "claude-personal",
+      models: { "claude-personal": "claude-opus-4-7" },
+    });
+  });
+
+  it("returns an empty object when no `.hydra-acp.json` sets these keys", async () => {
+    const dir = path.join(root, "empty");
+    await fs.mkdir(dir, { recursive: true });
+    expect(await resolveDirectorySessionDefaults(dir)).toEqual({});
+  });
+
+  it("ignores non-string/non-map values", async () => {
+    await writeConfigAt(root, { defaultAgent: 42, defaultModels: "nope" });
+    expect(await resolveDirectorySessionDefaults(root)).toEqual({});
   });
 });
 

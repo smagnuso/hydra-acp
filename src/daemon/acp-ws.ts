@@ -39,7 +39,13 @@ import {
   AGENT_INSTALL_PROGRESS_METHOD,
   type AgentInstallProgressParams,
 } from "../acp/types.js";
-import { listAgents, type AgentInstallProgress, type Registry } from "../core/registry.js";
+import {
+  listAgents,
+  lookupInheritedAgentValue,
+  type AgentInstallProgress,
+  type Registry,
+} from "../core/registry.js";
+import { resolveDirectorySessionDefaults } from "../core/directory-config.js";
 import {
   tokenFromUpgradeRequest,
   type TokenValidator,
@@ -864,9 +870,9 @@ export function registerAcpWsEndpoint(
           interactive?: unknown;
           _meta?: unknown;
         };
-        const agentId = typeof params.agentId === "string"
+        const explicitAgentId = typeof params.agentId === "string"
           ? params.agentId
-          : deps.defaultAgent;
+          : undefined;
         let cwd = typeof params.cwd === "string"
           ? params.cwd
           : undefined;
@@ -897,7 +903,7 @@ export function registerAcpWsEndpoint(
         // agent's default. Avoids a post-spawn set_model round-trip and
         // closes the window where the session briefly exists on the
         // wrong model.
-        const model =
+        const explicitModel =
           hydraMeta && typeof hydraMeta.model === "string"
             ? hydraMeta.model
             : undefined;
@@ -919,6 +925,20 @@ export function registerAcpWsEndpoint(
             "child_session/spawn requires cwd (or a parentSessionId pointing at a live session whose cwd we can inherit)",
           );
         }
+
+        // agentId/model resolution needs the finalized cwd (explicit or
+        // inherited from the parent above), so a `.hydra-acp.json` for the
+        // child's actual directory is what gets consulted, not one for a
+        // cwd it never ends up running in.
+        const directoryDefaults = await resolveDirectorySessionDefaults(cwd);
+        const agentId =
+          explicitAgentId ?? directoryDefaults.agentId ?? deps.defaultAgent;
+        const agentChain = await deps.registry?.getAgent(agentId);
+        const directoryModel = lookupInheritedAgentValue(
+          directoryDefaults.models,
+          agentChain ?? { id: agentId },
+        )?.value;
+        const model = explicitModel ?? directoryModel;
 
         // Children spawned by transformers are non-interactive by default:
         // they exist to do automated work driven by the transformer, not
@@ -1312,6 +1332,27 @@ export function registerAcpWsEndpoint(
           ? (hydraMeta.transformers as string[])
           : (deps.manager.defaultTransformers ?? []);
       const transformChain = deps.transformers?.resolveChain(transformerNames) ?? [];
+      // A `.hydra-acp.json` between params.cwd and $HOME can set
+      // `defaultAgent` / `defaultModels`. Directory config used to be
+      // resolved client-side only (the TUI picker), so every other client
+      // (editor shims, `hydra launch`) always landed on the daemon's global
+      // default instead. cwd is local to this machine, so the daemon can
+      // safely do the same walk the TUI does.
+      const directoryDefaults = await resolveDirectorySessionDefaults(
+        params.cwd,
+      );
+      const resolvedAgentId =
+        hydraMeta.agentId ?? directoryDefaults.agentId ?? deps.defaultAgent;
+      // Mirrors resolveComposerAgent's model lookup: walk the resolved
+      // agent's extends chain, most-specific first, so a derived agent
+      // picks up a directory default set on its base. Falls back to
+      // manager.create's own defaultModels[agentId] handling when this cwd
+      // has no directory override.
+      const agentChain = await deps.registry?.getAgent(resolvedAgentId);
+      const directoryModel = lookupInheritedAgentValue(
+        directoryDefaults.models,
+        agentChain ?? { id: resolvedAgentId },
+      )?.value;
       // If the client requested in-memory stdin streaming, mint a bearer
       // token now and inject an HTTP MCP descriptor into the agent's
       // mcpServers so the agent sees a `hydra-acp-stdin` server with the
@@ -1386,11 +1427,11 @@ export function registerAcpWsEndpoint(
       try {
         session = await deps.manager.create({
           cwd: params.cwd,
-          agentId: hydraMeta.agentId ?? deps.defaultAgent,
+          agentId: resolvedAgentId,
           mcpServers: augmentedMcpServers,
           title: hydraMeta.title,
           agentArgs: hydraMeta.agentArgs,
-          model: hydraMeta.model,
+          model: hydraMeta.model ?? directoryModel,
           onInstallProgress: makeInstallProgressForwarder(connection),
           transformChain,
           originatingClient: state.clientInfo,

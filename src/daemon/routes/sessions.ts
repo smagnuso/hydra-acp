@@ -26,6 +26,7 @@ import { isLoopbackHost } from "../../core/remote-url.js";
 import type { AttentionFlag } from "../../acp/types-attention.js";
 import { searchHistories } from "../../core/history-search.js";
 import { sweepNonInteractiveSessions } from "../../core/session-gc.js";
+import { resolveDirectorySessionDefaults } from "../../core/directory-config.js";
 import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
@@ -175,7 +176,14 @@ export function registerSessionRoutes(
       workspace?: WorkspaceRequest;
     };
     const cwd = expandHome(body.cwd ?? defaults.cwd);
-    const agentId = body.agentId ?? defaults.agentId;
+    // A `.hydra-acp.json` between `cwd` and $HOME can set `defaultAgent` for
+    // this tree. Directory config used to be resolved client-side only, so
+    // REST-initiated sessions (Slack `!session`, browser, …) always landed
+    // on the daemon's global default instead. `cwd` is local to this
+    // machine, so the daemon can safely do the same walk the TUI does.
+    const directoryDefaults = await resolveDirectorySessionDefaults(cwd);
+    const agentId =
+      body.agentId ?? directoryDefaults.agentId ?? defaults.agentId;
     // Mirror the ACP WS session/new path: mint one per-session token
     // covering every currently-registered extension MCP server and
     // append the resulting HTTP descriptors to the agent's mcpServers

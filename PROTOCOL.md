@@ -334,7 +334,7 @@ the failure text of tool calls that ended `failed` / `rejected` /
 
 #### `POST /v1/sessions`
 
-Create a new session. Equivalent to ACP `session/new` over REST. Omitted `cwd`/`agentId` fall back to daemon config.
+Create a new session. Equivalent to ACP `session/new` over REST. An omitted `agentId` resolves a `.hydra-acp.json` overlay for the finalized `cwd` (nearest `defaultAgent` between `cwd` and `$HOME`) before falling back to daemon config. An omitted `cwd` falls back to daemon config directly.
 
 **Request body**
 
@@ -1311,7 +1311,7 @@ The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything
 
 | Field | Type | Semantics |
 |---|---|---|
-| `agentId` | `string` | Which registry agent to spawn the session on. Falls back to `config.defaultAgent` when omitted. This is the only channel for agent selection — there is no top-level `agentId` param. Enumerate valid ids via [`hydra-acp/agents/list`](#hydra-acplist_agents) or REST `GET /v1/agents`. |
+| `agentId` | `string` | Which registry agent to spawn the session on. When omitted, resolves a `.hydra-acp.json` overlay for `cwd` (nearest `defaultAgent` between `cwd` and `$HOME`) before falling back to `config.defaultAgent`. This is the only channel for agent selection — there is no top-level `agentId` param. Enumerate valid ids via [`hydra-acp/agents/list`](#hydra-acplist_agents) or REST `GET /v1/agents`. |
 | `title` | `string` | Session label (`Session.title`). Surfaces in `session/list`, the picker, slack-bridge thread titles. First write wins; replaced by the first user prompt unless the agent has emitted its own `session_info_update`. |
 | `agentArgs` | `string[]` | Forwarded to the underlying agent's command line. Stored in the resume hints so a resurrected session re-spawns the agent with the same args. |
 | `transformers` | `string[]` | Names of transformers to attach to the session chain. Resolves to live connections at session-creation time; missing names are silently skipped (fail-open). Falls back to `config.defaultTransformers`. |

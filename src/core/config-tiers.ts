@@ -86,22 +86,27 @@ export const CONFIG_TIERS: { [K in keyof HydraConfig]-?: ConfigKeyTier } = {
   agentOverrides: { reload: "live", overlay: "inert", overlayNote: DAEMON_ONLY },
   registry: { reload: "live", overlay: "inert", overlayNote: DAEMON_ONLY },
   npmRegistry: { reload: "live", overlay: "inert", overlayNote: DAEMON_ONLY },
-  // The client resolves these itself and sends them explicitly on
-  // session/new; the daemon's copy is only a fallback for callers that
-  // omit them.
+  // Both the TUI picker (client-side) and the daemon itself resolve a
+  // `.hydra-acp.json` overlay for these two keys: any session-creation
+  // call that carries a cwd (REST POST /v1/sessions, WS session/new,
+  // hydra-acp/child_session/spawn) has the daemon walk that cwd up to
+  // $HOME the same way composerAgentForCwd does, via
+  // resolveDirectorySessionDefaults. A caller-supplied agentId/model still
+  // wins outright when present; the daemon's own config.defaultAgent /
+  // defaultModels is the last fallback, not a competing source.
   defaultAgent: { reload: "live", overlay: "effective" },
   defaultCwd: { reload: "live", overlay: "effective" },
-  // Partial on purpose, but only for the paths that skip the picker.
-  // Sessions created from the picker composer DO get the overlay's
-  // model: tui/composer-agent.ts resolves it per-cwd and the picker
-  // sends it on session/new alongside the agent. A direct
-  // `hydra --new` / `hydra "<prompt>"` sends `model` only from an
-  // explicit --model flag, so there the daemon's value still wins.
+  // Partial on purpose: WS session/new and child_session/spawn resolve a
+  // directory defaultModels the same way defaultAgent does, keyed by the
+  // resolved agent's extends chain. REST POST /v1/sessions does not —
+  // that route has never accepted a `model` field at all, so a directory
+  // override has nothing to plug into there regardless of overlay
+  // resolution.
   defaultModels: {
     reload: "live",
     overlay: "partial",
     overlayNote:
-      "applies to sessions started from the picker composer; a direct `hydra --new` still uses the daemon's value unless --model is passed",
+      "applies to WS session/new and child_session/spawn; POST /v1/sessions has no model field to apply it to",
   },
 
   // --- warn: snapshotted at boot, drift reported ----------------------

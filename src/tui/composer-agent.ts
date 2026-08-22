@@ -1,5 +1,9 @@
 import { hydraHome } from "../core/paths.js";
-import { resolveDirectoryConfig } from "../core/directory-config.js";
+import {
+  resolveDirectoryConfig,
+  stringField,
+  stringMapField,
+} from "../core/directory-config.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import type { HydraConfig } from "../core/config.js";
 
@@ -96,31 +100,6 @@ export interface ComposerAgentForCwd extends ComposerAgentSelection {
   // Something the caller should surface but that we deliberately did not
   // act on. Currently only a `home` key: see below.
   notice?: string;
-}
-
-function stringField(
-  obj: Record<string, unknown>,
-  key: string,
-): string | undefined {
-  const v = obj[key];
-  return typeof v === "string" && v.length > 0 ? v : undefined;
-}
-
-function stringMapField(
-  obj: Record<string, unknown>,
-  key: string,
-): Record<string, string> | undefined {
-  const v = obj[key];
-  if (v === null || typeof v !== "object" || Array.isArray(v)) {
-    return undefined;
-  }
-  const out: Record<string, string> = {};
-  for (const [k, value] of Object.entries(v)) {
-    if (typeof value === "string") {
-      out[k] = value;
-    }
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 // Resolve the composer's agent•model for `cwd`, reading that directory's
