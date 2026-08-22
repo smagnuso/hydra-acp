@@ -4704,6 +4704,13 @@ export class SessionManager {
   // bootstrap, logging success or a non-fatal rejection. `where` is the
   // human-readable provenance string used in log lines. A bad id in config
   // shouldn't break session creation, so a rejection is swallowed.
+  //
+  // Hands back the agent's reply alongside the verdict. On the
+  // set_config_option verb that reply carries a fresh configOptions
+  // snapshot rebuilt for the model just switched to, and it is the only
+  // word on it — agents answering this call emit no notification. Dropping
+  // it left the session advertising the replaced model's dimensions (see
+  // the seedReply thread in bootstrapAgent).
   private async applySeedModel(
     agent: AgentInstance,
     sessionId: string,
@@ -4712,12 +4719,12 @@ export class SessionManager {
     // Lead verb inferred from the agent's session/new response shape;
     // undefined falls back to session/set_model.
     modelVerb?: ModelVerb,
-  ): Promise<boolean> {
+  ): Promise<{ accepted: boolean; result?: unknown }> {
     try {
       // Leads with the inferred verb and probes the other on
       // MethodNotFound — agents on @agentclientprotocol/sdk >= 0.26 only
       // implement session/set_config_option (see core/model-verb.ts).
-      const { verb } = await requestModelChange({
+      const { verb, result } = await requestModelChange({
         request: (method, params) => agent.connection.request(method, params),
         sessionId,
         modelId,
@@ -4725,12 +4732,12 @@ export class SessionManager {
         logger: this.logger,
       });
       this.logger?.info(`${where}: ${verb} accepted`);
-      return true;
+      return { accepted: true, result };
     } catch (err) {
       this.logger?.warn(
         `${where} rejected by agent (${(err as Error).message}); session will use the agent's own default`,
       );
-      return false;
+      return { accepted: false };
     }
   }
 
@@ -4842,6 +4849,9 @@ export class SessionManager {
         agentDef,
       );
       const desired = params.model ?? inheritedModel?.value;
+      // The accepted seed's reply, when one was sent and accepted. Carries
+      // the agent's post-switch configOptions snapshot; see below.
+      let seedReply: unknown;
       if (desired && desired !== initialModel) {
         // Resolve against the agent's advertised model list when we have
         // one. Surfaces config typos (e.g. defaultModels[opencode] set to
@@ -4863,30 +4873,32 @@ export class SessionManager {
         if (resolution.kind === "exact" || resolution.kind === "none") {
           // Only adopt the desired id if the agent actually accepted it;
           // a rejection leaves the session on the agent's own default.
-          if (
-            await this.applySeedModel(
-              agent,
-              sessionIdRaw,
-              desired,
-              where,
-              modelVerb,
-            )
-          ) {
+          const seeded = await this.applySeedModel(
+            agent,
+            sessionIdRaw,
+            desired,
+            where,
+            modelVerb,
+          );
+          if (seeded.accepted) {
             initialModel = desired;
+            seedReply = seeded.result;
           }
         } else if (resolution.kind === "resolved") {
           if (resolution.modelId === initialModel) {
             initialModel = resolution.modelId;
-          } else if (
-            await this.applySeedModel(
+          } else {
+            const seeded = await this.applySeedModel(
               agent,
               sessionIdRaw,
               resolution.modelId,
               `${where} resolved to ${JSON.stringify(resolution.modelId)}`,
               modelVerb,
-            )
-          ) {
-            initialModel = resolution.modelId;
+            );
+            if (seeded.accepted) {
+              initialModel = resolution.modelId;
+              seedReply = seeded.result;
+            }
           }
         } else if (resolution.kind === "ambiguous") {
           this.logger?.warn(
@@ -4901,7 +4913,23 @@ export class SessionManager {
       }
       const initialModes = extractInitialModes(newResult);
       const initialMode = extractInitialCurrentMode(newResult);
-      const initialConfigOptions = extractInitialConfigOptions(newResult);
+      // Read the dimensions off the seed's reply when one was accepted:
+      // it describes the model the session is actually on, where newResult
+      // describes the one that was just replaced. claude-acp rebuilds its
+      // effort levels per model (and drops the option for a model with
+      // none), so preferring newResult here advertised levels the agent
+      // would go on to refuse, at a currentValue belonging to the old
+      // model. Only the model/mode extractors above can keep using
+      // newResult — hydra tracks the seeded model itself, in initialModel.
+      //
+      // Gated on the reply actually carrying the array, not merely on a
+      // seed having run: session/set_model (still the lead verb, and the
+      // only one older agents implement) answers without one, and treating
+      // that as authoritative would drop every dimension newResult
+      // advertised rather than refresh it.
+      const initialConfigOptions = extractInitialConfigOptions(
+        hasConfigOptions(seedReply) ? seedReply : newResult,
+      );
       return {
         agent,
         upstreamSessionId: sessionIdRaw,
@@ -8081,6 +8109,19 @@ function findConfigOptionEntry(
     }
   }
   return undefined;
+}
+
+// True when an RPC reply carries a configOptions array to harvest. Narrows
+// to the shape extractInitialConfigOptions takes, so a reply that answers
+// without one (session/set_model, which has no snapshot to give) is left to
+// the caller's fallback rather than read as "this agent has no dimensions".
+function hasConfigOptions(
+  reply: unknown,
+): reply is Record<string, unknown> & { configOptions: unknown[] } {
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+    return false;
+  }
+  return Array.isArray((reply as Record<string, unknown>).configOptions);
 }
 
 // Pull every agent-advertised config dimension OTHER than model/mode/agent

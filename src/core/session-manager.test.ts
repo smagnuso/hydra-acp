@@ -4159,6 +4159,108 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
       session.buildConfigOptions().filter((o) => agentOwnedIds.includes(o.id)),
     ).toHaveLength(3);
   });
+
+  it("harvests the seed model's own reply, not the snapshot for the model it replaced", async () => {
+    // claude-acp rebuilds effort levels per model. When hydra seeds a
+    // different model than the agent started on, the set_config_option reply
+    // is the only word on the new model's dimensions — no notification
+    // follows. Reading session/new instead advertises the replaced model's
+    // levels, which the agent will now refuse, at its currentValue.
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_seed_cfg",
+        configOptions: [
+          {
+            id: "model",
+            currentValue: "sonnet",
+            options: [{ value: "sonnet" }, { value: "opus" }],
+          },
+          {
+            id: "effort",
+            name: "Effort",
+            category: "thought_level",
+            currentValue: "default",
+            options: [{ value: "default", name: "Default" }],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        configOptions: [
+          {
+            id: "model",
+            currentValue: "opus",
+            options: [{ value: "sonnet" }, { value: "opus" }],
+          },
+          {
+            id: "effort",
+            name: "Effort",
+            category: "thought_level",
+            currentValue: "xhigh",
+            options: [
+              { value: "default", name: "Default" },
+              { value: "xhigh", name: "Extra high" },
+            ],
+          },
+        ],
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { "claude-code": "opus" } },
+    );
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: WORK_CWD,
+    });
+
+    expect(session.currentModel).toBe("opus");
+    const effort = session.buildConfigOptions().find((o) => o.id === "effort");
+    expect(effort?.currentValue).toBe("xhigh");
+    expect(effort?.options.map((v) => v.value)).toEqual(["default", "xhigh"]);
+  });
+
+  it("keeps session/new's config options when the seed verb answers without a snapshot", async () => {
+    // session/set_model is still the lead verb and answers with nothing to
+    // harvest. Preferring an empty reply there would drop every dimension
+    // the agent did advertise rather than refresh it.
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_seed_plain",
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            category: "thought_level",
+            currentValue: "default",
+            options: [
+              { value: "default", name: "Default" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+
+    const effort = session.buildConfigOptions().find((o) => o.id === "effort");
+    expect(effort?.currentValue).toBe("default");
+    expect(effort?.options.map((v) => v.value)).toEqual(["default", "high"]);
+  });
 });
 
 describe("SessionManager.create: agent.steeringSupported capture", () => {
