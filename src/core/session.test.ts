@@ -3751,6 +3751,49 @@ describe("Session", () => {
         vi.useRealTimers();
       }
     });
+
+    it("does NOT close while a background task is armed with no turn in flight", async () => {
+      // Regression: a session's turn ends normally after it kicks off a
+      // long-running Monitor/backgrounded-Bash watch (e.g. a device test
+      // run). hasWorkInFlight used to ignore armedBackgroundTasks entirely,
+      // so an hour of silence closed the session out from under the still-
+      // running job. PROTOCOL.md documents armedTasks>0 as "not finished
+      // with you"; the idle-close guard needs to agree.
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_armed_alive",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+
+        mock.triggerNotification("session/update", {
+          sessionId: "u",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_device_run",
+            title: "Terminal",
+            rawInput: {
+              command: "run-device-mem.sh",
+              description: "48-run factorial power run",
+              run_in_background: true,
+            },
+          },
+        });
+        expect(session.armedBackgroundTasks).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("agent exit", () => {

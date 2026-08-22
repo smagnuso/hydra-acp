@@ -8689,11 +8689,11 @@ export class Session {
     if (this.closed || this.idleTimeoutMs <= 0) {
       return;
     }
-    // Never abandon active work. An in-flight turn, unresolved
-    // permission request, or non-empty prompt queue defers the close
-    // by a full idle window — the next broadcast will re-arm us sooner
-    // anyway, and this avoids a tight reschedule loop when activity is
-    // stale but work is genuinely in flight or queued behind it.
+    // Never abandon active work (see hasWorkInFlight). Deferring the
+    // close by a full idle window is fine: the next broadcast will
+    // re-arm us sooner anyway, and this avoids a tight reschedule loop
+    // when activity is stale but work is genuinely in flight or queued
+    // behind it.
     if (this.hasWorkInFlight) {
       this.armIdleTimer(this.idleTimeoutMs);
       return;
@@ -8757,16 +8757,23 @@ export class Session {
   }
 
   // True while the session holds work that must not be abandoned: a
-  // turn in flight, an unresolved permission request, or entries still
-  // waiting on the queue. Every teardown path has to consult this, not
-  // just the idle-close timer: a client that fires a prompt and detaches
-  // immediately (hydra cat --no-wait) leaves a queued turn behind with
-  // nobody attached, and killing the agent then loses it silently.
+  // turn in flight, an unresolved permission request, entries still
+  // waiting on the queue, or a background task the agent armed and
+  // hasn't been seen to wake up for. Every teardown path has to consult
+  // this, not just the idle-close timer: a client that fires a prompt
+  // and detaches immediately (hydra cat --no-wait) leaves a queued turn
+  // behind with nobody attached, and killing the agent then loses it
+  // silently. Same reasoning for armed tasks: PROTOCOL.md documents that
+  // a nonzero armedTasks count means the session "is not finished with
+  // you" and renders BUSY in the session list; the idle-close guard
+  // needs to agree with that, or a session with a live device run/Monitor
+  // watch gets reaped mid-wait.
   get hasWorkInFlight(): boolean {
     return (
       this.turnStartedAt !== undefined ||
       this.hasPermissionFlag ||
-      this.promptQueue.length > 0
+      this.promptQueue.length > 0 ||
+      this.armedBackgroundTasks.length > 0
     );
   }
 
