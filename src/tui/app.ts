@@ -9547,16 +9547,27 @@ async function runSession(
         approxTokens?: number;
         currentUsage?: { used?: number; size?: number };
         compactionState?: { status?: string; attempts?: number } | null;
+        pendingAgentSwap?: string;
       };
-      // (A) Seed the indicator from the live compactionState. Mirrors
-      // the phase → text mapping in handleCompactionUpdate so the
-      // visible state is identical whether sourced from broadcast or
-      // from this read.
-      const status = compactInfo.compactionState?.status;
-      if (status === "requested" || status === "running") {
-        screen.setCompactionIndicator("compacting...");
-      } else if (status === "swap_pending" || status === "swap_deferred") {
-        screen.setCompactionIndicator("compaction queued (waiting for idle)");
+      // (A) Seed the indicator from the live compactionState, or from a
+      // pending /hydra agent swap. Mirrors the phase → text mapping in
+      // handleCompactionUpdate and the pendingAgentSwap branch of the
+      // session-info handler, so the visible state is identical whether
+      // sourced from broadcast or from this read. A pending agent swap
+      // takes the same banner slot as compaction text and, like the live
+      // push (emitSwapPhase never calls broadcastCompactionPhase for a
+      // swap job), takes priority over it.
+      if (typeof compactInfo.pendingAgentSwap === "string") {
+        screen.setCompactionIndicator(
+          `switching to ${compactInfo.pendingAgentSwap}...`,
+        );
+      } else {
+        const status = compactInfo.compactionState?.status;
+        if (status === "requested" || status === "running") {
+          screen.setCompactionIndicator("compacting...");
+        } else if (status === "swap_pending" || status === "swap_deferred") {
+          screen.setCompactionIndicator("compaction queued (waiting for idle)");
+        }
       }
       // (B) The prompt only fires on a fresh wake. Gated to avoid
       // nagging on every re-attach.

@@ -1586,6 +1586,58 @@ describe("session routes: compaction endpoints", () => {
     expect(body.compactionState?.status).toBe("running");
     expect(body.compactionState?.iter).toBe(2);
   });
+
+  it("GET /v1/sessions/:id/compact includes pendingAgentSwap when a /hydra agent swap is in flight", async () => {
+    // Same injection pattern as compactionState above — reattach-time
+    // reconciliation (app.ts) reads this field to seed the "switching
+    // to X..." indicator for a client that missed the live broadcast.
+    const bundle = {
+      version: 1 as const,
+      exportedAt: "2026-08-21T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_swap_route",
+        lineageId: "lin_swap_route",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-08-21T00:00:00.000Z",
+        updatedAt: "2026-08-21T00:00:00.000Z",
+      },
+      history: [] as Array<{
+        method: string;
+        params: Record<string, unknown>;
+        recordedAt: number;
+      }>,
+    };
+    const imported = await harness.manager.importBundle(bundle);
+    const store = (harness.manager as unknown as { store: SessionStore }).store;
+    const existing = await store.read(imported.sessionId);
+    await store.write({
+      ...existing!,
+      pendingAgentSwap: "new-agent",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pendingAgentSwap?: string };
+    expect(body.pendingAgentSwap).toBe("new-agent");
+  });
+
+  it("GET /v1/sessions/:id/compact omits pendingAgentSwap when no swap is pending", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact/status`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pendingAgentSwap?: string };
+    expect(body.pendingAgentSwap).toBeUndefined();
+  });
 });
 
 describe("session routes: compact/status token accounting", () => {

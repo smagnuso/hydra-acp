@@ -840,6 +840,7 @@ export function registerSessionRoutes(
     // in flight or queued session-wide, report inFlight=true.
     const compactionState = await manager.getCompactionState(id);
     const rollbackBreadcrumb = await manager.getRollbackBreadcrumb(id);
+    const pendingAgentSwap = await manager.getPendingAgentSwap(id);
 
     // Compute shouldCompact for clients deciding whether to surface a compaction prompt.
     let shouldCompact = false;
@@ -917,6 +918,7 @@ export function registerSessionRoutes(
       ...(currentUsage != null ? { currentUsage } : {}),
       ...(compactionState != null ? { compactionState } : {}),
       ...(rollbackBreadcrumb != null ? { rollbackBreadcrumb } : {}),
+      ...(pendingAgentSwap != null ? { pendingAgentSwap } : {}),
     };
   });
 
