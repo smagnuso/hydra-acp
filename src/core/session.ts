@@ -516,6 +516,16 @@ export function autonomousTurnTerminal(params: unknown): boolean {
   return typeof kind === "string" && AUTONOMOUS_TURN_ORIGINS.has(kind);
 }
 
+// The carrier every turn terminal rides, whichever lane produced it. On its
+// own it says nothing about whose turn ended — that is the origin stamp
+// autonomousTurnTerminal reads.
+function isUsageUpdate(params: unknown): boolean {
+  const update = (params as { update?: Record<string, unknown> } | undefined)
+    ?.update;
+  return !!update && typeof update === "object" &&
+    update.sessionUpdate === "usage_update";
+}
+
 // Cap on the agent-authored label naming what woke an unsolicited turn.
 // Renders as a single header line, so anything longer is already unreadable.
 const BACKGROUND_TASK_LABEL_MAX = 120;
@@ -842,7 +852,16 @@ export class Session {
   // user-lane (stamped kind:"human"), so autonomousTurnTerminal never fires
   // for it. Set before the request, not after the reply, because the
   // detached turn's first notification can arrive before the reply does.
-  private pendingSteerDetach = false;
+  //
+  // Carries the messageId that was current when it was armed, not a bare
+  // boolean, so the arm can be recognized as stale. The detached turn's
+  // whole lifetime can land while that entry is still nominally current
+  // (hydra's own session/prompt for it hasn't resolved, so promptInFlight
+  // is still true and noteAgentActivity folds the detached turn's output
+  // away instead of opening one for it). Nothing consumes the arm in that
+  // window, and left alone it survives to mislabel some unrelated turn
+  // minutes later. See the invalidation in noteAgentActivity.
+  private pendingSteerDetach: { messageId: string } | undefined;
   // Set when a queue entry superseded an unsolicited turn that was still
   // running. The agent is now inside a lane it started by itself, with our
   // prompt injected on top, and claude-acp owes exactly one SDK result for
@@ -3640,6 +3659,28 @@ export class Session {
       this.salvageSupersededTerminal();
       return;
     }
+    // A usage_update reaching here while the entry steer() armed against is
+    // STILL the current one is the detached turn's terminal being folded
+    // away: hydra's own session/prompt for that entry hasn't resolved, so
+    // promptInFlight is true, so the detached turn's content never opened an
+    // unsolicited turn and nothing will ever consume the arm. Invalidate it
+    // now — left armed it survives to mark some unrelated agent-initiated
+    // turn steerCaused minutes later, and steerCausedTurnTerminal would then
+    // close THAT turn on any usage_update at all, reporting the session idle
+    // while the agent is still working.
+    //
+    // Deliberately not hooked to the armed entry's broadcastTurnComplete
+    // instead: that entry routinely settles before the steering reply does
+    // (hydra only steered because it believed the turn was live), and the
+    // arm has to outlive it for the detached turn's own notifications, which
+    // arrive later, to be attributed at all.
+    if (
+      this.pendingSteerDetach !== undefined &&
+      this.currentEntry?.messageId === this.pendingSteerDetach.messageId &&
+      isUsageUpdate(envelope)
+    ) {
+      this.pendingSteerDetach = undefined;
+    }
     // State-shaped updates (model, mode, advertised commands) say nothing
     // about whether a turn is running — the agent emits them outside turns
     // routinely.
@@ -3671,10 +3712,7 @@ export class Session {
     if (this.unsolicitedTurn?.steerCaused !== true) {
       return false;
     }
-    const update = (envelope as { update?: Record<string, unknown> } | undefined)
-      ?.update;
-    return !!update && typeof update === "object" &&
-      update.sessionUpdate === "usage_update";
+    return isUsageUpdate(envelope);
   }
 
   // Harvest the background task an agent update announces, so an
@@ -4141,9 +4179,9 @@ export class Session {
       messageId: generateMessageId(),
       startedAt,
       cause,
-      steerCaused: this.pendingSteerDetach,
+      steerCaused: this.pendingSteerDetach !== undefined,
     };
-    this.pendingSteerDetach = false;
+    this.pendingSteerDetach = undefined;
     this.unsolicitedTurn = turn;
     this.promptStartedAt = startedAt;
     this.logger?.info(
@@ -4863,12 +4901,12 @@ export class Session {
       // agent's own turn ended just before this arrived, the detached
       // turn's first notification can beat this request's response back
       // to us. See pendingSteerDetach and steerCausedTurnTerminal.
-      this.pendingSteerDetach = true;
+      this.pendingSteerDetach = { messageId: this.currentEntry!.messageId };
       let response: unknown;
       try {
         response = await this.forwardRequest("_session/steering", params);
       } catch (err) {
-        this.pendingSteerDetach = false;
+        this.pendingSteerDetach = undefined;
         throw err;
       }
       const outcome = (response as { outcome?: unknown } | undefined)?.outcome;
@@ -4883,7 +4921,7 @@ export class Session {
       // detached turn coming and the flag must not linger to mislabel some
       // unrelated later one.
       if (result.outcome !== "startedNewTurn") {
-        this.pendingSteerDetach = false;
+        this.pendingSteerDetach = undefined;
       }
       if (result.outcome === "injected") {
         // The turn's boundary didn't change — record what was said, but

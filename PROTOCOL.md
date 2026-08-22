@@ -1743,6 +1743,17 @@ terminal racing in from outside. Every other unsolicited turn (a
 genuine agent-initiated resumption) still requires an autonomous
 `_claude/origin` kind to close, unchanged.
 
+That tracking carries the messageId it was armed against, because the
+detached turn can also live and die entirely before hydra's own
+`session/prompt` for the turn it thought was running resolves. While
+that entry is still current the daemon folds the detached turn's output
+into it rather than opening an unsolicited turn, so nothing consumes
+the arm — and an arm left set would mark some unrelated agent-initiated
+turn minutes later, whose ordinary human-lane terminal would then end it
+early and report the session idle while the agent was still working. A
+`usage_update` folded away while the armed entry is still current is
+that case, and retires the arm.
+
 #### Notification: `hydra-acp/prompt_queue/added`
 
 Daemon → every attached client. Fires when a new prompt is enqueued (including new turns from any client).

@@ -1352,3 +1352,66 @@ describe("unsolicited turn attribution", () => {
     expect(hydraMeta(started[0]!).cause).toBeUndefined();
   });
 });
+
+// pendingSteerDetach is armed before the `_session/steering` forward and
+// consumed by openUnsolicitedTurn. Nothing else clears it on the
+// startedNewTurn path -- so if the detached turn never reaches
+// openUnsolicitedTurn, the flag survives and marks whatever agent-initiated
+// turn comes next as steer-caused.
+describe("the steer detach flag outliving the turn it was armed for", () => {
+  it("does not mark a later agent-initiated turn as steer-caused", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    mock.agent.steeringSupported = true;
+
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    let settleTurn: (() => void) | undefined;
+    let steeredTurnPending = true;
+    requestMock.mockImplementation((method: string) => {
+      if (method === "session/prompt") {
+        if (!steeredTurnPending) {
+          return Promise.resolve({ stopReason: "end_turn" });
+        }
+        steeredTurnPending = false;
+        return new Promise((resolve) => {
+          settleTurn = () => resolve({ stopReason: "end_turn" });
+        });
+      }
+      if (method === "_session/steering") {
+        return Promise.resolve({ outcome: "startedNewTurn" });
+      }
+      return Promise.resolve({});
+    });
+
+    void session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "the turn being steered" }],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    await session.steer(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "actually, do X instead" }],
+    });
+
+    // The detached turn runs and ends inside the window where hydra still
+    // has its own prompt in flight, so noteAgentActivity folds its output
+    // into that turn and openUnsolicitedTurn -- the only consumer of the
+    // flag -- never runs.
+    agentChunk(mock, "doing X instead");
+    humanTerminal(mock);
+
+    settleTurn?.();
+    await settleDrain();
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    // Later, a background task wakes the agent. A genuine agent-initiated
+    // turn, nothing to do with the steer.
+    agentChunk(mock, "background task finished");
+    expect(session.inUnsolicitedTurn).toBe(true);
+
+    // An unrelated user turn's terminal must not end it -- the invariant
+    // "does not end on a user-lane terminal" rests on.
+    humanTerminal(mock);
+    expect(session.inUnsolicitedTurn).toBe(true);
+  });
+});
