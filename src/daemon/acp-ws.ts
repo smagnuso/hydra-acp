@@ -966,7 +966,7 @@ export function registerAcpWsEndpoint(
       // the chosen turn boundary. forkAt defaults to the latest
       // turn_complete; agentId defaults to the source's agent; cwd
       // defaults to the source's cwd. The new session is written with
-      // upstreamSessionId="" so its first attach triggers seedFromImport
+      // upstreamSessionId="" so the resurrect below triggers seedFromImport
       // (same wire shape as an imported session).
       connection.onRequest("hydra-acp/session/fork", async (raw) => {
         const params = (raw ?? {}) as {
@@ -992,13 +992,49 @@ export function registerAcpWsEndpoint(
         const model = typeof params.model === "string" && params.model.length > 0
           ? params.model
           : undefined;
-        return await deps.manager.forkSession(params.sessionId, {
+        const result = await deps.manager.forkSession(params.sessionId, {
           ...(forkAt !== undefined ? { forkAt } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           ...(agentId !== undefined ? { agentId } : {}),
           ...(mode !== undefined ? { mode } : {}),
           ...(model !== undefined ? { model } : {}),
         });
+        // forkSession only persists a cold record — no live Session is
+        // spawned. Bind this connection now (resurrect + attach, same as
+        // session/load's cold path) so the fork is immediately promptable
+        // instead of requiring a follow-up session/attach. Same fix as the
+        // standard session/fork alias below — see that handler's comment.
+        let session = deps.manager.get(result.sessionId);
+        if (!session) {
+          const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
+          if (!fromDisk) {
+            throw rpcError(
+              JsonRpcErrorCodes.InternalError,
+              `fork ${result.sessionId} vanished before it could be attached`,
+            );
+          }
+          session = await resurrectFromDisk(deps, {
+            ...fromDisk,
+            onInstallProgress: makeInstallProgressForwarder(connection),
+          });
+        }
+        evictPriorAttachment(state, session, session.sessionId);
+        const client = bindClientToSession(connection, session, state);
+        const { entries: replay } = await session.attach(client, "full");
+        state.attached.set(session.sessionId, {
+          sessionId: session.sessionId,
+          clientId: client.clientId,
+          readonly: false,
+        });
+        for (const note of replay) {
+          if (connection.isClosed()) {
+            break;
+          }
+          await connection
+            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+            .catch(() => undefined);
+        }
+        return { ...result, sessionId: session.sessionId };
       });
 
       // Speculative-compat alias for the still-Draft ACP RFD
@@ -1032,7 +1068,42 @@ export function registerAcpWsEndpoint(
           ...(cwd !== undefined ? { cwd } : {}),
           mode: "verbatim",
         });
-        return { sessionId: result.sessionId };
+        // forkSession only persists a cold record — no live Session is
+        // spawned. In plain ACP a returned sessionId is immediately
+        // usable, so bind this connection now (resurrect + attach, same
+        // as session/load's cold path) instead of leaving the caller to
+        // discover it needs a hydra-specific session/attach first.
+        let session = deps.manager.get(result.sessionId);
+        if (!session) {
+          const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
+          if (!fromDisk) {
+            throw rpcError(
+              JsonRpcErrorCodes.InternalError,
+              `fork ${result.sessionId} vanished before it could be attached`,
+            );
+          }
+          session = await resurrectFromDisk(deps, {
+            ...fromDisk,
+            onInstallProgress: makeInstallProgressForwarder(connection),
+          });
+        }
+        evictPriorAttachment(state, session, session.sessionId);
+        const client = bindClientToSession(connection, session, state);
+        const { entries: replay } = await session.attach(client, "full");
+        state.attached.set(session.sessionId, {
+          sessionId: session.sessionId,
+          clientId: client.clientId,
+          readonly: false,
+        });
+        for (const note of replay) {
+          if (connection.isClosed()) {
+            break;
+          }
+          await connection
+            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+            .catch(() => undefined);
+        }
+        return { sessionId: session.sessionId };
       });
 
       // Delete a session record (and, if live, close the agent first).
