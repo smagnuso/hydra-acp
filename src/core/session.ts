@@ -526,6 +526,34 @@ function isUsageUpdate(params: unknown): boolean {
     update.sessionUpdate === "usage_update";
 }
 
+// Whether a session/set_config_option reply is reporting the agent's whole
+// config set or just the id that was set. Nothing in the wire shape says
+// which — both are `{ configOptions: [...] }` — so this reads it off the
+// content: a reply naming any id other than the one requested is describing
+// more than the request, which only a full snapshot does. claude-acp always
+// answers with the complete array (model/mode/agent included) and so always
+// lands here as full; an agent that echoes back only what changed is treated
+// as partial, and its other dimensions are left alone rather than pruned.
+//
+// Errs toward partial: an unknown configId, or a reply carrying exactly the
+// one entry, both read as partial. A stale option outliving its model is a
+// visible annoyance; deleting an agent's live dimensions is data loss.
+function isFullConfigOptionSnapshot(
+  list: unknown[],
+  configId: string | undefined,
+): boolean {
+  if (configId === undefined) {
+    return false;
+  }
+  return list.some((raw) => {
+    if (!raw || typeof raw !== "object") {
+      return false;
+    }
+    const id = (raw as { id?: unknown }).id;
+    return typeof id === "string" && id.trim() !== "" && id.trim() !== configId;
+  });
+}
+
 // Cap on the agent-authored label naming what woke an unsolicited turn.
 // Renders as a single header line, so anything longer is already unreadable.
 const BACKGROUND_TASK_LABEL_MAX = 120;
@@ -5844,23 +5872,33 @@ export class Session {
   }
 
   // session/set_config_option's reply carries the agent's actual applied
-  // value for an id hydra doesn't own (e.g. "effort") — the only word on
-  // the new value, since agents answering this call emit no separate
-  // config_option_update notification. Unlike the notification path,
-  // this never prunes: the issue that motivated this method documents
-  // agents answering with "an updated snapshot" but not whether that's
-  // the full non-model/mode set or just the one id that changed, and
-  // wasn't verified against a live agent — wrongly dropping an option a
-  // client still has on screen is worse than leaving a currentValue
-  // briefly stale, so this only ever adds or updates. Model/mode/agent
-  // entries are ignored: this call is only reached for ids the setter's
-  // own model/mode/agent switch cases don't already own.
-  applyAgentConfigOptionResponse(response: unknown): void {
+  // state for the ids hydra doesn't own (e.g. "effort") — the only word on
+  // it, since agents answering this call emit no separate
+  // config_option_update notification. claude-acp's handler calls
+  // applyConfigOptionValue directly, bypassing the updateConfigOption
+  // helper that notifies, and returns `{ configOptions }` wholesale.
+  //
+  // Treat the reply as the state rather than as news about the one id that
+  // was set. Setting a config option can reshape the others: claude-acp
+  // rebuilds effort per model (dropping the option entirely for a model
+  // with no levels, clamping a currentValue the new model won't take) and
+  // shows/hides the Fast toggle on supportsFastMode. Nothing in the reply
+  // shape distinguishes "one field changed" from "rebuilt" — it is the
+  // same full array either way — so the honest read is to overwrite from
+  // it and diff, not to infer which ids the agent might have touched.
+  //
+  // Returns whether the stored set actually changed, so callers can
+  // broadcast only when there is something to say. Model/mode/agent
+  // entries are skipped: this is only reached for ids the setter's own
+  // model/mode/agent cases don't already own, and those have their own
+  // spec-shaped update paths.
+  applyAgentConfigOptionResponse(response: unknown, configId?: string): boolean {
     const list = (response as { configOptions?: unknown } | undefined)
       ?.configOptions;
     if (!Array.isArray(list)) {
-      return;
+      return false;
     }
+    const before = JSON.stringify(this.agentAdvertisedConfigOptions);
     for (const raw of list) {
       const id = (raw as { id?: unknown } | null)?.id;
       if (id === "model" || id === "mode" || id === "agent") {
@@ -5868,6 +5906,24 @@ export class Session {
       }
       this.applyOneConfigOptionEntry(raw);
     }
+    if (isFullConfigOptionSnapshot(list, configId)) {
+      // Same reasoning as the notification path: an id the agent stopped
+      // offering has to leave, or a picker the agent will now refuse stays
+      // on screen. Gated because a reply naming only the id that was set
+      // is reporting that one value, not the whole set, and pruning on it
+      // would delete every other dimension the agent still has.
+      const seen = new Set(
+        list
+          .filter(
+            (r): r is Record<string, unknown> => !!r && typeof r === "object",
+          )
+          .map((r) => (typeof r.id === "string" ? r.id.trim() : undefined))
+          .filter((id): id is string => !!id),
+      );
+      this.agentAdvertisedConfigOptions =
+        this.agentAdvertisedConfigOptions.filter((o) => seen.has(o.id));
+    }
+    return JSON.stringify(this.agentAdvertisedConfigOptions) !== before;
   }
 
   private applyOneConfigOptionEntry(raw: unknown): void {
@@ -6604,7 +6660,12 @@ export class Session {
   // agent swaps so config-options-aware clients stay in sync via the
   // spec mechanism. config_option_update is a STATE_UPDATE_KIND, so this
   // broadcasts live but is not recorded to history.
-  private broadcastConfigOptions(): void {
+  // Public because the daemon's set_config_option handler needs it: a
+  // setter reply is a response to one client, with no frame to relay to
+  // the others (unlike config_option_update, where the agent's own
+  // envelope is broadcast). Without this, a change made by one client
+  // leaves every other attached client rendering the old set.
+  broadcastConfigOptions(): void {
     this.recordAndBroadcast("session/update", {
       sessionId: this.upstreamSessionId,
       update: {
@@ -7270,7 +7331,12 @@ export class Session {
       });
       return { stopReason: "end_turn" };
     }
-    await this.forwardModelChange(modelId);
+    const reply = await this.forwardModelChange(modelId);
+    // Refresh the agent's other dimensions from the reply BEFORE
+    // applyModelChange, whose broadcastConfigOptions would otherwise send
+    // the pre-switch set: on claude-acp a model change rebuilds effort and
+    // the Fast toggle, and this reply is the only word on them.
+    this.applyAgentConfigOptionResponse(reply, "model");
     // Mirror the daemon's session/set_model WS handler (acp-ws.ts) —
     // update the cached currentModel and broadcast a synthetic
     // current_model_update. Some agents don't emit one themselves, so
@@ -7454,7 +7520,10 @@ export class Session {
     // appeared to no-op.
     if (id === "model") {
       if (resolvedValue !== this.currentModel) {
-        await this.forwardModelChange(resolvedValue);
+        // See runModelCommandInline: the reply carries the dimensions
+        // rebuilt for the new model, and applyModelChange broadcasts them.
+        const reply = await this.forwardModelChange(resolvedValue);
+        this.applyAgentConfigOptionResponse(reply, "model");
       }
       this.applyModelChange(resolvedValue);
       return { stopReason: "end_turn" };
@@ -7480,7 +7549,10 @@ export class Session {
       configId: id,
       value: resolvedValue,
     });
-    this.applyAgentConfigOptionResponse(response);
+    // Every attached client, not just whoever typed the command.
+    if (this.applyAgentConfigOptionResponse(response, id)) {
+      this.broadcastConfigOptions();
+    }
     return { stopReason: "end_turn" };
   }
 

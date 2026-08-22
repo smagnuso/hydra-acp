@@ -954,18 +954,77 @@ describe("Session", () => {
       });
       await flushHistoryWrites();
 
-      // The setter's reply only echoes the one id that changed — unlike a
-      // config_option_update notification, this must NOT prune "fast",
-      // since the reply shape (single value vs full snapshot) isn't
-      // verified against a live agent.
+      // A reply naming only the id that was set is reporting that one
+      // value, not the whole set, so "fast" must survive. Pruning on a
+      // partial reply would delete dimensions the agent still offers.
       session.applyAgentConfigOptionResponse({
         configOptions: [
           { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
         ],
-      });
+      }, "effort");
       const opts = session.buildConfigOptions();
       expect(opts.find((o) => o.id === "effort")?.currentValue).toBe("high");
       expect(opts.map((o) => o.id)).toContain("fast");
+    });
+
+    it("applyAgentConfigOptionResponse prunes an id the agent dropped when the reply is a full snapshot", async () => {
+      // claude-acp rebuilds config options per model: switch to one with no
+      // reasoning levels and "effort" is gone from the array entirely. Its
+      // reply is the whole set (model/mode/agent included), which is what
+      // distinguishes it from a reply about the single id that was set.
+      const { session, mock } = makeSession("sess_eff_prune", "u_eff_prune");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_prune",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
+            { id: "fast", currentValue: "off", options: [{ value: "off" }, { value: "on" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      expect(session.buildConfigOptions().map((o) => o.id)).toContain("effort");
+
+      const changed = session.applyAgentConfigOptionResponse({
+        configOptions: [
+          { id: "model", currentValue: "haiku", options: [{ value: "haiku" }] },
+          { id: "mode", currentValue: "default", options: [{ value: "default" }] },
+          { id: "fast", currentValue: "off", options: [{ value: "off" }, { value: "on" }] },
+        ],
+      }, "model");
+
+      expect(changed).toBe(true);
+      const ids = session.buildConfigOptions().map((o) => o.id);
+      expect(ids).not.toContain("effort");
+      expect(ids).toContain("fast");
+    });
+
+    it("applyAgentConfigOptionResponse reports no change when the reply matches what is cached", async () => {
+      // Gates the broadcast: re-sending an identical snapshot to every
+      // attached client on each set is churn.
+      const { session, mock } = makeSession("sess_eff_same", "u_eff_same");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_same",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      const changed = session.applyAgentConfigOptionResponse({
+        configOptions: [
+          { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
+        ],
+      }, "effort");
+      expect(changed).toBe(false);
     });
 
     it("applyAgentConfigOptionResponse ignores model/mode/agent entries and non-array payloads", () => {
@@ -6427,6 +6486,87 @@ describe("Session", () => {
         configId: "effort",
         value: "high",
       });
+    });
+
+    it("'/hydra config effort high' tells the other attached clients, not just the caller", async () => {
+      // The reply is a response addressed to whoever asked. Unlike the
+      // notification path there is no agent frame to relay, so without an
+      // explicit broadcast every other client keeps rendering the old set.
+      const { session, mock } = makeSession("sess_cfg_bcast", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockResolvedValue({
+        configOptions: [
+          { id: "effort", currentValue: "high", options: [{ value: "low" }, { value: "high" }] },
+        ],
+      });
+
+      const { client: alice } = makeClient();
+      await session.attach(alice, "full");
+      const { client: bob, stream: bobStream } = makeClient();
+      await session.attach(bob, "full");
+      bobStream.sent.length = 0;
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config effort high" }],
+      });
+
+      const pushed = bobStream.sent.filter(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "config_option_update",
+      );
+      expect(pushed.length).toBeGreaterThan(0);
+      const last = pushed[pushed.length - 1]!.params as {
+        update: { configOptions: Array<{ id: string; currentValue: string }> };
+      };
+      expect(
+        last.update.configOptions.find((o) => o.id === "effort")?.currentValue,
+      ).toBe("high");
+    });
+
+    it("'/hydra config model X' refreshes the dimensions the new model rebuilt", async () => {
+      // A model switch is a config change that reshapes other config
+      // values: claude-acp rebuilds effort for the new model and drops it
+      // entirely when that model has no levels. The setter reply is the
+      // only word on it — no config_option_update follows.
+      const { session, mock } = makeSession("sess_cfg_modelsw", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+      expect(session.buildConfigOptions().map((o) => o.id)).toContain("effort");
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockResolvedValue({
+        configOptions: [
+          {
+            id: "model",
+            currentValue: "openai/gpt-5",
+            options: [
+              { value: "ncp-anthropic/claude-opus-4-7" },
+              { value: "openai/gpt-5" },
+            ],
+          },
+          { id: "mode", currentValue: "plan", options: [{ value: "plan" }] },
+        ],
+      });
+
+      const { client: alice } = makeClient();
+      await session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config model openai/gpt-5" }],
+      });
+
+      expect(session.currentModel).toBe("openai/gpt-5");
+      // The new model advertises no effort levels, so the picker must go
+      // rather than sit there offering values the agent will refuse.
+      expect(session.buildConfigOptions().map((o) => o.id)).not.toContain(
+        "effort",
+      );
     });
 
     it("'/hydra config bogus' returns a synthetic error listing valid ids", async () => {

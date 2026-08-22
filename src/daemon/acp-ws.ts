@@ -2284,6 +2284,11 @@ export function registerAcpWsEndpoint(
         modelId,
         rawParams as Record<string, unknown>,
       );
+      // The reply carries the agent's other dimensions rebuilt for the new
+      // model (claude-acp rebuilds effort per model and shows/hides Fast).
+      // Apply before applyModelChange, whose broadcast would otherwise
+      // carry the pre-switch set.
+      decision.session.applyAgentConfigOptionResponse(result, "model");
       // Mirror set_mode: apply the change daemon-side so all attached clients
       // (including the originator) receive a current_model_update immediately,
       // regardless of whether the agent emits one on its own.
@@ -2368,7 +2373,10 @@ export function registerAcpWsEndpoint(
       switch (params.configId) {
         case "model": {
           if (params.value !== session.currentModel) {
-            await session.forwardModelChange(params.value);
+            // Reply first: it rebuilds effort/Fast for the new model, and
+            // applyModelChange is what broadcasts them.
+            const reply = await session.forwardModelChange(params.value);
+            session.applyAgentConfigOptionResponse(reply, "model");
           }
           session.applyModelChange(params.value);
           break;
@@ -2411,7 +2419,11 @@ export function registerAcpWsEndpoint(
           // emits no separate config_option_update notification for this
           // call. Without applying it here, the snapshot below would echo
           // back whatever was already cached instead of what was just set.
-          session.applyAgentConfigOptionResponse(response);
+          // The return below only reaches the caller, so the other attached
+          // clients need the broadcast.
+          if (session.applyAgentConfigOptionResponse(response, params.configId)) {
+            session.broadcastConfigOptions();
+          }
         }
       }
       return { configOptions: session.buildConfigOptions() };
