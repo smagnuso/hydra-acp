@@ -2205,13 +2205,18 @@ export class Session {
     // persisted model/mode were the OLD agent's identifiers and are
     // unlikely to be valid on the new agent.
     if (!crossAgent) {
-      await restoreCurrentModel({
+      const restored = await restoreCurrentModel({
         agent: fresh.agent,
         upstreamSessionId: fresh.upstreamSessionId,
         persistedModel,
         agentReportedModel: fresh.initialModel,
         logger: this.logger,
       });
+      // The cross-agent branch below refreshes the dimensions from
+      // session/new; this branch keeps the pre-swap set, so the restore's
+      // own reply is the only thing that can correct it. The drain a few
+      // lines down means a notification wouldn't survive anyway.
+      this.applyAgentConfigOptionResponse(restored.result, "model");
       await restoreCurrentMode({
         agent: fresh.agent,
         upstreamSessionId: fresh.upstreamSessionId,
@@ -2560,13 +2565,16 @@ export class Session {
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);
 
-    await restoreCurrentModel({
+    const restored = await restoreCurrentModel({
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
       persistedModel,
       agentReportedModel: fresh.initialModel,
       logger: this.logger,
     });
+    // Same reasoning as doSwapUpstream: nothing else refreshes the
+    // dimensions on this path, and the drain below eats any notification.
+    this.applyAgentConfigOptionResponse(restored.result, "model");
     await restoreCurrentMode({
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,

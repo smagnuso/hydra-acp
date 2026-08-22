@@ -421,6 +421,74 @@ describe("SessionManager.resurrect", () => {
     ).toHaveLength(3);
   });
 
+  it("harvests the restored model's reply on resurrect, not the snapshot session/load came up on", async () => {
+    // Resurrect restores the persisted model, which can put the agent on a
+    // different one than session/load reported — and the dimensions follow
+    // the model. The reply is the only chance to see them: the drain right
+    // after the restore discards any notification it prompted.
+    const restoreMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({
+            // Came up on sonnet, which offers only the default level.
+            configOptions: [
+              {
+                id: "model",
+                currentValue: "sonnet",
+                options: [{ value: "sonnet" }, { value: "opus" }],
+              },
+              {
+                id: "effort",
+                name: "Effort",
+                category: "thought_level",
+                currentValue: "default",
+                options: [{ value: "default", name: "Default" }],
+              },
+            ],
+          })
+          // The restore pushes the persisted opus back, and opus rebuilds
+          // effort with a level sonnet never had.
+          .mockResolvedValueOnce({
+            configOptions: [
+              {
+                id: "model",
+                currentValue: "opus",
+                options: [{ value: "sonnet" }, { value: "opus" }],
+              },
+              {
+                id: "effort",
+                name: "Effort",
+                category: "thought_level",
+                currentValue: "xhigh",
+                options: [
+                  { value: "default", name: "Default" },
+                  { value: "xhigh", name: "Extra high" },
+                ],
+              },
+            ],
+          });
+        return m.agent;
+      },
+    );
+    const session = await restoreMgr.resurrect({
+      hydraSessionId: "sess_cfg_restore",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: W_CWD,
+      currentModel: "opus",
+    });
+
+    expect(session.currentModel).toBe("opus");
+    const effort = session.buildConfigOptions().find((o) => o.id === "effort");
+    expect(effort?.currentValue).toBe("xhigh");
+    expect(effort?.options.map((v) => v.value)).toEqual(["default", "xhigh"]);
+  });
+
   it("does not let the first prompt after resurrect clobber the persisted title", async () => {
     const titledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),

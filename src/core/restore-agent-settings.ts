@@ -66,6 +66,12 @@ export async function restoreCurrentMode(opts: {
 // current_model_update the agent emitted in a prior session — the agent
 // confirmed it works. Let the agent be the authority; if it rejects, we
 // fall back.
+//
+// `result` is the accepted call's reply, present only when a call was
+// actually made and accepted. On the set_config_option verb it carries
+// the agent's configOptions rebuilt for the restored model, and it is the
+// only word on them: the caller drains buffered session/update right
+// after this returns, so a notification would be dropped even if one came.
 export async function restoreCurrentModel(opts: {
   agent: AgentInstance;
   upstreamSessionId: string;
@@ -75,14 +81,14 @@ export async function restoreCurrentModel(opts: {
   // model-verb.ts). Undefined falls back to session/set_model.
   modelVerb?: ModelVerb;
   logger?: AgentLogger;
-}): Promise<string | undefined> {
+}): Promise<{ modelId: string | undefined; result?: unknown }> {
   const { agent, upstreamSessionId, persistedModel, agentReportedModel, modelVerb, logger } =
     opts;
   if (!persistedModel) {
-    return agentReportedModel;
+    return { modelId: agentReportedModel };
   }
   if (persistedModel === agentReportedModel) {
-    return persistedModel;
+    return { modelId: persistedModel };
   }
   try {
     logger?.info(
@@ -91,7 +97,7 @@ export async function restoreCurrentModel(opts: {
     // Leads with the inferred verb, probing the other on MethodNotFound —
     // agents on @agentclientprotocol/sdk >= 0.26 only implement
     // session/set_config_option.
-    const { verb } = await requestModelChange({
+    const { verb, result } = await requestModelChange({
       request: (method, params) => agent.connection.request(method, params),
       sessionId: upstreamSessionId,
       modelId: persistedModel,
@@ -101,11 +107,11 @@ export async function restoreCurrentModel(opts: {
     logger?.info(
       `resurrect: ${verb} accepted, effectiveModel=${JSON.stringify(persistedModel)}`,
     );
-    return persistedModel;
+    return { modelId: persistedModel, result };
   } catch (err) {
     logger?.warn(
       `resurrect: session/set_model rejected by agent for modelId=${JSON.stringify(persistedModel)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedModel)}`,
     );
-    return agentReportedModel;
+    return { modelId: agentReportedModel };
   }
 }

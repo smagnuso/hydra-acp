@@ -6529,6 +6529,52 @@ describe("Session", () => {
       ).toBe("high");
     });
 
+    it("keeps the mode downgrade a model switch forces", async () => {
+      // A model switch can invalidate the permission mode: claude-acp
+      // clamps it to "default" and emits current_mode_update mid-request,
+      // before the reply. The reply then also carries mode=default, which
+      // applyAgentConfigOptionResponse skips — mode is hydra's own
+      // dimension, and the notification already moved it.
+      const { session, mock } = makeSession("sess_cfg_modedown", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+      expect(session.currentMode).toBe("plan");
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementation(async (method: string) => {
+        if (method !== "session/set_config_option") {
+          return {};
+        }
+        mock.triggerNotification("session/update", {
+          sessionId: "u_seed",
+          update: {
+            sessionUpdate: "current_mode_update",
+            currentModeId: "default",
+          },
+        });
+        return {
+          configOptions: [
+            {
+              id: "model",
+              currentValue: "openai/gpt-5",
+              options: [{ value: "openai/gpt-5" }],
+            },
+            { id: "mode", currentValue: "default", options: [{ value: "default" }] },
+          ],
+        };
+      });
+
+      const { client: alice } = makeClient();
+      await session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config model openai/gpt-5" }],
+      });
+
+      expect(session.currentModel).toBe("openai/gpt-5");
+      expect(session.currentMode).toBe("default");
+    });
+
     it("'/hydra config model X' refreshes the dimensions the new model rebuilt", async () => {
       // A model switch is a config change that reshapes other config
       // values: claude-acp rebuilds effort for the new model and drops it

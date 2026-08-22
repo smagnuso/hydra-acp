@@ -1341,10 +1341,6 @@ export class SessionManager {
     this.logger?.info(
       `resurrect: sessionId=${params.hydraSessionId} persistedModel=${JSON.stringify(params.currentModel)} agentReportedModel=${JSON.stringify(agentReportedModel)} advertisedModels=${JSON.stringify(advertisedModels?.map((m) => m.modelId))}`,
     );
-    const advertisedConfigOptions = nonEmptyOrUndefined(
-      extractInitialConfigOptions(loadResult ?? {}),
-    );
-
     // The set_mode call above may have prompted the agent to emit fresh
     // session/update notifications. Drop them before wireAgent so they
     // don't overwrite the mode we just set.
@@ -1362,7 +1358,7 @@ export class SessionManager {
     // Verb inferred from the session/load response shape; restoreCurrentModel
     // leads with it and probes the other on MethodNotFound.
     const loadedModelVerb = inferModelVerbFromResult(loadResult);
-    const effectiveModel = await restoreCurrentModel({
+    const restoredModel = await restoreCurrentModel({
       agent,
       upstreamSessionId: params.upstreamSessionId,
       persistedModel: params.currentModel,
@@ -1370,6 +1366,22 @@ export class SessionManager {
       ...(loadedModelVerb ? { modelVerb: loadedModelVerb } : {}),
       logger: this.logger,
     });
+    const effectiveModel = restoredModel.modelId;
+    // Harvested after the restore, and from its reply when that reply
+    // carried a snapshot: the restore can put the agent on a different
+    // model than session/load reported, and the dimensions follow the
+    // model (claude-acp rebuilds effort for it, dropping the option for a
+    // model with no levels). Reading loadResult here describes the model
+    // the agent came up on rather than the one it is now on. The drain
+    // below makes this the only chance — a config_option_update prompted
+    // by the restore is dropped, not applied.
+    const advertisedConfigOptions = nonEmptyOrUndefined(
+      extractInitialConfigOptions(
+        hasConfigOptions(restoredModel.result)
+          ? restoredModel.result
+          : (loadResult ?? {}),
+      ),
+    );
     if (params.pendingHistorySync !== true) {
       const drain3Count = agent.connection.drainBuffered("session/update");
       this.logger?.info(
@@ -1503,7 +1515,7 @@ export class SessionManager {
       logger: this.logger,
     });
     const advertisedModels = params.agentModels ?? fresh.initialModels;
-    const effectiveModel = await restoreCurrentModel({
+    const restoredModel = await restoreCurrentModel({
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
       persistedModel: params.currentModel,
@@ -1511,6 +1523,14 @@ export class SessionManager {
       ...(fresh.modelVerb ? { modelVerb: fresh.modelVerb } : {}),
       logger: this.logger,
     });
+    const effectiveModel = restoredModel.modelId;
+    // Usually a no-op here — bootstrapAgent was handed the persisted model
+    // and already seeded it, so the call above short-circuits. It only
+    // fires when that seed was rejected, and then the same rule applies:
+    // the reply describes the model the session ended up on.
+    const restoredConfigOptions = hasConfigOptions(restoredModel.result)
+      ? nonEmptyOrUndefined(extractInitialConfigOptions(restoredModel.result))
+      : undefined;
     // Drop any buffered session/update notifications that arrived during
     // the restore calls — same race as doResurrect.
     fresh.agent.connection.drainBuffered("session/update");
@@ -1560,7 +1580,7 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       agentModels: advertisedModels,
-      agentConfigOptions: fresh.initialConfigOptions,
+      agentConfigOptions: restoredConfigOptions ?? fresh.initialConfigOptions,
       summarizedThroughEntry: params.summarizedThroughEntry,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
