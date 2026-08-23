@@ -14,6 +14,7 @@ import {
   extractInitialModel,
   extractInitialModels,
   effectiveInteractive,
+  isClaudeAcpFamily,
   mergeForPersistence,
   appendUpstreamGeneration,
   matchesCwdFilter,
@@ -5613,5 +5614,34 @@ describe("SessionManager.syncFromAgent store-keyed dedupe", () => {
     ]);
     const { synced } = await manager.syncFromAgent("claude-code-dev");
     expect(synced[0]?.agentId).toBe("claude-code-dev");
+  });
+});
+
+describe("isClaudeAcpFamily", () => {
+  it("matches the base agent and prefixed renames", () => {
+    expect(isClaudeAcpFamily({ id: "claude-acp" })).toBe(true);
+    expect(isClaudeAcpFamily({ id: "claude-acp-dev" })).toBe(true);
+    expect(isClaudeAcpFamily({ id: "opencode" })).toBe(false);
+  });
+
+  it("matches an unrelated id whose extends chain reaches claude-acp", () => {
+    // The kOyaw60HrZlG841X regression: `claude-personal` extends claude-acp
+    // but the old id-prefix check missed it, so the session never subscribed
+    // to the background-task level and a finished task stayed armed forever.
+    expect(
+      isClaudeAcpFamily({
+        id: "claude-personal",
+        extendsChain: ["claude-personal", "claude-acp"],
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match a chain that never touches claude-acp", () => {
+    expect(
+      isClaudeAcpFamily({
+        id: "pi-local",
+        extendsChain: ["pi-local", "pi-dev", "pi-acp"],
+      }),
+    ).toBe(false);
   });
 });

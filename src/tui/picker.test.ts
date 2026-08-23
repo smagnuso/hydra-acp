@@ -135,7 +135,8 @@ function makePicker(opts: {
   height?: number;
   composerAgentId?: string;
   composerModel?: string;
-  availableAgents?: Array<{ id: string }>;
+  availableAgents?: Array<{ id: string; extendsChain?: string[] }>;
+  defaultModels?: Record<string, string>;
   onCwdChange?: (
     cwd: string,
   ) => Promise<{ agentId?: string; model?: string; notice?: string }>;
@@ -194,6 +195,9 @@ function makePicker(opts: {
 
   const config = {
     tui: { cwdColumnMaxWidth: 40 },
+    ...(opts.defaultModels !== undefined
+      ? { defaultModels: opts.defaultModels }
+      : {}),
   } as unknown as HydraConfig;
   const target = opts.target ?? ({} as RemoteTarget);
 
@@ -1746,5 +1750,30 @@ describe("^O re-resolves the composer's agent•model", () => {
     await flush();
     expect(calls).toBe(0);
     expect(drv.output()).not.toContain("from-directory");
+  });
+
+  it("inherits the default model through an agent's extends chain when switching in-picker", async () => {
+    // Regression: switching to a derived agent (extends: "claude-acp") with
+    // no default model of its own used to look up config.defaultModels by
+    // the raw picked id and silently find nothing, instead of walking the
+    // chain the way ensureAgentForNew does in app.ts.
+    const drv = makePicker({
+      sessions: [session({})],
+      composerAgentId: "opencode",
+      availableAgents: [
+        { id: "opencode" },
+        {
+          id: "claude-personal",
+          extendsChain: ["claude-personal", "claude-acp"],
+        },
+      ],
+      defaultModels: { "claude-acp": "sonnet" },
+    });
+    nextAgentPick = "claude-personal";
+    drv.mouse("MOUSE_MOTION", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 75, 1);
+    await flush();
+    expect(drv.output()).toContain("claude-personal•sonnet");
   });
 });

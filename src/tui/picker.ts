@@ -22,6 +22,7 @@ import {
   type FormatOptions,
 } from "../cli/session-row.js";
 import { localMachines } from "../core/machine.js";
+import { lookupInheritedAgentValue } from "../core/registry.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
@@ -2390,9 +2391,14 @@ export async function pickSession(
         // When the agent changes, the model tracks whatever's configured
         // as the default for the new agent (or clears if none). If the
         // user wants a specific model, `hydra agent set <id> <model>`
-        // still owns that persistence.
-        const models = opts.config.defaultModels;
-        composerModel = models ? models[result.agentId] : undefined;
+        // still owns that persistence. Inheritance-aware: a derived agent
+        // (`extends: "claude-acp"`) with no default of its own falls back
+        // to its base's, mirroring ensureAgentForNew's lookup in app.ts.
+        const chosenAgentEntry = agents.find((a) => a.id === result.agentId);
+        composerModel = lookupInheritedAgentValue(opts.config.defaultModels, {
+          id: result.agentId,
+          extendsChain: chosenAgentEntry?.extendsChain,
+        })?.value;
         opts.onComposerAgentChange?.(composerAgentId, composerModel);
         if (result.persist) {
           // Mirror ensureAgentForNew's persistence behavior: the `s`

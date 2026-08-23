@@ -11,6 +11,7 @@ import {
   listAgents,
   lookupInheritedAgentValue,
   planSpawn,
+  type AgentChainRef,
   type AgentInstallProgressCallback,
   type SpawnPlan,
 } from "./registry.js";
@@ -1253,7 +1254,7 @@ export class SessionManager {
 
     let loadResult: Record<string, unknown> | undefined;
     try {
-      const loadMeta = buildAgentSessionMeta(params.agentId, {
+      const loadMeta = buildAgentSessionMeta(agentDef, {
         model: params.currentModel,
       });
       loadResult = await agent.connection.request<Record<string, unknown>>(
@@ -4834,7 +4835,7 @@ export class SessionManager {
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
       agent.steeringSupported = parseSteeringSupported(initResult);
-      const newMeta = buildAgentSessionMeta(params.agentId);
+      const newMeta = buildAgentSessionMeta(agentDef);
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
         {
@@ -5025,7 +5026,7 @@ export class SessionManager {
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
       agent.steeringSupported = parseSteeringSupported(initResult);
-      const loadMeta = buildAgentSessionMeta(params.agentId);
+      const loadMeta = buildAgentSessionMeta(agentDef);
       const loadResult = await agent.connection.request<Record<string, unknown>>(
         "session/load",
         {
@@ -7815,12 +7816,22 @@ function persistedUsageToSnapshot(
 // filter list, not a boolean, so this subscribes to that subtype alone
 // rather than the whole raw firehose.
 
-// A from-source or otherwise renamed claude-acp still speaks claude-acp's
+// A from-source, renamed, or derived claude-acp still speaks claude-acp's
 // _meta dialect, so match the family rather than the exact registry id.
 // Without this a `claude-acp-dev` session silently loses thinking capture,
 // model injection, and the background-task level.
-function isClaudeAcpFamily(agentId: string): boolean {
-  return agentId === "claude-acp" || agentId.startsWith("claude-acp-");
+//
+// Walks the resolved extends chain, not just the id: an agent registered
+// under an unrelated name (`claude-personal` with `extends: "claude-acp"`)
+// is family too. An id-prefix match alone missed exactly that, and the
+// failure was the silent kind the comment above warns about — the session
+// ran on edge inference for armed tasks and a finished background Bash
+// stayed "armed" for the life of the session (kOyaw60HrZlG841X). The
+// per-element prefix check stays for standalone from-source registrations
+// that extend nothing.
+export function isClaudeAcpFamily(agent: AgentChainRef): boolean {
+  const chain = agent.extendsChain ?? [agent.id];
+  return chain.some((id) => id === "claude-acp" || id.startsWith("claude-acp-"));
 }
 
 const CLAUDE_RAW_SDK_MESSAGE_FILTER = [
@@ -7828,10 +7839,10 @@ const CLAUDE_RAW_SDK_MESSAGE_FILTER = [
 ];
 
 function buildAgentSessionMeta(
-  agentId: string,
+  agent: AgentChainRef,
   opts: { model?: string | undefined } = {},
 ): Record<string, unknown> | undefined {
-  if (!isClaudeAcpFamily(agentId))
+  if (!isClaudeAcpFamily(agent))
     return undefined;
   const options: Record<string, unknown> = {
     extraArgs: { "thinking-display": "summarized" },
