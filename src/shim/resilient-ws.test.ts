@@ -129,6 +129,32 @@ describe("ResilientWsStream", () => {
     await stream.close();
   });
 
+  it("re-resolves a subprotocols function on every reconnect attempt instead of reusing the first result", async () => {
+    const offered: Array<string | undefined> = [];
+    server.wss.on("connection", (_ws, request) => {
+      offered.push(request.headers["sec-websocket-protocol"]);
+    });
+
+    let call = 0;
+    const stream = new ResilientWsStream({
+      url: `ws://127.0.0.1:${server.port}`,
+      subprotocols: () => {
+        call += 1;
+        return [`acp.v1`, `hydra-acp-token.token-${call}`];
+      },
+      log: () => undefined,
+    });
+    await stream.start();
+    expect(offered[0]).toContain("token-1");
+
+    server.connections[0]!.terminate();
+    await new Promise((r) => setTimeout(r, 600));
+    expect(offered[1]).toContain("token-2");
+    expect(offered[1]).not.toContain("token-1");
+
+    await stream.close();
+  });
+
   it("does not strand a concurrent send() issued during flushQueue", async () => {
     // Server records every frame received in order, with a tiny per-message
     // ack delay so the in-flight `await this.current.send()` straddles a

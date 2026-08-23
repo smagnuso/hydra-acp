@@ -19,9 +19,19 @@ export type ResilientWsUrl =
   | string
   | (() => string | Promise<string>);
 
+// Same resolver-or-fixed shape as ResilientWsUrl, for the same reason:
+// the local-attach subprotocol carries the auth token
+// (`hydra-acp-token.<token>`), which can be rotated out from under a
+// long-lived TUI process. A resolver re-reads the current token on
+// every reconnect attempt instead of baking in whatever was current
+// when the stream was constructed.
+export type ResilientWsSubprotocols =
+  | string[]
+  | (() => string[] | Promise<string[]>);
+
 export interface ResilientWsOptions {
   url: ResilientWsUrl;
-  subprotocols: string[];
+  subprotocols: ResilientWsSubprotocols;
   // onConnect runs after WS open. During its execution, regular send() is
   // gated (queued) and the queued downstream backlog is held back; use
   // request() inside onConnect for raw, awaitable writes so things like
@@ -162,7 +172,11 @@ export class ResilientWsStream implements MessageStream {
           typeof this.opts.url === "function"
             ? await this.opts.url()
             : this.opts.url;
-        const ws = await openWs(url, this.opts.subprotocols);
+        const subprotocols =
+          typeof this.opts.subprotocols === "function"
+            ? await this.opts.subprotocols()
+            : this.opts.subprotocols;
+        const ws = await openWs(url, subprotocols);
         this.bindStream(wsToMessageStream(ws));
         const wasFirst = this.firstConnect;
         this.firstConnect = false;

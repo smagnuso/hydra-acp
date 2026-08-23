@@ -23,6 +23,7 @@ import {
 import {
   ResilientWsStream,
   type ResilientWsUrl,
+  type ResilientWsSubprotocols,
 } from "../shim/resilient-ws.js";
 import {
   loadConfig,
@@ -1819,7 +1820,17 @@ async function runSession(
         return fresh.wsUrl;
       }
     : target.wsUrl;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
+  // Mirrors wsUrl above: the token can be rotated out from under this
+  // long-lived process (unlike a daemon-spawned extension, which always
+  // gets a fresh per-process token on respawn), so re-read the current
+  // one on every reconnect attempt rather than baking in whatever was
+  // current at runSession entry.
+  const subprotocols: ResilientWsSubprotocols = target.isLocal
+    ? async (): Promise<string[]> => {
+        const fresh = await resolveLocalTarget(await loadConfig());
+        return ["acp.v1", `hydra-acp-token.${fresh.token}`];
+      }
+    : ["acp.v1", `hydra-acp-token.${target.token}`];
   // Forward-declared so the resilient stream's onConnect/onDisconnect
   // hooks (which fire before the Screen is built on first connect) can
   // call into them safely. Real implementations are assigned later.
@@ -9806,21 +9817,27 @@ async function runSession(
       sessionId: resolvedSessionId,
       skipInitialize,
     });
-    // Refresh target.baseUrl / target.wsUrl from the pidfile on every
-    // reconnect for local daemons. The WS layer's ResilientWsUrl resolver
-    // already re-reads the pidfile per attempt (wsUrl above), but
-    // target.baseUrl was captured once at runSession entry and is used by
-    // every HTTP path (listSessions for ^P picker, /v1/sessions/.../compact,
-    // /v1/sessions/.../export, fork/kill/info endpoints). If `hydra daemon
-    // restart` lands on a different ephemeral loopback port, those HTTP
-    // calls all reject with 'fetch failed' against the stale URL — making
-    // ^P silently do nothing while WS-driven UI keeps working. Mutate in
-    // place so every downstream reference (closures, helper calls) picks
-    // up the fresh URLs without rewiring.
+    // Refresh target.baseUrl / target.wsUrl / target.token from the
+    // pidfile + token file on every reconnect for local daemons. The WS
+    // layer's resolvers (wsUrl, subprotocols above) already re-read
+    // these per attempt for the WS transport itself, but target.baseUrl
+    // and target.token were captured once at runSession entry and are
+    // used by every HTTP path (listSessions for ^P picker,
+    // /v1/sessions/.../compact, /v1/sessions/.../export, fork/kill/info
+    // endpoints). If `hydra daemon restart` lands on a different
+    // ephemeral loopback port, or the service token got rotated, those
+    // HTTP calls all reject against the stale URL/token — making ^P
+    // silently do nothing (or 403) while WS-driven UI keeps working.
+    // Mutate in place so every downstream reference (closures, helper
+    // calls) picks up the fresh values without rewiring.
     if (target.isLocal) {
       try {
         const fresh = await resolveLocalTarget(await loadConfig());
-        if (fresh.baseUrl !== target.baseUrl || fresh.wsUrl !== target.wsUrl) {
+        if (
+          fresh.baseUrl !== target.baseUrl ||
+          fresh.wsUrl !== target.wsUrl ||
+          fresh.token !== target.token
+        ) {
           writeDebugLine({
             src: "reconnect",
             step: "target-refresh",
@@ -9830,6 +9847,7 @@ async function runSession(
           target.baseUrl = fresh.baseUrl;
           target.wsUrl = fresh.wsUrl;
           target.display = fresh.display;
+          target.token = fresh.token;
         }
       } catch (err) {
         // Best-effort: if the pidfile read fails the stale URL stays in
