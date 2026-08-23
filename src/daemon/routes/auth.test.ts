@@ -252,6 +252,42 @@ describe("auth routes — password configured", () => {
     expect(r.status).toBe(404);
   });
 
+  it("DELETE /v1/auth/sessions revokes every active session token", async () => {
+    const loginA = await fetch(`${baseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: PASSWORD, label: "a" }),
+    });
+    const issuedA = (await loginA.json()) as { session_token: string };
+    const loginB = await fetch(`${baseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: PASSWORD, label: "b" }),
+    });
+    const issuedB = (await loginB.json()) as { session_token: string };
+
+    const revokeAll = await fetch(`${baseUrl}/v1/auth/sessions`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(revokeAll.status).toBe(200);
+    const body = (await revokeAll.json()) as { revoked: number };
+    expect(body.revoked).toBe(2);
+
+    for (const issued of [issuedA, issuedB]) {
+      const r = await fetch(`${baseUrl}/v1/sessions`, {
+        headers: { Authorization: `Bearer ${issued.session_token}` },
+      });
+      expect(r.status).toBe(403);
+    }
+
+    const list = await fetch(`${baseUrl}/v1/auth/sessions`, {
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    const listBody = (await list.json()) as { sessions: unknown[] };
+    expect(listBody.sessions).toHaveLength(0);
+  });
+
   it("POST /v1/auth/logout revokes the current session token", async () => {
     const login = await fetch(`${baseUrl}/v1/auth/login`, {
       method: "POST",

@@ -101,6 +101,15 @@ export function registerAuthRoutes(
     return reply.code(200).send({ sessions: deps.store.list() });
   });
 
+  // Bulk revoke — used by `hydra-acp auth password` so an old password
+  // leak (or a leaked session cookie) doesn't outlive the rotation. A
+  // rotated password alone doesn't invalidate already-issued session
+  // tokens; this does.
+  app.delete("/v1/auth/sessions", async (_request, reply) => {
+    const revoked = await deps.store.revokeAll();
+    return reply.code(200).send({ revoked });
+  });
+
   app.delete<{ Params: { id: string } }>(
     "/v1/auth/sessions/:id",
     async (request, reply) => {

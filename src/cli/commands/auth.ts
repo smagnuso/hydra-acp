@@ -38,6 +38,28 @@ export async function runAuthPasswordSet(
   }
   await setPassword(next);
   process.stdout.write("Password set.\n");
+
+  // A rotated password alone doesn't invalidate session tokens already
+  // issued under the old one — revoke them so a leaked password/cookie
+  // doesn't outlive the reason you're rotating.
+  try {
+    const res = await daemonFetch("/v1/auth/sessions", {
+      method: "DELETE",
+      rethrowNetworkError: true,
+    });
+    if (res.ok) {
+      const body = res.body as { revoked?: number };
+      process.stdout.write(`Revoked ${body.revoked ?? 0} existing session token(s).\n`);
+    } else {
+      process.stderr.write(
+        `Warning: could not revoke existing session tokens (HTTP ${res.status}).\n`,
+      );
+    }
+  } catch (err) {
+    process.stderr.write(
+      `Warning: could not reach daemon to revoke existing session tokens: ${(err as Error).message}\n`,
+    );
+  }
 }
 
 export async function runAuthList(): Promise<void> {
