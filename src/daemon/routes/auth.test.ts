@@ -288,6 +288,56 @@ describe("auth routes — password configured", () => {
     expect(listBody.sessions).toHaveLength(0);
   });
 
+  it("POST /v1/auth/rotate-token swaps the live token for a service-token caller", async () => {
+    const NEW_TOKEN = "hydra_token_" + "f".repeat(64);
+    const rotate = await fetch(`${baseUrl}/v1/auth/rotate-token`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TEST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token: NEW_TOKEN }),
+    });
+    expect(rotate.status).toBe(200);
+
+    // The old token stops working immediately — no restart required.
+    const withOld = await fetch(`${baseUrl}/v1/auth/sessions`, {
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(withOld.status).toBe(403);
+
+    // The new token works right away.
+    const withNew = await fetch(`${baseUrl}/v1/auth/sessions`, {
+      headers: { Authorization: `Bearer ${NEW_TOKEN}` },
+    });
+    expect(withNew.status).toBe(200);
+  });
+
+  it("POST /v1/auth/rotate-token rejects a session-token caller", async () => {
+    const login = await fetch(`${baseUrl}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: PASSWORD }),
+    });
+    const issued = (await login.json()) as { session_token: string };
+
+    const rotate = await fetch(`${baseUrl}/v1/auth/rotate-token`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${issued.session_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token: "hydra_token_" + "a".repeat(64) }),
+    });
+    expect(rotate.status).toBe(403);
+
+    // The service token still works — rotation was rejected, not applied.
+    const stillGood = await fetch(`${baseUrl}/v1/auth/sessions`, {
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(stillGood.status).toBe(200);
+  });
+
   it("POST /v1/auth/logout revokes the current session token", async () => {
     const login = await fetch(`${baseUrl}/v1/auth/login`, {
       method: "POST",

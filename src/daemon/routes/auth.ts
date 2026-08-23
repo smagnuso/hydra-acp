@@ -3,6 +3,7 @@ import { z } from "zod";
 import { hasPassword, verifyPassword } from "../../core/password.js";
 import type { SessionTokenStore } from "../../core/session-tokens.js";
 import type { AuthRateLimiter } from "../rate-limit.js";
+import type { StaticTokenValidator } from "../auth.js";
 
 const LoginBody = z.object({
   password: z.string().min(1),
@@ -16,9 +17,14 @@ const LogoutBody = z
   })
   .optional();
 
+const RotateTokenBody = z.object({
+  token: z.string().min(32),
+});
+
 export interface AuthRoutesDeps {
   store: SessionTokenStore;
   rateLimiter: AuthRateLimiter;
+  staticTokenValidator: StaticTokenValidator;
 }
 
 export function registerAuthRoutes(
@@ -121,6 +127,27 @@ export function registerAuthRoutes(
       return reply.code(204).send();
     },
   );
+
+  // Live-swap the service token this daemon accepts, so
+  // `hydra-acp init --rotate-token` takes effect immediately instead of
+  // only on the next restart (the old token would otherwise keep working
+  // until then). Requires the CURRENT service token as bearer — the same
+  // "prove you hold the old credential to install a new one" gate
+  // `auth password` uses, and it means a mere session token (e.g. a
+  // leaked browser cookie) can't rotate the daemon's root credential.
+  app.post("/v1/auth/rotate-token", async (request, reply) => {
+    if (request.authIdentity !== "service") {
+      return reply.code(403).send({ error: "Requires the service token" });
+    }
+    let body: z.infer<typeof RotateTokenBody>;
+    try {
+      body = RotateTokenBody.parse(request.body);
+    } catch {
+      return reply.code(400).send({ error: "Invalid request body" });
+    }
+    deps.staticTokenValidator.rotate(body.token);
+    return reply.code(200).send({ rotated: true });
+  });
 }
 
 function remoteIp(request: FastifyRequest): string {

@@ -17,9 +17,16 @@ export interface TokenValidator {
 }
 
 export class StaticTokenValidator implements TokenValidator {
-  constructor(private readonly token: string) {}
+  constructor(private token: string) {}
   async validate(token: string): Promise<string | undefined> {
     return constantTimeEqual(token, this.token) ? "service" : undefined;
+  }
+  // Swaps the live-accepted token in place. Called by the
+  // /v1/auth/rotate-token route so `hydra-acp init --rotate-token`
+  // takes effect immediately on a running daemon instead of only on
+  // the file that gets read at next startup.
+  rotate(newToken: string): void {
+    this.token = newToken;
   }
 }
 

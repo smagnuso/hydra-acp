@@ -149,8 +149,9 @@ export async function startDaemon(
   const sessionTokenStore = await SessionTokenStore.load();
   const authRateLimiter = new AuthRateLimiter();
   const processRegistry = new ProcessTokenRegistry();
+  const staticTokenValidator = new StaticTokenValidator(serviceToken);
   const validator = new CompositeTokenValidator([
-    new StaticTokenValidator(serviceToken),
+    staticTokenValidator,
     new SessionTokenValidator(sessionTokenStore),
     processRegistry,
   ]);
@@ -304,6 +305,7 @@ export async function startDaemon(
   registerAuthRoutes(app, {
     store: sessionTokenStore,
     rateLimiter: authRateLimiter,
+    staticTokenValidator,
   });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerRecallMcpRoutes(app, mcpTokenRegistry);
