@@ -17,6 +17,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [Config](#config)
   - [Sessions](#sessions)
   - [Attention](#attention)
+  - [Turn completion webhook](#turn-completion-webhook)
   - [Session events](#session-events)
   - [Agents](#agents)
   - [Registry](#registry)
@@ -694,6 +695,62 @@ Emergency user-side clear, intended for the case where a raiser has gone away le
 **Errors**
 
 - `404` — session unknown.
+
+### Turn completion webhook
+
+A caller that submits a prompt (`session/prompt`, or any path that produces a `messageId`) normally learns the turn finished one of two ways: the `session/prompt` response itself (if it's the one holding that connection open), or a `turn_complete` `session/update` while attached. Both require holding a live connection to the daemon for as long as the turn takes — which is a real cost for a caller that isn't otherwise participating as an ACP client, e.g. a background service that dispatched a prompt on someone else's behalf and wants to react once, later, without keeping anything open in between.
+
+`POST /v1/sessions/:id/prompt/:messageId/notify` registers a one-shot HTTP callback for that *specific* `messageId` instead. The daemon `POST`s to the given URL exactly once, when (and only when) that messageId's turn completes — no polling, no held connection.
+
+**Scope.** Warm sessions only — a cold session has no turn in flight to wait for; any prompt it ever ran has already resolved. Registration is per-messageId, not per-session: completions for other prompts on the same session never trigger a callback you didn't register for.
+
+**In-memory only.** Registrations do not survive a daemon restart. A caller whose registration was lost that way gets no callback and must notice (e.g. on reconnect) and re-register, or fall back to polling.
+
+**Delivery is best-effort, not queued.** One `fetch` attempt, fire-and-forget, no retry. A caller that needs stronger guarantees re-registers rather than the daemon accruing retry/backoff state per callback.
+
+**Follows an amend.** If the registered prompt is amended (`hydra-acp/prompt/amend`) before it finishes, the registration transfers to the replacement prompt rather than firing early on the original's cancellation — a caller registered to learn when this line of work is actually done, and an amend continues that work under a new `messageId`, it doesn't end it. The delivered payload's `messageId` always stays the one you registered for; `amendedTo` reports the `messageId` that actually completed, when it differs. This can only chase one hop of "the registration existed before the amend happened" — a registration made *after* an amend already fully resolved sees only that later id's own outcome via the `already_terminal` fast path, not the full chain.
+
+#### `POST /v1/sessions/:id/prompt/:messageId/notify`
+
+```jsonc
+{
+  "callbackUrl": "https://caller.example/hooks/turn-done",
+  "secret":      "<caller-chosen opaque string>"
+}
+```
+
+`secret` is never interpreted by the daemon — it's echoed back only as the key for signing the delivered payload (below), so the receiver can verify a delivery genuinely came from a daemon that was given this exact secret at registration time.
+
+**Response — turn still in flight, `202 Accepted`**
+
+```jsonc
+{ "status": "registered" }
+```
+
+**Response — turn already completed, `200 OK`.** A race is possible between the caller receiving `messageId` back from wherever it came from and this call landing — if the turn already finished, there's nothing to wait for, so this resolves synchronously instead of registering a callback for information the caller can already have:
+
+```jsonc
+{ "status": "already_terminal", "stopReason": "end_turn" }
+```
+
+**Delivery payload.** Sent as the callback `POST`'s JSON body once the messageId's turn completes:
+
+```jsonc
+{
+  "sessionId":   "hydra_session_xyz",
+  "messageId":   "m_abc123",
+  "stopReason":  "end_turn",
+  "deliveredAt": 1717012800000,
+  "amendedTo":   "m_def456"   // present only if amended before completion — see below
+}
+```
+
+alongside header `X-Hydra-Turn-Notify-Signature: <hex HMAC-SHA256 of the exact JSON body, keyed by the registration's secret>`.
+
+**Errors**
+
+- `400` — `callbackUrl` or `secret` missing, or `callbackUrl` isn't a valid absolute `http(s)` URL.
+- `404` — session unknown or not warm.
 
 ### Session events
 

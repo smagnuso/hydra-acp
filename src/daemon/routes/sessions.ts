@@ -1493,6 +1493,52 @@ export function registerSessionRoutes(
     },
   );
 
+  // POST /v1/sessions/:id/prompt/:messageId/notify — register a one-shot
+  // HTTP callback fired when this specific prompt's turn completes (see
+  // Session.registerTurnNotify / turn-notify.ts). Body:
+  // { callbackUrl, secret }. Warm sessions only — a cold session has no
+  // turn in flight to wait for; any prompt it ever ran has already
+  // resolved, so there's nothing a callback could tell you that
+  // GET .../attention or the session record doesn't already have.
+  app.post<{ Params: { id: string; messageId: string } }>(
+    "/v1/sessions/:id/prompt/:messageId/notify",
+    async (request, reply) => {
+      const params = request.params as { id: string; messageId: string };
+      const raw = params.id;
+      const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+      const messageId = params.messageId;
+      const body = request.body as Record<string, unknown> | undefined;
+      const callbackUrl = typeof body?.callbackUrl === "string" ? body.callbackUrl : "";
+      const secret = typeof body?.secret === "string" ? body.secret : "";
+      if (!messageId || !callbackUrl || !secret) {
+        reply.code(400).send({ error: "messageId, callbackUrl, and secret are all required" });
+        return;
+      }
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(callbackUrl);
+      } catch {
+        reply.code(400).send({ error: "callbackUrl must be a valid absolute URL" });
+        return;
+      }
+      if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        reply.code(400).send({ error: "callbackUrl must be http or https" });
+        return;
+      }
+      const session = manager.get(id);
+      if (!session) {
+        reply.code(404).send({ error: "session not found or not warm" });
+        return;
+      }
+      const result = session.registerTurnNotify(messageId, callbackUrl, secret);
+      if (result.alreadyTerminal) {
+        reply.code(200).send({ status: "already_terminal", stopReason: result.stopReason });
+        return;
+      }
+      reply.code(202).send({ status: "registered" });
+    },
+  );
+
   // GET /v1/sessions/:id/attention — return the attention flags for a
   // single session. 404 when the session is unknown.
   app.get<{ Params: { id: string } }>("/v1/sessions/:id/attention", async (request, reply) => {

@@ -1,5 +1,6 @@
 import { customAlphabet } from "nanoid";
 import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
+import { deliverTurnNotify, type TurnNotifyRegistration } from "./turn-notify.js";
 
 // nanoid's default alphabet is URL-safe (alphanumerics + `-` + `_`). We
 // drop both punctuation chars: `-` collides with parsers that treat dashes
@@ -19,6 +20,13 @@ const QUIESCE_TAIL_SCAN_ENTRIES = 20;
 // seeds. Kept as a module constant so all callers use the same value.
 const TAIL_K = 20;
 const FORK_TAIL_FLOOR = 5;
+
+// Cap on pending registerTurnNotify() callbacks per session — same
+// LRU-drop shape as RECENTLY_TERMINAL_LIMIT below. A caller that races
+// past this many concurrent outstanding registrations on one session
+// should treat the oldest as abandoned and re-register if it still
+// cares, the same way it would if it raced past RECENTLY_TERMINAL_LIMIT.
+const TURN_NOTIFY_LIMIT = 32;
 
 export const HYDRA_SESSION_PREFIX = "hydra_session_";
 
@@ -1335,6 +1343,12 @@ export class Session {
     string,
     { stopReason: string; terminatedAt: number }
   >();
+  // Pending one-shot turn-completion webhooks, keyed by promptMessageId.
+  // See registerTurnNotify. In-memory only — does not survive a daemon
+  // restart; a caller whose registration was lost that way gets no
+  // callback and must re-register (or fall back to polling) once it
+  // notices the daemon came back.
+  private pendingTurnNotifiers = new Map<string, TurnNotifyRegistration>();
   // Optional ring buffer for piped stdin, populated by openStream() when
   // a cat --stream session attaches. Lifecycle follows the session — the
   // markClosed path closes the buffer and unlinks any file projection.
@@ -3613,6 +3627,19 @@ export class Session {
     this.scheduleWorkspaceSnapshotHook?.();
     if (promptMessageId !== undefined && stopReason !== undefined) {
       this.recordTerminal(promptMessageId, stopReason);
+      const notifier = this.pendingTurnNotifiers.get(promptMessageId);
+      if (notifier) {
+        this.pendingTurnNotifiers.delete(promptMessageId);
+        deliverTurnNotify(notifier, {
+          sessionId: this.sessionId,
+          messageId: notifier.originalMessageId,
+          stopReason,
+          deliveredAt: Date.now(),
+          ...(promptMessageId !== notifier.originalMessageId
+            ? { amendedTo: promptMessageId }
+            : {}),
+        });
+      }
     }
     // For amend-originated entries (sent via hydra-acp/prompt/amend, not
     // session/prompt), the originator has no awaiting session/prompt
@@ -4485,6 +4512,42 @@ export class Session {
     }
   }
 
+  // Register a one-shot HTTP callback for a specific prompt's turn
+  // completion, so a caller (e.g. hydra-acp-browser's server, wanting to
+  // push a phone notification) doesn't need to hold a live ACP attach —
+  // or any connection at all — open just to learn when its own prompt
+  // finishes. If the turn already completed (a race between the caller
+  // getting messageId back from session/prompt and this call landing),
+  // resolves synchronously instead of registering: there's nothing left
+  // to wait for, and no reason to make an outbound callback for
+  // information the caller can already have. See turn-notify.ts for the
+  // actual delivery mechanics and broadcastTurnComplete for the firing
+  // side.
+  registerTurnNotify(
+    messageId: string,
+    callbackUrl: string,
+    secret: string,
+  ): { alreadyTerminal: true; stopReason: string } | { alreadyTerminal: false } {
+    const terminal = this.recentlyTerminal.get(messageId);
+    if (terminal) {
+      return { alreadyTerminal: true, stopReason: terminal.stopReason };
+    }
+    this.pendingTurnNotifiers.set(messageId, {
+      callbackUrl,
+      secret,
+      registeredAt: Date.now(),
+      originalMessageId: messageId,
+    });
+    while (this.pendingTurnNotifiers.size > TURN_NOTIFY_LIMIT) {
+      const oldest = this.pendingTurnNotifiers.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.pendingTurnNotifiers.delete(oldest);
+    }
+    return { alreadyTerminal: false };
+  }
+
   // Fire hydra-acp/prompt/amended for the M1→M2 linkage. The amendment's
   // current content is read live from the queue entry so any update_prompt
   // calls during the amend window are reflected. Best-effort: if M2 has
@@ -4879,6 +4942,21 @@ export class Session {
       cancelledMessageId: targetMessageId,
       newMessageId,
     };
+    // Carry any pending registerTurnNotify() registration forward to M2
+    // rather than letting it fire on M1's own (imminent) cancellation.
+    // A caller registered because it wants to know when this line of
+    // work actually finishes — an amend doesn't end that, it continues
+    // it under a new messageId. Must happen synchronously here, before
+    // the session/cancel notify below, so it lands well ahead of M1's
+    // async broadcastTurnComplete (which is what would otherwise consume
+    // the registration and fire it prematurely with stopReason
+    // "cancelled"). originalMessageId travels with the registration
+    // unchanged, so the caller still sees the id it registered for.
+    const notifier = this.pendingTurnNotifiers.get(targetMessageId);
+    if (notifier) {
+      this.pendingTurnNotifiers.delete(targetMessageId);
+      this.pendingTurnNotifiers.set(newMessageId, notifier);
+    }
 
     // If M1 is an in-flight extension command dispatch (e.g. the
     // planner's `/hydra planner create`), the agent.connection cancel
@@ -8519,6 +8597,25 @@ export class Session {
       entry.cancelled = true;
       if (entry.kind === "user") {
         this.broadcastQueueRemoved(entry.messageId, "abandoned");
+      }
+      // A queued entry never reaches broadcastTurnComplete on its own —
+      // it was never dispatched, so there's no turn to complete. Without
+      // this, a registerTurnNotify() registration for a still-queued
+      // messageId would simply never fire: prompt_queue_removed isn't a
+      // turn-completion signal, and the caller has no other way to learn
+      // its wait is over.
+      const notifier = this.pendingTurnNotifiers.get(entry.messageId);
+      if (notifier) {
+        this.pendingTurnNotifiers.delete(entry.messageId);
+        deliverTurnNotify(notifier, {
+          sessionId: this.sessionId,
+          messageId: notifier.originalMessageId,
+          stopReason: "cancelled",
+          deliveredAt: Date.now(),
+          ...(entry.messageId !== notifier.originalMessageId
+            ? { amendedTo: entry.messageId }
+            : {}),
+        });
       }
       try {
         entry.resolve({ stopReason: "cancelled" });

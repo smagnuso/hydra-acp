@@ -2349,6 +2349,113 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
   });
 });
 
+describe("POST /v1/sessions/:id/prompt/:messageId/notify", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  function completeTurn(
+    session: Awaited<ReturnType<typeof harness.manager.create>>,
+    messageId: string,
+    stopReason: string,
+  ): void {
+    (session as unknown as {
+      broadcastTurnComplete(
+        originatorClientId: string,
+        response: unknown,
+        promptMessageId?: string,
+      ): void;
+    }).broadcastTurnComplete("some_client", { stopReason }, messageId);
+  }
+
+  it("returns 400 when a required field is missing", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/prompt/m_1/notify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for a malformed callbackUrl", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/prompt/m_1/notify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callbackUrl: "not-a-url",
+          secret: "s3cr3t",
+        }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_nope/prompt/m_1/notify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callbackUrl: "https://example.invalid/callback",
+          secret: "s3cr3t",
+        }),
+      },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 202 registered for a fresh registration", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/prompt/m_1/notify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callbackUrl: "https://example.invalid/callback",
+          secret: "s3cr3t",
+        }),
+      },
+    );
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ status: "registered" });
+  });
+
+  it("returns 200 already_terminal when the turn already completed", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    completeTurn(session, "m_1", "end_turn");
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/prompt/m_1/notify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callbackUrl: "https://example.invalid/callback",
+          secret: "s3cr3t",
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "already_terminal", stopReason: "end_turn" });
+  });
+});
+
 describe("GET /v1/sessions/:id/attention", () => {
   let harness: Harness;
 
