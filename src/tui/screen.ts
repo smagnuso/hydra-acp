@@ -5851,13 +5851,21 @@ export class Screen {
   // them to scroll away, so their prompt can't reach row 1. That's also
   // what makes "already at the newest turn" fall out of the > / <
   // comparisons in the steppers without a special case.
-  private turnAnchors(): Array<{ offset: number; lineIndex: number }> {
+  private turnAnchors(): Array<{
+    offset: number;
+    lineIndex: number;
+    recordedAt?: number;
+  }> {
     const w = this.contentWidth();
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
       return [];
     }
-    const anchors: Array<{ offset: number; lineIndex: number }> = [];
+    const anchors: Array<{
+      offset: number;
+      lineIndex: number;
+      recordedAt?: number;
+    }> = [];
     // Walking backwards, `rowsAtOrBelow` counts the wrapped rows from the
     // current line through the tail, which is exactly the scrollOffset
     // that puts this line's first row on the top of the viewport (less the
@@ -5867,7 +5875,8 @@ export class Screen {
     // we've reached the run's first line until we step past it. So hold the
     // oldest user line seen so far and commit it when the run ends (or when
     // we run out of scrollback).
-    let pending: { offset: number; lineIndex: number } | null = null;
+    let pending: { offset: number; lineIndex: number; recordedAt?: number } | null =
+      null;
     for (let i = this.lines.length - 1; i >= 0; i--) {
       const line = this.lines[i];
       if (!line || this.isHiddenLine(line)) {
@@ -5878,6 +5887,7 @@ export class Screen {
         pending = {
           offset: Math.max(0, rowsAtOrBelow - visibleRows),
           lineIndex: i,
+          recordedAt: line.recordedAt,
         };
         continue;
       }
@@ -5890,6 +5900,31 @@ export class Screen {
       anchors.push(pending);
     }
     return anchors;
+  }
+
+  // Land on the turn that was open at `target` (a recordedAt epoch-ms from
+  // a find-picker hit), instead of the live tail a plain attach lands on.
+  // Only the turn-opening line carries a recordedAt tag (see FormattedLine),
+  // so this is turn-grained, not line-grained: it finds the newest turn
+  // whose prompt fired at or before `target` and parks it at the top of the
+  // viewport, same as scrollToPrevTurn/NextTurn. Ctrl-R scrollback search
+  // from there narrows to the exact matched text.
+  //
+  // No slide — this runs during the attach-time repaint pause, before the
+  // first frame ever paints, so an animated glide has nothing to glide
+  // from. Falls back to the oldest visible turn when `target` predates
+  // everything currently in scrollback (older history trimmed or
+  // archived); does nothing when the transcript has no turns at all.
+  scrollToTurnAt(target: number): void {
+    const anchors = this.turnAnchors();
+    if (anchors.length === 0) {
+      return;
+    }
+    const landing =
+      anchors.find((a) => a.recordedAt !== undefined && a.recordedAt <= target) ??
+      anchors[anchors.length - 1]!;
+    this.setScrollOffset(landing.offset);
+    this.notifyTurnPosition(landing.offset);
   }
 
   // Ease the viewport to `target` instead of teleporting. A jump that

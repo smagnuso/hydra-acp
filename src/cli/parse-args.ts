@@ -72,6 +72,10 @@ const KNOWN_VALUE_FLAGS = new Set([
   "from-label",
   "from-session",
   "host",
+  // Internal-only: the argv a launcher-mode tab relaunches with when a
+  // find-picker attach targets it (term-host/open.ts buildArgs). No
+  // reason for a human to type this directly.
+  "jump-to-recorded-at",
   "last",
   // `hydra workspace merge -m/--message` (commit subject) and
   // `--into <path>` (explicit destination override, so landing work

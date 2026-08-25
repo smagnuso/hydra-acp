@@ -203,6 +203,14 @@ export interface OpenExistingSpec {
   title?: string | undefined;
   /** Session cwd, so the pane (and anything split off it) starts there. */
   cwd?: string | undefined;
+  /**
+   * Land the new tab's transcript on the turn open at this recordedAt
+   * (epoch ms) instead of the live tail — carried from a find-picker hit's
+   * PickerResult.jumpToRecordedAt. Only reaches the pane when revealOrOpen
+   * actually opens a fresh one; a revealed (already-open) pane keeps
+   * whatever it was already showing, since nothing about it restarts.
+   */
+  jumpToRecordedAt?: number | undefined;
 }
 
 export interface OpenNewSpec {
@@ -218,11 +226,15 @@ export type OpenSpec = OpenExistingSpec | OpenNewSpec;
 
 function buildArgs(spec: OpenSpec): { label: string; args: string[] } {
   if (spec.kind === "attach") {
+    const args = ["--session", spec.sessionId];
+    if (spec.jumpToRecordedAt !== undefined) {
+      args.push("--jump-to-recorded-at", String(spec.jumpToRecordedAt));
+    }
     return {
       // Same cap as labelForPrompt below: a session title is often the
       // user's opening message and runs to hundreds of characters.
       label: (spec.title ? tabLabelFor(spec.title) : "") || spec.sessionId,
-      args: ["--session", spec.sessionId],
+      args,
     };
   }
   // --new is what stops the new pane from re-entering the picker (or

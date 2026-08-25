@@ -118,6 +118,11 @@ export type PickerResult =
       // agent-install progress paint in the composer-adjacent status
       // row instead of scrolling out below the picker.
       installStatus?: InstallStatusLine;
+      // Set from the find layer's selected snippet (Snippet.recordedAt) so
+      // the fresh attach lands on the turn that matched instead of the
+      // live tail — see TuiOptions.jumpToRecordedAt for the consuming end.
+      // Undefined on every non-find attach path.
+      jumpToRecordedAt?: number;
     }
   | {
       // Picker's `f` keystroke. Outer flow runs the (optional) cwd
@@ -3241,6 +3246,10 @@ export async function pickSession(
         const session = visible.find((s) => s.sessionId === hit.sessionId);
         const isImportedPassive =
           !!session?.importedFromMachine && !session.upstreamSessionId;
+        // Snippet currently shown for this hit (cycled by n/p, LEFT/RIGHT) —
+        // its recordedAt is what the attach jumps to.
+        const jumpToRecordedAt =
+          hit.snippets[findSnippetIdx]?.recordedAt ?? hit.snippets[0]?.recordedAt;
         if (isImportedPassive) {
           persistFind();
           cleanup();
@@ -3250,6 +3259,9 @@ export async function pickSession(
           };
           if (session.agentId !== undefined) {
             result.agentId = session.agentId;
+          }
+          if (jumpToRecordedAt !== undefined) {
+            result.jumpToRecordedAt = jumpToRecordedAt;
           }
           resolve(result);
           return;
@@ -3277,6 +3289,9 @@ export async function pickSession(
           };
           if (session?.agentId !== undefined) {
             result.agentId = session.agentId;
+          }
+          if (jumpToRecordedAt !== undefined) {
+            result.jumpToRecordedAt = jumpToRecordedAt;
           }
           resolve(result);
         })();
@@ -3413,23 +3428,32 @@ export async function pickSession(
             openInfoLayer(session);
             return;
           }
-          if (data?.isCharacter && (name === "n" || name === "N")) {
-            const hit = findResults[findSelectedIdx];
-            if (!hit || hit.snippets.length <= 1) {
-              return;
-            }
-            findSnippetIdx = (findSnippetIdx + 1) % hit.snippets.length;
-            repaintFindResult(findSelectedIdx, true);
-            return;
-          }
-          if (data?.isCharacter && (name === "p" || name === "P")) {
+          // Shared by n/p and LEFT/RIGHT — both cycle the snippet shown
+          // for the selected hit, LEFT/RIGHT just spare the pinky reach.
+          const cycleFindSnippet = (delta: number): void => {
             const hit = findResults[findSelectedIdx];
             if (!hit || hit.snippets.length <= 1) {
               return;
             }
             findSnippetIdx =
-              (findSnippetIdx - 1 + hit.snippets.length) % hit.snippets.length;
+              (findSnippetIdx + delta + hit.snippets.length) %
+              hit.snippets.length;
             repaintFindResult(findSelectedIdx, true);
+          };
+          if (data?.isCharacter && (name === "n" || name === "N")) {
+            cycleFindSnippet(1);
+            return;
+          }
+          if (data?.isCharacter && (name === "p" || name === "P")) {
+            cycleFindSnippet(-1);
+            return;
+          }
+          if (name === "LEFT") {
+            cycleFindSnippet(-1);
+            return;
+          }
+          if (name === "RIGHT") {
+            cycleFindSnippet(1);
             return;
           }
           const moveDeep = (delta: number): void => {

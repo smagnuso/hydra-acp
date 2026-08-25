@@ -1436,6 +1436,22 @@ describe("pickSession: ^F find mode", () => {
     await drv.resolveOnce;
   });
 
+  it("LEFT/RIGHT cycle snippets the same as p/n", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    expect(drv.output()).toContain("[1/2] the needle is here");
+    drv.clearOutput();
+    drv.press("RIGHT");
+    expect(drv.output()).toContain("[2/2] Edit  another needle");
+    drv.clearOutput();
+    drv.press("LEFT");
+    expect(drv.output()).toContain("[1/2] the needle is here");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
   it("`i` on a hit opens the session info overlay", async () => {
     stubSearch();
     const drv = makePicker({ sessions: [alpha, beta], target });

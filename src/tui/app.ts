@@ -716,6 +716,13 @@ export interface TuiOptions {
     cwd: string;
     upstreamSessionId: string;
   };
+  // Land the transcript on the turn open at this recordedAt (epoch ms)
+  // instead of the live tail. Set from the find picker's selected snippet
+  // (PickerResult "attach".jumpToRecordedAt) so opening a search hit drops
+  // you near the match instead of at the bottom. Consumed once by the
+  // initial attach-replay drain (see screen.scrollToTurnAt); a later
+  // reconnect on the same session does not re-jump.
+  jumpToRecordedAt?: number;
   // Preselect this session's row when the startup picker opens.
   //
   // Only set by launcher mode's loop, which re-enters resolveSession after
@@ -856,6 +863,8 @@ interface SessionContext {
     cwd: string;
     upstreamSessionId: string;
   };
+  // Mirror of TuiOptions.jumpToRecordedAt (see there).
+  jumpToRecordedAt?: number;
   // True when this ctx was just minted by runForkFlow (the user picked
   // "fork from here" in the picker / /btw flow). Drives the launch
   // status line so the user sees "Forking session…" instead of the
@@ -1167,10 +1176,16 @@ async function dispatchToTerminalHost(
     sessionId: choice.sessionId,
     title: source?.title,
     cwd: source?.cwd ?? fallbackCwd,
+    jumpToRecordedAt: choice.jumpToRecordedAt,
   });
   switch (result.outcome) {
     case "revealed":
-      return `jumped to ${label}`;
+      // The pane was already open and nothing about it restarted, so a
+      // requested jump never had anywhere to apply — say so rather than
+      // implying the match is on screen.
+      return choice.jumpToRecordedAt !== undefined
+        ? `jumped to ${label} (already open — couldn't jump to the match there)`
+        : `jumped to ${label}`;
     case "opened":
       return `opened ${label} in a new tab`;
     default:
@@ -3114,6 +3129,9 @@ async function runSession(
   let resolvedAgentId = ctx.agentId;
   let resolvedCwd = ctx.cwd;
   let resolvedTitle: string | undefined;
+  // Consumed once by the initial attach-replay drain below; a reconnect
+  // later in this same runSession call must not re-jump the viewport.
+  const jumpToRecordedAt = ctx.jumpToRecordedAt;
   // Captured from the session/new or session/attach response. Used to
   // filter prompt_queue_added events for entries that originated from
   // this TUI so the deferred-echo plumbing can bind a local pending
@@ -5969,6 +5987,14 @@ async function runSession(
         // Clear any stale hint inherited from the current session's opts —
         // it was for the previous attach, not the new one.
         delete nextOpts.resumeHint;
+      }
+      if (choice.jumpToRecordedAt !== undefined) {
+        nextOpts.jumpToRecordedAt = choice.jumpToRecordedAt;
+      } else {
+        // Same staleness hazard as resumeHint above — ...opts carries the
+        // current session's jump target (if it had one), which means
+        // nothing for whatever we're switching to.
+        delete nextOpts.jumpToRecordedAt;
       }
       // Same hand-off as the "new" branch: keep the picker's status row
       // live across the runSession boundary so "Resuming session…" and
@@ -9141,6 +9167,11 @@ async function runSession(
       screen.ensureSeparator();
       const formatted = formatEvent(event);
       if (formatted.length > 0) {
+        // Tags the turn-opening line so a later scrollToTurnAt can find it —
+        // see the FormattedLine.recordedAt doc comment.
+        if (recordedAt !== undefined) {
+          formatted[0]!.recordedAt = recordedAt;
+        }
         screen.appendLines(formatted);
       }
       // Defensive turn-boundary cleanup. The turn-complete handler
@@ -9498,6 +9529,11 @@ async function runSession(
   try {
     for (const { event, rawUpdate, recordedAt } of buffered) {
       applyRenderEvent(event, rawUpdate, recordedAt);
+    }
+    // Still inside the repaint pause, so this lands in the same first
+    // frame as the replay instead of visibly jumping after attach.
+    if (jumpToRecordedAt !== undefined) {
+      screen.scrollToTurnAt(jumpToRecordedAt);
     }
   } finally {
     replayDraining = false;
@@ -10145,6 +10181,9 @@ async function resolveSession(
     if (opts.resolved !== undefined) {
       ctx.resolved = opts.resolved;
     }
+    if (opts.jumpToRecordedAt !== undefined) {
+      ctx.jumpToRecordedAt = opts.jumpToRecordedAt;
+    }
     return ctx;
   }
   if (opts.forceNew) {
@@ -10378,7 +10417,7 @@ async function resolveSession(
           continue;
         }
         const agentId = choice.agentId ?? chosen.agentId ?? "";
-        return {
+        const repairedCtx: SessionContext = {
           sessionId: choice.sessionId,
           agentId,
           cwd: r.path,
@@ -10388,6 +10427,10 @@ async function resolveSession(
             upstreamSessionId: "",
           },
         };
+        if (choice.jumpToRecordedAt !== undefined) {
+          repairedCtx.jumpToRecordedAt = choice.jumpToRecordedAt;
+        }
+        return repairedCtx;
       }
     }
     const ctx: SessionContext = {
@@ -10400,6 +10443,9 @@ async function resolveSession(
     }
     if (chosen !== undefined) {
       ctx.resolved = chosen;
+    }
+    if (choice.jumpToRecordedAt !== undefined) {
+      ctx.jumpToRecordedAt = choice.jumpToRecordedAt;
     }
     return ctx;
   }
@@ -10439,14 +10485,15 @@ async function runImportedFirstLaunchFlow(
       // object referenced by the attach call later in runSession.
       opts.readonly = true;
       const agentId = choice.agentId ?? chosen.agentId ?? "";
-      return {
-        kind: "ctx",
-        ctx: {
-          sessionId: choice.sessionId,
-          agentId,
-          cwd: chosen.cwd,
-        },
+      const viewCtx: SessionContext = {
+        sessionId: choice.sessionId,
+        agentId,
+        cwd: chosen.cwd,
       };
+      if (choice.jumpToRecordedAt !== undefined) {
+        viewCtx.jumpToRecordedAt = choice.jumpToRecordedAt;
+      }
+      return { kind: "ctx", ctx: viewCtx };
     }
     // action === "fork-local"
     const picked = await resolveForkAgent(

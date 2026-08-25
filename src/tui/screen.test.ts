@@ -4398,6 +4398,84 @@ describe("Screen scroll by turn", () => {
   });
 });
 
+describe("Screen.scrollToTurnAt", () => {
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  function topRow(screen: Screen): FormattedLine | undefined {
+    const s = screen as unknown as {
+      contentWidth: () => number;
+      scrollbackVisibleRows: () => number;
+      scrollOffset: number;
+      wrapTail: (w: number, needed: number) => { rows: FormattedLine[] };
+    };
+    const rowCount = s.scrollbackVisibleRows();
+    const { rows } = s.wrapTail(s.contentWidth(), rowCount + s.scrollOffset);
+    const end = rows.length - s.scrollOffset;
+    const start = Math.max(0, end - rowCount);
+    return rows.slice(start, end)[0];
+  }
+
+  // One turn per recordedAt in `stamps`, oldest first — mirrors replay
+  // order (buffered events drain oldest-to-newest into appendLines).
+  function makeStampedTurns(stamps: number[]): Screen {
+    const screen = makeScreen();
+    for (const [n, recordedAt] of stamps.entries()) {
+      screen.appendLines([
+        {
+          prefix: "▎ ",
+          prefixStyle: "user",
+          body: `u${n}`,
+          bodyStyle: "user",
+          recordedAt,
+        },
+      ]);
+      for (let i = 0; i < 3; i++) {
+        screen.appendLines([{ prefix: "  ", body: `a${n}${i}`, bodyStyle: "agent" }]);
+      }
+    }
+    return screen;
+  }
+
+  it("lands on the newest turn at or before the target", () => {
+    const screen = makeStampedTurns([1000, 2000, 3000, 4000]);
+    screen.scrollToTurnAt(2500);
+    expect(topRow(screen)?.body).toBe("u1");
+  });
+
+  it("lands exactly on the turn when the target matches its recordedAt", () => {
+    const screen = makeStampedTurns([1000, 2000, 3000, 4000]);
+    screen.scrollToTurnAt(3000);
+    expect(topRow(screen)?.body).toBe("u2");
+  });
+
+  it("falls back to the oldest visible turn when the target predates everything", () => {
+    const screen = makeStampedTurns([1000, 2000, 3000, 4000]);
+    screen.scrollToTurnAt(1);
+    expect(topRow(screen)?.body).toBe("u0");
+  });
+
+  it("is a no-op when the transcript has no turns", () => {
+    const screen = makeScreen();
+    screen.appendLines([{ prefix: "  ", body: "agent-only", bodyStyle: "agent" }]);
+    screen.scrollToTurnAt(1000);
+    expect(getScrollOffset(screen)).toBe(0);
+  });
+
+  it("jumps straight to the target without an animated slide", () => {
+    // Distinguishes this from scrollToPrevTurn/NextTurn (see "Screen
+    // turn-jump slide" below): attach-time positioning has no prior frame
+    // to glide from, so this must land in one step.
+    const screen = makeStampedTurns([1000, 2000, 3000, 4000, 5000, 6000]);
+    screen.scrollToTurnAt(2500);
+    expect(
+      (screen as unknown as { slideTimer: unknown }).slideTimer,
+    ).toBeNull();
+    expect(topRow(screen)?.body).toBe("u1");
+  });
+});
+
 describe("Screen turn-jump slide", () => {
   function getScrollOffset(screen: Screen): number {
     return (screen as unknown as { scrollOffset: number }).scrollOffset;

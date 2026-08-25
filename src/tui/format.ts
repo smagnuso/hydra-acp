@@ -162,6 +162,11 @@ export interface FormattedLine {
   // keyedBlocks entry. Plain appended lines (appendLine/appendLines)
   // carry no key.
   blockKey?: string;
+  // Daemon-stamped recordedAt of the entry that produced this line, set only
+  // on the first line of a "user"-styled turn-opening run. Screen.turnAnchors
+  // reads it to answer "which turn was live at timestamp T" for
+  // scrollToTurnAt — everything else leaves it undefined.
+  recordedAt?: number;
   // Optional finer-grained hover identifier within a keyed block. When two
   // rows share blockKey but differ on hoverSubKey, hover highlight scopes
   // to the matching subKey (e.g. tools: one block per turn but one

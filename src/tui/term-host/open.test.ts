@@ -195,6 +195,22 @@ describe("attaching an existing session", () => {
     await openInNewTab({ kind: "attach", sessionId: "s", cwd: "/home/me/proj" });
     expect(only().cwd).toBe("/home/me/proj");
   });
+
+  it("passes a find-picker jump target as --jump-to-recorded-at", async () => {
+    await openInNewTab({ kind: "attach", sessionId: "s", jumpToRecordedAt: 1700000000000 });
+    expect(tuiArgs()).toEqual([
+      "tui",
+      "--session",
+      "s",
+      "--jump-to-recorded-at",
+      "1700000000000",
+    ]);
+  });
+
+  it("omits --jump-to-recorded-at when there is no jump target", async () => {
+    await openInNewTab({ kind: "attach", sessionId: "s" });
+    expect(tuiArgs()).not.toContain("--jump-to-recorded-at");
+  });
 });
 
 describe("starting a new session", () => {

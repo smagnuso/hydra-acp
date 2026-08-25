@@ -1131,6 +1131,13 @@ async function dispatchTui(
       tuiOpts.dripSpeed = dripSpeed;
     }
   }
+  // Internal-only, emitted by term-host/open.ts buildArgs when a
+  // launcher-mode tab relaunches to satisfy a find-picker attach — see
+  // TuiOptions.jumpToRecordedAt.
+  const jumpToRecordedAt = parseNumericFlag(flags, "jump-to-recorded-at");
+  if (jumpToRecordedAt !== undefined) {
+    tuiOpts.jumpToRecordedAt = jumpToRecordedAt;
+  }
   await runTui(tuiOpts);
 }
 
