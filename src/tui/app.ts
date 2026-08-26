@@ -3225,7 +3225,10 @@ async function runSession(
         showBanner: (agentId, onboarding, authMethods) =>
           promptAuthRequiredBanner(term, agentId, onboarding, authMethods, {
             authenticate: (methodId) =>
-              conn.request("authenticate", { methodId }),
+              conn.request("authenticate", {
+                methodId,
+                _meta: { [HYDRA_META_KEY]: { agentId } },
+              }),
           }),
         resolveOnboarding: async (agentId) => {
           if (!agentId) {
