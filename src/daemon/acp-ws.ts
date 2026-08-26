@@ -2189,7 +2189,31 @@ export function registerAcpWsEndpoint(
           "not attached to session",
         );
       }
-      const session = requireLiveSession(deps.manager, params.sessionId);
+      let session = deps.manager.get(params.sessionId);
+      if (!session) {
+        // Mirror session/prompt's cold-resurrect: the session was killed
+        // while this WS connection stayed attached. steer() already
+        // falls through to a plain prompt() when no turn is in flight,
+        // which is always true right after resurrection, so this turns a
+        // steer into a dead session into a normal send instead of a
+        // hard failure.
+        const fromDisk = await deps.manager.loadFromDisk(params.sessionId);
+        if (!fromDisk) {
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
+            `session ${params.sessionId} not found`,
+          );
+        }
+        session = await resurrectFromDisk(deps, fromDisk);
+        const client = bindClientToSession(
+          connection,
+          session,
+          state,
+          undefined,
+          att.clientId,
+        );
+        await session.attach(client, "none");
+      }
       return session.steer(att.clientId, params);
     });
 
