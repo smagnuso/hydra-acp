@@ -414,7 +414,7 @@ describe("compaction swap — onSynthesisArtifact hook", () => {
           typeof update === "object" &&
           update !== null &&
           "sessionUpdate" in update &&
-          (update as Record<string, unknown>).sessionUpdate === "hydra_compaction" &&
+          (update as Record<string, unknown>).sessionUpdate === "_hydra_compaction" &&
           (update as Record<string, unknown>).phase === "swapped"
         ) {
           swappedEvents.push(update as unknown as { phase: string; title?: string; summarizedThroughEntry?: number });
@@ -488,7 +488,7 @@ describe("compaction swap — onSynthesisArtifact hook", () => {
           typeof update === "object" &&
           update !== null &&
           "sessionUpdate" in update &&
-          (update as Record<string, unknown>).sessionUpdate === "hydra_compaction" &&
+          (update as Record<string, unknown>).sessionUpdate === "_hydra_compaction" &&
           (update as Record<string, unknown>).phase === "deferred"
         ) {
           deferredEvents.push(update as unknown as { phase: string; attempts: number });

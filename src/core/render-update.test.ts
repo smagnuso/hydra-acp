@@ -739,7 +739,7 @@ describe("mapUpdate", () => {
   it("handles current_model_update", () => {
     expect(
       mapUpdate({
-        sessionUpdate: "current_model_update",
+        sessionUpdate: "_hydra_current_model_update",
         currentModel: "claude-sonnet",
       }),
     ).toEqual({ kind: "model-changed", model: "claude-sonnet" });
@@ -757,7 +757,7 @@ describe("mapUpdate", () => {
   it("maps turn_started/turn_ended, carrying the unsolicited marker", () => {
     expect(
       mapUpdate({
-        sessionUpdate: "turn_started",
+        sessionUpdate: "_hydra_turn_started",
         _meta: {
           "hydra-acp": {
             unsolicited: true,
@@ -768,7 +768,7 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "turn-started", unsolicited: true, cause: "gibbon rebuild" });
     expect(
       mapUpdate({
-        sessionUpdate: "turn_ended",
+        sessionUpdate: "_hydra_turn_ended",
         _meta: { "hydra-acp": { unsolicited: true, reason: "idle" } },
       }),
     ).toEqual({ kind: "turn-ended", unsolicited: true, reason: "idle" });
@@ -777,11 +777,11 @@ describe("mapUpdate", () => {
   it("tolerates turn_started with no cause and no _meta at all", () => {
     expect(
       mapUpdate({
-        sessionUpdate: "turn_started",
+        sessionUpdate: "_hydra_turn_started",
         _meta: { "hydra-acp": { unsolicited: true } },
       }),
     ).toEqual({ kind: "turn-started", unsolicited: true });
-    expect(mapUpdate({ sessionUpdate: "turn_started" })).toEqual({
+    expect(mapUpdate({ sessionUpdate: "_hydra_turn_started" })).toEqual({
       kind: "turn-started",
       unsolicited: false,
     });

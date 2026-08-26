@@ -778,7 +778,7 @@ The following session-update kinds may be queried. The list is additive — new 
 | `turn_complete` | Assistant turn boundary marker |
 | `permission_resolved` | Permission request resolved |
 
-Other kinds (notably `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`, `plan`, `current_model_update`, etc.) may exist on disk but are **not** queryable via this endpoint. Requesting one returns `400`. Rationale: chunk kinds can stream megabytes per session and need a separate pagination/byte-cap decision; state-snapshot kinds are already served via `meta.json` + attach-time synthesis.
+Other kinds (notably `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`, `plan`, `_hydra_current_model_update`, etc.) may exist on disk but are **not** queryable via this endpoint. Requesting one returns `400`. Rationale: chunk kinds can stream megabytes per session and need a separate pagination/byte-cap decision; state-snapshot kinds are already served via `meta.json` + attach-time synthesis.
 
 **Response — `200 OK`**
 
@@ -1195,7 +1195,7 @@ All three return a short "no compacted history yet" payload until the session ha
 
 Consumers must therefore merge a call with its updates (union of `rawInput`, later values winning) and resolve the name from the **opening** event only. Taking the newest `title` yields the command text in the tool name's place. `core/history-transcript.ts` exposes `mergeToolCalls` and `normalizeToolName` for this; recall, the transcript renderer, and the compaction seed all go through them. When the resolved name turns out to be an echo of an argument, the ACP `kind` is used instead, which is why `kind` is the portable filter axis and `tool_name` is not.
 
-**Abandoned chains are closed by the daemon.** An agent that is interrupted mid-tool owes no further update for the call it dropped, so without intervention the `tool_call` stays `pending` on disk forever. When a turn ends with `stopReason` `cancelled`, `error`, or `refusal`, hydra emits a synthetic terminal update for every still-open call in that session, immediately **before** the `turn_complete` (or `turn_ended`, for an agent-initiated turn cancelled by `session/cancel`) row:
+**Abandoned chains are closed by the daemon.** An agent that is interrupted mid-tool owes no further update for the call it dropped, so without intervention the `tool_call` stays `pending` on disk forever. When a turn ends with `stopReason` `cancelled`, `error`, or `refusal`, hydra emits a synthetic terminal update for every still-open call in that session, immediately **before** the `turn_complete` (or `_hydra_turn_ended`, for an agent-initiated turn cancelled by `session/cancel`) row:
 
 ```json
 { "sessionUpdate": "tool_call_update", "toolCallId": "…", "status": "failed",
@@ -1236,7 +1236,7 @@ No capability bit distinguishes them — `AgentCapabilities` says nothing about 
 
 | Agent advertises models as | Verb hydra uses |
 |---|---|
-| `availableModels` (top level, nested under `models`, or in a foreign `_meta` namespace) / `current_model_update` | `session/set_model` |
+| `availableModels` (top level, nested under `models`, or in a foreign `_meta` namespace) / `_hydra_current_model_update` | `session/set_model` |
 | `configOptions[id="model"]` on `session/new`/`session/load` / `config_option_update` | `session/set_config_option` |
 | nothing yet | `session/set_model` (default) |
 
@@ -1360,7 +1360,7 @@ The cap is only evaluated when `fromSession` is present. **Label-only sends are 
 
 | Field | Type | Semantics |
 |---|---|---|
-| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `current_model_update`, `current_mode_update`, `available_commands_update`, `available_modes_update`, `usage_update`, `config_option_update`, `hydra_compaction`, `hydra_workspace`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
+| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `_hydra_current_model_update`, `current_mode_update`, `available_commands_update`, `_hydra_available_modes_update`, `usage_update`, `config_option_update`, `_hydra_compaction`, `_hydra_workspace`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
 
 **Why it exists.** Replay is otherwise undatable. A client that attaches to an existing session receives the whole history through the same notification channel as live traffic (by design — see [`session/attach`](#request-sessionattach)), with nothing distinguishing the two. Without `recordedAt`, the only clock available is time-of-receipt, so every replayed `tool_call` appears to have started the instant the client attached, and elapsed-time rendering reads `0s` for work that ran hours ago. `_meta["hydra-acp"].turnStartedAt` on the attach response fixes this at *turn* granularity only; `recordedAt` generalizes it to every event.
 
@@ -2016,13 +2016,13 @@ responses interleave. Hydra therefore infers the turn. Turn content arriving
 with no prompt in flight is already a protocol violation, which makes the
 inference sound: a conforming agent can never trigger it.
 
-**`turn_started`** — hydra opens a synthetic turn:
+**`_hydra_turn_started`** — hydra opens a synthetic turn:
 
 ```jsonc
 {
   "sessionId": "hydra_session_…",
   "update": {
-    "sessionUpdate": "turn_started",
+    "sessionUpdate": "_hydra_turn_started",
     "messageId": "m_…",
     "_meta": { "hydra-acp": {
       "unsolicited": true,
@@ -2034,15 +2034,15 @@ inference sound: a conforming agent can never trigger it.
 }
 ```
 
-**`turn_ended`** — hydra closes it:
+**`_hydra_turn_ended`** — hydra closes it:
 
 ```jsonc
 {
   "sessionId": "hydra_session_…",
   "update": {
-    "sessionUpdate": "turn_ended",
+    "sessionUpdate": "_hydra_turn_ended",
     "messageId": "m_…",
-    "startedMessageId": "m_…",   // the turn_started this closes
+    "startedMessageId": "m_…",   // the _hydra_turn_started this closes
     "durationMs": 2100,
     "_meta": { "hydra-acp": {
       "unsolicited": true,
@@ -2381,7 +2381,7 @@ it, and an agent that reports neither simply gets an unlabelled turn.
 
 ### session/update — compaction lifecycle
 
-Attached clients receive `session/update` notifications as compaction progresses. The `update.sessionUpdate` field is `"hydra_compaction"` for all six phases.
+Attached clients receive `session/update` notifications as compaction progresses. The `update.sessionUpdate` field is `"_hydra_compaction"` for all six phases.
 
 **Envelope shape** (all phases):
 
@@ -2389,7 +2389,7 @@ Attached clients receive `session/update` notifications as compaction progresses
 {
   "sessionId": "<upstream session id>",
   "update": {
-    "sessionUpdate": "hydra_compaction",
+    "sessionUpdate": "_hydra_compaction",
     "phase": "started" | "iteration" | "deferred" | "swapped" | "converged" | "failed",
     // ... phase-specific fields below
   }
@@ -2400,25 +2400,25 @@ Attached clients receive `session/update` notifications as compaction progresses
 
 ```jsonc
 // started — emitted once when the catch-up loop begins
-{ "sessionUpdate": "hydra_compaction", "phase": "started", "requestedAt": 1717012800000 }
+{ "sessionUpdate": "_hydra_compaction", "phase": "started", "requestedAt": 1717012800000 }
 
 // iteration — emitted once per successful catch-up loop iteration
-{ "sessionUpdate": "hydra_compaction", "phase": "iteration", "iter": 1, "historyLen": 42 }
+{ "sessionUpdate": "_hydra_compaction", "phase": "iteration", "iter": 1, "historyLen": 42 }
 
 // deferred — emitted each time the swap is deferred because the session is not quiesced
-{ "sessionUpdate": "hydra_compaction", "phase": "deferred", "attempts": 1 }
+{ "sessionUpdate": "_hydra_compaction", "phase": "deferred", "attempts": 1 }
 
 // swapped — emitted once when the upstream agent is replaced successfully;
 //            replaces the old empty session_info_update signal
-{ "sessionUpdate": "hydra_compaction", "phase": "swapped", "title": "My Session", "summarizedThroughEntry": 42 }
+{ "sessionUpdate": "_hydra_compaction", "phase": "swapped", "title": "My Session", "summarizedThroughEntry": 42 }
 
 // converged: emitted once per RUN when the catch-up loop finishes having
 //             produced an artifact, whether it stopped because history
 //             stopped growing or because it hit maxIterations
-{ "sessionUpdate": "hydra_compaction", "phase": "converged", "iter": 2, "summarizedThroughEntry": 11646 }
+{ "sessionUpdate": "_hydra_compaction", "phase": "converged", "iter": 2, "summarizedThroughEntry": 11646 }
 
 // failed — emitted when retrySwap exhausts deferrals or encounters a fatal error
-{ "sessionUpdate": "hydra_compaction", "phase": "failed", "error": "deferral cap reached — session never quiesced" }
+{ "sessionUpdate": "_hydra_compaction", "phase": "failed", "error": "deferral cap reached — session never quiesced" }
 ```
 
 **`converged` is per-run; `swapped` is per-swap.** One compaction run can swap
@@ -2509,54 +2509,54 @@ rotation, and the `usage_update` rows in `history.jsonl` are a ring buffer.
 Emitted while a session moves into or out of an isolated workspace, or has its
 workspace reset underneath it (`/hydra workspace start|merge|apply|sync|stop|detach|clean|discard`).
 `update.sessionUpdate` is
-`"hydra_workspace"` for every phase. Ephemeral: never written to
+`"_hydra_workspace"` for every phase. Ephemeral: never written to
 `history.jsonl`, so replaying clients do not see it.
 
 ```jsonc
 // provisioning — the workspace checkout is being created
-{ "sessionUpdate": "hydra_workspace", "phase": "provisioning" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "provisioning" }
 
 // setup — repo-defined setup hooks are running (these may install dependencies)
-{ "sessionUpdate": "hydra_workspace", "phase": "setup" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "setup" }
 
 // swapping — the agent process is being replaced in the new directory
-{ "sessionUpdate": "hydra_workspace", "phase": "swapping" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "swapping" }
 
 // landing: the workspace is being merged back into the source tree. The
 //          session STAYS in it for `merge`; for `stop` a `returning`
 //          follows.
-{ "sessionUpdate": "hydra_workspace", "phase": "landing" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "landing" }
 
 // applying: the workspace's changes are being staged into the source
 //           without its history. Followed by `entered` with an unchanged
 //           cwd, since the session stays put.
-{ "sessionUpdate": "hydra_workspace", "phase": "applying" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "applying" }
 
 // returning: the session is being swapped back to the source tree
-{ "sessionUpdate": "hydra_workspace", "phase": "returning" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "returning" }
 
 // cleaning: the workspace's tree is being reset to its base under a
 //           session that STAYS in it. Followed by `entered` with an
 //           unchanged cwd, since nothing relocated.
-{ "sessionUpdate": "hydra_workspace", "phase": "cleaning", "label": "feature" }
+{ "sessionUpdate": "_hydra_workspace", "phase": "cleaning", "label": "feature" }
 
 // entered — terminal. The session now lives at `cwd`.
-{ "sessionUpdate": "hydra_workspace", "phase": "entered",
+{ "sessionUpdate": "_hydra_workspace", "phase": "entered",
   "cwd": "/home/u/.hydra-acp/workspaces/<hash>/feature",
   "sourceCwd": "/home/u/dev/proj", "label": "feature", "branch": "hydra/feature" }
 
 // left — terminal. The session is back in the source tree.
-{ "sessionUpdate": "hydra_workspace", "phase": "left",
+{ "sessionUpdate": "_hydra_workspace", "phase": "left",
   "cwd": "/home/u/dev/proj", "sourceCwd": "/home/u/dev/proj", "integrated": true }
 
 // failed — terminal. The move was unwound; the session did not relocate.
-{ "sessionUpdate": "hydra_workspace", "phase": "failed", "error": "..." }
+{ "sessionUpdate": "_hydra_workspace", "phase": "failed", "error": "..." }
 
 // drift — not a phase of a move at all: the SOURCE has gained commits the
 //         workspace does not have. Emitted at a turn boundary, at most once
 //         per distinct source tip, and only for providers with shared
 //         history. `behind` is the commit count.
-{ "sessionUpdate": "hydra_workspace", "phase": "drift",
+{ "sessionUpdate": "_hydra_workspace", "phase": "drift",
   "label": "feature", "sourceCwd": "/home/u/dev/proj", "behind": 3 }
 ```
 
@@ -2633,7 +2633,7 @@ Semantics slot between the neighbouring lifecycle verbs:
   [agent-initiated turn](#agent-initiated-turns) too: that turn has no
   `session/prompt` to settle, so nothing else would ever close it, and before
   this was wired up `^C` was a guaranteed no-op for the entire class of turns
-  the agent starts by itself. Emits `turn_ended` with `reason: "cancelled"`.
+  the agent starts by itself. Emits `_hydra_turn_ended` with `reason: "cancelled"`.
 - `session/close` — kill the upstream agent and free session state, keep the record so a later `session/resume` can rehydrate it.
 - `session/delete` — do everything close does plus remove the record from `session/list`.
 
@@ -3036,7 +3036,7 @@ Intercepts are matched against `request:<method>`, `response:<method>`, and `lif
 | `tool.completed` | Edge-triggered: the first `tool_call_update` for a given `toolCallId` whose `status` is `"completed"` or `"failed"`. Deduplicated per session — repeat terminal updates do not re-fire. | `{ toolCallId, status, kind?, content?, locations? }` |
 | `file.edited` | A `tool_call` or `tool_call_update` of `kind: "edit"` carries one or more `locations[].path`. Deduplicated per `(session, path)` — only the first sighting of each path emits. | `{ path, toolCallId, line? }` |
 | `agent.swap` | Around `swapUpstream`. Fires twice per swap: `phase: "pre"` before the new agent is spawned, `phase: "post"` after the old agent is killed. | `{ phase, previousUpstreamSessionId, upstreamSessionId?, agentId }` |
-| `compaction` | Mirrors every `broadcastCompactionPhase` call. Same envelope as the `hydra_compaction` `session/update`, exposed as a typed lifecycle so hooks don't have to filter notifications. Notification-only — cancellable `compact:pre` is deferred to a future stage. | `{ phase, ... }` (phase ∈ `"started"`, `"iteration"`, `"deferred"`, `"swapped"`, `"failed"`, `"rolled_back"`) |
+| `compaction` | Mirrors every `broadcastCompactionPhase` call. Same envelope as the `_hydra_compaction` `session/update`, exposed as a typed lifecycle so hooks don't have to filter notifications. Notification-only — cancellable `compact:pre` is deferred to a future stage. | `{ phase, ... }` (phase ∈ `"started"`, `"iteration"`, `"deferred"`, `"swapped"`, `"failed"`, `"rolled_back"`) |
 
 **Recognized request-side intercepts.**
 

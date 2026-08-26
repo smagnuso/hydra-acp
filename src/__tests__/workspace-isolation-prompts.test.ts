@@ -511,7 +511,7 @@ describe("session isolation end-to-end: prompts and typed commands", () => {
             (m as { params?: { update?: Record<string, unknown> } }).params?.update ??
             {},
         )
-        .filter((u) => u.sessionUpdate === "hydra_workspace" && u.phase === "drift");
+        .filter((u) => u.sessionUpdate === "_hydra_workspace" && u.phase === "drift");
     const said = (): string =>
       stream.sent
         .map((m) => {

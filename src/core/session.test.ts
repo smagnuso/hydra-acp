@@ -57,7 +57,7 @@ async function flushHistoryWrites(): Promise<void> {
 // entries.
 const STATE_SNAPSHOT_KINDS = new Set([
   "session_info_update",
-  "current_model_update",
+  "_hydra_current_model_update",
   "current_mode_update",
   "available_commands_update",
   "usage_update",
@@ -641,7 +641,7 @@ describe("Session", () => {
       await session.attach(warm.client, "full");
       mock.triggerNotification("session/update", {
         sessionId: "u_state",
-        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "gpt-5" },
       });
       mock.triggerNotification("session/update", {
         sessionId: "u_state",
@@ -667,7 +667,7 @@ describe("Session", () => {
             (e.params as { update?: { sessionUpdate?: string } }).update
               ?.sessionUpdate === kind,
         )?.params;
-      const model = findKind("current_model_update") as
+      const model = findKind("_hydra_current_model_update") as
         | { update: { currentModel: string } }
         | undefined;
       const mode = findKind("current_mode_update") as
@@ -696,7 +696,7 @@ describe("Session", () => {
       await session.attach(warm.client, "full");
       mock.triggerNotification("session/update", {
         sessionId: "u_none",
-        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "gpt-5" },
       });
       await flushHistoryWrites();
       const { client: cold } = makeClient();
@@ -715,7 +715,7 @@ describe("Session", () => {
       mock.triggerNotification("session/update", {
         sessionId: "u_models",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "ncp-anthropic/claude-opus-4-7",
           availableModels: [
             { modelId: "ncp-anthropic/claude-opus-4-7", name: "Opus 4.7" },
@@ -737,7 +737,7 @@ describe("Session", () => {
       const synth = replay.find(
         (e) =>
           (e.params as { update?: { sessionUpdate?: string } }).update
-            ?.sessionUpdate === "current_model_update",
+            ?.sessionUpdate === "_hydra_current_model_update",
       );
       expect(synth).toBeDefined();
       const update = (synth?.params as {
@@ -1129,7 +1129,7 @@ describe("Session", () => {
       mock.triggerNotification("session/update", {
         sessionId: "u_ocswap",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "ncp-anthropic/claude-opus-4-7",
         },
       });
@@ -1150,7 +1150,7 @@ describe("Session", () => {
         params?: { update?: { sessionUpdate?: string; currentModel?: string } };
       }>;
       const synth = sent.find(
-        (m) => m.params?.update?.sessionUpdate === "current_model_update",
+        (m) => m.params?.update?.sessionUpdate === "_hydra_current_model_update",
       );
       expect(synth).toBeDefined();
       expect(synth!.params?.update?.currentModel).toBe(
@@ -1196,7 +1196,7 @@ describe("Session", () => {
       mock.triggerNotification("session/update", {
         sessionId: "u_swap",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "x",
           availableModels: [{ modelId: "x" }],
         },
@@ -1212,7 +1212,7 @@ describe("Session", () => {
       mock.triggerNotification("session/update", {
         sessionId: "u_swap",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "y",
           availableModels: [],
         },
@@ -1236,7 +1236,7 @@ describe("Session", () => {
       await session.attach(warm.client, "full");
       mock.triggerNotification("session/update", {
         sessionId: "u_po",
-        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "gpt-5" },
       });
       // Record a real conversation-history entry so we can prove it's
       // excluded from the pending_only replay.
@@ -1262,7 +1262,7 @@ describe("Session", () => {
       const model = replay.find(
         (e) =>
           (e.params as { update?: { sessionUpdate?: string } }).update
-            ?.sessionUpdate === "current_model_update",
+            ?.sessionUpdate === "_hydra_current_model_update",
       );
       expect(model).toBeDefined();
       expect(
@@ -1403,10 +1403,10 @@ describe("Session", () => {
 
       mock.triggerNotification("session/update", {
         sessionId: "u_rec_state",
-        update: { sessionUpdate: "current_model_update", currentModel: "opus" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "opus" },
       });
 
-      const note = findSessionUpdate(a.stream.sent, "current_model_update");
+      const note = findSessionUpdate(a.stream.sent, "_hydra_current_model_update");
       expect(note).toBeDefined();
       expect(hydraMeta(note)?.recordedAt).toBeUndefined();
     });
@@ -1476,7 +1476,7 @@ describe("Session", () => {
 
       mock.triggerNotification("session/update", {
         sessionId: "u_state",
-        update: { sessionUpdate: "current_model_update", currentModel: "opus" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "opus" },
       });
 
       // State updates ARE broadcast (so live clients can react) but
@@ -1487,7 +1487,7 @@ describe("Session", () => {
           "method" in m &&
           m.method === "session/update" &&
           (m.params as { update?: { sessionUpdate?: string } } | undefined)
-            ?.update?.sessionUpdate === "current_model_update",
+            ?.update?.sessionUpdate === "_hydra_current_model_update",
       );
       const update = ((broadcast as JsonRpcNotification | undefined)
         ?.params as { update: { messageId?: unknown } }).update;
@@ -2465,7 +2465,7 @@ describe("Session", () => {
       // Snapshot kind: filtered from history, so should NOT fire.
       mock.triggerNotification("session/update", {
         sessionId: "u_OB",
-        update: { sessionUpdate: "current_model_update", currentModel: "x" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "x" },
       });
       mock.triggerNotification("session/update", {
         sessionId: "u_OB",
@@ -3401,7 +3401,7 @@ describe("Session", () => {
       mock.triggerNotification("session/update", {
         sessionId: "u_agent",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "anthropic/claude-opus-4-7",
           availableModels: [{ modelId: "anthropic/claude-opus-4-7" }],
         },
@@ -3432,7 +3432,7 @@ describe("Session", () => {
       // every applyModelChange) must not drag us back to the dead verb.
       mock.triggerNotification("session/update", {
         sessionId: "u_agent",
-        update: { sessionUpdate: "current_model_update", currentModel: "m1" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "m1" },
       });
       await new Promise((r) => setImmediate(r));
       requestMock.mockClear();
@@ -3643,7 +3643,7 @@ describe("Session", () => {
         // they must not extend the inactivity window.
         mock.triggerNotification("session/update", {
           sessionId: "u",
-          update: { sessionUpdate: "current_model_update", model: "opus" },
+          update: { sessionUpdate: "_hydra_current_model_update", model: "opus" },
         });
         await vi.advanceTimersByTimeAsync(501);
         expect(closeSpy).toHaveBeenCalled();
@@ -6370,7 +6370,7 @@ describe("Session", () => {
           "method" in m &&
           m.method === "session/update" &&
           (m.params as { update?: { sessionUpdate?: string } })?.update
-            ?.sessionUpdate === "current_model_update",
+            ?.sessionUpdate === "_hydra_current_model_update",
       );
       expect(broadcast).toBeDefined();
       expect(
@@ -6378,7 +6378,7 @@ describe("Session", () => {
       ).toMatchObject({
         sessionId: "sess_m",
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "opus[1m]",
         },
       });
@@ -7255,7 +7255,7 @@ describe("Session", () => {
       });
       mock.triggerNotification("session/update", {
         sessionId: "u_rf2",
-        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "gpt-5" },
       });
       mock.triggerNotification("session/update", {
         sessionId: "u_rf2",
@@ -7268,7 +7268,7 @@ describe("Session", () => {
       const { entries: replay } = await session.attach(cold.client, "full");
 
       // No state-update kinds should appear in the historical portion.
-      const stateKinds = ["usage_update", "current_model_update", "session_info_update"];
+      const stateKinds = ["usage_update", "_hydra_current_model_update", "session_info_update"];
       for (const kind of stateKinds) {
         const found = replay.filter(
           (e) =>

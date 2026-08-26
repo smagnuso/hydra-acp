@@ -2187,14 +2187,14 @@ async function runSession(
   let reconnectReplayBuffer: unknown[] | null = null;
   const STATE_UPDATE_KINDS = new Set([
     "session_info_update",
-    "current_model_update",
+    "_hydra_current_model_update",
     "current_mode_update",
     "available_commands_update",
-    "available_modes_update",
+    "_hydra_available_modes_update",
     "usage_update",
     "config_option_update",
-    "hydra_compaction",
-    "hydra_workspace",
+    "_hydra_compaction",
+    "_hydra_workspace",
     "clarifier_question_asked",
     "clarifier_question_answered",
     "clarifier_question_dismissed",
@@ -2254,11 +2254,11 @@ async function runSession(
       handlePermissionResolved(update);
       return;
     }
-    if (rawTag === "hydra_compaction") {
+    if (rawTag === "_hydra_compaction") {
       handleCompactionUpdate(update);
       return;
     }
-    if (rawTag === "hydra_workspace") {
+    if (rawTag === "_hydra_workspace") {
       handleWorkspaceUpdate(update);
       return;
     }

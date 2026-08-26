@@ -184,7 +184,7 @@ describe("session isolation end-to-end: moving a live session", () => {
     const seen: Array<Record<string, unknown>> = [];
     session.onBroadcast?.((msg) => {
       const update = (msg.params as { update?: Record<string, unknown> } | undefined)?.update;
-      if (update?.sessionUpdate === "hydra_workspace") {
+      if (update?.sessionUpdate === "_hydra_workspace") {
         seen.push(update);
       }
     });
@@ -215,7 +215,7 @@ describe("session isolation end-to-end: moving a live session", () => {
     const seen: Array<Record<string, unknown>> = [];
     session.onBroadcast?.((msg) => {
       const update = (msg.params as { update?: Record<string, unknown> } | undefined)?.update;
-      if (update?.sessionUpdate === "hydra_workspace") {
+      if (update?.sessionUpdate === "_hydra_workspace") {
         seen.push(update);
       }
     });

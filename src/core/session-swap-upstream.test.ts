@@ -849,7 +849,7 @@ describe("Session.swapUpstream", () => {
         const m = msg as { method: string; params?: unknown };
         if (m.params && typeof m.params === "object") {
           const update = (m.params as { update?: { sessionUpdate?: string; phase?: string } }).update;
-          if (update?.sessionUpdate === "hydra_compaction" && update?.phase === "swapped") {
+          if (update?.sessionUpdate === "_hydra_compaction" && update?.phase === "swapped") {
             foundSwapNotification = true;
             break;
           }

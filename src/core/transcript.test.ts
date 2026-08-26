@@ -259,7 +259,7 @@ describe("bundleToMarkdown", () => {
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
         update({ sessionUpdate: "current_mode_update", currentMode: "default" }),
-        update({ sessionUpdate: "current_model_update", currentModel: "claude-opus-4-7" }),
+        update({ sessionUpdate: "_hydra_current_model_update", currentModel: "claude-opus-4-7" }),
       ]),
     );
     expect(md).toContain("_mode: default_");

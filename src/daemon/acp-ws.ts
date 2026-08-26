@@ -2337,7 +2337,7 @@ export function registerAcpWsEndpoint(
           .notify("session/update", {
             sessionId: decision.sessionId,
             update: {
-              sessionUpdate: "current_model_update",
+              sessionUpdate: "_hydra_current_model_update",
               currentModel: decision.currentModel,
             },
           })

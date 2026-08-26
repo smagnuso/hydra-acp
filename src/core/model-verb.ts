@@ -115,7 +115,7 @@ export function inferModelVerbFromUpdate(
     return undefined;
   }
   const kind = (update as { sessionUpdate?: unknown }).sessionUpdate;
-  if (kind === "current_model_update") {
+  if (kind === "_hydra_current_model_update") {
     return MODEL_VERB_SET_MODEL;
   }
   if (

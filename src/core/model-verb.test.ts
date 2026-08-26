@@ -119,7 +119,7 @@ describe("inferModelVerbFromResult", () => {
 describe("inferModelVerbFromUpdate", () => {
   it("infers set_model from current_model_update", () => {
     expect(
-      inferModelVerbFromUpdate({ sessionUpdate: "current_model_update", currentModel: "m1" }),
+      inferModelVerbFromUpdate({ sessionUpdate: "_hydra_current_model_update", currentModel: "m1" }),
     ).toBe(MODEL_VERB_SET_MODEL);
   });
 

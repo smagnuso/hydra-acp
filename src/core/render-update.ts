@@ -226,19 +226,19 @@ export function mapUpdate(
       return mapPlan(u);
     case "current_mode_update":
       return mapMode(u);
-    case "current_model_update":
+    case "_hydra_current_model_update":
       return mapModel(u);
     case "turn_complete":
       return mapTurnComplete(u);
-    case "turn_started":
+    case "_hydra_turn_started":
       return mapTurnBoundary(u, "turn-started");
-    case "turn_ended":
+    case "_hydra_turn_ended":
       return mapTurnBoundary(u, "turn-ended");
     case "usage_update":
       return mapUsage(u);
     case "available_commands_update":
       return mapAvailableCommands(u);
-    case "available_modes_update":
+    case "_hydra_available_modes_update":
       return mapAvailableModes(u);
     case "session_info_update":
       return mapSessionInfo(u);

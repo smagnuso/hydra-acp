@@ -173,9 +173,9 @@ describe("unsolicited turn detection", () => {
         const p = (m as { params?: { update?: { sessionUpdate?: string } } }).params;
         return p?.update?.sessionUpdate;
       });
-    expect(kinds).toEqual(["turn_started", "agent_message_chunk"]);
+    expect(kinds).toEqual(["_hydra_turn_started", "agent_message_chunk"]);
 
-    const started = updatesOfKind(sent, "turn_started")[0]!;
+    const started = updatesOfKind(sent, "_hydra_turn_started")[0]!;
     expect(hydraMeta(started).unsolicited).toBe(true);
   });
 
@@ -247,19 +247,19 @@ describe("unsolicited turn lifecycle", () => {
     expect(session.inUnsolicitedTurn).toBe(false);
     expect(session.turnStartedAt).toBeUndefined();
 
-    const ended = updatesOfKind(sent, "turn_ended");
+    const ended = updatesOfKind(sent, "_hydra_turn_ended");
     expect(ended).toHaveLength(1);
     expect(hydraMeta(ended[0]!).reason).toBe("completed");
     expect(hydraMeta(ended[0]!).unsolicited).toBe(true);
     expect(ended[0]!.startedMessageId).toBe(
-      updatesOfKind(sent, "turn_started")[0]!.messageId,
+      updatesOfKind(sent, "_hydra_turn_started")[0]!.messageId,
     );
 
     // A second background task wakes it again: fresh turn, not a resumption
     // of the closed one.
     agentChunk(mock, "woken again");
     expect(session.inUnsolicitedTurn).toBe(true);
-    expect(updatesOfKind(sent, "turn_started")).toHaveLength(2);
+    expect(updatesOfKind(sent, "_hydra_turn_started")).toHaveLength(2);
   });
 
   it("does not end on a user-lane terminal", async () => {
@@ -272,7 +272,7 @@ describe("unsolicited turn lifecycle", () => {
     // turn the moment any user turn finished.
     humanTerminal(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
-    expect(updatesOfKind(sent, "turn_ended")).toHaveLength(0);
+    expect(updatesOfKind(sent, "_hydra_turn_ended")).toHaveLength(0);
 
     autonomousTerminal(mock);
     expect(session.inUnsolicitedTurn).toBe(false);
@@ -310,7 +310,7 @@ describe("unsolicited turn lifecycle", () => {
 
     expect(session.inUnsolicitedTurn).toBe(false);
     expect(session.turnStartedAt).toBeUndefined();
-    const ended = updatesOfKind(sent, "turn_ended");
+    const ended = updatesOfKind(sent, "_hydra_turn_ended");
     expect(ended).toHaveLength(1);
     expect(hydraMeta(ended[0]!).reason).toBe("cancelled");
   });
@@ -332,7 +332,7 @@ describe("unsolicited turn lifecycle", () => {
     await done;
 
     expect(session.inUnsolicitedTurn).toBe(false);
-    const ended = updatesOfKind(sent, "turn_ended");
+    const ended = updatesOfKind(sent, "_hydra_turn_ended");
     expect(ended).toHaveLength(1);
     // "completed", not "superseded": the agent finished it, the prompt just
     // happened to be waiting. Nothing was cut short.
@@ -346,8 +346,8 @@ describe("unsolicited turn lifecycle", () => {
         const p = (m as { params?: { update?: { sessionUpdate?: string } } }).params;
         return p?.update?.sessionUpdate;
       })
-      .filter((k) => k === "turn_ended" || k === "prompt_received");
-    expect(order).toEqual(["turn_ended", "prompt_received"]);
+      .filter((k) => k === "_hydra_turn_ended" || k === "prompt_received");
+    expect(order).toEqual(["_hydra_turn_ended", "prompt_received"]);
   });
 
   it("closes an open unsolicited turn when the session closes", async () => {
@@ -355,7 +355,7 @@ describe("unsolicited turn lifecycle", () => {
     agentChunk(mock);
     await session.close({ deleteRecord: false });
 
-    const ended = updatesOfKind(sent, "turn_ended");
+    const ended = updatesOfKind(sent, "_hydra_turn_ended");
     expect(ended).toHaveLength(1);
     expect(hydraMeta(ended[0]!).reason).toBe("closed");
   });
@@ -1248,7 +1248,7 @@ describe("unsolicited turn attribution", () => {
     expect(session.inUnsolicitedTurn).toBe(false);
 
     agentChunk(mock, "build finished");
-    return updatesOfKind(sent, "turn_started");
+    return updatesOfKind(sent, "_hydra_turn_started");
   }
 
   it("labels the turn with a backgrounded Bash", async () => {
@@ -1318,7 +1318,7 @@ describe("unsolicited turn attribution", () => {
     await settleDrain();
 
     agentChunk(mock, "validation runs complete");
-    const started = updatesOfKind(sent, "turn_started");
+    const started = updatesOfKind(sent, "_hydra_turn_started");
     expect(started).toHaveLength(1);
     expect(hydraMeta(started[0]!).cause).toEqual({
       toolCallId: "toolu_mon",

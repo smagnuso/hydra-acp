@@ -1249,7 +1249,7 @@ describe("SessionManager: history persistence", () => {
       const m = mocks[0]!;
       m.triggerNotification("session/update", {
         sessionId: session.upstreamSessionId,
-        update: { sessionUpdate: "current_model_update", currentModel: "sonnet-4.6" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "sonnet-4.6" },
       });
       m.triggerNotification("session/update", {
         sessionId: session.upstreamSessionId,
@@ -1301,7 +1301,7 @@ describe("SessionManager: history persistence", () => {
       });
       mocks[0]!.triggerNotification("session/update", {
         sessionId: session.upstreamSessionId,
-        update: { sessionUpdate: "current_model_update", currentModel: "x" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "x" },
       });
       mocks[0]!.triggerNotification("session/update", {
         sessionId: session.upstreamSessionId,
@@ -1323,7 +1323,7 @@ describe("SessionManager: history persistence", () => {
             ?.sessionUpdate,
       );
       expect(kinds).toContain("agent_message_chunk");
-      expect(kinds).not.toContain("current_model_update");
+      expect(kinds).not.toContain("_hydra_current_model_update");
       expect(kinds).not.toContain("current_mode_update");
       expect(kinds).not.toContain("available_commands_update");
     });
@@ -1334,7 +1334,7 @@ describe("SessionManager: history persistence", () => {
       mocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "opus-4.7",
         },
       });
@@ -1641,7 +1641,7 @@ describe("SessionManager: history persistence", () => {
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
-        update: { sessionUpdate: "current_model_update", currentModel: "opus[1m]" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "opus[1m]" },
       });
       await eventually(
         () => localManager.loadFromDisk(sessionId),
@@ -1698,7 +1698,7 @@ describe("SessionManager: history persistence", () => {
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
         update: {
-          sessionUpdate: "current_model_update",
+          sessionUpdate: "_hydra_current_model_update",
           currentModel: "opus[1m]",
         },
       });
@@ -1756,7 +1756,7 @@ describe("SessionManager: history persistence", () => {
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
-        update: { sessionUpdate: "current_model_update", currentModel: "opus[1m]" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "opus[1m]" },
       });
       await eventually(
         () => localManager.loadFromDisk(sessionId),
@@ -1803,7 +1803,7 @@ describe("SessionManager: history persistence", () => {
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
-        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+        update: { sessionUpdate: "_hydra_current_model_update", currentModel: "gpt-5" },
       });
       await eventually(
         () => localManager.loadFromDisk(sessionId),

@@ -117,20 +117,20 @@ export interface SynopsisCoordinatorOptions {
 }
 
 export type HydraCompactionPayload =
-  | { sessionUpdate: "hydra_compaction"; phase: "started"; requestedAt: number }
-  | { sessionUpdate: "hydra_compaction"; phase: "iteration"; iter: number; historyLen: number }
-  | { sessionUpdate: "hydra_compaction"; phase: "deferred"; attempts: number }
-  | { sessionUpdate: "hydra_compaction"; phase: "swapped"; title?: string; summarizedThroughEntry: number }
+  | { sessionUpdate: "_hydra_compaction"; phase: "started"; requestedAt: number }
+  | { sessionUpdate: "_hydra_compaction"; phase: "iteration"; iter: number; historyLen: number }
+  | { sessionUpdate: "_hydra_compaction"; phase: "deferred"; attempts: number }
+  | { sessionUpdate: "_hydra_compaction"; phase: "swapped"; title?: string; summarizedThroughEntry: number }
   // Terminal success. Distinct from "swapped": that one fires per swap
   // from the Session, this fires once per RUN from the coordinator, and a
   // run can swap more than once.
   | {
-      sessionUpdate: "hydra_compaction";
+      sessionUpdate: "_hydra_compaction";
       phase: "converged";
       iter: number;
       summarizedThroughEntry: number;
     }
-  | { sessionUpdate: "hydra_compaction"; phase: "failed"; error: string };
+  | { sessionUpdate: "_hydra_compaction"; phase: "failed"; error: string };
 
 // Same alphabet as hydra session ids: alphanumeric only, so a runId
 // survives being embedded in log lines and json without escaping.
@@ -385,7 +385,7 @@ export class SynopsisCoordinator {
           requestedAt,
         });
         wireBroadcast({
-          sessionUpdate: "hydra_compaction",
+          sessionUpdate: "_hydra_compaction",
           phase: "started",
           requestedAt,
         });
@@ -447,7 +447,7 @@ export class SynopsisCoordinator {
                   iter,
                 });
                 wireBroadcast({
-                  sessionUpdate: "hydra_compaction",
+                  sessionUpdate: "_hydra_compaction",
                   phase: "iteration",
                   iter,
                   historyLen: historyAtStart.length,
@@ -500,7 +500,7 @@ export class SynopsisCoordinator {
               lastError: errorMsg,
             });
             wireBroadcast({
-              sessionUpdate: "hydra_compaction",
+              sessionUpdate: "_hydra_compaction",
               phase: "failed",
               error: errorMsg,
             });
@@ -528,7 +528,7 @@ export class SynopsisCoordinator {
             // "no compaction in progress" means. The durable success
             // record is the generation entry the swap appends.
             wireBroadcast({
-              sessionUpdate: "hydra_compaction",
+              sessionUpdate: "_hydra_compaction",
               phase: "converged",
               iter,
               summarizedThroughEntry: latestThrough,
@@ -549,7 +549,7 @@ export class SynopsisCoordinator {
             lastError: message,
           });
           this.opts.broadcastHydraCompaction?.(sessionId, {
-            sessionUpdate: "hydra_compaction",
+            sessionUpdate: "_hydra_compaction",
             phase: "failed",
             error: message,
           }, { targetAgentId });

@@ -347,7 +347,7 @@ describe("session isolation end-to-end: leaving a workspace", () => {
     const phases: string[] = [];
     session.onBroadcast((raw) => {
       const ev = raw as { params?: { update?: { sessionUpdate?: string; phase?: string } } };
-      if (ev.params?.update?.sessionUpdate === "hydra_workspace") {
+      if (ev.params?.update?.sessionUpdate === "_hydra_workspace") {
         phases.push(ev.params.update.phase ?? "");
       }
     });

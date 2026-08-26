@@ -1515,7 +1515,7 @@ export class Session {
     this.recordAndBroadcast("session/update", {
       sessionId: this.upstreamSessionId,
       update: {
-        sessionUpdate: "available_modes_update",
+        sessionUpdate: "_hydra_available_modes_update",
         availableModes: this.agentAdvertisedModes,
       },
     });
@@ -1527,7 +1527,7 @@ export class Session {
   // model-list updates standalone before any current model is set.
   private broadcastAvailableModels(): void {
     const update: Record<string, unknown> = {
-      sessionUpdate: "current_model_update",
+      sessionUpdate: "_hydra_current_model_update",
       availableModels: [...this.agentAdvertisedModels],
     };
     if (this.currentModel !== undefined && this.currentModel.length > 0) {
@@ -2785,7 +2785,7 @@ export class Session {
     }
     const params = this.rewriteForClient({
       sessionId: this.upstreamSessionId,
-      update: { sessionUpdate: "hydra_compaction", ...update },
+      update: { sessionUpdate: "_hydra_compaction", ...update },
     });
     for (const handler of this.broadcastHandlers) {
       try {
@@ -2826,7 +2826,7 @@ export class Session {
   broadcastWorkspacePhase(update: Record<string, unknown>): void {
     const params = this.rewriteForClient({
       sessionId: this.upstreamSessionId,
-      update: { sessionUpdate: "hydra_workspace", ...update },
+      update: { sessionUpdate: "_hydra_workspace", ...update },
     });
     for (const handler of this.broadcastHandlers) {
       try {
@@ -3002,7 +3002,7 @@ export class Session {
       this.agentAdvertisedModels.length > 0
     ) {
       const update: Record<string, unknown> = {
-        sessionUpdate: "current_model_update",
+        sessionUpdate: "_hydra_current_model_update",
       };
       if (this.currentModel !== undefined && this.currentModel.length > 0) {
         update.currentModel = this.currentModel;
@@ -3049,7 +3049,7 @@ export class Session {
         params: {
           sessionId,
           update: {
-            sessionUpdate: "available_modes_update",
+            sessionUpdate: "_hydra_available_modes_update",
             availableModes: [...this.agentAdvertisedModes],
           },
         },
@@ -3096,7 +3096,7 @@ export class Session {
         params: {
           sessionId,
           update: {
-            sessionUpdate: "hydra_compaction",
+            sessionUpdate: "_hydra_compaction",
             ...this._liveCompactionPhase,
           },
         },
@@ -4271,7 +4271,7 @@ export class Session {
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: "turn_started",
+        sessionUpdate: "_hydra_turn_started",
         messageId: turn.messageId,
         _meta: { "hydra-acp": meta },
       },
@@ -4428,7 +4428,7 @@ export class Session {
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: "turn_ended",
+        sessionUpdate: "_hydra_turn_ended",
         messageId: generateMessageId(),
         startedMessageId: turn.messageId,
         durationMs,
@@ -5884,7 +5884,7 @@ export class Session {
       model?: unknown;
       availableModels?: unknown;
     };
-    if (update.sessionUpdate !== "current_model_update") {
+    if (update.sessionUpdate !== "_hydra_current_model_update") {
       return false;
     }
     const models = parseModelsList(update.availableModels);
@@ -6621,7 +6621,7 @@ export class Session {
         }
       }
       const update: Record<string, unknown> = {
-        sessionUpdate: "current_model_update",
+        sessionUpdate: "_hydra_current_model_update",
         currentModel: trimmed,
       };
       if (this.agentAdvertisedModels.length > 0) {
@@ -8406,7 +8406,7 @@ export class Session {
       this.recordAndBroadcast("session/update", {
         sessionId: this.upstreamSessionId,
         update: {
-          sessionUpdate: "stream_truncated",
+          sessionUpdate: "_hydra_stream_truncated",
           ...(filePath !== undefined ? { filePath } : {}),
           fileCapBytes: opts.fileCapBytes,
         },
@@ -10005,10 +10005,10 @@ function withCode(err: Error, code: number): Error & { code: number } {
 // parsing private on-disk formats.
 const STATE_UPDATE_KINDS = new Set([
   "session_info_update",
-  "current_model_update",
+  "_hydra_current_model_update",
   "current_mode_update",
   "available_commands_update",
-  "available_modes_update",
+  "_hydra_available_modes_update",
   "usage_update",
   // opencode's non-spec carrier for model/mode/config state. Its canonical
   // form is harvested into meta.json and re-synthesized on attach, so
@@ -10016,7 +10016,7 @@ const STATE_UPDATE_KINDS = new Set([
   // history and make them look interactive in the picker.
   "config_option_update",
   // Ephemeral compaction-phase signals — never conversation history.
-  "hydra_compaction",
+  "_hydra_compaction",
 ]);
 
 // Whether an arming is a repeating watch (a Monitor) rather than a one-shot
@@ -10263,7 +10263,7 @@ function extractAdvertisedModes(params: unknown): AdvertisedMode[] | null {
     sessionUpdate?: unknown;
     availableModes?: unknown;
   };
-  if (update.sessionUpdate !== "available_modes_update") {
+  if (update.sessionUpdate !== "_hydra_available_modes_update") {
     return null;
   }
   const list = update.availableModes;
