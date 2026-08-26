@@ -1064,6 +1064,23 @@ export class Screen {
   // (copy) without requiring a drag, and suppresses the block-click
   // toggle that would otherwise fire for a press+release on the same cell.
   private doubleClickPending = false;
+  // Granularity a held-down drag extends by. Set on a double-click
+  // word-snap ("word") or triple-click line-select ("line") press, reset
+  // to "char" at the start of every press. Lets handleSelectionDrag keep
+  // extending by whole words/lines when the button stays down after the
+  // second/third click instead of freezing the selection at the initial
+  // word/line until release.
+  private selectionGranularity: "char" | "word" | "line" = "char";
+  // Word bounds on the anchor source line captured at double-click press
+  // time; the fixed end that a word-granularity drag always keeps fully
+  // selected while the other end snaps to whatever word the pointer is
+  // over.
+  private selectionAnchorWordBounds:
+    | { sourceLineId: number; start: number; end: number }
+    | null = null;
+  // Source line captured at triple-click press time; the fixed end that
+  // a line-granularity drag always keeps fully selected.
+  private selectionAnchorLineId: number | null = null;
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
   // Chain state for multi-click gestures. `count` reflects how many
@@ -4194,6 +4211,9 @@ export class Screen {
     this.selectionDragStarted = false;
     this.doubleClickPending = false;
     this.pendingClickCount = 1;
+    this.selectionGranularity = "char";
+    this.selectionAnchorWordBounds = null;
+    this.selectionAnchorLineId = null;
     if (!this.inAppSelectionEnabled || cell === null) {
       return;
     }
@@ -4257,6 +4277,8 @@ export class Screen {
       this.pendingClickCount = 3;
       this.cancelPendingBlockClick();
       this.selectWholeSourceLine(anchor.sourceLineId);
+      this.selectionGranularity = "line";
+      this.selectionAnchorLineId = anchor.sourceLineId;
       // Word-snap on the second click set doubleClickPending so the
       // release finalizes (extract + clipboard). We want the same
       // for a triple: the line-select is complete on press, and the
@@ -4311,6 +4333,12 @@ export class Screen {
           { sourceLineId: anchor.sourceLineId, offset: word.end },
         );
         this.doubleClickPending = true;
+        this.selectionGranularity = "word";
+        this.selectionAnchorWordBounds = {
+          sourceLineId: anchor.sourceLineId,
+          start: word.start,
+          end: word.end,
+        };
       }
       // Fall through — handleSelectionRelease updates lastLeftClick
       // with count=2 so a third same-cell press upgrades to the
@@ -4335,19 +4363,15 @@ export class Screen {
   }
 
   // Drag-motion half of the gesture: extends the selection from the
-  // recorded anchor to the cell currently under the pointer. Honors
-  // the feature flag and ignores motion that doesn't resolve into the
-  // scrollback area (e.g. drag into the prompt row).
+  // recorded anchor to the cell currently under the pointer, at whatever
+  // granularity the initiating press set (see extendSelectionForGesture).
+  // Honors the feature flag and ignores motion that doesn't resolve into
+  // the scrollback area (e.g. drag into the prompt row).
   private handleSelectionDrag(cell: { x: number; y: number }): void {
     if (!this.inAppSelectionEnabled || this.selectionAnchor === null) {
       return;
     }
-    if (this.doubleClickPending) {
-      // A drag during a double-click would muddle the word-snap; the
-      // word-grab gesture is intentionally release-only here.
-      return;
-    }
-    this.extendSelectionToCell(cell);
+    this.extendSelectionForGesture(cell);
     // Autoscroll while the pointer sits on the top or bottom row of the
     // scrollback area. Row 1 pulls older content into view (delta > 0);
     // the last row reveals newer content. If the drag is between the
@@ -4363,6 +4387,109 @@ export class Screen {
     } else {
       this.stopAutoscroll();
     }
+  }
+
+  // Dispatches a drag-motion cell to the extend routine matching the
+  // gesture that's in progress: plain char-by-char drag, a
+  // double-click-then-hold drag (keeps the initial word fully selected,
+  // grows word-by-word), or a triple-click-then-hold drag (keeps the
+  // initial line fully selected, grows line-by-line). Shared by
+  // handleSelectionDrag and the autoscroll ticker so a stationary drag at
+  // the viewport edge keeps growing with the same granularity.
+  private extendSelectionForGesture(cell: { x: number; y: number }): void {
+    if (this.selectionGranularity === "word") {
+      this.extendWordSelectionToCell(cell);
+    } else if (this.selectionGranularity === "line") {
+      this.extendLineSelectionToCell(cell);
+    } else {
+      this.extendSelectionToCell(cell);
+    }
+  }
+
+  // Word-granularity drag extension for a double-click-then-hold gesture.
+  // The double-clicked word (selectionAnchorWordBounds) always stays
+  // fully selected; the end the pointer is dragging toward snaps to the
+  // boundaries of whichever word is under the pointer (falling back to
+  // the exact cell when the pointer sits over whitespace/punctuation),
+  // so the selection grows a whole word at a time.
+  private extendWordSelectionToCell(cell: { x: number; y: number }): void {
+    if (this.selectionAnchorWordBounds === null) {
+      return;
+    }
+    const focus =
+      this.resolveCellToSource(cell.x, cell.y) ??
+      this.resolveNearestSource(cell.x, cell.y);
+    if (focus === null) {
+      return;
+    }
+    const bounds = this.selectionAnchorWordBounds;
+    const anchorLineIdx = this.lineIndexById(bounds.sourceLineId);
+    const focusLineIdx = this.lineIndexById(focus.sourceLineId);
+    if (anchorLineIdx < 0 || focusLineIdx < 0) {
+      return;
+    }
+    const focusBeforeAnchor =
+      focusLineIdx < anchorLineIdx ||
+      (focusLineIdx === anchorLineIdx && focus.offset < bounds.start);
+    const focusAfterAnchor =
+      focusLineIdx > anchorLineIdx ||
+      (focusLineIdx === anchorLineIdx && focus.offset > bounds.end);
+    let start: { sourceLineId: number; offset: number } = {
+      sourceLineId: bounds.sourceLineId,
+      offset: bounds.start,
+    };
+    let end: { sourceLineId: number; offset: number } = {
+      sourceLineId: bounds.sourceLineId,
+      offset: bounds.end,
+    };
+    if (focusBeforeAnchor) {
+      const focusWord = this.wordBoundsAt(focus);
+      start = focusWord !== null
+        ? { sourceLineId: focus.sourceLineId, offset: focusWord.start }
+        : focus;
+    } else if (focusAfterAnchor) {
+      const focusWord = this.wordBoundsAt(focus);
+      end = focusWord !== null
+        ? { sourceLineId: focus.sourceLineId, offset: focusWord.end }
+        : focus;
+    }
+    this.selectionDragStarted = true;
+    this.setSelection(start, end);
+  }
+
+  // Line-granularity drag extension for a triple-click-then-hold gesture.
+  // The triple-clicked line (selectionAnchorLineId) always stays fully
+  // selected; the selection grows by whole lines toward the pointer, from
+  // the start of whichever line is earlier to the end of whichever line
+  // is later.
+  private extendLineSelectionToCell(cell: { x: number; y: number }): void {
+    if (this.selectionAnchorLineId === null) {
+      return;
+    }
+    const focus =
+      this.resolveCellToSource(cell.x, cell.y) ??
+      this.resolveNearestSource(cell.x, cell.y);
+    if (focus === null) {
+      return;
+    }
+    const anchorIdx = this.lineIndexById(this.selectionAnchorLineId);
+    const focusIdx = this.lineIndexById(focus.sourceLineId);
+    if (anchorIdx < 0 || focusIdx < 0) {
+      return;
+    }
+    const startLineId =
+      focusIdx <= anchorIdx ? focus.sourceLineId : this.selectionAnchorLineId;
+    const endLineId =
+      focusIdx <= anchorIdx ? this.selectionAnchorLineId : focus.sourceLineId;
+    const endLine = this.lineById(endLineId);
+    if (endLine === null) {
+      return;
+    }
+    this.selectionDragStarted = true;
+    this.setSelection(
+      { sourceLineId: startLineId, offset: 0 },
+      { sourceLineId: endLineId, offset: (endLine.body ?? "").length },
+    );
   }
 
   // Extend an existing selection to the given cell by pinning the far
@@ -4562,7 +4689,7 @@ export class Screen {
         this.stopAutoscroll();
         return;
       }
-      this.extendSelectionToCell(this.autoscrollCell);
+      this.extendSelectionForGesture(this.autoscrollCell);
     }, Screen.AUTOSCROLL_TICK_MS);
   }
 
