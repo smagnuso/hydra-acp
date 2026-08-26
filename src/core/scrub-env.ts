@@ -105,6 +105,7 @@ export const PANE_SCOPED_ENV_BY_BACKEND: Readonly<Record<string, readonly string
   kitty: ["KITTY_WINDOW_ID"],
   screen: ["STY"],
   iterm2: ["ITERM_SESSION_ID"],
+  paseo: ["PASEO_TERMINAL_ID", "PASEO_ACTIVITY_TOKEN"],
   // hydra's own: written by the ^t hand-off to tell the child it owns the
   // tab label. Names one specific tab, so it has the same problem. Host
   // agnostic — it describes hydra's claim, not any host's tab. Must stay in

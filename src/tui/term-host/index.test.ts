@@ -75,6 +75,43 @@ describe("precedence", () => {
   });
 });
 
+describe("paseo precedence exception", () => {
+  // Regression for a real environment observed live: Paseo's own daemon
+  // doesn't scrub TMUX/TMUX_PANE from its own inherited environment before
+  // spawning terminals, so a Paseo daemon started inside a tmux pane leaks
+  // that pane's stale identity into every terminal it creates — even though
+  // nothing is actually nested. Strict "innermost wins" would let that false
+  // signal win over paseo's own real one, so paseo is deliberately ordered
+  // first despite being the outermost host in a genuine nesting.
+  it("resolves paseo even when a leaked TMUX/TMUX_PANE is also present", () => {
+    const host = initTerminalHost({
+      PASEO_TERMINAL_ID: "term_1",
+      PASEO_ACTIVITY_TOKEN: "tok",
+      PASEO_TERMINAL_ACTIVITY_URL: "http://127.0.0.1:6767/api/terminal-activity",
+      TMUX: "/tmp/tmux-1000/default,4091673,0",
+      TMUX_PANE: "%4",
+    });
+    expect(host?.id).toBe("paseo");
+  });
+
+  it("still resolves tmux when paseo's own env is genuinely absent", () => {
+    // tmuxCandidate.create() reads real process.env directly (not the env
+    // passed to detect()), same as herdr's — so unlike the paseo/herdr
+    // cases above, this one can't be exercised via a synthetic env object
+    // alone; it needs the real environment set, matching tmux.test.ts's own
+    // setup.
+    process.env.TMUX = "/tmp/tmux-1000/default,4091673,0";
+    process.env.TMUX_PANE = "%4";
+    try {
+      const host = initTerminalHost(process.env);
+      expect(host?.id).toBe("tmux");
+    } finally {
+      delete process.env.TMUX;
+      delete process.env.TMUX_PANE;
+    }
+  });
+});
+
 describe("initTerminalHost", () => {
   it("resolves nothing from an empty environment", () => {
     expect(initTerminalHost({})).toBeNull();

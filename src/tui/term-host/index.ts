@@ -33,18 +33,39 @@
 // left the hazard for every other embedder of Screen.
 
 import { herdrCandidate } from "./herdr.js";
+import { paseoCandidate } from "./paseo.js";
 import { tmuxCandidate } from "./tmux.js";
 import type { TerminalHost, TerminalHostCandidate } from "./types.js";
 
 /**
- * Most specific first. See the precedence note above.
+ * Most specific first — EXCEPT paseo, deliberately out of "innermost wins"
+ * order. See the precedence note above for the general rule; this is the
+ * documented exception to it.
  *
- * herdr before tmux because herdr inside tmux is an ordinary setup and herdr
- * is then the inner host — it owns the pane. The reverse (tmux inside herdr)
- * also happens, and picks tmux only if herdr's own variables are absent,
- * which is exactly right: in that case herdr isn't our pane's owner.
+ * paseo goes FIRST, ahead of herdr and tmux, even though its terminal is
+ * ordinarily the outermost box a multiplexer would run inside (so strict
+ * innermost-wins would put it last). Verified live: Paseo's own daemon does
+ * not scrub pane-scoped variables (TMUX, TMUX_PANE, and presumably the
+ * herdr/zellij/etc. equivalents) from its OWN inherited environment before
+ * spawning terminals — the same "daemon outlives the shell that started it"
+ * bug class core/scrub-env.ts exists to prevent on Hydra's side, just not
+ * fixed on theirs. A Paseo daemon started inside a tmux pane leaks that
+ * pane's stale identity into every terminal it creates afterward, so
+ * TMUX_PANE reads as present even though nothing is actually nested — tmux
+ * would otherwise win detection and reports would go to a pane the user
+ * isn't even looking at, silently, with paseo's own real signal ignored.
+ *
+ * The tradeoff this accepts: a user who deliberately runs tmux (or herdr)
+ * INSIDE a real Paseo terminal loses per-pane granularity — activity reports
+ * to the one Paseo terminal-level indicator instead of the specific nested
+ * pane. That's a real but rare setup (Paseo terminals are ordinarily used as
+ * a single plain shell), and it degrades to "coarser, not silent" rather
+ * than "silent," so it's the better failure mode of the two. Revisit this
+ * ordering if/when Paseo scrubs its own daemon's environment before spawning
+ * terminals.
  */
 export const CANDIDATES: readonly TerminalHostCandidate[] = [
+  paseoCandidate,
   herdrCandidate,
   tmuxCandidate,
 ];
