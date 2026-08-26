@@ -2639,6 +2639,79 @@ export class Session {
     this.updatedAt = Date.now();
   }
 
+  // Reload the CURRENT upstream session onto a fresh agent process after
+  // the agent has forgotten it. Distinct from rollbackToUpstream (which
+  // moves to an *earlier* upstream id and rewinds the compaction
+  // watermark) and from respawnAgent (which mints a *new* upstream
+  // session and replays a synthesized transcript). Here the upstream id
+  // is still good — Claude's own JSONL is intact — so session/load
+  // restores the real context and the id never changes.
+  //
+  // No quiesce check: the only caller runs inside the prompt queue, so
+  // this session has exactly one turn in flight and it is the one that
+  // just failed before the agent accepted it.
+  private async reloadUpstreamAfterAgentLoss(): Promise<void> {
+    const loadAgent = this.loadExistingAgentSession;
+    if (!loadAgent) {
+      throw new Error("loadExistingAgentSession not configured for this session");
+    }
+
+    const persistedModel = this.currentModel;
+    const persistedMode = this.currentMode;
+
+    const fresh = await loadAgent(this.upstreamSessionId, {
+      agentId: this.agentId,
+      cwd: this.cwd,
+      agentArgs: this.agentArgs,
+      ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
+      mcpServers: this.mcpServersConfig ?? [],
+    });
+
+    this.accumulateAndResetCost();
+    this.wireAgent(fresh.agent);
+
+    const restored = await restoreCurrentModel({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedModel,
+      agentReportedModel: fresh.initialModel,
+      logger: this.logger,
+    });
+    this.applyAgentConfigOptionResponse(restored.result, "model");
+    await restoreCurrentMode({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedMode,
+      agentReportedMode: fresh.initialMode,
+      logger: this.logger,
+    });
+
+    // session/load replays the whole transcript as session/update
+    // notifications. Clients already have every one of those events, so
+    // drop them rather than duplicating the conversation.
+    fresh.agent.connection.drainBuffered("session/update");
+
+    const oldAgent = this.agent;
+    this.agent = fresh.agent;
+    this.upstreamSessionId = fresh.upstreamSessionId;
+    this.agentMeta = fresh.agentMeta;
+    this.agentCapabilities = fresh.agentCapabilities;
+    this.resetModelVerb(fresh.modelVerb);
+
+    this.broadcastMergedCommands();
+    this.broadcastConfigOptions();
+
+    await this.retireAgent(oldAgent, "upstream-lost");
+
+    // No rotation reason: the agent PROCESS restarted but the upstream
+    // session did not rotate, so this must not open a new generation.
+    // The notify still persists the (unchanged) ids and banks the cost
+    // the retired process had reported.
+    this.notifyAgentChange("reloadUpstreamAfterAgentLoss");
+
+    this.updatedAt = Date.now();
+  }
+
   // Scan the recent tail of history.jsonl for an open tool-call chain:
   // a tool_call entry without a corresponding tool_call_update that has
   // status="completed" or status="failed". Scans at most `maxEntries`
@@ -9924,19 +9997,7 @@ export class Session {
       // to the agent, so the user's transcript keeps the words they
       // actually typed.
       outboundPrompt = this.applyWorkspacePromptRewrite(outboundPrompt);
-      // Route through the transformer chain so transformers that register
-      // a request:session/prompt intercept (e.g. the clarifier's deviation
-      // injection) get to see and potentially rewrite the prompt before it
-      // reaches the agent. forwardRequest handles rewriteForAgent
-      // (sessionId → upstreamSessionId) and tail-forwards to the agent.
-      response = await this.awaitPromptResponse(
-        this.forwardRequest(
-          "session/prompt",
-          { sessionId: this.sessionId, prompt: outboundPrompt },
-          entry.emitterName ? new Set([entry.emitterName]) : new Set(),
-          entry.chainStartIdx ?? 0,
-        ),
-      );
+      response = await this.dispatchPrompt(entry, outboundPrompt);
     } catch (err) {
       // Deliberate force-cancel: the agent was killed on purpose. Resolve
       // the originator's prompt as cancelled (markClosed already broadcast
@@ -9973,6 +10034,57 @@ export class Session {
     return response;
   }
 
+  // Send one session/prompt to the agent, recovering once from an agent
+  // that has forgotten our upstream session.
+  //
+  // An ACP agent can host many sessions in one process and drop a single
+  // one while the process itself stays alive and the connection stays
+  // open: claude-agent-acp evicts the entry from its in-memory session
+  // map when that session's CLI subprocess dies, and then answers every
+  // later session/prompt for it with a bare "Session not found". Nothing
+  // else notices — Hydra's liveness signal is the process and the
+  // connection, both of which are still healthy — so the session stays
+  // `warm` forever and every prompt from every client fails with an
+  // opaque internal error.
+  //
+  // The upstream id is still valid on disk, so session/load on a fresh
+  // process restores the real conversation (the agent replays its own
+  // context) and the prompt goes through. This is the same recovery
+  // forceCancel documents, just triggered by the agent losing the
+  // session rather than by us killing it.
+  private async dispatchPrompt(
+    entry: UserPromptQueueEntry,
+    outboundPrompt: unknown[],
+  ): Promise<unknown> {
+    // Route through the transformer chain so transformers that register
+    // a request:session/prompt intercept (e.g. the clarifier's deviation
+    // injection) get to see and potentially rewrite the prompt before it
+    // reaches the agent. forwardRequest handles rewriteForAgent
+    // (sessionId → upstreamSessionId) and tail-forwards to the agent.
+    const send = (): Promise<unknown> =>
+      this.awaitPromptResponse(
+        this.forwardRequest(
+          "session/prompt",
+          { sessionId: this.sessionId, prompt: outboundPrompt },
+          entry.emitterName ? new Set([entry.emitterName]) : new Set(),
+          entry.chainStartIdx ?? 0,
+        ),
+      );
+
+    try {
+      return await send();
+    } catch (err) {
+      if (!this.loadExistingAgentSession || !isUpstreamSessionLost(err)) {
+        throw err;
+      }
+      this.logger?.warn(
+        `agent ${this.agentId} no longer knows upstream session ${this.upstreamSessionId} for ${this.sessionId}; reloading it onto a fresh process and retrying the prompt once`,
+      );
+      await this.reloadUpstreamAfterAgentLoss();
+      return await send();
+    }
+  }
+
   // Clear amendInProgress once the cancelled turn's task has fully
   // settled. broadcastTurnComplete needs the marker still set when it
   // fires, so the clear must happen *after*. Called from runQueueEntry's
@@ -9982,6 +10094,40 @@ export class Session {
       this.amendInProgress = undefined;
     }
   }
+}
+
+// Agent-side ways of saying "I no longer have that session, and I did not
+// accept your prompt". claude-agent-acp throws both from the very top of
+// its prompt handler, before anything is enqueued and before any tool can
+// run, which is what makes re-sending safe.
+//
+// A plain `throw new Error("Session not found")` (the session was evicted
+// from the agent's map) reaches us as InternalError with the text in
+// `data.details`; a RequestError.internalError (the query stream ended but
+// the husk is still mapped) carries it appended to `message`. Match both
+// shapes.
+//
+// Deliberately NOT matched: "The Claude Agent process exited unexpectedly",
+// which the agent raises against a turn that was already RUNNING. That
+// prompt may have executed tools, so retrying it could repeat side effects.
+const UPSTREAM_SESSION_LOST_PATTERNS = [
+  "session not found",
+  "the claude agent session has ended",
+];
+
+export function isUpstreamSessionLost(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown; data?: unknown };
+  // Gate on InternalError so Hydra's own -32001 SessionNotFound (a
+  // different condition, raised before the agent is ever consulted) can
+  // never be mistaken for the agent having lost the session.
+  if (e?.code !== JsonRpcErrorCodes.InternalError) {
+    return false;
+  }
+  const details = (e.data as { details?: unknown } | undefined)?.details;
+  const haystack = `${typeof e.message === "string" ? e.message : ""} ${
+    typeof details === "string" ? details : ""
+  }`.toLowerCase();
+  return UPSTREAM_SESSION_LOST_PATTERNS.some((p) => haystack.includes(p));
 }
 
 function withCode(err: Error, code: number): Error & { code: number } {
