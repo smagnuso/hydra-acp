@@ -1094,6 +1094,10 @@ async function dispatchTui(
   }
   if (base.agentId !== undefined) {
     tuiOpts.agentId = base.agentId;
+    // base.agentId is already resolveOption(flags, "agent") — flag, else
+    // HYDRA_ACP_AGENT env — so this one assignment covers both of the
+    // top two precedence tiers. See TuiOptions.explicitAgentId.
+    tuiOpts.explicitAgentId = base.agentId;
   }
   if (cwd !== undefined) {
     tuiOpts.cwd = cwd;

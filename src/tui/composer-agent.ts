@@ -36,6 +36,13 @@ export interface ComposerAgentSelection {
 }
 
 export interface ComposerAgentInputs {
+  // The invocation's own `--agent` flag (or HYDRA_ACP_AGENT env var —
+  // resolveOption in cli/parse-args.ts already folds env under the flag,
+  // so this one field carries both). Set once at launch and never
+  // rewritten, unlike fallbackAgentId below — it is the strongest
+  // possible statement of intent ("run THIS agent"), stronger even than
+  // a `.hydra-acp.json` for the tree, so it sits above everything else.
+  explicitAgentId?: string;
   // defaultAgent / defaultModels as written in the `.hydra-acp.json`
   // layers for the cwd in question, NOT the already-merged config. The
   // distinction is the whole point of the precedence rule below: once
@@ -52,13 +59,16 @@ export interface ComposerAgentInputs {
   availableAgents: readonly ComposerAgentChainSource[];
 }
 
-// Precedence, most specific first. A directory config outranks
-// `lastChosenAgent` because the two are not the same kind of statement: a
-// `.hydra-acp.json` is an explicit, durable claim about one tree, while
-// lastChosenAgent is implicit global stickiness left over from whatever
-// the user last clicked. Without this ordering the key would be dead for
-// exactly the people who write it — anyone who has ever picked an agent
-// from the composer label.
+// Precedence, most specific first. explicitAgentId (--agent / env) wins
+// outright: it is a fresh, deliberate statement for this exact
+// invocation, and nothing resolved from a config file should be able to
+// override what the user just typed. Below that, a directory config
+// outranks `lastChosenAgent` because the two are not the same kind of
+// statement: a `.hydra-acp.json` is an explicit, durable claim about one
+// tree, while lastChosenAgent is implicit global stickiness left over
+// from whatever the user last clicked. Without this ordering the key
+// would be dead for exactly the people who write it — anyone who has
+// ever picked an agent from the composer label.
 //
 // An explicit pick made *in the picker itself* still outranks everything;
 // the picker enforces that by not calling this again after one.
@@ -66,6 +76,7 @@ export function resolveComposerAgent(
   inputs: ComposerAgentInputs,
 ): ComposerAgentSelection {
   const agentId =
+    inputs.explicitAgentId ??
     inputs.directoryDefaultAgent ??
     inputs.prefs.lastChosenAgent ??
     inputs.fallbackAgentId ??
@@ -122,6 +133,7 @@ export async function composerAgentForCwd(args: {
   cwd: string;
   config: HydraConfig;
   prefs: ComposerAgentPrefs;
+  explicitAgentId?: string;
   fallbackAgentId?: string;
   availableAgents: readonly ComposerAgentChainSource[];
 }): Promise<ComposerAgentForCwd> {
@@ -138,6 +150,9 @@ export async function composerAgentForCwd(args: {
   const dirAgent = stringField(merged, "defaultAgent");
   const dirModels = stringMapField(merged, "defaultModels");
   const selection = resolveComposerAgent({
+    ...(args.explicitAgentId !== undefined
+      ? { explicitAgentId: args.explicitAgentId }
+      : {}),
     ...(dirAgent !== undefined ? { directoryDefaultAgent: dirAgent } : {}),
     ...(dirModels !== undefined ? { directoryDefaultModels: dirModels } : {}),
     prefs: args.prefs,

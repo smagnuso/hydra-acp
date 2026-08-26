@@ -42,6 +42,22 @@ describe("resolveComposerAgent", () => {
     ).toEqual({ agentId: "claude-home" });
   });
 
+  it("prefers an explicit --agent/env id over a directory default", () => {
+    // The invocation's own --agent flag (or HYDRA_ACP_AGENT) is a
+    // deliberate, fresh statement of intent — it must not be shadowed by
+    // a `.hydra-acp.json` for the tree, which is exactly the bug this
+    // guards against.
+    expect(
+      resolveComposerAgent({
+        explicitAgentId: "cursor",
+        directoryDefaultAgent: "claude-personal",
+        prefs: { lastChosenAgent: "opencode" },
+        configDefaultAgent: "opencode",
+        availableAgents: [],
+      }).agentId,
+    ).toBe("cursor");
+  });
+
   it("falls back through lastChosen, opts, then config", () => {
     expect(
       resolveComposerAgent({
@@ -155,6 +171,23 @@ describe("composerAgentForCwd", () => {
         availableAgents: [],
       }),
     ).toEqual({ agentId: "claude-acp", model: "opus" });
+  });
+
+  it("prefers an explicit agent id over the tree's own defaultAgent", async () => {
+    const dir = path.join(root, "work-explicit");
+    await writeConfigAt(dir, {
+      defaultAgent: "claude-acp",
+      defaultModels: { "claude-acp": "opus" },
+    });
+    expect(
+      await composerAgentForCwd({
+        cwd: dir,
+        config,
+        prefs: {},
+        explicitAgentId: "cursor",
+        availableAgents: [],
+      }),
+    ).toEqual({ agentId: "cursor" });
   });
 
   it("falls back to the global config where the tree says nothing", async () => {

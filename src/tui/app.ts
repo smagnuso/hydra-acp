@@ -653,6 +653,14 @@ function parseResponseConfigOptions(
 export interface TuiOptions {
   sessionId?: string;
   agentId?: string;
+  // The invocation's `--agent` flag (or HYDRA_ACP_AGENT env var), captured
+  // once at launch and never rewritten afterward — unlike agentId, which
+  // every attach / alt+n cycle overwrites with the *attached session's*
+  // agent (see ViewPrefs.lastChosenAgent for why that field can't hold
+  // this instead). Composer resolution reads this as the top-priority
+  // signal so a directory `.hydra-acp.json` default can't shadow a flag
+  // the user explicitly typed. See tui/composer-agent.ts.
+  explicitAgentId?: string;
   cwd?: string;
   name?: string;
   // One-shot model override applied to fresh session/new only. Not
@@ -1326,6 +1334,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       const agents = await listAgents(target);
       const canonical = canonicalAgentId(opts.agentId, agents.map((a) => a.id));
       if (canonical !== undefined && canonical !== opts.agentId) {
+        if (opts.explicitAgentId === opts.agentId) {
+          opts.explicitAgentId = canonical;
+        }
         opts.agentId = canonical;
       }
     } catch {
@@ -5729,6 +5740,9 @@ async function runSession(
             cwd: forCwd,
             config,
             prefs: viewPrefs,
+            ...(opts.explicitAgentId !== undefined
+              ? { explicitAgentId: opts.explicitAgentId }
+              : {}),
             ...(opts.agentId !== undefined
               ? { fallbackAgentId: opts.agentId }
               : {}),
@@ -10254,6 +10268,9 @@ async function resolveSession(
         cwd: forCwd,
         config,
         prefs: viewPrefs,
+        ...(opts.explicitAgentId !== undefined
+          ? { explicitAgentId: opts.explicitAgentId }
+          : {}),
         ...(opts.agentId !== undefined ? { fallbackAgentId: opts.agentId } : {}),
         availableAgents,
       });
