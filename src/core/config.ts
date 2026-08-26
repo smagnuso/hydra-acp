@@ -152,9 +152,13 @@ export type LocalAgentConfig = z.infer<typeof LocalAgentConfig>;
 // replaces the npx package spec (e.g. "opencode-ai@0.5.12") so a bad
 // upstream publish can be sidestepped without editing the registry. The
 // pinned spec also keys its own install dir so it never collides with the
-// floating "current" install.
+// floating "current" install. `extraArgs` appends onto whichever
+// distribution kind the agent resolves to (npx/uvx/exec args, or every
+// platform's args for a binary distribution) without needing to know or
+// duplicate the registry's own args.
 const AgentOverrideConfig = z.object({
   packageSpec: z.string().optional(),
+  extraArgs: z.array(z.string()).optional(),
 });
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfig>;
 

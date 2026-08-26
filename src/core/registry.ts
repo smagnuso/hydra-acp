@@ -411,28 +411,42 @@ export class Registry {
   }
 
   // Apply a config.agentOverrides[id] pin to a registry agent: swap the
-  // npx package spec and key the install dir on the pinned version so it
-  // never collides with the floating "current" install. No-op when the
-  // agent has no override or isn't npx-distributed.
+  // npx package spec (keying the install dir on the pinned version so it
+  // never collides with the floating "current" install) and/or append
+  // extraArgs onto whichever distribution kind the agent resolves to.
+  // No-op when the agent has no override.
   private applyOverride(agent: ResolvedAgent): ResolvedAgent {
     const withChain: ResolvedAgent = agent.extendsChain
       ? agent
       : { ...agent, extendsChain: [agent.id] };
     const override = this.config.agentOverrides?.[withChain.id];
-    if (!override?.packageSpec || !withChain.distribution.npx) {
+    if (!override) {
       return withChain;
     }
-    return {
-      ...withChain,
-      version: versionKeyFromSpec(override.packageSpec),
+
+    let distribution = withChain.distribution;
+    let version = withChain.version;
+    let installId = withChain.installId;
+
+    if (override.packageSpec && distribution.npx) {
+      version = versionKeyFromSpec(override.packageSpec);
       // Pinning a different package makes this a distinct install, so it
       // stops sharing whatever install dir it inherited.
-      installId: withChain.id,
-      distribution: {
-        ...withChain.distribution,
-        npx: { ...withChain.distribution.npx, package: override.packageSpec },
-      },
-    };
+      installId = withChain.id;
+      distribution = {
+        ...distribution,
+        npx: { ...distribution.npx, package: override.packageSpec },
+      };
+    }
+
+    if (override.extraArgs?.length) {
+      distribution = appendExtraArgsToDistribution(distribution, override.extraArgs);
+    }
+
+    if (distribution === withChain.distribution) {
+      return withChain;
+    }
+    return { ...withChain, version, installId, distribution };
   }
 
   private isPinned(): boolean {
@@ -558,6 +572,33 @@ function mergeIntoDistribution(
     ...(base.binary
       ? {
           // Per-platform map: overlay each target that's actually present.
+          binary: Object.fromEntries(
+            Object.entries(base.binary).map(([platform, target]) => [
+              platform,
+              target ? overlay(target) : target,
+            ]),
+          ),
+        }
+      : {}),
+  };
+}
+
+// Append extraArgs onto whichever distribution kinds are actually present,
+// leaving each distribution's own args in place ahead of them.
+function appendExtraArgsToDistribution(
+  base: RegistryAgent["distribution"],
+  extraArgs: string[],
+): RegistryAgent["distribution"] {
+  const overlay = <T extends { args?: string[] }>(target: T): T => ({
+    ...target,
+    args: [...(target.args ?? []), ...extraArgs],
+  });
+  return {
+    ...(base.npx ? { npx: overlay(base.npx) } : {}),
+    ...(base.uvx ? { uvx: overlay(base.uvx) } : {}),
+    ...(base.exec ? { exec: overlay(base.exec) } : {}),
+    ...(base.binary
+      ? {
           binary: Object.fromEntries(
             Object.entries(base.binary).map(([platform, target]) => [
               platform,

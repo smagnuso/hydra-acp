@@ -558,6 +558,75 @@ describe("local agents and pin overrides", () => {
     }
   });
 
+  it("appends agentOverrides extraArgs onto a registry agent's npx args", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "claude-acp": { extraArgs: ["--foo", "bar"] },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, FIXTURE);
+    const agent = await registry.getAgent("claude-acp");
+    expect(agent?.distribution.npx?.args).toEqual(["--foo", "bar"]);
+    // packageSpec/version/installId are untouched when no pin is set.
+    expect(agent?.version).toBeUndefined();
+    expect(agent?.installId).toBeUndefined();
+  });
+
+  it("appends agentOverrides extraArgs onto every platform of a binary distribution", async () => {
+    const doc: { agents: RegistryAgent[] } = {
+      agents: [
+        {
+          id: "some-binary-acp",
+          name: "Some Binary",
+          distribution: {
+            binary: {
+              "linux-x86_64": { cmd: "run", args: ["--serve"] },
+              "darwin-aarch64": { cmd: "run" },
+            },
+          },
+        },
+      ],
+    };
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "some-binary-acp": { extraArgs: ["--enforce_kernel_ipv6_support=false"] },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, doc as typeof FIXTURE);
+    const agent = await registry.getAgent("some-binary-acp");
+    expect(agent?.distribution.binary?.["linux-x86_64"]?.args).toEqual([
+      "--serve",
+      "--enforce_kernel_ipv6_support=false",
+    ]);
+    expect(agent?.distribution.binary?.["darwin-aarch64"]?.args).toEqual([
+      "--enforce_kernel_ipv6_support=false",
+    ]);
+  });
+
+  it("combines a packageSpec pin with extraArgs on the same override", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "claude-acp": {
+          packageSpec: "@agentclientprotocol/claude-agent-acp@0.99.0",
+          extraArgs: ["--foo"],
+        },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, FIXTURE);
+    const agent = await registry.getAgent("claude-acp");
+    expect(agent?.distribution.npx?.package).toBe(
+      "@agentclientprotocol/claude-agent-acp@0.99.0",
+    );
+    expect(agent?.distribution.npx?.args).toEqual(["--foo"]);
+    expect(agent?.installId).toBe("claude-acp");
+  });
+
   it("derives a pinned install-dir version key from a packageSpec", async () => {
     const pinned: RegistryAgent = {
       id: "opencode",
