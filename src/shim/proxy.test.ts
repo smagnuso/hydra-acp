@@ -1,9 +1,28 @@
-import { describe, it, expect } from "vitest";
-import { wireShim, normaliseInitializeClientInfo } from "./proxy.js";
+import { describe, it, expect, vi } from "vitest";
+import {
+  wireShim,
+  normaliseInitializeClientInfo,
+  detachUnpromptedSessions,
+} from "./proxy.js";
 import { SessionTracker } from "./session-tracker.js";
 import { makeControlledStream } from "../__tests__/test-utils.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
-import type { JsonRpcNotification, JsonRpcRequest } from "../acp/types.js";
+import {
+  JsonRpcErrorCodes,
+  type JsonRpcNotification,
+  type JsonRpcRequest,
+} from "../acp/types.js";
+import type { RemoteTarget } from "../core/remote-target.js";
+
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+const fakeTarget: RemoteTarget = {
+  baseUrl: "http://test.invalid",
+  wsUrl: "ws://test.invalid/acp",
+  token: "test-token",
+  display: "test.invalid",
+  isLocal: false,
+};
 
 describe("wireShim forwarding", () => {
   it("forwards initialize to upstream and does NOT spuriously respond on downstream", async () => {
@@ -484,6 +503,235 @@ describe("wireShim forwarding", () => {
       sessionId: "sess_existing",
     });
   });
+
+  it("retries session/prompt with an explicit attach after a SessionNotFound rejection, then succeeds", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 42,
+      method: "session/prompt",
+      params: { sessionId: "sess_stale", prompt: [{ type: "text", text: "hi" }] },
+    });
+    await tick();
+
+    expect(upstream.sent).toHaveLength(1);
+    expect(upstream.sent[0]).toMatchObject({
+      id: 42,
+      method: "session/prompt",
+    });
+
+    // Daemon rejects: this connection was never attached to sess_stale.
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 42,
+      error: {
+        code: JsonRpcErrorCodes.SessionNotFound,
+        message: "not attached to session",
+      },
+    });
+    await tick();
+    await tick();
+
+    // Shim should have issued an explicit attach for that sessionId.
+    expect(upstream.sent).toHaveLength(2);
+    const attachReq = upstream.sent[1] as JsonRpcRequest;
+    expect(attachReq.method).toBe("session/attach");
+    expect(attachReq.params).toMatchObject({ sessionId: "sess_stale" });
+    expect(downstream.sent).toEqual([]); // not resolved to the client yet
+
+    // Attach succeeds.
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: attachReq.id,
+      result: { sessionId: "sess_stale" },
+    });
+    await tick();
+    await tick();
+
+    // Original prompt is retried with the SAME id the client is waiting on.
+    expect(upstream.sent).toHaveLength(3);
+    expect(upstream.sent[2]).toMatchObject({
+      id: 42,
+      method: "session/prompt",
+    });
+    expect(downstream.sent).toEqual([]);
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 42,
+      result: { stopReason: "end_turn" },
+    });
+    await tick();
+    await tick();
+
+    expect(downstream.sent).toHaveLength(1);
+    expect(downstream.sent[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 42,
+      result: { stopReason: "end_turn" },
+    });
+  });
+
+  it("gives up after one retry when the reattach itself fails, without looping", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/prompt",
+      params: { sessionId: "sess_gone", prompt: [] },
+    });
+    await tick();
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 7,
+      error: {
+        code: JsonRpcErrorCodes.SessionNotFound,
+        message: "not attached to session",
+      },
+    });
+    await tick();
+    await tick();
+
+    const attachReq = upstream.sent[1] as JsonRpcRequest;
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: attachReq.id,
+      error: {
+        code: JsonRpcErrorCodes.SessionNotFound,
+        message: "session sess_gone not found",
+      },
+    });
+    await tick();
+    await tick();
+
+    // No second retry of session/prompt — only the original send plus one attach attempt.
+    expect(upstream.sent).toHaveLength(2);
+    expect(downstream.sent).toHaveLength(1);
+    expect(downstream.sent[0]).toMatchObject({
+      id: 7,
+      error: { message: "session sess_gone not found" },
+    });
+  });
+
+  it("leaves a session/prompt that succeeds on the first try untouched", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/prompt",
+      params: { sessionId: "sess_ok", prompt: [] },
+    });
+    await tick();
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { stopReason: "end_turn" },
+    });
+    await tick();
+    await tick();
+
+    expect(upstream.sent).toHaveLength(1);
+    expect(downstream.sent).toEqual([
+      { jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } },
+    ]);
+  });
+
+  it("cold-watch reattaches once a closed session is observed to go warm again", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "warm" }),
+    });
+
+    wireShim({
+      opts: {},
+      upstream,
+      downstream,
+      tracker,
+      target: fakeTarget,
+      coldWatch: { pollMs: 5, fetchImpl },
+    });
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      method: "hydra-acp/session/closed",
+      params: { sessionId: "sess_killed" },
+    });
+
+    // Wait for at least one poll tick.
+    await new Promise((r) => setTimeout(r, 40));
+    await tick();
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://test.invalid/v1/sessions/sess_killed",
+    );
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer test-token",
+    );
+
+    const attachReq = upstream.sent.find(
+      (m): m is JsonRpcRequest =>
+        "method" in m && m.method === "session/attach",
+    );
+    expect(attachReq).toBeDefined();
+    expect(attachReq?.params).toMatchObject({ sessionId: "sess_killed" });
+  });
+
+  it("cold-watch stops polling once the session 404s (gone for good)", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    });
+
+    wireShim({
+      opts: {},
+      upstream,
+      downstream,
+      tracker,
+      target: fakeTarget,
+      coldWatch: { pollMs: 5, fetchImpl },
+    });
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      method: "hydra-acp/session/closed",
+      params: { sessionId: "sess_deleted" },
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    const callsAfterFirstWindow = fetchImpl.mock.calls.length;
+    expect(callsAfterFirstWindow).toBeGreaterThanOrEqual(1);
+
+    await new Promise((r) => setTimeout(r, 40));
+    // No further calls once the poll has observed a 404 and stopped itself.
+    expect(fetchImpl.mock.calls.length).toBe(callsAfterFirstWindow);
+  });
 });
 
 describe("normaliseInitializeClientInfo", () => {
@@ -591,5 +839,162 @@ describe("wireShim initialize normalisation", () => {
       version: "0.190.0",
       title: "Stable",
     });
+  });
+});
+
+describe("detachUnpromptedSessions", () => {
+  it("sends nothing when there are no unprompted originated sessions", async () => {
+    const upstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    await detachUnpromptedSessions(tracker, upstream, "SIGTERM");
+
+    expect(upstream.sent).toEqual([]);
+  });
+
+  it("sends session/detach for a never-prompted session/new'd session", async () => {
+    const upstream = makeControlledStream();
+    const tracker = new SessionTracker();
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/w" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        sessionId: "sess_probe",
+        _meta: {
+          "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+        },
+      },
+    });
+
+    await detachUnpromptedSessions(tracker, upstream, "SIGTERM");
+
+    expect(upstream.sent).toHaveLength(1);
+    expect(upstream.sent[0]).toMatchObject({
+      method: "session/detach",
+      params: { sessionId: "sess_probe" },
+    });
+  });
+
+  it("does not detach a session that was prompted, or one only attached to", async () => {
+    const upstream = makeControlledStream();
+    const tracker = new SessionTracker();
+    // Originated and prompted — must be left alone.
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/w" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        sessionId: "sess_used",
+        _meta: {
+          "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+        },
+      },
+    });
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId: "sess_used", prompt: [] },
+    });
+    // Attached (resumed), not originated — not ours to judge.
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/attach",
+      params: { sessionId: "sess_resumed" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        sessionId: "sess_resumed",
+        _meta: {
+          "hydra-acp": { upstreamSessionId: "u2", agentId: "a", cwd: "/w" },
+        },
+      },
+    });
+
+    await detachUnpromptedSessions(tracker, upstream, "SIGTERM");
+
+    expect(upstream.sent).toEqual([]);
+  });
+
+  it("sends a detach for every unprompted originated session", async () => {
+    const upstream = makeControlledStream();
+    const tracker = new SessionTracker();
+    for (const [id, sessionId] of [
+      [1, "sess_a"],
+      [2, "sess_b"],
+    ] as const) {
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id,
+        method: "session/new",
+        params: { cwd: "/w" },
+      });
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          sessionId,
+          _meta: {
+            "hydra-acp": { upstreamSessionId: `u_${id}`, agentId: "a", cwd: "/w" },
+          },
+        },
+      });
+    }
+
+    await detachUnpromptedSessions(tracker, upstream, "SIGTERM");
+
+    const detachedIds = upstream.sent
+      .filter((m): m is JsonRpcRequest => "method" in m && m.method === "session/detach")
+      .map((m) => (m.params as { sessionId: string }).sessionId);
+    expect(detachedIds.sort()).toEqual(["sess_a", "sess_b"]);
+  });
+
+  it("does not hang past its timeout when the send never resolves", async () => {
+    const tracker = new SessionTracker();
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/w" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        sessionId: "sess_stuck",
+        _meta: {
+          "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+        },
+      },
+    });
+    const neverResolvingUpstream = {
+      send: () => new Promise<void>(() => undefined),
+      onMessage: () => undefined,
+      onClose: () => undefined,
+      close: async () => undefined,
+    };
+
+    const start = Date.now();
+    await detachUnpromptedSessions(
+      tracker,
+      neverResolvingUpstream,
+      "SIGTERM",
+      20,
+    );
+    expect(Date.now() - start).toBeLessThan(500);
   });
 });

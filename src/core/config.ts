@@ -25,6 +25,15 @@ const DaemonConfig = z.object({
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),
+  // A session that has never received a real prompt (interactive !==
+  // true) and currently has zero attached clients is reaped after this
+  // much quiet time instead of waiting the full sessionIdleTimeoutSeconds
+  // window. Backstops the fast session/detach -> reapIfOrphanedNonInteractive
+  // path for clients that vanish without detaching cleanly (SIGKILL, crash,
+  // a probe connection that's just yanked closed) — see acp-ws.ts and
+  // session.ts's orphan timer. 0 disables the fast path entirely, falling
+  // back to sessionIdleTimeoutSeconds for these sessions too.
+  nonInteractiveOrphanTimeoutSeconds: z.number().int().nonnegative().default(180),
   // Cap on entries kept in a session's on-disk replay log (history.jsonl).
   // Compaction trims to this many on a periodic basis; reads also slice
   // to the tail at this length as a defensive measure against older

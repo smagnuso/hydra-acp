@@ -234,6 +234,11 @@ export interface SessionInit {
   modelVerb?: ModelVerb;
   agentArgs?: string[];
   idleTimeoutMs?: number;
+  // Fast reap window for a session that has zero attached clients AND
+  // has never been promoted to interactive (no real prompt ever landed).
+  // See scheduleOrphanCheck. 0/undefined disables the fast path; such a
+  // session still falls through to the general idleTimeoutMs eventually.
+  orphanTimeoutMs?: number;
   // Pino-style logger for close + idle paths. Optional so tests/consumers
   // that construct Session directly aren't forced to provide one.
   logger?: { info: (msg: string) => void; warn: (msg: string) => void };
@@ -1022,6 +1027,10 @@ export class Session {
     | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
+  // Fast-reap timer for an orphaned non-interactive session — see
+  // scheduleOrphanCheck/checkOrphan near the idle-timer cluster below.
+  private orphanTimeoutMs: number;
+  private orphanTimer: NodeJS.Timeout | undefined;
   // Separate timer that fires session.idle to the transformer chain after
   // a quiet period. Distinct from idleTimer, which drives session close.
   private idleEventTimeoutMs: number;
@@ -1405,6 +1414,7 @@ export class Session {
       this.agentAdvertisedConfigOptions = [...init.agentConfigOptions];
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
+    this.orphanTimeoutMs = init.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     // Wire the transformer-chain `session.idle` lifecycle event onto the
     // unified idle primitive: fire after `idleEventTimeoutMs` of
@@ -2886,6 +2896,7 @@ export class Session {
       );
     }
     this.clients.set(client.clientId, client);
+    this.cancelOrphanTimer();
     this.updatedAt = Date.now();
     // "none" is a true opt-out — caller wants zero notifications.
     if (historyPolicy === "none") {
@@ -3119,6 +3130,7 @@ export class Session {
     }
     this.clients.delete(clientId);
     this.updatedAt = Date.now();
+    this.scheduleOrphanCheck();
     this.broadcastClientDisconnected(leaving);
   }
 
@@ -3371,6 +3383,7 @@ export class Session {
       ).ancillary === true;
     if (!ancillary && this._interactive !== true) {
       this._interactive = true;
+      this.cancelOrphanTimer();
       for (const handler of this.interactiveHandlers) {
         try {
           handler(true);
@@ -5731,6 +5744,7 @@ export class Session {
       );
     }
     this.cancelIdleTimer();
+    this.cancelOrphanTimer();
     for (const claim of this.pendingClaims.values()) {
       clearTimeout(claim.timer);
     }
@@ -8554,6 +8568,7 @@ export class Session {
     this.closing = true;
     this.closed = true;
     this.cancelIdleTimer();
+    this.cancelOrphanTimer();
     if (this.extensionCommandsUnsub) {
       this.extensionCommandsUnsub();
       this.extensionCommandsUnsub = undefined;
@@ -8821,6 +8836,70 @@ export class Session {
       this.idleTimer = undefined;
     }
     this.disposeIdleHandlers();
+  }
+
+  // Arms the fast orphan-reap timer when the last attached client just
+  // left a session that has never been promoted to interactive (no real
+  // prompt ever landed). Backstops reapIfOrphanedNonInteractive's
+  // explicit session/detach path (acp-ws.ts) for clients that vanish
+  // without detaching cleanly — a raw WS close, a SIGKILL'd probe
+  // process, a crash. Deliberately much shorter than the general
+  // idle-close window (orphanTimeoutMs vs idleTimeoutMs): there's no
+  // conversation to protect against a false-positive reap here, unlike
+  // the general idle timer's "give a transient disconnect the benefit
+  // of the doubt" stance.
+  private scheduleOrphanCheck(): void {
+    if (this.closed || this.orphanTimeoutMs <= 0) {
+      return;
+    }
+    if (this.clients.size > 0 || this._interactive === true) {
+      return;
+    }
+    this.armOrphanTimer(this.orphanTimeoutMs);
+  }
+
+  private armOrphanTimer(delay: number): void {
+    if (this.orphanTimer) {
+      clearTimeout(this.orphanTimer);
+    }
+    this.orphanTimer = setTimeout(() => {
+      this.orphanTimer = undefined;
+      this.checkOrphan();
+    }, delay);
+    if (typeof this.orphanTimer.unref === "function") {
+      this.orphanTimer.unref();
+    }
+  }
+
+  private checkOrphan(): void {
+    if (this.closed) {
+      return;
+    }
+    // Raced back to eligible (a new attach, or a prompt landed) before
+    // the timer fired — nothing to do.
+    if (this.clients.size > 0 || this._interactive === true) {
+      return;
+    }
+    // Same guard reapIfOrphanedNonInteractive uses: never abandon work a
+    // detached-but-not-gone client is still waiting on (hydra cat
+    // --no-wait enqueues then detaches immediately).
+    if (this.hasWorkInFlight) {
+      this.armOrphanTimer(this.orphanTimeoutMs);
+      return;
+    }
+    this.logger?.info(
+      `session ${this.sessionId} orphan timeout fired after ${Math.round(this.orphanTimeoutMs / 1000)}s with no attached client and no prompt ever received — closing`,
+    );
+    void this.close({ deleteRecord: false, by: "reap-orphaned" }).catch(
+      () => undefined,
+    );
+  }
+
+  private cancelOrphanTimer(): void {
+    if (this.orphanTimer) {
+      clearTimeout(this.orphanTimer);
+      this.orphanTimer = undefined;
+    }
   }
 
   // ── Idle dispatch ────────────────────────────────────────────────────────

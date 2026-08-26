@@ -3796,6 +3796,201 @@ describe("Session", () => {
     });
   });
 
+  describe("orphan timeout (non-interactive + unattached)", () => {
+    it("reaps a never-prompted session shortly after its last client detaches", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_orphan",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          orphanTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+
+        session.detach(client.clientId);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(closeSpy).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(2);
+
+        // Matches reapIfOrphanedNonInteractive's own shape: cold record
+        // kept (unlike the general idle timer, which drops never-prompted
+        // records entirely) so a later attach can still resurrect it.
+        // close() rebuilds opts to just { deleteRecord } internally before
+        // notifying listeners (see Session.close), so `by` never reaches
+        // onClose handlers even though checkOrphan passes it through —
+        // same as reapIfOrphanedNonInteractive's own call shape.
+        expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: false });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("never arms while a client stays attached", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_orphan_attached",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          orphanTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("cancels the orphan timer when a new client attaches before the window elapses", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_orphan_reattach",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          orphanTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client: first } = makeClient();
+        session.attach(first, "full");
+        session.detach(first.clientId);
+
+        await vi.advanceTimersByTimeAsync(600);
+        const { client: second } = makeClient();
+        session.attach(second, "full");
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("never reaps a session that was ever prompted, even after every client detaches", async () => {
+      // The core safety property: reapIfOrphanedNonInteractive and this
+      // fast timer both exist ONLY for sessions that never became a real
+      // conversation. The instant a real prompt lands, interactive flips
+      // true permanently — this must be exempt for good, not just while
+      // someone happens to be attached.
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+      const session = new Session({
+        sessionId: "hydra_session_orphan_used",
+        cwd: "/w",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u",
+        orphanTimeoutMs: 1_000,
+      });
+      const closeSpy = vi.fn();
+      session.onClose(closeSpy);
+      const { client } = makeClient();
+      session.attach(client, "full");
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue(
+        { stopReason: "end_turn" },
+      );
+
+      // Real timers for the prompt round-trip itself; only the
+      // detach+advance phase below needs to be fake-timer-controlled.
+      await session.prompt(client.clientId, {
+        sessionId: "hydra_session_orphan_used",
+        prompt: [{ type: "text", text: "hi" }],
+      });
+      expect(session.interactive).toBe(true);
+
+      vi.useFakeTimers();
+      try {
+        session.detach(client.clientId);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("defers instead of closing while work is still in flight (ancillary prompt, no promotion)", async () => {
+      // An ancillary prompt (hydra cat) deliberately does not promote
+      // interactive, so a session mid-ancillary-turn is exactly the case
+      // that must NOT be reaped out from under it once its sender detaches.
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_orphan_inflight",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          orphanTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+        (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+          () => new Promise(() => undefined),
+        );
+
+        void session.prompt(client.clientId, {
+          sessionId: "hydra_session_orphan_inflight",
+          prompt: [{ type: "text", text: "cat output" }],
+          _meta: { "hydra-acp": { ancillary: true } },
+        });
+        await Promise.resolve();
+        expect(session.interactive).toBeUndefined();
+
+        session.detach(client.clientId);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("orphanTimeoutMs=0 disables the fast path", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_orphan_disabled",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          orphanTimeoutMs: 0,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+        session.detach(client.clientId);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("agent exit", () => {
     it("notifies clients with hydra-acp/session/closed and cleans up", () => {
       const { session, mock } = makeSession("sess_x", "u");

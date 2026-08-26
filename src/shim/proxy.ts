@@ -10,6 +10,9 @@ import {
   type JsonRpcMessage,
   type JsonRpcNotification,
   type JsonRpcRequest,
+  type JsonRpcResponse,
+  type JsonRpcId,
+  JsonRpcErrorCodes,
 } from "../acp/types.js";
 import {
   ResilientWsStream,
@@ -102,7 +105,28 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     },
   });
 
-  wireShim({ opts, upstream, downstream, tracker });
+  wireShim({ opts, upstream, downstream, tracker, target });
+
+  // A host that kills us without ever sending session/prompt for a
+  // session we ourselves created (Paseo's fetchCatalog model-discovery
+  // probe is exactly this: initialize -> session/new -> tree-kill, no
+  // prompt in between) leaves that session orphaned on the daemon —
+  // durable by design, so it doesn't just vanish when our connection
+  // does. Best effort: SIGTERM gives a process a real grace window
+  // before SIGKILL (tree-kill.js sends SIGTERM first); see
+  // detachUnpromptedSessions for what we do with it.
+  let exiting = false;
+  const handleTerminationSignal = (signal: NodeJS.Signals): void => {
+    if (exiting) {
+      return;
+    }
+    exiting = true;
+    void detachUnpromptedSessions(tracker, upstream, signal).finally(() => {
+      process.exit(0);
+    });
+  };
+  process.on("SIGTERM", handleTerminationSignal);
+  process.on("SIGINT", handleTerminationSignal);
 
   upstream.onClose((err) => {
     if (err) {
@@ -135,17 +159,175 @@ export interface WireShimArgs {
   upstream: MessageStream;
   downstream: MessageStream;
   tracker: SessionTracker;
+  // Needed for the cold-watch poll's REST status check (GET
+  // /v1/sessions/:id). Optional so existing tests that don't exercise
+  // cold-watch don't have to construct one — startColdWatch simply
+  // never runs without it. runShim always supplies it.
+  target?: RemoteTarget;
+  // Test-only overrides: a short poll interval and a fake fetch so
+  // cold-watch tests don't need real timers or a real daemon.
+  coldWatch?: {
+    pollMs?: number;
+    fetchImpl?: typeof fetch;
+  };
 }
+
+const COLD_WATCH_POLL_MS = 12_000;
 
 export function wireShim({
   opts,
   upstream,
   downstream,
   tracker,
+  target,
+  coldWatch,
 }: WireShimArgs): void {
+  // Correlates requests this proxy originates itself — the explicit
+  // reattach in handleSessionPrompt below, and the cold-watch revival
+  // attach — with their responses, without depending on
+  // ResilientWsStream.request(). wireShim is typed against the plain
+  // MessageStream interface so it stays mockable in tests; a response
+  // whose id is in here is ours, intercepted before the normal
+  // daemon→client relay and never forwarded downstream.
+  const pendingOwn = new Map<JsonRpcId, (resp: JsonRpcResponse) => void>();
+  const sendAndAwait = async (
+    req: JsonRpcRequest,
+  ): Promise<JsonRpcResponse> => {
+    const promise = new Promise<JsonRpcResponse>((resolve) => {
+      pendingOwn.set(req.id, resolve);
+    });
+    try {
+      await upstream.send(req);
+    } catch (err) {
+      pendingOwn.delete(req.id);
+      return {
+        jsonrpc: "2.0",
+        id: req.id,
+        error: {
+          code: JsonRpcErrorCodes.InternalError,
+          message: (err as Error).message,
+        },
+      };
+    }
+    return promise;
+  };
+
+  // Cold-watch: a session we're attached to can die underneath us
+  // (killed, idle-closed) while our WS stays up — the daemon has no
+  // event telling us it came back (mirrors src/tui/app.ts's
+  // startColdWatch/COLD_WATCH_POLL_MS). If some OTHER client revives it,
+  // we'd otherwise keep forwarding session/prompt against stale
+  // attachment state forever. So once we see hydra-acp/session/closed,
+  // poll the REST status and reattach the moment it goes warm again.
+  let destroyed = false;
+  const coldWatchTimers = new Map<string, NodeJS.Timeout>();
+  const pollMs = coldWatch?.pollMs ?? COLD_WATCH_POLL_MS;
+  const fetchImpl = coldWatch?.fetchImpl ?? fetch;
+
+  const stopColdWatch = (sessionId: string): void => {
+    const timer = coldWatchTimers.get(sessionId);
+    if (timer) {
+      clearInterval(timer);
+      coldWatchTimers.delete(sessionId);
+    }
+  };
+
+  const attachAfterRevival = async (sessionId: string): Promise<boolean> => {
+    const afterMessageId = tracker.lastMessageId(sessionId);
+    const params: Record<string, unknown> = { sessionId };
+    if (afterMessageId) {
+      params.historyPolicy = "after_message";
+      params.afterMessageId = afterMessageId;
+    } else {
+      params.historyPolicy = "pending_only";
+    }
+    const req: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id: `coldwatch-${sessionId}-${Date.now()}`,
+      method: "session/attach",
+      params,
+    };
+    tracker.observeFromClient(req);
+    const resp = await sendAndAwait(req);
+    if (resp.error) {
+      process.stderr.write(
+        `hydra-acp: cold-watch reattach for ${sessionId} failed: ${resp.error.message}\n`,
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const startColdWatch = (sessionId: string): void => {
+    if (!target || coldWatchTimers.has(sessionId)) {
+      return;
+    }
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight || destroyed) {
+        return;
+      }
+      inFlight = true;
+      void (async () => {
+        try {
+          const liveTarget = target.isLocal
+            ? await resolveLocalTarget(await loadConfig())
+            : target;
+          const res = await fetchImpl(
+            `${liveTarget.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}`,
+            { headers: { Authorization: `Bearer ${liveTarget.token}` } },
+          );
+          if (!res.ok) {
+            // 404 means the record is gone for good — nothing will ever
+            // go warm, so stop burning a timer on it.
+            if (res.status === 404) {
+              stopColdWatch(sessionId);
+            }
+            return;
+          }
+          const data = (await res.json()) as { status?: "warm" | "cold" };
+          if (data.status !== "warm") {
+            return;
+          }
+          const attached = await attachAfterRevival(sessionId);
+          if (attached) {
+            stopColdWatch(sessionId);
+            process.stderr.write(
+              `hydra-acp: session ${sessionId} revived by another client; reattached\n`,
+            );
+          }
+        } catch {
+          // Daemon down or unreachable — keep polling. If the WS is also
+          // down, the resilient transport-level reconnect owns recovery.
+        } finally {
+          inFlight = false;
+        }
+      })();
+    }, pollMs);
+    coldWatchTimers.set(sessionId, timer);
+  };
+
+  const stopAllColdWatch = (): void => {
+    destroyed = true;
+    for (const sessionId of [...coldWatchTimers.keys()]) {
+      stopColdWatch(sessionId);
+    }
+  };
+  upstream.onClose(stopAllColdWatch);
+  downstream.onClose(stopAllColdWatch);
+
   upstream.onMessage((msg) => {
     wireLog("daemon→client", msg);
+    if (isResponseMsg(msg) && msg.id !== null && pendingOwn.has(msg.id)) {
+      const resolve = pendingOwn.get(msg.id)!;
+      pendingOwn.delete(msg.id);
+      resolve(msg);
+      return;
+    }
     tracker.observeFromServer(msg);
+    if (isSessionClosedNotification(msg)) {
+      startColdWatch(msg.params.sessionId);
+    }
     // --dangerously-skip-permissions: when the daemon asks us to
     // approve a tool call, reply directly to upstream with an "allow"
     // option and DON'T forward to downstream — the editor would just
@@ -201,8 +383,87 @@ export function wireShim({
       void upstream.send(outgoing);
       return;
     }
+    if (isSessionPromptRequest(msg)) {
+      void handleSessionPrompt(msg, sendAndAwait, downstream, tracker);
+      return;
+    }
     void upstream.send(msg);
   });
+}
+
+// "not attached to session" and "session {id} not found" share one code
+// (RFD #533's SessionNotFound, -32001). A fresh shim process/connection
+// that never attached to an existing sessionId hits the former — the
+// daemon's own auto-resurrect-on-prompt (acp-ws.ts's session/prompt
+// handler) only rescues a connection that WAS attached before its
+// Session object died, so a connection that was never attached has to
+// attach itself first. If the session is genuinely gone, that attach
+// fails too and we give up after one retry rather than looping.
+async function handleSessionPrompt(
+  msg: JsonRpcRequest,
+  sendAndAwait: (req: JsonRpcRequest) => Promise<JsonRpcResponse>,
+  downstream: MessageStream,
+  tracker: SessionTracker,
+): Promise<void> {
+  const params = (msg.params ?? {}) as Record<string, unknown>;
+  const sessionId =
+    typeof params.sessionId === "string" ? params.sessionId : undefined;
+
+  let resp = await sendAndAwait(msg);
+
+  if (resp.error?.code === JsonRpcErrorCodes.SessionNotFound && sessionId) {
+    const attachReq: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id: `reattach-${sessionId}-${Date.now()}`,
+      method: "session/attach",
+      params: { sessionId, historyPolicy: "pending_only" },
+    };
+    tracker.observeFromClient(attachReq);
+    const attachResp = await sendAndAwait(attachReq);
+    if (!attachResp.error) {
+      process.stderr.write(
+        `hydra-acp: re-attached to ${sessionId} after a not-attached prompt rejection; retrying\n`,
+      );
+      resp = await sendAndAwait(msg);
+    } else {
+      process.stderr.write(
+        `hydra-acp: re-attach to ${sessionId} failed too: ${attachResp.error.message}\n`,
+      );
+      // Surface the attach failure, not the original "not attached"
+      // rejection — it's more specific about why (e.g. the session is
+      // genuinely gone vs. this connection just never attached to it).
+      // Reply under the client's original request id; attachResp.id is
+      // our own synthetic reattach id, meaningless to the caller.
+      resp = { jsonrpc: "2.0", id: msg.id, error: attachResp.error };
+    }
+  }
+
+  await downstream.send(resp);
+}
+
+function isResponseMsg(msg: JsonRpcMessage): msg is JsonRpcResponse {
+  return !("method" in msg) && "id" in msg;
+}
+
+function isSessionClosedNotification(
+  msg: JsonRpcMessage,
+): msg is JsonRpcNotification & { params: { sessionId: string } } {
+  return (
+    "method" in msg &&
+    !("id" in msg && msg.id !== undefined) &&
+    msg.method === "hydra-acp/session/closed" &&
+    typeof (msg as { params?: { sessionId?: unknown } }).params
+      ?.sessionId === "string"
+  );
+}
+
+function isSessionPromptRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
+  return (
+    "method" in msg &&
+    "id" in msg &&
+    msg.id !== undefined &&
+    msg.method === "session/prompt"
+  );
 }
 
 function maybeReplyToResolvedPermission(
@@ -324,6 +585,46 @@ async function cancelPendingPermissions(
   }
 }
 
+
+// Best-effort session/detach for every session this process originated
+// (session/new) but never itself prompted — see runShim's SIGTERM/SIGINT
+// handler. An explicit detach is what lets the daemon's fast
+// reapIfOrphanedNonInteractive path (session/detach handler in
+// acp-ws.ts) close an orphaned session right away instead of it sitting
+// warm until the much longer general idle timeout. We bound our own
+// wait so a stuck send can't eat the whole SIGTERM grace window and get
+// us force-killed mid-cleanup with nothing sent at all; not awaiting a
+// response is deliberate — we're exiting either way, and the request
+// only needs to have reached the wire, not be acknowledged.
+export async function detachUnpromptedSessions(
+  tracker: SessionTracker,
+  upstream: MessageStream,
+  signal: NodeJS.Signals,
+  timeoutMs = 1_500,
+): Promise<void> {
+  const ids = tracker.unpromptedOriginatedSessionIds();
+  if (ids.length === 0) {
+    return;
+  }
+  process.stderr.write(
+    `hydra-acp: ${signal} received; best-effort detaching ${ids.length} never-prompted session(s)\n`,
+  );
+  await Promise.race([
+    Promise.allSettled(
+      ids.map((sessionId) =>
+        upstream
+          .send({
+            jsonrpc: "2.0",
+            id: `sigterm-detach-${sessionId}`,
+            method: "session/detach",
+            params: { sessionId },
+          })
+          .catch(() => undefined),
+      ),
+    ),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
 
 async function replayAttach(
   stream: ResilientWsStream,

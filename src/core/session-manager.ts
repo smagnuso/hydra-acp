@@ -310,6 +310,9 @@ export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
 
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
+  // Fast-reap window for a session with zero attached clients that has
+  // never been promoted to interactive — see Session.scheduleOrphanCheck.
+  orphanTimeoutMs?: number;
   // Per-agent default model id. When a brand-new agent process is spawned
   // (the bootstrapAgent path: create(), /hydra agent switch, import
   // re-seed), hydra issues session/set_model with the entry that matches
@@ -403,6 +406,7 @@ export class SessionManager {
   private tombstones: TombstoneStore;
   private histories: HistoryStore;
   private idleTimeoutMs: number;
+  private orphanTimeoutMs: number;
   private defaultModels: Record<string, string>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
@@ -483,6 +487,7 @@ export class SessionManager {
     });
     this.workspaceSnapshotsDisabled = options.disableWorkspaceSnapshots === true;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.orphanTimeoutMs = options.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};
     this.synopsisAgent = options.synopsisAgent;
@@ -1075,6 +1080,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      orphanTimeoutMs: this.orphanTimeoutMs,
       idleEventTimeoutMs: this.idleEventTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
@@ -1403,6 +1409,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      orphanTimeoutMs: this.orphanTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({
@@ -1554,6 +1561,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      orphanTimeoutMs: this.orphanTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({

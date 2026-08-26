@@ -58,6 +58,14 @@ export class SessionTracker {
   // reconnect-replay path to send historyPolicy:"after_message" with
   // afterMessageId so the daemon only replays the delta we missed.
   private lastMessageIds = new Map<string, string>();
+  // Sessions THIS shim process itself created via session/new — never a
+  // session it merely attached to or resumed (that one may already have
+  // real history from elsewhere; it isn't ours to judge). Combined with
+  // promptedSessionIds, this is what unpromptedOriginatedSessionIds()
+  // uses to decide what's safe to best-effort detach on SIGTERM/SIGINT —
+  // see runShim's exit handler.
+  private originatedHere = new Set<string>();
+  private promptedSessionIds = new Set<string>();
 
   observeFromClient(msg: JsonRpcMessage): void {
     if (isResponse(msg)) {
@@ -77,6 +85,13 @@ export class SessionTracker {
       const params = (msg.params ?? {}) as Record<string, unknown>;
       const cwd = typeof params.cwd === "string" ? params.cwd : "";
       this.pending.set(msg.id, { kind: "new", data: { cwd } });
+      return;
+    }
+    if (msg.method === "session/prompt") {
+      const params = (msg.params ?? {}) as Record<string, unknown>;
+      if (typeof params.sessionId === "string") {
+        this.promptedSessionIds.add(params.sessionId);
+      }
       return;
     }
     if (msg.method === "session/attach") {
@@ -173,6 +188,9 @@ export class SessionTracker {
     if (!sessionId) {
       return;
     }
+    if (pending.kind === "new") {
+      this.originatedHere.add(sessionId);
+    }
     const meta = result._meta as Record<string, unknown> | undefined;
     const hydraMeta = extractHydraMeta(meta);
     const upstreamSessionId = hydraMeta.upstreamSessionId;
@@ -202,6 +220,21 @@ export class SessionTracker {
   forget(sessionId: string): void {
     this.contexts.delete(sessionId);
     this.lastMessageIds.delete(sessionId);
+    this.originatedHere.delete(sessionId);
+    this.promptedSessionIds.delete(sessionId);
+  }
+
+  // Sessions this process created (session/new, not attach/load) that
+  // never got a real session/prompt through it. Best-effort candidates
+  // for an explicit session/detach on exit — see runShim's SIGTERM/SIGINT
+  // handler. Deliberately excludes attached/resumed sessions: one of
+  // those may carry real history from another process entirely, and
+  // "I personally never prompted it in this process" says nothing about
+  // whether it's orphaned.
+  unpromptedOriginatedSessionIds(): string[] {
+    return [...this.originatedHere].filter(
+      (id) => !this.promptedSessionIds.has(id),
+    );
   }
 
   // Latest messageId observed for `sessionId`, or undefined if we

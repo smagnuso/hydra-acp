@@ -15,6 +15,7 @@ function testConfig(): HydraConfig {
       port: 0,
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
+      nonInteractiveOrphanTimeoutSeconds: 30,
       sessionHistoryMaxEntries: 1000,
       sessionHistoryArchiveMaxBytes: 10_000_000,
       sessionHistoryArchiveTiers: 10,

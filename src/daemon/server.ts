@@ -217,6 +217,7 @@ export async function startDaemon(
   const extensionCommands = new ExtensionCommandRegistry();
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
+    orphanTimeoutMs: config.daemon.nonInteractiveOrphanTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,

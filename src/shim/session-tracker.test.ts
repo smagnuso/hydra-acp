@@ -415,6 +415,145 @@ describe("SessionTracker", () => {
     });
   });
 
+  describe("unpromptedOriginatedSessionIds", () => {
+    const respond = (
+      tracker: SessionTracker,
+      id: number,
+      sessionId: string,
+    ): void => {
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          sessionId,
+          _meta: {
+            "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+          },
+        },
+      });
+    };
+
+    it("includes a session/new'd session that was never prompted", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: "/w" },
+      });
+      respond(tracker, 1, "sess_probe");
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual(["sess_probe"]);
+    });
+
+    it("excludes a session/new'd session once a real prompt is sent for it", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: "/w" },
+      });
+      respond(tracker, 1, "sess_used");
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: { sessionId: "sess_used", prompt: [] },
+      });
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual([]);
+    });
+
+    it("excludes a session this process only attached to (resume), never originated", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/attach",
+        params: { sessionId: "sess_resumed" },
+      });
+      respond(tracker, 1, "sess_resumed");
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual([]);
+    });
+
+    it("excludes a session this process only loaded (resume), never originated", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/load",
+        params: { sessionId: "sess_loaded", cwd: "/w" },
+      });
+      respond(tracker, 1, "sess_loaded");
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual([]);
+    });
+
+    it("only returns the unprompted subset when multiple sessions were originated", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: "/a" },
+      });
+      respond(tracker, 1, "sess_a");
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/new",
+        params: { cwd: "/b" },
+      });
+      respond(tracker, 2, "sess_b");
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: { sessionId: "sess_b", prompt: [] },
+      });
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual(["sess_a"]);
+    });
+
+    it("forget() removes a session from both the origin and prompted sets", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: "/w" },
+      });
+      respond(tracker, 1, "sess_forgotten");
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual([
+        "sess_forgotten",
+      ]);
+
+      tracker.forget("sess_forgotten");
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual([]);
+    });
+
+    it("ignores a session/prompt with no sessionId", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: "/w" },
+      });
+      respond(tracker, 1, "sess_x");
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: { prompt: [] },
+      });
+
+      expect(tracker.unpromptedOriginatedSessionIds()).toEqual(["sess_x"]);
+    });
+  });
+
   it("ignores responses to ids it did not observe", () => {
     const tracker = new SessionTracker();
     tracker.observeFromServer({
