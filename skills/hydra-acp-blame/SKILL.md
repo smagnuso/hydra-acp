@@ -1,7 +1,7 @@
 ---
 name: hydra-acp-blame
 description: |
-  Activate this skill whenever the user is trying to figure out why code that used to work is now broken, or asks any question that reduces to "how did this change land". Pairs git reflog + commit archaeology with `hydra session list` + `hydra session diff` to attribute each hunk to the session that authored it — or flag it as an orphan (edits that landed via `git commit -a` outside any recorded session).
+  Activate this skill whenever the user is trying to figure out why code that used to work is now broken, or asks any question that reduces to "how did this change land". Pairs git reflog + commit archaeology with `hydra session list`, `hydra session changes`, and `hydra session diff` to attribute each hunk to the session that authored it — or flag it as an orphan (edits that landed via `git commit -a` outside any recorded session).
 
   Activate on any of these user phrasings (verbatim examples — plus obvious paraphrases):
   - "help me understand how this broke", "how did this break", "how did this get broken"
@@ -17,7 +17,7 @@ description: |
   - `git blame` on a failing line lands on a commit whose message is unrelated to the code being blamed.
 
   Keywords:
-  - hydra, hydra-acp, hydra session list, hydra session diff, hydra session info
+  - hydra, hydra-acp, hydra session list, hydra session changes, hydra session diff, hydra session info
   - git reflog, git blame, git stash, ORIG_HEAD, commit --amend
   - regression, revert, orphan hunk, accidental revert, working-tree drift
   - test failure archaeology, "used to work", "was passing"
@@ -46,6 +46,7 @@ Standard `git blame` tells you *what* commit changed a line. This skill tells yo
 | `hydra session list --all --host all --include-non-interactive --columns=session,host,age,title,cwd` | every session — interactive + planner workers + imports from peer hosts. **Use these flags together for forensics**; the default `list` hides non-interactive sessions, imports, and older cold rows. |
 | `hydra session list --dir[=<path>]` | same listing, scoped to one directory subtree (bare `--dir` = cwd) |
 | `hydra session diff <id>` | aggregate final-vs-initial diff for that session |
+| `hydra session changes <path>` | direct file/dir → session lookup: every session with an edit-kind record touching that path, joined with the session list (no host/interactive filter, no cold cap by default). Skips the title-matching guesswork of a plain `session list`. Shares `session diff`'s edit-carrier blind spot — see below. |
 | `hydra session info <id>` | turn count, tool histogram, files touched, cost, synopsis |
 | `~/.hydra-acp/sessions/<id>/meta.json` | title, cwd, agent, upstream id, timestamps, `importedFromMachine` (peer host), `interactive` (false for planner workers / `hydra cat`) |
 | `~/.hydra-acp/sessions/<id>/history.jsonl` | full turn stream — grep for symbols, file paths, phrases |
@@ -56,7 +57,9 @@ Standard `git blame` tells you *what* commit changed a line. This skill tells yo
 - Symbols introduced then removed in the same session (net-diff cancellation).
 - Changes routed through a subagent, another session, or a background process.
 
-**When session-diff attribution comes up empty, DO NOT conclude "no session did it".** The session that was active in the same cwd at the commit timestamp is very likely still the author — the human sitting in that session made the edit themselves and their `git commit` timestamp landed inside its lifetime. Fall through to `rg` on `history.jsonl` (Step 5) and the timing correlation (Step 6); those catch what the aggregate diff hides.
+`hydra session changes <path>` has the same root blind spot, for the same reason: it only indexes recorded `Edit`/`Write` tool calls. A delete never reaches the wire, and a shell-driven mutation (`sed -i`, `git checkout`, `mv`) is a Bash call with no edit payload — neither shows up as a hit, no matter how targeted the path.
+
+**When session-diff (or session-changes) attribution comes up empty, DO NOT conclude "no session did it".** The session that was active in the same cwd at the commit timestamp is very likely still the author — the human sitting in that session made the edit themselves and their `git commit` timestamp landed inside its lifetime. Fall through to `rg` on `history.jsonl` (Step 5) and the timing correlation (Step 6); those catch what the aggregate diff hides.
 
 ## Workflow
 
@@ -116,6 +119,16 @@ git show <sha> --stat
 If the commit message describes work on file A but the stat also shows file B changed with a diff shape unrelated to A, that's the tell. Note: `.lock` files, generated files, and version bumps are noise — filter them out.
 
 ### 4. Session cross-reference (the hydra-specific step)
+
+Start with the direct lookup, not the broad list. `hydra session changes <path>` searches every session's edit history for one that touched that exact file, joined with session metadata, with no host/interactive filtering and no cold cap by default:
+
+```bash
+hydra session changes <file-or-dir> --files
+```
+
+This replaces title-matching-against-a-full-list with an exact index hit, so prefer it over the list+diff sweep below whenever the anomaly is scoped to a specific file or directory. **But an empty result here is not proof no session authored the change** — per the blind spot above, it only means no session touched the path through a recorded `Edit`/`Write` call. Treat an empty (or suspiciously thin) result as the trigger to fall through to Step 5 (`history.jsonl` grep) and Step 6 (timing correlation), the same as an empty `session diff`.
+
+If `session changes` isn't available (daemon predates the `edit:` scope — it will say so) or the anomaly isn't scoped to one path (e.g. "which session was active around this time"), fall back to the broader sweep:
 
 `hydra session list` **defaults hide two categories that regularly author commits** — turn both on for forensics:
 
@@ -250,7 +263,7 @@ Produce a short causal narrative, not a raw log dump:
 - **Don't skip the reflog.** A missing session author + a `reset --hard` in the reflog usually means "user ran a git command manually."
 - **Don't page interactively.** All the `hydra session *` commands accept `--no-pager --no-color` for scripting; use them so output is greppable.
 - **Don't confuse aggregate diff with turn-level activity.** `hydra session diff` is a NET diff of tool-recorded edits — it hides (a) symbols introduced then removed in the same session, and (b) all edits the human made outside recorded tools. Fall through to `rg` on `history.jsonl` for those.
-- **Don't declare "no session authored this" from a session-diff miss alone.** Combine session-diff with `rg` on history.jsonl AND timing + cwd correlation. A session with 0 tool-recorded edits to a file but whose lifetime brackets the commit timestamp in the same repo is almost always the author — via the human, not the agent.
+- **Don't declare "no session authored this" from a session-diff (or session-changes) miss alone.** Combine it with `rg` on history.jsonl AND timing + cwd correlation. A session with 0 tool-recorded edits to a file but whose lifetime brackets the commit timestamp in the same repo is almost always the author — via the human, not the agent. `hydra session changes` inherits the same edit-carrier blind spot as `session diff` (deletes and shell-driven edits are invisible to both), so an empty result from it is a prompt to fall through, not a verdict.
 
 ## Examples (real ones from this repo)
 
