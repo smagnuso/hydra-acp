@@ -241,6 +241,13 @@ class PaseoHost implements TerminalHost {
    * leading POSIX `KEY=value` assignments — send-keys has no separate
    * channel for it, but that's ordinary, correct shell syntax for scoping
    * env to one command.
+   *
+   * No explicit `env` override: `execFile` inherits ours as-is, including
+   * PASEO_WORKSPACE_ID when we're running inside a Paseo pane ourselves.
+   * That's deliberate — it's what makes a tab opened from here join the
+   * SAME workspace/tab bar as the pane that opened it: `terminal create`
+   * treats that var as an explicit "attach here" signal (its own
+   * --workspace precedence) rather than silently matching by directory.
    */
   async openTab(spec: OpenTabSpec): Promise<OpenTabResult> {
     let created: { id?: unknown };

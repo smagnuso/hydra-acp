@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 interface ExecInvocation {
   file: string;
   args: string[];
+  env: NodeJS.ProcessEnv | undefined;
 }
 let execCalls: ExecInvocation[];
 let stdoutFor: (args: string[]) => string;
@@ -22,11 +23,11 @@ vi.mock("node:child_process", async (importOriginal) => {
     execFile: (
       file: string,
       args: string[],
-      _opts: unknown,
+      opts: { env?: NodeJS.ProcessEnv } | undefined,
       cb: (err: Error | null, res?: { stdout: string; stderr: string }) => void,
     ) => {
       const index = execCalls.length;
-      execCalls.push({ file, args });
+      execCalls.push({ file, args, env: opts?.env });
       if (execFailWith || index === failOnCallIndex) {
         cb(execFailWith ?? new Error("send-keys failed"));
         return;
@@ -355,5 +356,16 @@ describe("openTab", () => {
 
     expect(result).toEqual({ ok: false, error: "send-keys failed" });
     expect(execCalls).toHaveLength(2);
+  });
+
+  it("lets the child paseo call inherit our own PASEO_WORKSPACE_ID, so the new tab joins the same workspace", async () => {
+    process.env.PASEO_WORKSPACE_ID = "wks_current_pane";
+
+    await host().openTab!({ label: "x", argv: ["hydra"] });
+
+    // No explicit env override on the exec call at all — inheritance is the
+    // mechanism, not something openTab has to wire up itself.
+    expect(execCalls[0]?.env).toBeUndefined();
+    delete process.env.PASEO_WORKSPACE_ID;
   });
 });
