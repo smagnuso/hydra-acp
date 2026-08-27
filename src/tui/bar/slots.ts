@@ -184,6 +184,7 @@ function normalize(entry: BarSlotEntry): {
   suffix?: string;
   separator?: string;
   style?: string;
+  truncate?: boolean;
   onClick?: string;
   onDoubleClick?: string;
 } {
@@ -242,6 +243,9 @@ function restyle(chunks: Chunk[], e: Entry): Chunk[] | null {
     if (out.length === 0) {
       return null;
     }
+  }
+  if (e.truncate === false) {
+    out = out.map((c) => ({ ...c, truncatable: false }));
   }
   return out;
 }

@@ -253,10 +253,19 @@ const BarSlotEntry = z.union([
       // `script` is set.
       refreshMs: z.number().int().positive().optional(),
       // Hard cap in columns; the value is truncated with an ellipsis.
+      // This is a cap the config author asked for, so it still applies
+      // even when `truncate: false` is also set below.
       maxWidth: z.number().int().positive().optional(),
       // Marks the entry shrinkable down to this many columns before the
       // row starts dropping whole fields.
       minWidth: z.number().int().nonnegative().optional(),
+      // Set to false to exempt this entry from the row-collision
+      // fallback that hard-truncates whatever chunk straddles the edge
+      // of the terminal: it renders in full or not at all, never
+      // partially. Truncation is already ANSI-aware (never splits an
+      // escape code mid-sequence), but a value like a date or a script's
+      // output can still read as nonsense cut off halfway.
+      truncate: z.boolean().optional(),
       // Shed order when the two sides collide: lower goes first. Omit
       // to use the field's built-in priority.
       priority: z.number().optional(),

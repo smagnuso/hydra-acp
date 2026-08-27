@@ -110,6 +110,30 @@ describe("tui.composer script entries schema", () => {
   });
 });
 
+describe("BarSlotEntry.truncate schema", () => {
+  it("accepts truncate: false on any entry", () => {
+    const cfg = HydraConfig.parse({
+      tui: { composer: { top: { left: [{ field: "cwd", truncate: false }] } } },
+    });
+    expect(cfg.tui.composer.top.left).toEqual([{ field: "cwd", truncate: false }]);
+  });
+
+  it("accepts truncate: true", () => {
+    const cfg = HydraConfig.parse({
+      tui: { composer: { top: { left: [{ field: "cwd", truncate: true }] } } },
+    });
+    expect(cfg.tui.composer.top.left).toEqual([{ field: "cwd", truncate: true }]);
+  });
+
+  it("rejects a non-boolean", () => {
+    expect(() =>
+      HydraConfig.parse({
+        tui: { composer: { top: { left: [{ field: "cwd", truncate: "no" }] } } },
+      }),
+    ).toThrow();
+  });
+});
+
 describe("tui.scriptRefreshMs schema", () => {
   it("defaults to 5000", () => {
     expect(defaultConfig().tui.scriptRefreshMs).toBe(5_000);

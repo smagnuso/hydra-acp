@@ -20,9 +20,12 @@
 // own arithmetic and two of the three simply overflowed the terminal
 // width and wrapped.
 
+import ansiRegex from "ansi-regex";
 import stringWidth from "string-width";
 import type { ThemeToken } from "../theme/index.js";
 import { CHROME_ACTIONS, type ChromeAction } from "../chrome-action.js";
+
+const ANSI_PATTERN = ansiRegex();
 
 /**
  * What a click on a bar chunk does. The vocabulary is shared with the
@@ -57,6 +60,13 @@ export interface Chunk {
   flex?: boolean;
   /** Floor for a flex chunk, in columns. Ignored when !flex. */
   minWidth?: number;
+  /**
+   * false means this chunk must render whole or not at all: the
+   * row-collision fallback (shrink, hardTruncate) drops it rather than
+   * slicing it. Does not affect a per-entry `maxWidth` cap, which is an
+   * intentional truncation the config author asked for.
+   */
+  truncatable?: boolean;
 }
 
 /** A click target on a painted row. */
@@ -169,7 +179,7 @@ function shrink(chunks: Chunk[], budget: number): Chunk[] {
   const result = chunks.map((c) => ({ ...c }));
   const flexIdx = result
     .map((c, i) => ({ c, i }))
-    .filter(({ c }) => c.flex === true)
+    .filter(({ c }) => c.flex === true && c.truncatable !== false)
     .map(({ i }) => i);
   while (over > 0 && flexIdx.length > 0) {
     // Pick the flex chunk with the most room above its floor.
@@ -198,9 +208,38 @@ function shrink(chunks: Chunk[], budget: number): Chunk[] {
 }
 
 /**
+ * Split `text` into runs of a complete ANSI escape sequence (kept whole,
+ * zero width) and plain visible text, so truncateToWidth's budget loop
+ * never slices a sequence in half — a script's `\x1b[38;5;200m` cut
+ * mid-code leaves a dangling, malformed escape rather than a colour.
+ */
+function tokenizeAnsi(text: string): Array<{ text: string; ansi: boolean }> {
+  const tokens: Array<{ text: string; ansi: boolean }> = [];
+  ANSI_PATTERN.lastIndex = 0;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = ANSI_PATTERN.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      tokens.push({ text: text.slice(lastIndex, match.index), ansi: false });
+    }
+    tokens.push({ text: match[0], ansi: true });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    tokens.push({ text: text.slice(lastIndex), ansi: false });
+  }
+  return tokens;
+}
+
+/**
  * Width-correct right truncation with an ellipsis. Deliberately local
  * rather than reaching into screen.ts: the layout engine is imported by
  * screen.ts, and the reverse edge would be a cycle.
+ *
+ * ANSI-aware: an escape sequence embedded in `text` (a script slot entry
+ * may carry real colour codes straight through to the terminal — see
+ * bar/scripts.ts) never counts toward the budget and is never split, so
+ * truncating coloured output can't emit a broken escape code.
  */
 export function truncateToWidth(text: string, max: number): string {
   if (max <= 0) {
@@ -212,21 +251,31 @@ export function truncateToWidth(text: string, max: number): string {
   if (max === 1) {
     return "…";
   }
-  const chars = [...text];
   let acc = "";
   let w = 0;
-  for (const ch of chars) {
-    const cw = stringWidth(ch);
-    if (w + cw > max - 1) {
-      break;
+  outer: for (const tok of tokenizeAnsi(text)) {
+    if (tok.ansi) {
+      acc += tok.text;
+      continue;
     }
-    acc += ch;
-    w += cw;
+    for (const ch of tok.text) {
+      const cw = stringWidth(ch);
+      if (w + cw > max - 1) {
+        break outer;
+      }
+      acc += ch;
+      w += cw;
+    }
   }
   return acc + "…";
 }
 
-/** Drop the whole tail of a side that still will not fit. */
+/**
+ * Drop the whole tail of a side that still will not fit. The chunk that
+ * straddles the boundary is sliced with an ellipsis — unless it opted out
+ * via `truncatable: false`, in which case it (and everything after it) is
+ * dropped whole instead of rendering a partial value.
+ */
 function hardTruncate(chunks: Chunk[], budget: number): Chunk[] {
   const out: Chunk[] = [];
   let used = 0;
@@ -239,6 +288,8 @@ function hardTruncate(chunks: Chunk[], budget: number): Chunk[] {
     if (w <= remaining) {
       out.push(c);
       used += w;
+    } else if (c.truncatable === false) {
+      break;
     } else {
       out.push({ ...c, text: truncateToWidth(c.text, remaining) });
       break;
