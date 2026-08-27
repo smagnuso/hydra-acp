@@ -6218,7 +6218,19 @@ async function runSession(
           })
           .then((raw) => {
             const res = raw as UpdatePromptResult;
-            if (!res.updated && res.reason !== "ok") {
+            if (res.updated || res.reason === "ok") {
+              // The prompt_queue/updated broadcast refreshes pending.text
+              // but has no wire concept of displayText, so the eventual
+              // scrollback echo would otherwise still show the pre-edit
+              // text. Apply the as-typed text here, once the edit is
+              // confirmed to have landed.
+              const pending = ownPendingByMid.get(mid);
+              if (pending) {
+                pending.text = effect.text;
+                pending.displayText = effect.displayText ?? effect.text;
+                pending.attachments = effect.attachments;
+              }
+            } else {
               screen.notify(`queue edit skipped (${res.reason})`);
             }
           })
