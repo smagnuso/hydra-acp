@@ -142,6 +142,8 @@ import {
 } from "./screen.js";
 import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import { formatTokens } from "./bar/fields.js";
+import { collectScriptCommands, createScriptRunner } from "./bar/scripts.js";
+import { expandBarConfig } from "./bar/slots.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -2034,6 +2036,11 @@ async function runSession(
   // attached. Stopped when synthesis completes, fails, or on teardown.
   let synthesisPollTimer: NodeJS.Timeout | null = null;
   let coldWatchTimer: NodeJS.Timeout | null = null;
+  // Ticks the `script` slot-entry poller (see bar/scripts.ts). Only
+  // created when the resolved bar config actually has a script entry —
+  // shelling out on a timer for a feature nobody configured is exactly
+  // the cost the git-poll relevance predicate exists to avoid.
+  let scriptTicker: NodeJS.Timeout | null = null;
   // Wall-clock moment of the most recent session/update we received from
   // the daemon. The 1Hz timer reads this to detect a stalled upstream
   // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
@@ -4283,6 +4290,27 @@ async function runSession(
     composer: config.tui.composer,
     sessionbar: config.tui.sessionbar,
   });
+  // Same expansion Screen just did internally (pure, cheap) so the poller
+  // sees the same set of script commands the render path will look up.
+  const scriptCommands = collectScriptCommands(
+    expandBarConfig({
+      composer: config.tui.composer,
+      sessionbar: config.tui.sessionbar,
+    }),
+    config.tui.scriptRefreshMs,
+  );
+  if (scriptCommands.size > 0) {
+    const scriptRunner = createScriptRunner({
+      cwd: () => resolvedCwd,
+      onOutput: (command, output) => screen.setScriptOutput(command, output),
+    });
+    scriptTicker = setInterval(() => {
+      scriptRunner.poll(scriptCommands, Date.now());
+    }, 1_000);
+    scriptTicker.unref?.();
+    // Prime immediately rather than waiting out the first tick.
+    scriptRunner.poll(scriptCommands, Date.now());
+  }
   // Seeded before the first paint too: a session whose history file is
   // already past the threshold should never flash the hints on its way to
   // collapsing them.
@@ -5625,6 +5653,10 @@ async function runSession(
     // snapshot into the next session's sidebar.
     stopSidebarTicker();
     stopGitPoll();
+    if (scriptTicker !== null) {
+      clearInterval(scriptTicker);
+      scriptTicker = null;
+    }
     screen.clearWindowTitle();
     // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,
     // so don't toggle fullscreen here — that's done after the outer

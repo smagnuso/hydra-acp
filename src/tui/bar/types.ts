@@ -116,6 +116,12 @@ export interface FieldContext {
   scrollOffset: number;
   transient: TransientInfo | null;
   /**
+   * Last-known stdout of each `script` slot entry, keyed by the literal
+   * command string. Populated by a timer outside the render path (see
+   * src/tui/bar/scripts.ts); absent means no successful run yet.
+   */
+  scriptOutputs: ReadonlyMap<string, string>;
+  /**
    * Id of the hit region under the pointer, or null. Fields do not
    * normally need this: drawBar applies the hover token swap generically
    * from the placed chunks' ids.

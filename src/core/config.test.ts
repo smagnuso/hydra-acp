@@ -57,6 +57,75 @@ describe("tui.skipPermissions schema", () => {
   });
 });
 
+describe("tui.composer script entries schema", () => {
+  it("accepts a script entry with no refreshMs override", () => {
+    const cfg = HydraConfig.parse({
+      tui: { composer: { top: { left: [{ script: "foo.sh" }] } } },
+    });
+    expect(cfg.tui.composer.top.left).toEqual([{ script: "foo.sh" }]);
+  });
+
+  it("accepts a script entry with a refreshMs override", () => {
+    const cfg = HydraConfig.parse({
+      tui: {
+        composer: {
+          top: { left: [{ script: "foo.sh", refreshMs: 2000 }] },
+        },
+      },
+    });
+    expect(cfg.tui.composer.top.left).toEqual([
+      { script: "foo.sh", refreshMs: 2000 },
+    ]);
+  });
+
+  it("accepts a bare $(...) string entry", () => {
+    const cfg = HydraConfig.parse({
+      tui: { composer: { top: { left: ["$(foo.sh)"] } } },
+    });
+    expect(cfg.tui.composer.top.left).toEqual(["$(foo.sh)"]);
+  });
+
+  it("rejects a non-positive refreshMs", () => {
+    expect(() =>
+      HydraConfig.parse({
+        tui: {
+          composer: {
+            top: { left: [{ script: "foo.sh", refreshMs: 0 }] },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a non-integer refreshMs", () => {
+    expect(() =>
+      HydraConfig.parse({
+        tui: {
+          composer: {
+            top: { left: [{ script: "foo.sh", refreshMs: 2.5 }] },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("tui.scriptRefreshMs schema", () => {
+  it("defaults to 5000", () => {
+    expect(defaultConfig().tui.scriptRefreshMs).toBe(5_000);
+  });
+
+  it("parses an explicit override", () => {
+    expect(HydraConfig.parse({ tui: { scriptRefreshMs: 2_000 } }).tui.scriptRefreshMs).toBe(
+      2_000,
+    );
+  });
+
+  it("rejects a non-positive value", () => {
+    expect(() => HydraConfig.parse({ tui: { scriptRefreshMs: 0 } })).toThrow();
+  });
+});
+
 describe("tui.sessionColumns schema", () => {
   it("accepts a valid ordered column list", () => {
     const cfg = HydraConfig.parse({

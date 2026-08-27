@@ -1034,6 +1034,10 @@ export class Screen {
       right: DEFAULT_SESSIONBAR_RIGHT,
     },
   };
+  // Cached stdout of `script` slot entries, keyed by the literal command
+  // string. Populated by app.ts's script poller via setScriptOutput; read
+  // synchronously by resolveSide() through FieldContext.scriptOutputs.
+  private scriptOutputs = new Map<string, string>();
   private lastWindowTitle: string | null = null;
   // Last cwd reported via OSC 7; suppresses redundant writes when
   // setSessionbar fires for an unrelated field.
@@ -2139,6 +2143,24 @@ export class Screen {
     if (this.sidebarVisible) {
       this.scheduleRepaint();
     }
+  }
+
+  // One `script` slot entry's command finished (or failed/timed out).
+  // null clears any previously cached output rather than leaving a stale
+  // value on screen, matching "a field with nothing to say drops out".
+  setScriptOutput(command: string, output: string | null): void {
+    if (output === null) {
+      if (!this.scriptOutputs.has(command)) {
+        return;
+      }
+      this.scriptOutputs.delete(command);
+    } else {
+      if (this.scriptOutputs.get(command) === output) {
+        return;
+      }
+      this.scriptOutputs.set(command, output);
+    }
+    this.scheduleRepaint();
   }
 
   appendLines(lines: FormattedLine[]): void {
@@ -6533,6 +6555,7 @@ export class Screen {
       transient: this.bannerRightContent(),
       hovered: this.terminalFocused ? this.hoveredBarHit : null,
       hintsRevealed: this.hintsRevealed(),
+      scriptOutputs: this.scriptOutputs,
     };
   }
 
@@ -6639,6 +6662,7 @@ export class Screen {
       // The overlay frame reuses the composer.top slot config, which has
       // no helpHint field; an empty hint list already resolves to nothing.
       hintsRevealed: false,
+      scriptOutputs: this.scriptOutputs,
     };
   }
 

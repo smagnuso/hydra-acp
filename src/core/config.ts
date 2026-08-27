@@ -212,8 +212,8 @@ const TUI_HOTKEY_KEY_NAMES = z.enum([
 ]);
 
 // One entry in a chrome-bar slot: either a bare field id ("cwd"), an
-// object naming a field with per-entry overrides, or a literal string
-// to interleave.
+// object naming a field with per-entry overrides, a literal string to
+// interleave, or a shell command whose stdout renders in the slot.
 //
 // Field ids are listed in src/tui/bar/fields.ts (FIELDS). As of writing:
 //   status, elapsed, sessionId, sessionIdFull, queued, scroll, usage,
@@ -221,6 +221,10 @@ const TUI_HOTKEY_KEY_NAMES = z.enum([
 //   helpHint
 // Unknown ids are ignored rather than rejected, so a config written
 // against a newer build degrades instead of blanking the row.
+//
+// A bare string of the form "$(some command)" is sugar for
+// { script: "some command" } — see the `script` field below. Anything
+// else is treated as a field id.
 //
 // The literal "..." stands for the built-in list for that side, so a
 // field can be added without restating the default:
@@ -239,6 +243,15 @@ const BarSlotEntry = z.union([
       field: z.string().optional(),
       // Literal text instead of a field. Mutually exclusive with `field`.
       text: z.string().optional(),
+      // A shell command run on a timer (see tui.scriptRefreshMs), with
+      // its stdout rendered in place of a field. Mutually exclusive with
+      // `field`/`text`. Runs through a shell, so pipes and args work.
+      // Nothing renders until the first run completes; a failing or
+      // timed-out run behaves like a field with nothing to say.
+      script: z.string().optional(),
+      // Overrides tui.scriptRefreshMs for this entry. Ignored unless
+      // `script` is set.
+      refreshMs: z.number().int().positive().optional(),
       // Hard cap in columns; the value is truncated with an ellipsis.
       maxWidth: z.number().int().positive().optional(),
       // Marks the entry shrinkable down to this many columns before the
@@ -361,6 +374,11 @@ const TuiConfig = z.object({
   // Distinct from `tui.sidebar` (the right-hand column) despite the
   // one-letter difference.
   sessionbar: barConfig(DEFAULT_SESSIONBAR_LEFT, DEFAULT_SESSIONBAR_RIGHT),
+  // Default interval (ms) between runs of a `script` slot entry (see
+  // BarSlotEntry above). Applies to both composer.* and sessionbar.*,
+  // which is why this lives at the top level rather than under
+  // `composer`. Override per entry with that entry's `refreshMs`.
+  scriptRefreshMs: z.number().int().positive().default(5_000),
   // Minimum interval (ms) between full-screen repaints driven by content
   // events (agent text chunks, tool/plan updates, elapsed-tick refreshes).
   // User-action repaints — scrolling, prompt-row changes, modal open/close,

@@ -110,6 +110,10 @@ const SIDE_DEFAULTS: Record<SlotName, { left: BarSideConfig; right: BarSideConfi
   },
 };
 
+// Script entries need no special handling here: a bare "$(...)" string
+// returns itself, which never collides with a SIDE_DEFAULTS id, and an
+// object-form { script } entry returns null (entry.field is undefined),
+// same as a text-only entry today.
 function fieldIdOf(entry: BarSlotEntry): string | null {
   if (typeof entry === "string") {
     return entry === DEFAULTS_SENTINEL ? null : entry;
@@ -163,9 +167,16 @@ export function expandSide(
   return out;
 }
 
+// A bare string of the form "$(some command)" is sugar for a script
+// entry, same relationship as any other bare string being sugar for
+// { field: entry }. Checked first since it's the more specific shape.
+const SCRIPT_SUGAR = /^\$\((.+)\)\s*$/;
+
 function normalize(entry: BarSlotEntry): {
   field?: string;
   text?: string;
+  script?: string;
+  refreshMs?: number;
   maxWidth?: number;
   minWidth?: number;
   priority?: number;
@@ -176,7 +187,12 @@ function normalize(entry: BarSlotEntry): {
   onClick?: string;
   onDoubleClick?: string;
 } {
-  return typeof entry === "string" ? { field: entry } : entry;
+  if (typeof entry !== "string") {
+    return entry;
+  }
+  const sugar = SCRIPT_SUGAR.exec(entry);
+  const command = sugar?.[1];
+  return command !== undefined ? { script: command } : { field: entry };
 }
 
 /**
@@ -275,6 +291,21 @@ export function resolveSide(
           id: `text:${e.text}`,
           priority: 10,
           chunks: [{ text: e.text, token: "rule-meta" }],
+        },
+      ];
+    } else if (e.script !== undefined) {
+      // Nothing cached yet (first run still pending) or the last run
+      // produced no output: drop out like any other field with nothing
+      // to report, rather than blanking the row with an empty chunk.
+      const out = ctx.scriptOutputs.get(e.script);
+      if (out === undefined || out.length === 0) {
+        continue;
+      }
+      produced = [
+        {
+          id: `script:${e.script}`,
+          priority: 10,
+          chunks: [{ text: out, token: "rule-meta" }],
         },
       ];
     } else {

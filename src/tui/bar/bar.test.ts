@@ -36,6 +36,7 @@ function render(
     bar?: BarLayoutConfig;
     session?: Record<string, unknown>;
     banner?: Record<string, unknown>;
+    scriptOutputs?: Record<string, string>;
   } = {},
 ): Rows {
   const height = 24;
@@ -54,6 +55,9 @@ function render(
   priv["started"] = true;
   if (opts.bar) {
     screen.setBarConfig(opts.bar);
+  }
+  for (const [command, output] of Object.entries(opts.scriptOutputs ?? {})) {
+    screen.setScriptOutput(command, output);
   }
   screen.setSessionbar({
     agent: "claude",
@@ -1128,5 +1132,79 @@ describe('the "..." defaults sentinel', () => {
     const r = render(140, { bar });
     expect(r.top).toContain("Thinking 1m 2s · hydra-a1b2c3d4e5 · 2 queued · ~/dev");
     expect(r.top).toContain("12.4k/200.0k · $0.31");
+  });
+
+  it("leaves a script entry untouched by expansion", () => {
+    const out = expandSide("composerTop", "left", [
+      "$(foo.sh)",
+      "...",
+    ]);
+    expect(out[0]).toBe("$(foo.sh)");
+    expect(out.slice(1)).toEqual(
+      expandSide("composerTop", "left", ["..."]),
+    );
+  });
+});
+
+describe("script slot entries", () => {
+  it("renders nothing before the first run completes", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: [{ script: "uptime" }], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    };
+    const r = render(120, { bar });
+    expect(r.top).not.toContain("up");
+  });
+
+  it("renders the cached output, honoring per-entry overrides", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: {
+          left: [{ script: "uptime", prefix: "[", suffix: "]" }],
+          right: [],
+        },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    };
+    const r = render(120, {
+      bar,
+      scriptOutputs: { uptime: "up 3 days" },
+    });
+    expect(r.top).toContain("[up 3 days]");
+  });
+
+  it("resolves the $(...) bare-string sugar to the same cache entry", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["$(uptime)"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    };
+    const r = render(120, {
+      bar,
+      scriptOutputs: { uptime: "up 3 days" },
+    });
+    expect(r.top).toContain("up 3 days");
+  });
+
+  it("shares one cache entry for the same command across regions", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: [{ script: "whoami" }], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [{ script: "whoami" }], right: [] },
+    };
+    const r = render(120, {
+      bar,
+      scriptOutputs: { whoami: "me" },
+    });
+    expect(r.top).toContain("me");
+    expect(r.sessionbar).toContain("me");
   });
 });
