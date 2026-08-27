@@ -43,7 +43,7 @@ import type { SidebarBorder, SidebarSnapshot } from "./sidebar/types.js";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { paths, shortenHomePath } from "../core/paths.js";
-import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
+import { HYDRA_SESSION_PREFIX } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
 import {
   reportBanner,
@@ -2453,13 +2453,12 @@ export class Screen {
     this.repaint();
   }
 
-  // Push the current session title (or short session id, as fallback) to
-  // the host terminal via OSC 2. Supported by xterm/foot/iTerm2/Alacritty/
-  // most modern emulators; ignored harmlessly elsewhere.
+  // Push the current session title (or a generic fallback, for an untitled
+  // session) to the host terminal via OSC 2. Supported by xterm/foot/
+  // iTerm2/Alacritty/most modern emulators; ignored harmlessly elsewhere.
   private syncWindowTitle(): void {
     const title = this.sessionbar.title?.trim();
-    const fallback = shortId(this.sessionbar.sessionId) || "hydra";
-    const raw = title && title.length > 0 ? title : fallback;
+    const raw = title && title.length > 0 ? title : "New Hydra Session";
     const tagged = this.readonly ? `${raw} [VIEW ONLY]` : raw;
     // Strip control chars (including ESC) so a hostile title can't
     // close the escape sequence early and inject further sequences.
@@ -10371,10 +10370,6 @@ function firstLine(text: string): string {
   const idx = text.indexOf("\n");
   return idx === -1 ? text : `${text.slice(0, idx)} ↵`;
 }
-
-// Re-export for clarity at call sites that read `shortId(id)`. The shared
-// helper lives in core/session.ts alongside the prefix constant.
-const shortId = stripHydraSessionPrefix;
 
 export function mapKeyName(name: string): KeyName | null {
   switch (name) {
