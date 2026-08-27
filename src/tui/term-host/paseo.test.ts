@@ -199,6 +199,55 @@ describe("report", () => {
   });
 });
 
+describe("needs-input notify delay", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not POST immediately when the state becomes needs-input", async () => {
+    await host().report(snapshot({ state: "blocked" }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("POSTs needs-input once the delay elapses", async () => {
+    await host().report(snapshot({ state: "blocked" }));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ state: "needs-input" });
+  });
+
+  it("drops the notification if the state resolves before the delay elapses", async () => {
+    // The scenario this exists for: a second attached client loses the
+    // "permission requests race, first response wins" race and briefly sees
+    // its own blocked -> resolved round trip for a request nobody needed it
+    // to answer.
+    await host().report(snapshot({ state: "blocked" }));
+    await host().report(snapshot({ state: "working" }));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ state: "running" });
+  });
+
+  it("drops the notification if release() runs before the delay elapses", async () => {
+    await host().report(snapshot({ state: "blocked" }));
+    await host().release();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ state: "idle" });
+  });
+});
+
 describe("release", () => {
   it("does nothing if nothing was ever reported", async () => {
     await host().release();

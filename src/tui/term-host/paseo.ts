@@ -57,6 +57,16 @@ const COMMAND_TIMEOUT_MS = 5_000;
 const REPORT_TIMEOUT_MS = 1_000;
 
 /**
+ * How long a `needs-input` transition has to hold before Paseo hears about
+ * it. Matches herdr's own `ui.toast.delay_seconds` default (1s) — herdr
+ * gates its OS-level toast behind exactly this kind of hold, re-checking the
+ * pane's live state at delivery time, which is why the same multi-client
+ * permission race that spams Paseo has never been visible there. Paseo has
+ * no equivalent on its end, so it has to happen here instead.
+ */
+const NEEDS_INPUT_NOTIFY_DELAY_MS = 1_000;
+
+/**
  * Env vars Paseo uses to identify a terminal. PASEO_TERMINAL_ACTIVITY_URL
  * and PASEO_HOOK_CLI are deliberately absent: they're "how do I reach the
  * server" (URL) and "which binary" (CLI path), valid for as long as Paseo
@@ -135,6 +145,23 @@ class PaseoHost implements TerminalHost {
   private lastState: string | null = null;
   private claimed = false;
 
+  // Holds a pending `needs-input` POST during NEEDS_INPUT_NOTIFY_DELAY_MS.
+  // A session attached from more than one client (e.g. reopened from
+  // hydra's own picker into a second Paseo tab) broadcasts every permission
+  // request to all of them; the client that loses the "first response wins"
+  // race still sees a real blocked -> resolved transition, just one nobody
+  // needed to act on. Without this, that transition alone is enough to fire
+  // a push notification for a request answered elsewhere in well under a
+  // second.
+  private pendingNeedsInput: ReturnType<typeof setTimeout> | null = null;
+
+  private cancelPendingNeedsInput(): void {
+    if (this.pendingNeedsInput !== null) {
+      clearTimeout(this.pendingNeedsInput);
+      this.pendingNeedsInput = null;
+    }
+  }
+
   constructor(env: NodeJS.ProcessEnv, fetchImpl: typeof fetch = fetch) {
     this.cli = env.PASEO_HOOK_CLI || "paseo";
     this.terminalId = env.PASEO_TERMINAL_ID as string;
@@ -172,6 +199,22 @@ class PaseoHost implements TerminalHost {
     }
     this.lastState = state;
     this.claimed = true;
+    this.cancelPendingNeedsInput();
+    if (state === "needs-input") {
+      this.pendingNeedsInput = setTimeout(() => {
+        this.pendingNeedsInput = null;
+        // lastState may have moved on again while the timer was pending
+        // (resolved, then blocked again for a genuinely new reason) — only
+        // deliver if it's still what we're holding.
+        if (this.lastState === "needs-input") {
+          void this.post("needs-input");
+        }
+      }, NEEDS_INPUT_NOTIFY_DELAY_MS);
+      // Same reasoning as the unreachable-hold timer in report.ts: must not
+      // be what keeps the process alive past a clean exit.
+      this.pendingNeedsInput.unref?.();
+      return;
+    }
     await this.post(state);
   }
 
@@ -182,6 +225,7 @@ class PaseoHost implements TerminalHost {
    * terminal, which is the only user-visible state report() ever set.
    */
   async release(): Promise<void> {
+    this.cancelPendingNeedsInput();
     if (!this.claimed) {
       return;
     }
