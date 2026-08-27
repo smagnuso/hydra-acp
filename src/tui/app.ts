@@ -6110,6 +6110,18 @@ async function runSession(
       screen.notify("already on that session");
       return;
     }
+    // Same invariant switchSession enforces for the picker (app.ts ~5908):
+    // what "become this session" means in launcher mode must not depend on
+    // which code path asked for it.
+    if (opts.terminalHostLauncher) {
+      const notice = await dispatchToTerminalHost(
+        { kind: "attach", sessionId: match.sessionId },
+        sessions,
+        match.cwd ?? resolvedCwd,
+      );
+      screen.notify(notice);
+      return;
+    }
     const resume = finishSession;
     finishSession = null;
     // Same reason as cycleLiveSession: full teardown to avoid leaking
