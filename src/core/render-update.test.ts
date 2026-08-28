@@ -452,6 +452,36 @@ describe("mapUpdate", () => {
     expect(mapUpdate({ sessionUpdate: "tool_call", title: "x" })).toBeNull();
   });
 
+  it("surfaces parentToolUseId on tool_call from a Task subagent", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc3",
+        title: "Find Milo-related files",
+        status: "pending",
+        _meta: { claudeCode: { parentToolUseId: "toolu_parent1" } },
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc3",
+      title: "Find Milo-related files",
+      status: "pending",
+      parentToolUseId: "toolu_parent1",
+    });
+  });
+
+  it("omits parentToolUseId for a top-level tool_call", () => {
+    const event = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc4",
+      title: "Read file",
+      status: "pending",
+      _meta: { claudeCode: { toolName: "Read" } },
+    });
+    expect(event).not.toBeNull();
+    expect((event as { parentToolUseId?: string }).parentToolUseId).toBeUndefined();
+  });
+
   it("handles tool_call_update", () => {
     expect(
       mapUpdate({
@@ -463,6 +493,22 @@ describe("mapUpdate", () => {
       kind: "tool-call-update",
       toolCallId: "tc1",
       status: "completed",
+    });
+  });
+
+  it("surfaces parentToolUseId on tool_call_update from a Task subagent", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "completed",
+        _meta: { claudeCode: { parentToolUseId: "toolu_parent1" } },
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "completed",
+      parentToolUseId: "toolu_parent1",
     });
   });
 

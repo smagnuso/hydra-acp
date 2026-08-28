@@ -5,7 +5,7 @@ import { posix as posixPath } from "node:path";
 import stripAnsi from "strip-ansi";
 import { shortenHomePath } from "./paths.js";
 
-import { getWorkerTaskId } from "../tui/worker-id.js";
+import { getParentToolUseId, getWorkerTaskId } from "../tui/worker-id.js";
 import type { Attachment } from "../tui/input.js";
 import type { ConfigOption, ConfigOptionValue } from "./hydra-commands.js";
 
@@ -86,6 +86,11 @@ export type RenderEvent =
       // {path, line} on double-click instead of grepping the file.
       locations?: ToolCallLocation[];
       workerTaskId?: string;
+      // Set when this call was issued by a Task-tool subagent rather than
+      // the top-level turn — see getParentToolUseId. Lets the render layer
+      // avoid treating a background subagent's own tool calls as an
+      // interruption of the foreground turn's in-progress text/thought.
+      parentToolUseId?: string;
     }
   | {
       kind: "tool-call-update";
@@ -114,6 +119,8 @@ export type RenderEvent =
       // `end_turn` stopReason from the upstream agent.
       upstreamInterrupted?: boolean;
       workerTaskId?: string;
+      // See the same field on "tool-call".
+      parentToolUseId?: string;
     }
   | {
       // Claude's ExitPlanMode tool carries the plan as markdown in its
@@ -655,6 +662,10 @@ function mapToolCall(
   if (wtid !== undefined) {
     event.workerTaskId = wtid;
   }
+  const parentToolUseId = getParentToolUseId(u);
+  if (parentToolUseId !== undefined) {
+    event.parentToolUseId = parentToolUseId;
+  }
   return event;
 }
 
@@ -944,6 +955,10 @@ function mapToolCallUpdate(
   const wtid = getWorkerTaskId(u);
   if (wtid !== undefined) {
     event.workerTaskId = wtid;
+  }
+  const parentToolUseId = getParentToolUseId(u);
+  if (parentToolUseId !== undefined) {
+    event.parentToolUseId = parentToolUseId;
   }
   return event;
 }

@@ -9368,8 +9368,15 @@ async function runSession(
       return;
     }
     if (event.kind === "tool-call") {
-      closeAgentText();
-      closeThought();
+      // A subagent's own tool call (Task-tool `parentToolUseId` set) is
+      // concurrent background noise multiplexed into this stream, not a
+      // sequential interruption of the foreground turn — closing the
+      // in-progress text/thought block here would freeze it mid-word the
+      // instant the subagent's next chunk lands.
+      if (event.parentToolUseId === undefined) {
+        closeAgentText();
+        closeThought();
+      }
       if (!toolStates.has(event.toolCallId)) {
         maybeEmitWorkerHeader(event.workerTaskId);
       }
@@ -9455,8 +9462,11 @@ async function runSession(
       return;
     }
     if (event.kind === "tool-call-update") {
-      closeAgentText();
-      closeThought();
+      // See the matching check in "tool-call" above.
+      if (event.parentToolUseId === undefined) {
+        closeAgentText();
+        closeThought();
+      }
       recordToolCall(
         event.toolCallId,
         event.title,
