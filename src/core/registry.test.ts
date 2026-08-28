@@ -654,6 +654,73 @@ describe("local agents and pin overrides", () => {
     ]);
   });
 
+  it("merges agentOverrides env onto a registry agent's npx distribution", async () => {
+    const doc: { agents: RegistryAgent[] } = {
+      agents: [
+        {
+          id: "claude-acp",
+          name: "Claude",
+          distribution: {
+            npx: {
+              package: "@agentclientprotocol/claude-agent-acp@0.33.1",
+              env: { KEEP_ME: "yes", API_TIMEOUT_MS: "1000" },
+            },
+          },
+        },
+      ],
+    };
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "claude-acp": { env: { API_TIMEOUT_MS: "600000" } },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, doc as typeof FIXTURE);
+    const agent = await registry.getAgent("claude-acp");
+    // Override wins key by key; unrelated keys survive.
+    expect(agent?.distribution.npx?.env).toEqual({
+      KEEP_ME: "yes",
+      API_TIMEOUT_MS: "600000",
+    });
+    // env alone must not disturb the install identity.
+    expect(agent?.version).toBeUndefined();
+    expect(agent?.installId).toBeUndefined();
+  });
+
+  it("applies agentOverrides env to every platform of a binary distribution", async () => {
+    const doc: { agents: RegistryAgent[] } = {
+      agents: [
+        {
+          id: "some-binary-acp",
+          name: "Some Binary",
+          distribution: {
+            binary: {
+              "linux-x86_64": { cmd: "run", env: { A: "1" } },
+              "darwin-aarch64": { cmd: "run" },
+            },
+          },
+        },
+      ],
+    };
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "some-binary-acp": { env: { B: "2" } },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, doc as typeof FIXTURE);
+    const agent = await registry.getAgent("some-binary-acp");
+    expect(agent?.distribution.binary?.["linux-x86_64"]?.env).toEqual({
+      A: "1",
+      B: "2",
+    });
+    expect(agent?.distribution.binary?.["darwin-aarch64"]?.env).toEqual({
+      B: "2",
+    });
+  });
+
   it("combines a packageSpec pin with extraArgs on the same override", async () => {
     const config: HydraConfig = {
       ...fakeConfig(),

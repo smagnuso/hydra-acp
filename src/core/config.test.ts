@@ -8,6 +8,7 @@ import {
   expandHome,
   loadConfig,
   migrateLegacyAuthToken,
+  setAgentOverride,
   setTuiSidebarEnabled,
   writeConfig,
 } from "./config.js";
@@ -419,6 +420,62 @@ describe("expandHome", () => {
 // today's `gadgets` list and `border` into the user's file, silently pinning
 // them to defaults the user never chose (and freezing out gadgets added
 // later).
+describe("setAgentOverride", () => {
+  it("pins without clobbering a hand-written env override", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        agentOverrides: {
+          "claude-acp": { env: { API_TIMEOUT_MS: "600000" } },
+        },
+      }) + "\n",
+      "utf8",
+    );
+    await setAgentOverride("claude-acp", "pkg@1.0.0");
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.agentOverrides["claude-acp"]).toEqual({
+      env: { API_TIMEOUT_MS: "600000" },
+      packageSpec: "pkg@1.0.0",
+    });
+  });
+
+  it("unpin removes only packageSpec, keeping other override fields", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        agentOverrides: {
+          "claude-acp": {
+            packageSpec: "pkg@1.0.0",
+            env: { API_TIMEOUT_MS: "600000" },
+          },
+        },
+      }) + "\n",
+      "utf8",
+    );
+    await setAgentOverride("claude-acp", undefined);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.agentOverrides["claude-acp"]).toEqual({
+      env: { API_TIMEOUT_MS: "600000" },
+    });
+  });
+
+  it("unpin drops the whole entry when nothing else remains", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        agentOverrides: { "claude-acp": { packageSpec: "pkg@1.0.0" } },
+      }) + "\n",
+      "utf8",
+    );
+    await setAgentOverride("claude-acp", undefined);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.agentOverrides["claude-acp"]).toBeUndefined();
+  });
+});
+
 describe("setTuiSidebarEnabled", () => {
   it("writes only the enabled flag when nothing is on disk", async () => {
     await fs.mkdir(paths.home(), { recursive: true });

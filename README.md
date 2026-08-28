@@ -557,6 +557,8 @@ The service token lives in its own file (`~/.hydra-acp/auth-token`, mode 0600) a
 
 `daemon.sessionGcMaxAgeDays` (default 2) is why a session can vanish from the list entirely: a background sweep deletes *non-interactive* cold records — one-shot `hydra-acp cat` runs and editor panels that never took a turn — once they're older than this. Sessions that held a real conversation are never swept. `daemon.sessionGcIntervalMinutes` (default 60) sets how often the sweep runs, and `hydra-acp session collect` triggers it by hand.
 
+`agentOverrides.<id>` tweaks a *registry* agent without forking its identity: `packageSpec` pins the npm package (what `hydra-acp agent pin` writes), `extraArgs` appends CLI args, and `env` merges environment variables onto whatever distribution the registry resolves, e.g. `"agentOverrides": { "claude-acp": { "env": { "API_TIMEOUT_MS": "600000" } } }`. This is the only way to set env vars for a registry agent under its own id: a `config.agents` entry with the same id *shadows* the registry entry (it defines a local agent, not an overlay), and `extends` back to the same id is rejected as a cycle. Overrides apply on the next agent spawn; restart the daemon or wait for the running agent to rotate.
+
 ### Themes and the options panel
 
 `^O` opens the options panel: tools, plan, thoughts, diffs, mouse, enter,

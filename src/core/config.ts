@@ -155,10 +155,15 @@ export type LocalAgentConfig = z.infer<typeof LocalAgentConfig>;
 // floating "current" install. `extraArgs` appends onto whichever
 // distribution kind the agent resolves to (npx/uvx/exec args, or every
 // platform's args for a binary distribution) without needing to know or
-// duplicate the registry's own args.
+// duplicate the registry's own args. `env` merges onto the resolved
+// distribution's env the same way, and is the only way to set env vars for
+// a registry agent under its own id: a config.agents entry with the same
+// id shadows the registry entry outright, and `extends` back to the same
+// id is rejected as a cycle.
 const AgentOverrideConfig = z.object({
   packageSpec: z.string().optional(),
   extraArgs: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
 });
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfig>;
 
@@ -1109,10 +1114,21 @@ export async function setAgentOverride(
       raw.agentOverrides && typeof raw.agentOverrides === "object"
         ? (raw.agentOverrides as Record<string, unknown>)
         : {};
+    // Touch only the packageSpec field: an env / extraArgs override the
+    // user wrote by hand must survive a pin or unpin.
+    const entry =
+      overrides[agentId] && typeof overrides[agentId] === "object"
+        ? (overrides[agentId] as Record<string, unknown>)
+        : {};
     if (packageSpec === undefined) {
+      delete entry.packageSpec;
+    } else {
+      entry.packageSpec = packageSpec;
+    }
+    if (Object.keys(entry).length === 0) {
       delete overrides[agentId];
     } else {
-      overrides[agentId] = { packageSpec };
+      overrides[agentId] = entry;
     }
     raw.agentOverrides = overrides;
   });

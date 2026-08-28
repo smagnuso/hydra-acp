@@ -427,9 +427,9 @@ export class Registry {
 
   // Apply a config.agentOverrides[id] pin to a registry agent: swap the
   // npx package spec (keying the install dir on the pinned version so it
-  // never collides with the floating "current" install) and/or append
-  // extraArgs onto whichever distribution kind the agent resolves to.
-  // No-op when the agent has no override.
+  // never collides with the floating "current" install), append extraArgs
+  // onto whichever distribution kind the agent resolves to, and/or merge
+  // env onto it. No-op when the agent has no override.
   private applyOverride(agent: ResolvedAgent): ResolvedAgent {
     const withChain: ResolvedAgent = agent.extendsChain
       ? agent
@@ -456,6 +456,13 @@ export class Registry {
 
     if (override.extraArgs?.length) {
       distribution = appendExtraArgsToDistribution(distribution, override.extraArgs);
+    }
+
+    // Reuses the derived-agent env overlay so the merge semantics are
+    // identical either way the user reaches for env: override wins over
+    // the distribution's own entries, key by key.
+    if (override.env && Object.keys(override.env).length > 0) {
+      distribution = mergeIntoDistribution(distribution, { env: override.env });
     }
 
     if (distribution === withChain.distribution) {
