@@ -4478,7 +4478,7 @@ async function runSession(
       return;
     }
     screen.setHelpPrompt({
-      title: "Hotkeys",
+      title: `Hotkeys · hydra-acp v${HYDRA_VERSION}`,
       entries: buildHelpEntries(),
       hint: "any key dismisses · /help lists commands",
     });
