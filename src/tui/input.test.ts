@@ -793,17 +793,31 @@ describe("InputDispatcher", () => {
     expect(feed(d, [k("end")])).toEqual([{ type: "scroll-to-bottom" }]);
   });
 
-  it("Ctrl+A and Ctrl+E remain line-level (no scroll fallback)", () => {
+  it("Ctrl+A and Ctrl+E cascade up/down through lines (no scroll fallback)", () => {
     const d = new InputDispatcher();
     feed(d, [ch("a"), k("alt-enter"), ch("b"), ch("c")]);
     feed(d, [k("ctrl-a")]);
     expect(d.state().row).toBe(1);
     expect(d.state().col).toBe(0);
-    // Ctrl+A again is still a no-op (line-local, no scroll effect).
+    // Already at line start → cascade up to the previous line's start.
     expect(feed(d, [k("ctrl-a")])).toEqual([]);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(0);
+    // Already at buffer start → no further cascade, no scroll effect.
+    expect(feed(d, [k("ctrl-a")])).toEqual([]);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(0);
     feed(d, [k("ctrl-e")]);
-    expect(d.state().col).toBe(2);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(1);
+    // Already at line end → cascade down to the next line's end.
     expect(feed(d, [k("ctrl-e")])).toEqual([]);
+    expect(d.state().row).toBe(1);
+    expect(d.state().col).toBe(2);
+    // Already at buffer end → no further cascade, no scroll effect.
+    expect(feed(d, [k("ctrl-e")])).toEqual([]);
+    expect(d.state().row).toBe(1);
+    expect(d.state().col).toBe(2);
   });
 
   it("Escape during a turn emits cancel with prefill=true", () => {

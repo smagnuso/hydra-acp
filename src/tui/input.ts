@@ -572,10 +572,23 @@ export class InputDispatcher {
         this.moveRight();
         return [];
       case "ctrl-a":
-        this.col = 0;
+        if (this.col === 0) {
+          if (this.row > 0) {
+            this.row -= 1;
+          }
+        } else {
+          this.col = 0;
+        }
         return [];
       case "ctrl-e":
-        this.col = this.currentLine().length;
+        if (this.col === this.currentLine().length) {
+          if (this.row < this.buffer.length - 1) {
+            this.row += 1;
+            this.col = this.currentLine().length;
+          }
+        } else {
+          this.col = this.currentLine().length;
+        }
         return [];
       case "home":
         return this.handleHome();
