@@ -10583,11 +10583,16 @@ function ensureMessageIdOnUpdate(method: string, params: unknown): unknown {
 // session/update.messageId matches `target`. Returns -1 if not found.
 // Used by attach() to compute the after_message replay slice, and by
 // SessionManager.forkSession to slice history at a turn boundary.
+// Returns the LAST matching index, not the first: a single streamed
+// message shares one messageId across every chunk, and both callers need
+// the boundary at the complete message, not its first chunk — otherwise
+// after_message replays (almost) the whole message a second time, and
+// forkAt truncates it mid-stream.
 export function findMessageIdIndex(
   history: CachedNotification[],
   target: string,
 ): number {
-  for (let i = 0; i < history.length; i++) {
+  for (let i = history.length - 1; i >= 0; i--) {
     const entry = history[i];
     if (!entry || entry.method !== "session/update") {
       continue;

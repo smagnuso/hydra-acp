@@ -551,6 +551,51 @@ describe("Session", () => {
       ).toBe("agent_message_chunk");
     });
 
+    it("after_message anchored on a multi-chunk messageId doesn't replay that message's own chunks", async () => {
+      // Regression: a streamed message shares one messageId across every
+      // chunk. A reconnecting client's lastSeenMessageId is commonly that
+      // shared id (the last chunk it saw), not a unique turn_complete id —
+      // findMessageIdIndex must resolve to the LAST chunk carrying that id,
+      // not the first, or replay re-sends (almost) the whole message the
+      // client already has.
+      const { session, mock } = makeSession("sess_am2", "u_am2");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+
+      const sharedId = "msg_shared_across_chunks";
+      mock.triggerNotification("session/update", {
+        sessionId: "u_am2",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "chunk 1" }, messageId: sharedId },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_am2",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "chunk 2" }, messageId: sharedId },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_am2",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "chunk 3" }, messageId: sharedId },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_am2",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "new turn" }, messageId: "msg_next" },
+      });
+      await flushHistoryWrites();
+
+      const { client: late } = makeClient();
+      const { entries: delta, appliedPolicy } = await session.attach(
+        late,
+        "after_message",
+        { afterMessageId: sharedId },
+      );
+      expect(appliedPolicy).toBe("after_message");
+      const historicalDelta = delta.filter((e) => !isStateSnapshotEntry(e));
+      expect(historicalDelta).toHaveLength(1);
+      expect(
+        (historicalDelta[0]?.params as { update: { messageId: string } })
+          .update.messageId,
+      ).toBe("msg_next");
+    });
+
     it("after_message resolves a cutoff that coalesceReplay would drop", async () => {
       // Regression: coalesceReplay folds consecutive same-kind chunks into
       // the first one, so a TUI whose lastSeenMessageId pointed at a
