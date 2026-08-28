@@ -2138,6 +2138,14 @@ async function runSession(
       }
     } else if (before > 0 && pendingTurns === 0) {
       cancelling = false;
+      // Every turn settled, so a pending or armed force-stop escalation is
+      // now aimed at nothing. Disarm it, or a later turn's first ^C would
+      // skip the soft cancel and restart the agent outright.
+      if (remoteCancelAckTimer !== null) {
+        clearTimeout(remoteCancelAckTimer);
+        remoteCancelAckTimer = null;
+      }
+      forceStopArmed = false;
       sessionBusySince = null;
       if (attachSettled) {
         lastTurnEndedAt = Date.now();
@@ -2342,6 +2350,11 @@ async function runSession(
   // How long after a user cancel we wait for the turn to actually end
   // before warning that the agent didn't acknowledge it.
   const CANCEL_ACK_TIMEOUT_MS = 4000;
+  // Ack deadline for a cancel sent against a turn this TUI did not start
+  // (armed in cancelRemoteTurn). The own-turn path has its own timer in
+  // runPrompt; this one covers peer / reattached / agent-initiated turns,
+  // where turnInFlight is null and nothing else would ever escalate.
+  let remoteCancelAckTimer: NodeJS.Timeout | null = null;
 
   conn.onNotification("hydra-acp/prompt_queue/added", (params) => {
     if (teardownStarted) return;
@@ -4382,13 +4395,43 @@ async function runSession(
     conn
       .notify("session/cancel", { sessionId: resolvedSessionId })
       .catch(() => undefined);
+    // Deadline backstop. hydra-acp/cancel_failed only fires when the agent
+    // answers the cancel with an error frame (opencode-shaped); claude-acp
+    // accepts cancels it never honors, so the absence of an error is no
+    // evidence the cancel worked. Without a deadline, a wedged agent-side
+    // turn reduces every further ^C to a silent no-op with no escalation
+    // ever offered. Mirrors the own-turn ack timer in runPrompt.
+    if (remoteCancelAckTimer === null) {
+      const cancelSentAt = Date.now();
+      remoteCancelAckTimer = setTimeout(() => {
+        remoteCancelAckTimer = null;
+        if (pendingTurns === 0) {
+          return;
+        }
+        // cancel_failed already warned and armed with the precise reason.
+        if (lastCancelFailedAt >= cancelSentAt || forceStopArmed) {
+          return;
+        }
+        forceStopArmed = true;
+        screenRef?.appendLines([
+          {
+            prefix: "⚠ ",
+            prefixStyle: "tool-status-fail",
+            body:
+              "cancel not acknowledged by agent; the turn is still running. " +
+              "Cancel again to force-stop (restarts the agent).",
+            bodyStyle: "tool-status-fail",
+          },
+        ]);
+      }, CANCEL_ACK_TIMEOUT_MS);
+    }
   };
-  // Escalation for a turn this TUI did not start. Reached only once the agent
-  // has explicitly told us the cancel failed: hydra-acp/cancel_failed arms
-  // forceStopArmed and tells the user in as many words to "Cancel again to
-  // force-stop". Before this existed that promise was broken — the second ^C
-  // re-sent the same rejected session/cancel. Driven entirely by that
-  // notification, never by a deadline.
+  // Escalation for a turn this TUI did not start. Reached once the agent has
+  // explicitly told us the cancel failed (hydra-acp/cancel_failed) or once
+  // the deadline in cancelRemoteTurn expired with the turn still pending;
+  // both arm forceStopArmed and tell the user in as many words to "Cancel
+  // again to force-stop". Before this existed that promise was broken: the
+  // second ^C re-sent the same rejected session/cancel.
   const forceStopRemoteTurn = (): void => {
     forceStopArmed = false;
     if (screenRef !== null) {

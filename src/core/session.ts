@@ -5241,6 +5241,18 @@ export class Session {
         JsonRpcErrorCodes.SessionNotFound,
       );
     }
+    // A cancel against a live requested turn otherwise leaves zero trace in
+    // the daemon log: the unsolicited-turn close no-ops silently, the
+    // tool-call sweep is skipped, and the agent forward is fire-and-forget.
+    // A stall postmortem needs to know the user cancelled at all, and what
+    // the session believed its state was when they did.
+    this.logger?.info(
+      `session ${this.sessionId} session/cancel from ${clientId} ` +
+        `promptInFlight=${this.promptInFlight} ` +
+        `agentTurnInFlight=${this.agentTurnInFlight} ` +
+        `unsolicitedTurn=${this.unsolicitedTurn !== undefined} ` +
+        `queued=${this.promptQueue.length}`,
+    );
     // session/cancel is a notification per the ACP spec — agents process it
     // and don't reply. Sending it as a request would hang our promise
     // forever waiting for a response that never comes. The downside: an

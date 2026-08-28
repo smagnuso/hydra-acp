@@ -196,6 +196,14 @@ export async function startDaemon(
     onFetched: () => {
       void pruneStaleAgentVersions(registry, manager);
     },
+    onStaleFallback: (err, ageMs) => {
+      const hours = Math.round(ageMs / 3_600_000);
+      const age = hours >= 48 ? `${Math.round(hours / 24)}d` : `${hours}h`;
+      app.log.warn(
+        `registry fetch failed (${err.message}); serving stale cache last synced ${age} ago; ` +
+          `agent versions may be outdated ('hydra registry refresh' to retry)`,
+      );
+    },
   });
   setAgentPruneLogger((msg) => app.log.info(msg));
   // Inject the configured stderr-tail size into every spawned agent so a

@@ -211,6 +211,11 @@ export interface RegistryOptions {
   // resolvedLocalAgents() — a broken `extends`. The catalog drops the
   // entry and keeps going; this is how the reason reaches daemon.log.
   onResolveError?: (agentId: string, err: Error) => void;
+  // Fires when a network fetch fails and load() silently serves the
+  // stale on-disk cache instead. Without this hook a machine that can't
+  // reach the registry keeps resolving weeks-old agent versions with no
+  // indication anywhere; ageMs says how old the served cache is.
+  onStaleFallback?: (err: Error, ageMs: number) => void;
 }
 
 export class Registry {
@@ -237,6 +242,16 @@ export class Registry {
       return fresh.data;
     } catch (err) {
       if (onDisk) {
+        const hook = this.options.onStaleFallback;
+        if (hook) {
+          // Same containment as onFetched: a faulty hook must not turn a
+          // survivable fetch failure into a failed load.
+          try {
+            hook(err as Error, Date.now() - onDisk.fetchedAt);
+          } catch {
+            // ignore
+          }
+        }
         this.cache = onDisk;
         return onDisk.data;
       }

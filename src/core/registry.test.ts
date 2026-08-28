@@ -151,6 +151,52 @@ describe("Registry.lastFetchedAt", () => {
   });
 });
 
+describe("Registry.load stale fallback", () => {
+  it("fires onStaleFallback when the fetch fails and a stale disk cache is served", async () => {
+    const doc = { ...FIXTURE, version: "0" };
+    const staleMs = 48 * 60 * 60 * 1000;
+    await fs.mkdir(path.dirname(paths.registryCache()), { recursive: true });
+    await fs.writeFile(
+      paths.registryCache(),
+      JSON.stringify({ fetchedAt: Date.now() - staleMs, data: doc }),
+    );
+    const calls: Array<{ err: Error; ageMs: number }> = [];
+    const registry = new Registry(fakeConfig(), {
+      onStaleFallback: (err, ageMs) => {
+        calls.push({ err, ageMs });
+      },
+    });
+    try {
+      const loaded = await registry.load();
+      expect(loaded.agents.map((a) => a.id)).toContain("claude-acp");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.ageMs).toBeGreaterThanOrEqual(staleMs);
+    } finally {
+      await fs.rm(paths.registryCache(), { force: true });
+    }
+  });
+
+  it("survives an onStaleFallback hook that throws", async () => {
+    const doc = { ...FIXTURE, version: "0" };
+    await fs.mkdir(path.dirname(paths.registryCache()), { recursive: true });
+    await fs.writeFile(
+      paths.registryCache(),
+      JSON.stringify({ fetchedAt: 0, data: doc }),
+    );
+    const registry = new Registry(fakeConfig(), {
+      onStaleFallback: () => {
+        throw new Error("hook exploded");
+      },
+    });
+    try {
+      const loaded = await registry.load();
+      expect(loaded.agents.map((a) => a.id)).toContain("claude-acp");
+    } finally {
+      await fs.rm(paths.registryCache(), { force: true });
+    }
+  });
+});
+
 describe("agentInstallState", () => {
   it("returns 'lazy' for uvx-only agents", async () => {
     const agent: RegistryAgent = {
