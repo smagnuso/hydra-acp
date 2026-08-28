@@ -641,6 +641,12 @@ interface UserPromptQueueEntry {
   // includes the originator in the wire turn_complete (no exclusion) so
   // their TUI can clear currentHeadMessageId and adjust pendingTurns.
   wasAmend?: boolean;
+  // True when this entry was created by steering an IDLE session
+  // (_session/steering falling through to a plain enqueue). Same property
+  // as wasAmend for turn-accounting purposes: the originator's steering
+  // response carries an outcome, never a stopReason, so the wire
+  // turn_complete is the only turn-end signal it will ever get.
+  wasSteer?: boolean;
   // Set when this entry was synthesized via `route: "queue"` on
   // hydra-acp/message/emit by an in-chain transformer (e.g. the
   // planner originating a worker's turn). forwardRequest must start
@@ -3405,6 +3411,7 @@ export class Session {
     clientId: string,
     params: unknown,
     sentBy?: SentBy,
+    opts?: { steerOriginated?: boolean },
   ): Promise<unknown> {
     const client = this.clients.get(clientId);
     if (!client) {
@@ -3477,7 +3484,7 @@ export class Session {
         }
       }
     }
-    return this.enqueueUserPrompt(client, params, messageId, sentBy);
+    return this.enqueueUserPrompt(client, params, messageId, sentBy, opts);
   }
 
   // DEVIATION FROM RFD #533: this broadcast is deliberately deferred
@@ -3659,11 +3666,25 @@ export class Session {
       .catch(() => undefined);
   }
 
+  // Amend- and steer-originated entries share the one property the
+  // originator exclusion actually cares about: their sender has no
+  // awaiting session/prompt promise that will deliver a stopReason, so
+  // the wire turn_complete is the only turn-end signal it will ever see.
+  // Keying the exclusion on "was it an amend" instead of on that property
+  // is what stranded steer-originated turns: the client incremented its
+  // turn counter and nothing ever decremented it.
+  private originatorNeedsTurnComplete(entry: {
+    wasAmend?: boolean;
+    wasSteer?: boolean;
+  }): boolean {
+    return entry.wasAmend === true || entry.wasSteer === true;
+  }
+
   private broadcastTurnComplete(
     originatorClientId: string,
     response: unknown,
     promptMessageId?: string,
-    wasAmend?: boolean,
+    includeOriginator?: boolean,
   ): void {
     const stopReason =
       response &&
@@ -3739,10 +3760,10 @@ export class Session {
         });
       }
     }
-    // For amend-originated entries (sent via hydra-acp/prompt/amend, not
-    // session/prompt), the originator has no awaiting session/prompt
-    // promise that would deliver the turn outcome — so include them in
-    // the broadcast so their TUI can clear currentHeadMessageId and
+    // For entries whose originator has no awaiting session/prompt promise
+    // to deliver the turn outcome — amend-originated (hydra-acp/prompt/amend)
+    // and steer-originated (_session/steering on an idle session) — include
+    // them in the broadcast so their TUI can clear currentHeadMessageId and
     // adjust pendingTurns. For regular session/prompt entries, exclude
     // as before since the response itself carries the stopReason.
     // A turn that did not finish cleanly abandons whatever tool was
@@ -3763,7 +3784,7 @@ export class Session {
         sessionId: this.sessionId,
         update,
       },
-      wasAmend ? undefined : originatorClientId,
+      includeOriginator ? undefined : originatorClientId,
     );
     if (
       amend &&
@@ -5147,6 +5168,15 @@ export class Session {
       // generic unsolicited-turn handling (noteAgentActivity /
       // openUnsolicitedTurn) picks up whatever the agent does next, same
       // as any other unprompted agent activity. Not special-cased here.
+      //
+      // It IS flagged, though: that handling emits its own
+      // _hydra_turn_started / _hydra_turn_ended pair, which turn-counting
+      // clients already pair up themselves. Without `detached` such a
+      // client also counts this outcome, so one turn is counted twice and
+      // the surplus never comes back down.
+      if (result.outcome === "startedNewTurn") {
+        return { ...result, detached: true };
+      }
       return result;
     }
 
@@ -5169,9 +5199,31 @@ export class Session {
     if (params._meta?.steering?.idleBehavior === "promptRequired") {
       return { outcome: "promptRequired", reason: "noRunningTurn" };
     }
-    await this.prompt(clientId, {
-      sessionId: params.sessionId,
-      prompt: params.prompt,
+    // Deliberately NOT awaited. prompt() resolves via the queue entry's
+    // own promise, which settles when the TURN ENDS — so awaiting here
+    // held the steering response until the work was already over, and a
+    // client that increments its turn counter on "startedNewTurn" applied
+    // that increment to a turn that had finished. Nothing downstream could
+    // ever take it back: the counter stuck above zero, the composer sat on
+    // "Thinking" until the stall watchdog repainted it "Stalled", and only
+    // a reattach (which reconciles against the daemon) could clear it.
+    // Returning as soon as the prompt is enqueued keeps "startedNewTurn"
+    // meaning what its name says — a turn is in flight right now — and
+    // steerOriginated marks the entry so the turn_complete that ends it
+    // reaches the originator (see originatorNeedsTurnComplete).
+    void this.prompt(
+      clientId,
+      { sessionId: params.sessionId, prompt: params.prompt },
+      undefined,
+      { steerOriginated: true },
+    ).catch((err: Error) => {
+      // Returning early means this rejection no longer reaches the caller
+      // as a failed steer. It is the narrow set prompt() throws before
+      // enqueueing (notably a session mid-close); log rather than drop it,
+      // so a steer that never became a turn is still attributable.
+      this.logger?.warn(
+        `steer-originated prompt failed to enqueue: ${err.message}`,
+      );
     });
     return { outcome: "startedNewTurn" };
   }
@@ -8698,7 +8750,7 @@ export class Session {
         this.currentEntry.clientId,
         { stopReason: "interrupted" },
         this.currentEntry.messageId,
-        this.currentEntry.wasAmend,
+        this.originatorNeedsTurnComplete(this.currentEntry),
       );
     }
     this.currentEntry = undefined;
@@ -9629,6 +9681,7 @@ export class Session {
     params: unknown,
     messageId: string,
     sentBy?: SentBy,
+    opts?: { steerOriginated?: boolean },
   ): Promise<unknown> {
     const promptArray = (((params ?? {}) as { prompt?: unknown[] }).prompt ??
       []) as unknown[];
@@ -9677,6 +9730,9 @@ export class Session {
         resolve,
         reject,
       };
+      if (opts?.steerOriginated === true) {
+        entry.wasSteer = true;
+      }
       const insertedAt = this.insertEntryAt(entry, queuePosition);
       this.persistRewrite();
       this.broadcastQueueAdded(entry, { position: insertedAt });
@@ -9981,7 +10037,12 @@ export class Session {
         result = await this.handleSlashCommand(promptText, entry.messageId);
       }
       if (!this.closed) {
-        this.broadcastTurnComplete(entry.clientId, result, entry.messageId, entry.wasAmend);
+        this.broadcastTurnComplete(
+          entry.clientId,
+          result,
+          entry.messageId,
+          this.originatorNeedsTurnComplete(entry),
+        );
       }
       this.clearAmendIfMatches(entry.messageId);
       return result;
@@ -10043,7 +10104,7 @@ export class Session {
           entry.clientId,
           { stopReason: "error" },
           entry.messageId,
-          entry.wasAmend,
+          this.originatorNeedsTurnComplete(entry),
         );
       }
       this.clearAmendIfMatches(entry.messageId);
@@ -10056,7 +10117,7 @@ export class Session {
         entry.clientId,
         response,
         entry.messageId,
-        entry.wasAmend,
+        this.originatorNeedsTurnComplete(entry),
       );
     }
     this.clearAmendIfMatches(entry.messageId);

@@ -143,6 +143,13 @@ export type SteeringParams = z.infer<typeof SteeringParams>;
 export const SteeringResult = z.object({
   outcome: z.enum(["injected", "startedNewTurn", "promptRequired", "failed"]),
   reason: z.literal("noRunningTurn").optional(),
+  // Set only on the native-steering race (see Session.steer): the agent's
+  // own turn had already settled, so the follow-on work is picked up by
+  // hydra's unsolicited-turn machinery, which emits its own
+  // _hydra_turn_started / _hydra_turn_ended pair. A client that counts
+  // turns must NOT count this outcome itself, or the same turn is counted
+  // twice and the extra increment never comes back down.
+  detached: z.boolean().optional(),
 });
 export type SteeringResult = z.infer<typeof SteeringResult>;
 

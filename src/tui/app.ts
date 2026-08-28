@@ -2106,6 +2106,19 @@ async function runSession(
   ): void => {
     const before = pendingTurns;
     pendingTurns = Math.max(0, pendingTurns + delta);
+    // Every other signal needed to debug a stuck banner is already in this
+    // log; this counter's own history was the one thing that wasn't, which
+    // made a leaked increment diagnosable only by reading the source and
+    // guessing. An unbalanced +1 is invisible in the wire trace precisely
+    // because the missing event is the one that never arrived.
+    writeDebugLine({
+      src: "pending-turns",
+      delta,
+      before,
+      after: pendingTurns,
+      origin: origin ?? null,
+      label: originLabel ?? null,
+    });
     if (delta > 0) {
       reportTurn({ origin: origin ?? null, label: originLabel });
     }
@@ -6846,7 +6859,7 @@ async function runSession(
         prompt: blocks,
       })
       .then((raw) => {
-        const res = raw as { outcome?: string };
+        const res = raw as { outcome?: string; detached?: boolean };
         if (res.outcome === "injected") {
           // Nothing was enqueued server-side — no prompt_queue_added/
           // removed pair will ever arrive for this echo. Flush it here,
@@ -6870,7 +6883,15 @@ async function runSession(
           // server-side — both genuinely create a new queue entry, so
           // leave the echo in pendingEchoes; prompt_queue_added/removed
           // will bind and flush it exactly like enqueuePrompt's flow.
-          adjustPendingTurns(1, "self");
+          //
+          // `detached` means the daemon handed the work to its
+          // unsolicited-turn machinery instead, and that emits a
+          // _hydra_turn_started / _hydra_turn_ended pair we already count
+          // below. Counting here too would book the same turn twice, and
+          // the second increment has nothing to settle it.
+          if (res.detached !== true) {
+            adjustPendingTurns(1, "self");
+          }
           return;
         }
         // "failed" (native forward errored — resolved, not thrown, per

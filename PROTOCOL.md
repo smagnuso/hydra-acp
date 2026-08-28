@@ -1743,10 +1743,29 @@ both adapters':
 }
 // result
 {
-  "outcome": "injected" | "startedNewTurn" | "promptRequired" | "failed",
-  "reason":  "noRunningTurn"   // present only with outcome "promptRequired"
+  "outcome":  "injected" | "startedNewTurn" | "promptRequired" | "failed",
+  "reason":   "noRunningTurn",  // present only with outcome "promptRequired"
+  "detached": true              // optional; only with outcome "startedNewTurn"
 }
 ```
+
+**Turn accounting for `"startedNewTurn"`.** The response carries an
+outcome, never a `stopReason`, so a client that tracks whether the session
+is busy cannot settle this turn from the reply. Two rules make that
+tractable, and both matter to any client that counts turns:
+
+- Without `detached`, the turn is one hydra enqueued on the client's
+  behalf. Hydra therefore **includes the originator** in that turn's
+  `turn_complete` broadcast — unlike a `session/prompt` turn, where the
+  originator is excluded because its own response carries the outcome.
+  This is the same rule amend-originated entries follow, and for the same
+  reason: the wire `turn_complete` is the only turn-end signal the sender
+  will ever receive.
+- With `"detached": true`, the agent's own turn had already settled and
+  the work was picked up by hydra's unsolicited-turn machinery, which
+  emits its own `_hydra_turn_started` / `_hydra_turn_ended` pair. A client
+  that counts turns must **not** count this outcome as well, or it books
+  one turn twice and the surplus never comes back down.
 
 Hydra advertises `_meta.steering.supported: true` **unconditionally** on
 `initialize` — as a sibling of `_meta["hydra-acp"]`, the same place the

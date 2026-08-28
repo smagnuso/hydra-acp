@@ -5670,7 +5670,9 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "redirect" }],
       });
 
-      expect(result).toEqual({ outcome: "startedNewTurn" });
+      // detached: the unsolicited-turn machinery owns this turn's
+      // start/end pair, so turn-counting clients must not count it too.
+      expect(result).toEqual({ outcome: "startedNewTurn", detached: true });
       const chunk = stream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
@@ -5726,7 +5728,7 @@ describe("Session", () => {
 
       resolveSteer?.({ outcome: "startedNewTurn" });
       const result = await steerPromise;
-      expect(result).toEqual({ outcome: "startedNewTurn" });
+      expect(result).toEqual({ outcome: "startedNewTurn", detached: true });
 
       // The detached turn's own content, streamed with no prompt in flight.
       mock.triggerNotification("session/update", {
@@ -5940,6 +5942,12 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "hello" }],
       });
 
+      // steer() returns as soon as the prompt is enqueued — it no longer
+      // blocks until the turn ends — so let the queue drain before
+      // asserting the forward happened.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
       expect(result).toEqual({ outcome: "startedNewTurn" });
       expect(requestMock).toHaveBeenCalledWith(
         "session/prompt",
@@ -5953,6 +5961,41 @@ describe("Session", () => {
             ?.sessionUpdate === "prompt_received",
       );
       expect(promptReceived).toBeDefined();
+    });
+
+    // Regression: steering an IDLE session enqueues a plain prompt, but the
+    // originator's steering response carries an outcome, never a stopReason.
+    // The wire turn_complete is therefore its only turn-end signal, so it
+    // must NOT be excluded from that broadcast the way a session/prompt
+    // originator is. Excluding it stranded the client's turn counter above
+    // zero: the composer sat on "Thinking", flipped to "Stalled" after the
+    // watchdog window, and only a reattach could clear it — while every
+    // other attached client correctly showed the session idle.
+    it("sends turn_complete to the originator of a steer-originated turn", async () => {
+      const { session, mock } = makeSession("hydra_session_steer7", "u_steer7");
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+      mock.agent.steeringSupported = true;
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      await session.steer(client.clientId, {
+        sessionId: "hydra_session_steer7",
+        prompt: [{ type: "text", text: "hello" }],
+      });
+
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const turnComplete = stream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      expect(turnComplete).toBeDefined();
     });
 
     it("returns promptRequired without enqueueing anything when the caller opts into it on an idle session", async () => {
