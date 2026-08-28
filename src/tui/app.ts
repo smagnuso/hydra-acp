@@ -7775,6 +7775,10 @@ async function runSession(
   let agentBuffer = "";
   let agentKey: string | null = null;
   let agentSeq = 0;
+  // Worker owning the currently-open agentKey block (undefined for the
+  // foreground turn). A chunk from a different worker must not merge into
+  // this buffer — see the worker-mismatch check at the agent-text handler.
+  let agentBlockWorkerTaskId: string | undefined;
 
   const renderAgentBlock = (): void => {
     if (agentKey === null) {
@@ -7791,7 +7795,7 @@ async function runSession(
     screen.upsertLines(agentKey, lines);
   };
 
-  const appendAgentText = (text: string): void => {
+  const appendAgentText = (text: string, workerTaskId?: string): void => {
     if (text.length === 0) {
       return;
     }
@@ -7804,6 +7808,7 @@ async function runSession(
       agentKey = `agent:${agentSeq}`;
       agentSeq += 1;
       agentBuffer = "";
+      agentBlockWorkerTaskId = workerTaskId;
     }
     agentBuffer += text;
     renderedAgentText.set(agentKey, agentBuffer);
@@ -7813,6 +7818,7 @@ async function runSession(
   const closeAgentText = (): void => {
     agentKey = null;
     agentBuffer = "";
+    agentBlockWorkerTaskId = undefined;
   };
 
   // Parallel buffered-rerender for thought blocks. Same pattern as agent
@@ -7822,6 +7828,9 @@ async function runSession(
   let thoughtBuffer = "";
   let thoughtKey: string | null = null;
   let thoughtSeq = 0;
+  // Worker owning the currently-open thoughtKey block — same purpose as
+  // agentBlockWorkerTaskId above.
+  let thoughtBlockWorkerTaskId: string | undefined;
 
   // The single dim line a collapsed thought run folds down to. Keeps
   // bodyStyle "thought" so the ^T hide-thoughts filter still drops it; the
@@ -7870,6 +7879,7 @@ async function runSession(
       thoughtKey = `thought:${thoughtSeq}`;
       thoughtSeq += 1;
       thoughtBuffer = "";
+      thoughtBlockWorkerTaskId = workerTaskId;
     }
     thoughtBuffer += text;
     renderedThoughts.set(thoughtKey, { text: thoughtBuffer, workerTaskId });
@@ -7877,6 +7887,7 @@ async function runSession(
   };
 
   const closeThought = (): void => {
+    thoughtBlockWorkerTaskId = undefined;
     thoughtKey = null;
     thoughtBuffer = "";
   };
@@ -9327,10 +9338,18 @@ async function runSession(
     }
     if (event.kind === "agent-text") {
       closeThought();
+      // A chunk from a different worker than the one that opened this
+      // block (foreground turn vs. a background Agent() task, or two
+      // distinct background tasks) must not merge into it — their chunks
+      // can genuinely interleave in time, since a background task can run
+      // for minutes alongside several foreground turns.
+      if (agentKey !== null && agentBlockWorkerTaskId !== event.workerTaskId) {
+        closeAgentText();
+      }
       if (agentKey === null) {
         maybeEmitWorkerHeader(event.workerTaskId);
       }
-      appendAgentText(event.text);
+      appendAgentText(event.text, event.workerTaskId);
       return;
     }
     if (event.kind === "agent-thought") {
@@ -9340,6 +9359,10 @@ async function runSession(
       // setHideThoughts() filters at draw time so toggling ^T reveals lines
       // that streamed in while hidden.
       closeAgentText();
+      // Same worker-mismatch guard as agent-text above.
+      if (thoughtKey !== null && thoughtBlockWorkerTaskId !== event.workerTaskId) {
+        closeThought();
+      }
       if (thoughtKey === null) {
         maybeEmitWorkerHeader(event.workerTaskId);
       }
