@@ -308,6 +308,38 @@ describe("Session.swapUpstream", () => {
     expect((session as unknown as Record<string, unknown>).parentSessionId).toBeUndefined();
   });
 
+  it("does not let the fresh upstream's session_info_update override an established title", async () => {
+    // Regression: /hydra compact spawns a fresh upstream agent that treats
+    // itself as a brand-new conversation and may emit its own title for the
+    // compaction seed it was just handed. Before this fix, that title was
+    // treated as authoritative and clobbered the session's real title.
+    const { spawnReplacementAgent, oldMock, newMock } = makeSpawnMock({
+      agentId: "a1",
+    });
+
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_swap_title_stable",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      title: "Fix the login bug",
+      historyStore: store,
+      spawnReplacementAgent,
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+    expect(session.title).toBe("Fix the login bug");
+
+    await triggerUpdate(newMock, {
+      sessionUpdate: "session_info_update",
+      title: "agent-derived title for the compaction seed",
+    });
+
+    expect(session.title).toBe("Fix the login bug");
+  });
+
   it("swapIntoWorkspace puts the move note in the seed and keeps the session's synopsis", async () => {
     // Regression: the note used to be passed AS the artifact, cast to
     // SessionSynopsis with a `summary` field that type doesn't have. The

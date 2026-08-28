@@ -864,6 +864,15 @@ export class Session {
   // gets its turn. See maybeSeedTitleFromPrompt for why none of those is
   // grounds for giving up on the session entirely.
   private _titleSeedPending = true;
+  // True once the upstream agent process has been replaced at least once
+  // (compaction, /hydra agent, workspace move, rollback, or crash reload).
+  // Gates maybeApplyAgentSessionInfo: a freshly spawned upstream treats
+  // itself as a brand-new conversation and may emit its own title for the
+  // compaction seed it was just handed, but by that point this session
+  // already has a real title from its actual first turn — the fresh
+  // agent's guess must not clobber it. Only the session's original,
+  // never-respawned upstream gets to win the startup title race.
+  private _upstreamRespawned = false;
   // Wall-clock when the active prompt started, undefined when idle.
   // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
   // Also bumped/cleared by open/closeUnsolicitedTurn, so a session the
@@ -1545,10 +1554,13 @@ export class Session {
   // check is what makes switching safe: when the *old* agent exits as
   // part of a swap, this.agent has already been replaced, so we no-op
   // and don't tear the session down.
-  private wireAgent(agent: AgentInstance): void {
+  private wireAgent(agent: AgentInstance, opts?: { respawn?: boolean }): void {
     // Covers agent swaps that don't route through retireAgent (a cold
     // resurrect wires a fresh process with no predecessor to retire).
     this.resetBackgroundTaskLevel();
+    if (opts?.respawn) {
+      this._upstreamRespawned = true;
+    }
     agent.connection.onNotification("session/update", (params) => {
       // /hydra slash-command sub-prompts (e.g. title regeneration)
       // run "behind the scenes" — the agent's chunks for those are
@@ -2222,7 +2234,7 @@ export class Session {
     // lying about where the process is if the spawn failed, and every
     // subsequent respawn reads this value.
     this.cwd = cwd;
-    this.wireAgent(fresh.agent);
+    this.wireAgent(fresh.agent, { respawn: true });
 
     // Restore model and mode only for same-agent swaps. Cross-agent
     // swaps inherit the target agent's defaults from session/new — the
@@ -2587,7 +2599,7 @@ export class Session {
     // report would bank the same amount a second time. See the rollback note
     // in PROTOCOL.md "Cost ledger scope".
     this.accumulateAndResetCost();
-    this.wireAgent(fresh.agent);
+    this.wireAgent(fresh.agent, { respawn: true });
 
     const restored = await restoreCurrentModel({
       agent: fresh.agent,
@@ -2668,7 +2680,7 @@ export class Session {
     });
 
     this.accumulateAndResetCost();
-    this.wireAgent(fresh.agent);
+    this.wireAgent(fresh.agent, { respawn: true });
 
     const restored = await restoreCurrentModel({
       agent: fresh.agent,
@@ -7088,7 +7100,9 @@ export class Session {
   // Pick up an agent-emitted session_info_update and store its title
   // as our canonical record. The notification is also forwarded to
   // clients via the surrounding recordAndBroadcast call. Authoritative
-  // — overrides our placeholder.
+  // over our placeholder, but only for the session's original upstream:
+  // see _upstreamRespawned for why a respawned agent's own title never
+  // lands here.
   private maybeApplyAgentSessionInfo(params: unknown): void {
     const obj = (params ?? {}) as { update?: unknown };
     const update = (obj.update ?? {}) as {
@@ -7099,6 +7113,9 @@ export class Session {
       return;
     }
     if (typeof update.title !== "string") {
+      return;
+    }
+    if (this._upstreamRespawned) {
       return;
     }
     const trimmed = update.title.trim();
@@ -8189,7 +8206,7 @@ export class Session {
       ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
     });
     this.accumulateAndResetCost();
-    this.wireAgent(fresh.agent);
+    this.wireAgent(fresh.agent, { respawn: true });
 
     const oldAgent = this.agent;
     this.agent = fresh.agent;
