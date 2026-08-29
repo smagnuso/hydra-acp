@@ -4393,15 +4393,30 @@ async function runSession(
     }),
     config.tui.scriptRefreshMs,
   );
+  // Shared by the composer-bar and sidebar-gadget runners below: a
+  // script's daemon token, the daemon's own URL, and (when a session is
+  // resolved) the session id in the same form the REST API takes it in
+  // (e.g. GET /v1/sessions/:id, see the internal call at ~L2881) — so a
+  // script can scope its own calls to the session it's running under
+  // rather than only ever seeing daemon-wide data.
+  const scriptEnvFor = (command: string): Record<string, string> | undefined => {
+    const token = scriptTokens.get(command);
+    if (token === undefined) {
+      return undefined;
+    }
+    const env: Record<string, string> = {
+      HYDRA_ACP_TOKEN: token,
+      HYDRA_ACP_DAEMON_URL: target.baseUrl,
+    };
+    if (resolvedSessionId !== null) {
+      env.HYDRA_ACP_SESSION_ID = resolvedSessionId;
+    }
+    return env;
+  };
   if (scriptCommands.size > 0) {
     const scriptRunner = createScriptRunner({
       cwd: () => resolvedCwd,
-      envFor: (command) => {
-        const token = scriptTokens.get(command);
-        return token === undefined
-          ? undefined
-          : { HYDRA_ACP_TOKEN: token, HYDRA_ACP_DAEMON_URL: target.baseUrl };
-      },
+      envFor: scriptEnvFor,
       onOutput: (command, output) => screen.setScriptOutput(command, output),
     });
     scriptTicker = setInterval(() => {
@@ -4421,12 +4436,7 @@ async function runSession(
   if (sidebarProcessCommands.size > 0) {
     const sidebarProcessRunner = createProcessRunner({
       cwd: () => resolvedCwd,
-      envFor: (command) => {
-        const token = scriptTokens.get(command);
-        return token === undefined
-          ? undefined
-          : { HYDRA_ACP_TOKEN: token, HYDRA_ACP_DAEMON_URL: target.baseUrl };
-      },
+      envFor: scriptEnvFor,
       sanitize: sanitizeProcessOutput,
       onOutput: (command, output) => screen.setProcessOutput(command, output),
     });
