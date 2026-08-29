@@ -145,6 +145,13 @@ import { formatTokens } from "./bar/fields.js";
 import { collectScriptCommands, createScriptRunner } from "./bar/scripts.js";
 import { expandBarConfig } from "./bar/slots.js";
 import { mintScriptTokens, revokeScriptTokens } from "./shared/script-tokens.js";
+import { createProcessRunner } from "./shared/process-runner.js";
+import {
+  collectSidebarGadgetCommands,
+  collectSidebarGadgetConfigs,
+  sanitizeProcessOutput,
+  sidebarGadgetId,
+} from "./sidebar/process-gadget.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -1475,6 +1482,20 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }),
     config.tui.scriptRefreshMs,
   );
+  // Sidebar process gadgets share the same token batch as composer
+  // scripts — one sessionLabel, one mint call, one revoke call, covering
+  // both surfaces. A command configured on both sides collapses to one
+  // token either way, matching collectScriptCommands' own dedup rule.
+  for (const [command, refreshMs] of collectSidebarGadgetCommands(
+    config.tui.sidebar.gadgets,
+    config.tui.scriptRefreshMs,
+  )) {
+    const existing = scriptCommandsForTokens.get(command);
+    scriptCommandsForTokens.set(
+      command,
+      existing === undefined ? refreshMs : Math.min(existing, refreshMs),
+    );
+  }
   const scriptTokens =
     scriptCommandsForTokens.size > 0
       ? await mintScriptTokens(
@@ -2084,6 +2105,10 @@ async function runSession(
   // shelling out on a timer for a feature nobody configured is exactly
   // the cost the git-poll relevance predicate exists to avoid.
   let scriptTicker: NodeJS.Timeout | null = null;
+  // Same idea, for sidebar process gadgets (see sidebar/process-gadget.ts)
+  // — a separate ticker/runner because it preserves multi-line output
+  // instead of squashing to one line.
+  let sidebarProcessTicker: NodeJS.Timeout | null = null;
   // Wall-clock moment of the most recent session/update we received from
   // the daemon. The 1Hz timer reads this to detect a stalled upstream
   // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
@@ -4386,11 +4411,39 @@ async function runSession(
     // Prime immediately rather than waiting out the first tick.
     scriptRunner.poll(scriptCommands, Date.now());
   }
+  // Sidebar process gadgets: same polling shape as the composer bar's, but
+  // built directly on the shared runner (not bar/scripts.ts's wrapper) so
+  // output keeps its newlines instead of being squashed to one line.
+  const sidebarProcessCommands = collectSidebarGadgetCommands(
+    config.tui.sidebar.gadgets,
+    config.tui.scriptRefreshMs,
+  );
+  if (sidebarProcessCommands.size > 0) {
+    const sidebarProcessRunner = createProcessRunner({
+      cwd: () => resolvedCwd,
+      envFor: (command) => {
+        const token = scriptTokens.get(command);
+        return token === undefined
+          ? undefined
+          : { HYDRA_ACP_TOKEN: token, HYDRA_ACP_DAEMON_URL: target.baseUrl };
+      },
+      sanitize: sanitizeProcessOutput,
+      onOutput: (command, output) => screen.setProcessOutput(command, output),
+    });
+    sidebarProcessTicker = setInterval(() => {
+      sidebarProcessRunner.poll(sidebarProcessCommands, Date.now());
+    }, 1_000);
+    sidebarProcessTicker.unref?.();
+    sidebarProcessRunner.poll(sidebarProcessCommands, Date.now());
+  }
   // Seeded before the first paint too: a session whose history file is
   // already past the threshold should never flash the hints on its way to
   // collapsing them.
   syncHintsExhausted();
-  screen.setSidebarGadgets(config.tui.sidebar.gadgets);
+  screen.setSidebarProcessGadgets(
+    collectSidebarGadgetConfigs(config.tui.sidebar.gadgets),
+  );
+  screen.setSidebarGadgets(config.tui.sidebar.gadgets.map(sidebarGadgetId));
   screen.setSidebarWidth(config.tui.sidebar.width ?? null);
   screen.setSidebarBorder(config.tui.sidebar.border);
   screen.setSidebarSnapshot({
@@ -5761,6 +5814,10 @@ async function runSession(
     if (scriptTicker !== null) {
       clearInterval(scriptTicker);
       scriptTicker = null;
+    }
+    if (sidebarProcessTicker !== null) {
+      clearInterval(sidebarProcessTicker);
+      sidebarProcessTicker = null;
     }
     screen.clearWindowTitle();
     // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,

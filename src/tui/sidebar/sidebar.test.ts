@@ -24,6 +24,7 @@ import { DEFAULT_GADGET_IDS, gadgetById, SidebarRenderer } from "./registry.js";
 import { HydraConfig } from "../../core/config.js";
 import { emptySnapshot } from "./types.js";
 import type {
+  Gadget,
   SidebarAction,
   SidebarArmedTask,
   SidebarLine,
@@ -716,6 +717,45 @@ describe("SidebarRenderer", () => {
     expect(lines[0]!.body).not.toBe("");
     expect(lines.at(-1)!.body).not.toBe("");
     expect(lines.filter((l) => l.body === "")).toHaveLength(1);
+  });
+});
+
+describe("SidebarRenderer.setProcessGadgets", () => {
+  const fakeGadget = (id: string): Gadget => ({
+    id,
+    title: id,
+    relevant: () => true,
+    versionKey: () => "v",
+    render: () => [{ body: id }],
+  });
+
+  it("resolves a config id not in BUILTIN_GADGETS once registered", () => {
+    const r = new SidebarRenderer(["activity", "proc:x"]);
+    expect(r.configuredIds()).toEqual(["activity"]);
+    r.setProcessGadgets([fakeGadget("proc:x")]);
+    expect(r.configuredIds()).toEqual(["activity", "proc:x"]);
+  });
+
+  it("still drops an id that was never registered", () => {
+    const r = new SidebarRenderer(["activity", "proc:x"]);
+    r.setProcessGadgets([fakeGadget("proc:other")]);
+    expect(r.configuredIds()).toEqual(["activity"]);
+  });
+
+  it("resolves regardless of call order relative to setGadgets", () => {
+    const r = new SidebarRenderer([]);
+    r.setProcessGadgets([fakeGadget("proc:x")]);
+    r.setGadgets(["activity", "proc:x"]);
+    expect(r.configuredIds()).toEqual(["activity", "proc:x"]);
+  });
+
+  it("renders the registered gadget's own rows", () => {
+    const r = new SidebarRenderer(["proc:x"]);
+    r.setProcessGadgets([fakeGadget("proc:x")]);
+    // First row is the gadget's title (fakeGadget sets title: id); second
+    // is the body row render() returns.
+    const lines = r.render(snap(), ctx());
+    expect(lines.map((l) => l.body)).toEqual(["proc:x", "proc:x"]);
   });
 });
 

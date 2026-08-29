@@ -155,6 +155,11 @@ export interface SidebarSnapshot {
   // the answer should be readable at any moment, not just at the moment
   // it changed.
   workspace: { label: string; path: string } | null;
+  // Cached stdout for process-gadget script commands, keyed by the literal
+  // command string (same dedup unit the poller uses) — mirrors the bar's
+  // scriptOutputs map one level up. Absent entry means "no output yet",
+  // not "empty output".
+  processOutputs: ReadonlyMap<string, string>;
 }
 
 export interface SidebarTextMetrics {
@@ -355,5 +360,6 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     model: null,
     mode: null,
     workspace: null,
+    processOutputs: new Map(),
   };
 }

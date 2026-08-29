@@ -290,6 +290,10 @@ interface CacheEntry {
 
 export class SidebarRenderer {
   private cache = new Map<string, CacheEntry>();
+  // Config-constructed gadgets (process gadgets today), keyed by id.
+  // Checked before BUILTIN_GADGETS so a config id never collides with a
+  // builtin's — see setProcessGadgets.
+  private extraGadgets = new Map<string, Gadget>();
   // The bracket-mode bottom rule, memoized on width so an unchanged frame
   // returns the identical row object here too.
   // Frame rules, memoized per width. Three junctions share one entry
@@ -299,6 +303,13 @@ export class SidebarRenderer {
     lines: Record<FrameJunction, SidebarLine>;
   } | null = null;
   private gadgets: Gadget[] = [];
+  // The last id list handed to setGadgets, kept separately from the
+  // resolved `gadgets` above (which only holds what successfully
+  // resolved) so setProcessGadgets can re-resolve against the FULL
+  // requested list, not just whatever already survived — otherwise an id
+  // registered via setProcessGadgets after an earlier setGadgets call
+  // would already be dropped and unrecoverable.
+  private configuredGadgetIds: readonly string[] = DEFAULT_GADGET_IDS;
 
   constructor(ids: readonly string[] = DEFAULT_GADGET_IDS) {
     this.setGadgets(ids);
@@ -308,8 +319,9 @@ export class SidebarRenderer {
   // hand-editable and a typo shouldn't take the TUI down. Order follows
   // the configured list, so users control the column layout.
   setGadgets(ids: readonly string[]): void {
+    this.configuredGadgetIds = ids;
     const next = ids
-      .map((id) => gadgetById(id))
+      .map((id) => this.extraGadgets.get(id) ?? gadgetById(id))
       .filter((g): g is Gadget => g !== undefined);
     const changed =
       next.length !== this.gadgets.length ||
@@ -318,6 +330,15 @@ export class SidebarRenderer {
       this.gadgets = next;
       this.cache.clear();
     }
+  }
+
+  // Registers config-constructed gadgets (process gadgets) so setGadgets
+  // can resolve their ids. Re-resolves the last configured id list
+  // against the new extras, so this can be called either before or after
+  // setGadgets without losing an id.
+  setProcessGadgets(gadgets: readonly Gadget[]): void {
+    this.extraGadgets = new Map(gadgets.map((g) => [g.id, g]));
+    this.setGadgets(this.configuredGadgetIds);
   }
 
   configuredIds(): string[] {

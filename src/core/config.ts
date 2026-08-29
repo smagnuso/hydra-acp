@@ -300,6 +300,31 @@ const BarSlotEntry = z.union([
 
 export type BarSlotEntry = z.infer<typeof BarSlotEntry>;
 
+// A sidebar gadget entry: either a builtin's id (see DEFAULT_GADGET_IDS in
+// tui/sidebar/registry.ts) or a process gadget — a shell command run on a
+// timer, its stdout shown as a sidebar block. Same string-or-object shape
+// as BarSlotEntry above, for the same reason: a bare id needs no ceremony,
+// a process gadget needs a place to hang refreshMs/cap/title.
+const ProcessGadgetEntry = z
+  .object({
+    id: z.string().min(1),
+    script: z.string().min(1),
+    // Overrides tui.scriptRefreshMs for this entry. Ignored unless
+    // omitted defaults apply the same as a composer script slot.
+    refreshMs: z.number().int().positive().optional(),
+    title: z.string().optional(),
+    // Max lines shown before an overflow "+N more" row. Deliberately not
+    // pageSize-based pagination — see process-gadget.ts.
+    cap: z.number().int().positive().optional(),
+  })
+  .strict();
+
+export type ProcessGadgetEntry = z.infer<typeof ProcessGadgetEntry>;
+
+const SidebarGadgetEntry = z.union([z.string(), ProcessGadgetEntry]);
+
+export type SidebarGadgetEntry = z.infer<typeof SidebarGadgetEntry>;
+
 const BarSideConfig = z.array(BarSlotEntry);
 
 export type BarSideConfig = z.infer<typeof BarSideConfig>;
@@ -631,7 +656,7 @@ const TuiConfig = z.object({
       //   "none" — no rules at all, blank-row separation only.
       border: z.enum(["none", "rule", "frame"]).default("frame"),
       gadgets: z
-        .array(z.string())
+        .array(SidebarGadgetEntry)
         // Must stay in step with DEFAULT_GADGET_IDS in tui/sidebar/registry.ts.
         // Duplicated rather than imported because core must not depend on tui.
         .default([

@@ -28,7 +28,7 @@ import type {
   SessionInfo,
   UsageState,
 } from "./bar/types.js";
-import type { BarSideConfig } from "../core/config.js";
+import type { BarSideConfig, ProcessGadgetEntry } from "../core/config.js";
 import {
   DEFAULT_COMPOSER_BOTTOM_LEFT,
   DEFAULT_COMPOSER_BOTTOM_RIGHT,
@@ -38,6 +38,7 @@ import {
   DEFAULT_SESSIONBAR_RIGHT,
 } from "../core/config.js";
 import { SidebarRenderer } from "./sidebar/registry.js";
+import { createProcessGadget } from "./sidebar/process-gadget.js";
 import { emptySnapshot } from "./sidebar/types.js";
 import type { SidebarBorder, SidebarSnapshot } from "./sidebar/types.js";
 import wrapAnsi from "wrap-ansi";
@@ -2078,6 +2079,15 @@ export class Screen {
     this.scheduleRepaint();
   }
 
+  // Registers config-driven process gadgets so setSidebarGadgets can
+  // resolve their ids alongside the builtins. Called once at startup,
+  // order relative to setSidebarGadgets doesn't matter — see
+  // SidebarRenderer.setProcessGadgets.
+  setSidebarProcessGadgets(configs: readonly ProcessGadgetEntry[]): void {
+    this.sidebarRenderer.setProcessGadgets(configs.map(createProcessGadget));
+    this.scheduleRepaint();
+  }
+
   isSidebarGadgetConfigured(id: string): boolean {
     return this.sidebarRenderer.isConfigured(id);
   }
@@ -2161,6 +2171,33 @@ export class Screen {
       this.scriptOutputs.set(command, output);
     }
     this.scheduleRepaint();
+  }
+
+  // One process-gadget script command finished (or failed/timed out).
+  // Same contract as setScriptOutput, but the output lives directly on the
+  // sidebar snapshot (not a separate class field) since Gadget.render()
+  // only ever sees SidebarSnapshot — mirrors how the git/resources gadgets
+  // already get their data pushed in via setSidebarSnapshot.
+  setProcessOutput(command: string, output: string | null): void {
+    const current = this.sidebarSnapshot.processOutputs.get(command);
+    if (output === null) {
+      if (current === undefined) {
+        return;
+      }
+      const next = new Map(this.sidebarSnapshot.processOutputs);
+      next.delete(command);
+      this.sidebarSnapshot = { ...this.sidebarSnapshot, processOutputs: next };
+    } else {
+      if (current === output) {
+        return;
+      }
+      const next = new Map(this.sidebarSnapshot.processOutputs);
+      next.set(command, output);
+      this.sidebarSnapshot = { ...this.sidebarSnapshot, processOutputs: next };
+    }
+    if (this.sidebarVisible) {
+      this.scheduleRepaint();
+    }
   }
 
   appendLines(lines: FormattedLine[]): void {
