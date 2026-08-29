@@ -157,8 +157,10 @@ export interface SidebarSnapshot {
   workspace: { label: string; path: string } | null;
   // Cached stdout for process-gadget script commands, keyed by the literal
   // command string (same dedup unit the poller uses) — mirrors the bar's
-  // scriptOutputs map one level up. Absent entry means "no output yet",
-  // not "empty output".
+  // scriptOutputs map one level up. Absent entry covers both "hasn't run
+  // yet" and "ran, nothing to show" — setProcessOutput deletes on empty
+  // output rather than storing "", so the two aren't distinguished. A
+  // process gadget treats absence as "not relevant" (see process-gadget.ts).
   processOutputs: ReadonlyMap<string, string>;
 }
 

@@ -93,10 +93,19 @@ describe("collectSidebarGadgetCommands", () => {
 });
 
 describe("createProcessGadget", () => {
-  it("shows a placeholder before the first output arrives", () => {
+  it("is not relevant before the first output arrives", () => {
     const gadget = createProcessGadget({ id: "proc:x", script: "echo hi" });
-    const lines = gadget.render(snap(new Map()), ctx());
-    expect(lines).toEqual([{ body: "…", bodyStyle: "muted" }]);
+    expect(gadget.relevant(snap(new Map()))).toBe(false);
+  });
+
+  it("becomes relevant once output exists for its command", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "echo hi" });
+    expect(gadget.relevant(snap(new Map([["echo hi", "one"]])))).toBe(true);
+  });
+
+  it("renders nothing when called without output (defensive, relevant() gates this)", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "echo hi" });
+    expect(gadget.render(snap(new Map()), ctx())).toEqual([]);
   });
 
   it("splits output into lines, dropping blanks", () => {
@@ -154,11 +163,6 @@ describe("createProcessGadget", () => {
       ctx(),
     );
     expect(lines.map((l) => l.body)).toEqual(["hit"]);
-  });
-
-  it("is always relevant — presence in config is the signal to show it", () => {
-    const gadget = createProcessGadget({ id: "proc:x", script: "echo hi" });
-    expect(gadget.relevant(snap(new Map()))).toBe(true);
   });
 
   it("versionKey changes when the command's output changes", () => {

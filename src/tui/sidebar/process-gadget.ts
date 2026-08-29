@@ -70,13 +70,20 @@ export function createProcessGadget(cfg: ProcessGadgetEntry): Gadget {
   return {
     id: cfg.id,
     title: cfg.title ?? cfg.id,
-    relevant: () => true,
+    // Hidden rather than placeholder'd while there's nothing to show — no
+    // output yet and a run that came back empty are the same state
+    // (setProcessOutput deletes the entry either way), and the sidebar's
+    // convention is relevant()-gated hiding, not a "waiting…" row (see
+    // gitGadget/toolsGadget). A gadget author who wants a visible "nothing
+    // found" message writes it into the script's own output, same as the
+    // `|| echo 'no PR'` pattern.
+    relevant: (snapshot) => snapshot.processOutputs.has(cfg.script),
     versionKey: (snapshot, ctx) =>
       `${ctx.width}:${snapshot.processOutputs.get(cfg.script) ?? ""}`,
     render: (snapshot, ctx) => {
       const raw = snapshot.processOutputs.get(cfg.script);
       if (raw === undefined) {
-        return [{ body: "…", bodyStyle: "muted" }];
+        return [];
       }
       const { truncate } = ctx.metrics;
       const lines = raw.split("\n").filter((line) => line.length > 0);
