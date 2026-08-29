@@ -100,7 +100,12 @@ export async function runShim(opts: ShimOptions): Promise<void> {
         `hydra-acp: reconnected; resuming ${contexts.length} session(s)\n`,
       );
       for (const ctx of contexts) {
-        await replayAttach(upstream, ctx, tracker.lastMessageId(ctx.sessionId));
+        await replayAttach(
+          upstream,
+          ctx,
+          tracker.lastMessageId(ctx.sessionId),
+          tracker.lastSeq(ctx.sessionId),
+        );
       }
     },
   });
@@ -234,10 +239,15 @@ export function wireShim({
 
   const attachAfterRevival = async (sessionId: string): Promise<boolean> => {
     const afterMessageId = tracker.lastMessageId(sessionId);
+    const afterSeq = tracker.lastSeq(sessionId);
     const params: Record<string, unknown> = { sessionId };
     if (afterMessageId) {
       params.historyPolicy = "after_message";
       params.afterMessageId = afterMessageId;
+      // Exact cursor when the daemon stamps one; it wins server-side.
+      if (afterSeq !== undefined) {
+        params.afterSeq = afterSeq;
+      }
     } else {
       params.historyPolicy = "pending_only";
     }
@@ -630,6 +640,7 @@ async function replayAttach(
   stream: ResilientWsStream,
   ctx: ResumeContext,
   afterMessageId: string | undefined,
+  afterSeq: number | undefined,
 ): Promise<void> {
   const resumeHints: Record<string, unknown> = {
     upstreamSessionId: ctx.upstreamSessionId,
@@ -655,6 +666,10 @@ async function replayAttach(
   if (afterMessageId) {
     params.historyPolicy = "after_message";
     params.afterMessageId = afterMessageId;
+    // Exact cursor when the daemon stamps one; it wins server-side.
+    if (afterSeq !== undefined) {
+      params.afterSeq = afterSeq;
+    }
   } else {
     params.historyPolicy = "pending_only";
   }

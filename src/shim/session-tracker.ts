@@ -1,4 +1,5 @@
 import {
+  extractFrameSeq,
   extractHydraMeta,
   type JsonRpcId,
   type JsonRpcMessage,
@@ -58,6 +59,13 @@ export class SessionTracker {
   // reconnect-replay path to send historyPolicy:"after_message" with
   // afterMessageId so the daemon only replays the delta we missed.
   private lastMessageIds = new Map<string, string>();
+  // The exact form of the same cursor: `_meta["hydra-acp"].seq`, unique
+  // per recorded frame where messageId is shared by every chunk of a
+  // streamed reply. Sent as afterSeq alongside afterMessageId (the daemon
+  // prefers it) so a reconnect mid-reply resumes on the chunk we stopped
+  // at rather than past the reply's last one. Empty against a daemon that
+  // doesn't stamp seq.
+  private lastSeqs = new Map<string, number>();
   // Sessions THIS shim process itself created via session/new — never a
   // session it merely attached to or resumed (that one may already have
   // real history from elsewhere; it isn't ours to judge). Combined with
@@ -129,6 +137,12 @@ export class SessionTracker {
           typeof params.update?.messageId === "string"
             ? params.update.messageId
             : undefined;
+        if (sessionId) {
+          const seq = extractFrameSeq(msg.params);
+          if (seq !== undefined) {
+            this.lastSeqs.set(sessionId, seq);
+          }
+        }
         if (sessionId && messageId) {
           this.lastMessageIds.set(sessionId, messageId);
         }
@@ -243,6 +257,12 @@ export class SessionTracker {
   // historyPolicy:"after_message" with afterMessageId.
   lastMessageId(sessionId: string): string | undefined {
     return this.lastMessageIds.get(sessionId);
+  }
+
+  // Latest frame seq observed for `sessionId`. Paired with
+  // lastMessageId on the reconnect-replay attach; see lastSeqs.
+  lastSeq(sessionId: string): number | undefined {
+    return this.lastSeqs.get(sessionId);
   }
 
   clearPending(): void {

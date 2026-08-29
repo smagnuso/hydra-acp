@@ -47,7 +47,19 @@ export const SessionAttachParams = z.object({
   // messageId matches this value. If the id isn't found in the buffer,
   // the response.historyPolicy field surfaces "full" so the caller
   // knows we fell back. Per RFD #533.
+  //
+  // Superseded by afterSeq below, and only sound when the caller received
+  // the message whole: messageId names a message, not a frame, so a
+  // caller that dropped part-way through one cannot express that here.
   afterMessageId: z.string().optional(),
+  // Preferred cursor for "after_message": the `_meta["hydra-acp"].seq` of
+  // the last frame the caller processed. Unique per recorded frame, so
+  // the resume point is exact — unlike afterMessageId, which is one id
+  // shared by every chunk of a streamed reply. Wins over afterMessageId
+  // when both are sent. An unknown seq (compacted away, or a caller
+  // inventing one) falls back to "full" and says so in
+  // response.historyPolicy, same as a missing afterMessageId.
+  afterSeq: z.number().optional(),
   // Caller-assigned opaque id (e.g. a UUID). When provided, the proxy
   // echoes it in resolvedBy/sentBy and lifecycle events so other
   // clients can disambiguate multiple instances of the same

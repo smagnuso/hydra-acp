@@ -10,6 +10,7 @@ import { JsonRpcConnection } from "../acp/connection.js";
 import {
   HYDRA_META_KEY,
   extractHydraMeta,
+  extractFrameSeq,
   extractRecordedAt,
   type CancelPromptResult,
   type JsonRpcRequest,
@@ -2273,6 +2274,14 @@ async function runSession(
   // snapshots) aren't persisted to history, so we deliberately skip them
   // here — tracking one would force after_message to fall back to "full".
   let lastSeenMessageId: string | undefined = undefined;
+  // The same cursor, but exact: `_meta["hydra-acp"].seq` is unique per
+  // recorded frame where messageId is shared by every chunk of a reply.
+  // Sent as afterSeq and preferred by the daemon when present, so a
+  // reconnect landing mid-reply resumes at the chunk we actually stopped
+  // on instead of past the reply's last one — which used to drop the rest
+  // of the message for good. Stays undefined against a daemon that
+  // doesn't stamp seq, leaving the messageId path in charge.
+  let lastSeenSeq: number | undefined = undefined;
   // When non-null, session/update notifications get parked here instead of
   // running. Set by onReconnect before issuing session/attach with
   // after_message so the daemon's replay (delivered via notify() during
@@ -2324,6 +2333,10 @@ async function runSession(
       const u = (update as { messageId?: unknown }) ?? {};
       if (typeof u.messageId === "string") {
         lastSeenMessageId = u.messageId;
+      }
+      const seq = extractFrameSeq(params);
+      if (seq !== undefined) {
+        lastSeenSeq = seq;
       }
     }
     if (rawTag === "prompt_received") {
@@ -10235,7 +10248,12 @@ async function runSession(
         });
       }
     }
-    const useAfterMessage = lastSeenMessageId !== undefined;
+    // Either cursor qualifies. They're normally set together (every
+    // recordable frame carries both), but keying only on the messageId
+    // would silently drop to historyPolicy:"none" — replaying nothing at
+    // all — if we ever held a seq without one.
+    const useAfterMessage =
+      lastSeenMessageId !== undefined || lastSeenSeq !== undefined;
     const attachReq: JsonRpcRequest = {
       jsonrpc: "2.0",
       id: `tui-reattach-${nanoid()}`,
@@ -10243,7 +10261,17 @@ async function runSession(
       params: {
         sessionId: resolvedSessionId,
         historyPolicy: useAfterMessage ? "after_message" : "none",
-        ...(useAfterMessage ? { afterMessageId: lastSeenMessageId } : {}),
+        ...(useAfterMessage && lastSeenMessageId !== undefined
+          ? { afterMessageId: lastSeenMessageId }
+          : {}),
+        // Exact cursor when the daemon stamps one; the daemon prefers it
+        // over afterMessageId, which can only name a whole message and so
+        // cannot express "I stopped part-way through this reply". Both go
+        // out (PROTOCOL.md recommends it) so a daemon predating seq still
+        // gets a cursor it understands.
+        ...(useAfterMessage && lastSeenSeq !== undefined
+          ? { afterSeq: lastSeenSeq }
+          : {}),
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
         ...(() => {
           const meta: Record<string, unknown> = {};
@@ -10277,6 +10305,7 @@ async function runSession(
       step: "attach-send",
       useAfterMessage,
       lastSeenMessageId,
+      lastSeenSeq,
     });
     try {
       const resp = await stream.request(attachReq);

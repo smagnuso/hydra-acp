@@ -779,6 +779,63 @@ export function withRecordedAt(
   };
 }
 
+// Stamp notification params with the frame's sequence number, under
+// `_meta["hydra-acp"].seq`. This is the cursor a client sends back as
+// `afterSeq` on session/attach to resume exactly where it left off; see
+// HistoryEntry.seq for why messageId cannot serve that role. Absent on
+// state-kind updates (never recorded, so never resumable) and on daemons
+// predating the field — a client seeing no seq falls back to
+// afterMessageId.
+//
+// Never overwrites an existing value, matching withRecordedAt: a replay
+// re-stamping a frame must not renumber it.
+export function withFrameSeq(params: unknown, seq: number | undefined): unknown {
+  if (
+    typeof seq !== "number" ||
+    !Number.isFinite(seq) ||
+    !params ||
+    typeof params !== "object" ||
+    Array.isArray(params)
+  ) {
+    return params;
+  }
+  const p = params as Record<string, unknown>;
+  const meta =
+    p._meta && typeof p._meta === "object" && !Array.isArray(p._meta)
+      ? (p._meta as Record<string, unknown>)
+      : {};
+  const raw = meta[HYDRA_META_KEY];
+  const inner =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  if (typeof inner.seq === "number") {
+    return params;
+  }
+  return {
+    ...p,
+    _meta: { ...meta, [HYDRA_META_KEY]: { ...inner, seq } },
+  };
+}
+
+// Read side of withFrameSeq. Undefined when the frame carries no cursor
+// (state kind, or a daemon predating the field).
+export function extractFrameSeq(params: unknown): number | undefined {
+  if (!params || typeof params !== "object") {
+    return undefined;
+  }
+  const meta = (params as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object") {
+    return undefined;
+  }
+  const inner = (meta as Record<string, unknown>)[HYDRA_META_KEY];
+  if (!inner || typeof inner !== "object") {
+    return undefined;
+  }
+  const seq = (inner as { seq?: unknown }).seq;
+  return typeof seq === "number" && Number.isFinite(seq) ? seq : undefined;
+}
+
 // Read side of withRecordedAt. Returns undefined when the stamp is absent
 // (state-kind update, ephemeral push, or a daemon predating the field), in
 // which case callers should fall back to their local clock.

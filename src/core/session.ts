@@ -112,7 +112,12 @@ import type {
   SteeringResult,
   UpdatePromptResult,
 } from "../acp/types.js";
-import { JsonRpcErrorCodes, extractHydraMeta, withRecordedAt } from "../acp/types.js";
+import {
+  JsonRpcErrorCodes,
+  extractHydraMeta,
+  withFrameSeq,
+  withRecordedAt,
+} from "../acp/types.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import type { SentBy } from "../daemon/sent-by.js";
 import * as fsp from "node:fs/promises";
@@ -1065,6 +1070,16 @@ export class Session {
   // or attach/detach, which would otherwise let passive observers
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
+  // Last frame sequence handed out (see HistoryEntry.seq). Seeded from
+  // the wall clock rather than persisted or read back off disk: a fresh
+  // process starts at 0, and the first frame it records takes
+  // max(prev + 1, Date.now()) — necessarily larger than every seq the
+  // previous process assigned, since each of those was itself at least
+  // its own (earlier) record time. That buys monotonicity across
+  // restarts, resurrects and agent swaps without a counter to persist or
+  // a load to await, which matters because recordAndBroadcast is
+  // synchronous and can fire before any history read has happened.
+  private lastSeq = 0;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
   private mintMcpServersForSwap: ((session: Session) => Promise<unknown[]>) | undefined;
   private loadExistingAgentSession: LoadExistingAgentSession | undefined;
@@ -2970,6 +2985,7 @@ export class Session {
     historyPolicy: HistoryPolicy,
     opts: {
       afterMessageId?: string;
+      afterSeq?: number;
       raw?: boolean;
       toolContent?: "inline" | "references";
     } = {},
@@ -3012,6 +3028,7 @@ export class Session {
     historyPolicy: HistoryPolicy,
     opts: {
       afterMessageId?: string;
+      afterSeq?: number;
       raw?: boolean;
       toolContent?: "inline" | "references";
     },
@@ -3044,9 +3061,16 @@ export class Session {
     const replayable = raw.filter((e) => !isStateUpdate(e.method, e.params));
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
-      const cutoff = opts.afterMessageId
-        ? findMessageIdIndex(replayable, opts.afterMessageId)
-        : -1;
+      // afterSeq wins when the client has one: it addresses a single
+      // frame, so the cutoff is exact. afterMessageId addresses a whole
+      // message and is kept only for clients that predate seq — see
+      // findMessageIdIndex for what that costs them.
+      const cutoff =
+        opts.afterSeq !== undefined
+          ? findSeqIndex(replayable, opts.afterSeq)
+          : opts.afterMessageId
+            ? findMessageIdIndex(replayable, opts.afterMessageId)
+            : -1;
       if (cutoff < 0) {
         return {
           entries: [...state, ...maybeCoalesce(replayable)],
@@ -9485,13 +9509,20 @@ export class Session {
     // recordedAt is already a first-class column on CachedNotification and
     // the replay path re-derives the _meta from it.
     const recordedAt = Date.now();
-    const wire = recordable ? withRecordedAt(broadcast, recordedAt) : broadcast;
+    // Frame cursor. Assigned before the wire stamp so live and replayed
+    // deliveries of the same frame carry the same seq — a client's cursor
+    // has to mean the same thing whichever way it arrived.
+    const seq = recordable ? (this.lastSeq = Math.max(this.lastSeq + 1, recordedAt)) : undefined;
+    const wire = recordable
+      ? withFrameSeq(withRecordedAt(broadcast, recordedAt), seq)
+      : broadcast;
     if (recordable) {
       this.noteRecordedToolCall(method, broadcast);
       const entry: CachedNotification = {
         method,
         params: broadcast,
         recordedAt,
+        seq,
       };
       this.lastRecordedAt = entry.recordedAt;
       this.appendCount += 1;
@@ -10640,15 +10671,43 @@ function ensureMessageIdOnUpdate(method: string, params: unknown): unknown {
   };
 }
 
+// Index of the entry carrying `seq`, or -1 if this history doesn't hold
+// it (compacted away, or written before seq existed) — in which case
+// attach() falls back to a full replay rather than guessing.
+//
+// This is the sound cursor: seq is unique per frame, so "everything after
+// seq S" means one thing. Contrast findMessageIdIndex below.
+export function findSeqIndex(
+  history: CachedNotification[],
+  target: number,
+): number {
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.seq === target) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // Walk a history snapshot and find the index of the entry whose
 // session/update.messageId matches `target`. Returns -1 if not found.
-// Used by attach() to compute the after_message replay slice, and by
+// Used by attach() as the pre-seq fallback cursor, and by
 // SessionManager.forkSession to slice history at a turn boundary.
 // Returns the LAST matching index, not the first: a single streamed
-// message shares one messageId across every chunk, and both callers need
-// the boundary at the complete message, not its first chunk — otherwise
-// after_message replays (almost) the whole message a second time, and
-// forkAt truncates it mid-stream.
+// message shares one messageId across every chunk, and forkAt needs the
+// boundary at the complete message, not its first chunk.
+//
+// For a replay cursor that choice is a coin toss between two wrong
+// answers, which is why afterSeq exists. A client that disconnected
+// part-way through a message names that message here, and last-index
+// resumes past its final chunk — everything it hadn't received is
+// dropped, permanently, since its cursor then sits beyond the gap.
+// (Measured live: a 27s turn that rendered its prompt and turn-stamp with
+// the entire reply missing.) First-index would trade that for replaying
+// content the client already has, which clients that dedupe streamed
+// chunks cannot detect either. Only afterSeq distinguishes the two cases;
+// prefer it, and treat this path as compatibility for clients that
+// haven't been taught seq yet.
 export function findMessageIdIndex(
   history: CachedNotification[],
   target: string,

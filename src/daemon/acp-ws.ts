@@ -26,6 +26,7 @@ import {
   extractHydraMeta,
   HYDRA_META_KEY,
   mergeMeta,
+  withFrameSeq,
   withRecordedAt,
   sessionListEntryToWire,
   buildHydraSessionMeta,
@@ -1031,7 +1032,10 @@ export function registerAcpWsEndpoint(
             break;
           }
           await connection
-            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+            .notify(
+              note.method,
+              withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+            )
             .catch(() => undefined);
         }
         return { ...result, sessionId: session.sessionId };
@@ -1100,7 +1104,10 @@ export function registerAcpWsEndpoint(
             break;
           }
           await connection
-            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+            .notify(
+              note.method,
+              withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+            )
             .catch(() => undefined);
         }
         return { sessionId: session.sessionId };
@@ -1608,7 +1615,10 @@ export function registerAcpWsEndpoint(
               break;
             }
             await connection
-              .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+              .notify(
+                note.method,
+                withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+              )
               .catch(() => undefined);
           }
         })();
@@ -1689,7 +1699,10 @@ export function registerAcpWsEndpoint(
         );
         for (const entry of history) {
           await connection
-            .notify(entry.method, withRecordedAt(entry.params, entry.recordedAt))
+            .notify(
+              entry.method,
+              withFrameSeq(withRecordedAt(entry.params, entry.recordedAt), entry.seq),
+            )
             .catch(() => undefined);
         }
         return {
@@ -1811,6 +1824,7 @@ export function registerAcpWsEndpoint(
         params.historyPolicy,
         {
           afterMessageId: params.afterMessageId,
+          afterSeq: params.afterSeq,
           raw: drip,
           // Lean clients opt into ref-form tool content via _meta; default
           // stays inline so existing/third-party clients are unaffected.
@@ -1860,7 +1874,10 @@ export function registerAcpWsEndpoint(
               prev = at;
             }
             try {
-              await connection.notify(note.method, withRecordedAt(note.params, at ?? undefined));
+              await connection.notify(
+                note.method,
+                withFrameSeq(withRecordedAt(note.params, at ?? undefined), note.seq),
+              );
             } catch {
               // Client detached mid-drip — stop quietly.
               return;
@@ -1884,7 +1901,10 @@ export function registerAcpWsEndpoint(
           }
           const note = replay[i]!;
           const pending = connection
-            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+            .notify(
+              note.method,
+              withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+            )
             .catch(() => undefined);
           if ((i + 1) % REPLAY_FLUSH_EVERY === 0) {
             await pending;
@@ -2303,7 +2323,10 @@ export function registerAcpWsEndpoint(
           break;
         }
         await connection
-          .notify(note.method, withRecordedAt(note.params, note.recordedAt))
+          .notify(
+            note.method,
+            withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+          )
           .catch(() => undefined);
       }
       session.replayPendingPermissions(client);

@@ -95,6 +95,12 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
     ) {
       if (chunkRun && chunkRun.kind === kind) {
         appendChunkText(out, chunkRun.outIndex, readChunkText(upd.content));
+        // The merged frame now carries this chunk's text, so it must also
+        // carry this chunk's cursor. Leaving the run's leading seq would
+        // understate what the client received: its next after_message
+        // reconnect would resume from the head of a message it already
+        // has in full and be sent the whole thing again.
+        advanceSeq(out, chunkRun.outIndex, entry.seq);
       } else {
         out.push(entry);
         chunkRun = { outIndex: out.length - 1, kind };
@@ -167,6 +173,24 @@ function readChunkText(content: unknown): string {
   }
   const c = content as Record<string, unknown>;
   return typeof c.text === "string" ? c.text : "";
+}
+
+// Move a merged frame's cursor forward to the newest chunk folded into
+// it. Guarded against going backwards so an out-of-order or seq-less
+// entry can't rewind a cursor the client would then resume from.
+function advanceSeq(
+  out: HistoryEntry[],
+  index: number,
+  seq: number | undefined,
+): void {
+  const entry = out[index];
+  if (entry === undefined || typeof seq !== "number") {
+    return;
+  }
+  if (entry.seq !== undefined && entry.seq >= seq) {
+    return;
+  }
+  out[index] = { ...entry, seq };
 }
 
 function appendChunkText(

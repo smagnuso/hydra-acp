@@ -26,6 +26,19 @@ export interface HistoryEntry {
   method: string;
   params: unknown;
   recordedAt: number;
+  // Strictly increasing per session, unique per recorded frame, and the
+  // only sound cursor for after_message replay. messageId is not: agents
+  // stamp one id on every chunk of a reply (thought chunks included), so
+  // "resume after messageId M" cannot distinguish a client that has all
+  // of M from one that has only its first chunk — and resolving it to M's
+  // last frame silently dropped everything in between for the latter.
+  // See Session.recordAndBroadcast for how it's assigned and
+  // Session.loadReplay for how a cursor is resolved.
+  //
+  // Optional because every entry written before this field existed lacks
+  // one. Those stay replayable; they just can't be addressed by seq, and
+  // a client holding no seq falls back to the messageId cursor.
+  seq?: number;
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -466,6 +479,7 @@ export class HistoryStore {
           method: obj.method,
           params: obj.params,
           recordedAt: obj.recordedAt,
+          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
         });
       }
     }
@@ -546,6 +560,7 @@ export class HistoryStore {
           method: obj.method,
           params: obj.params,
           recordedAt: obj.recordedAt,
+          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
         };
       }
     } finally {
@@ -839,6 +854,7 @@ export class HistoryStore {
         method: obj.method,
         params: obj.params,
         recordedAt: obj.recordedAt,
+        ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
       });
     }
     const effectiveCap = opts.maxEntries ?? this.maxEntries;

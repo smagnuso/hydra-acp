@@ -670,6 +670,125 @@ describe("Session", () => {
       expect(entries.length).toBeGreaterThan(0);
     });
 
+    it("afterSeq resumes mid-message where afterMessageId cannot", async () => {
+      // The bug afterSeq exists for. A reply's chunks all share one
+      // messageId, so a client that dropped after chunk 1 names the whole
+      // reply — and findMessageIdIndex resolves that to its LAST chunk,
+      // replaying from past the end and losing chunks 2 and 3 for good.
+      // seq is per-frame, so the same client resumes exactly.
+      const { session, mock } = makeSession("sess_seq", "u_seq");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+
+      const sharedId = "msg_shared_across_chunks";
+      for (const text of ["chunk 1", "chunk 2", "chunk 3"]) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_seq",
+          update: { sessionUpdate: "agent_message_chunk", content: { text }, messageId: sharedId },
+        });
+      }
+      mock.triggerNotification("session/update", {
+        sessionId: "u_seq",
+        update: { sessionUpdate: "turn_complete", stopReason: "end_turn" },
+      });
+      await flushHistoryWrites();
+
+      const snap = await session.getHistorySnapshot();
+      const chunks = snap.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "agent_message_chunk",
+      );
+      expect(chunks).toHaveLength(3);
+      const firstChunkSeq = chunks[0]?.seq;
+      expect(typeof firstChunkSeq).toBe("number");
+
+      // Resume as a client that only ever received chunk 1.
+      const { client: late } = makeClient();
+      const { entries, appliedPolicy } = await session.attach(
+        late,
+        "after_message",
+        { afterSeq: firstChunkSeq, raw: true },
+      );
+      expect(appliedPolicy).toBe("after_message");
+      const delta = entries.filter((e) => !isStateSnapshotEntry(e));
+      const texts = delta
+        .filter(
+          (e) =>
+            (e.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === "agent_message_chunk",
+        )
+        .map((e) => (e.params as { update: { content: { text: string } } }).update.content.text);
+      expect(texts).toEqual(["chunk 2", "chunk 3"]);
+    });
+
+    it("afterSeq wins over a same-request afterMessageId", async () => {
+      const { session, mock } = makeSession("sess_seq2", "u_seq2");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+      const sharedId = "msg_both_cursors";
+      for (const text of ["a", "b"]) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_seq2",
+          update: { sessionUpdate: "agent_message_chunk", content: { text }, messageId: sharedId },
+        });
+      }
+      await flushHistoryWrites();
+      const snap = await session.getHistorySnapshot();
+      const firstSeq = snap.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "agent_message_chunk",
+      )?.seq;
+
+      const { client: late } = makeClient();
+      const { entries } = await session.attach(late, "after_message", {
+        // afterMessageId alone would resolve past "b"; afterSeq must win.
+        afterMessageId: sharedId,
+        afterSeq: firstSeq,
+        raw: true,
+      });
+      const delta = entries.filter((e) => !isStateSnapshotEntry(e));
+      expect(delta).toHaveLength(1);
+      expect(
+        (delta[0]?.params as { update: { content: { text: string } } }).update.content.text,
+      ).toBe("b");
+    });
+
+    it("an unknown afterSeq falls back to full", async () => {
+      const { session, mock } = makeSession("sess_seq3", "u_seq3");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_seq3",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "x" } },
+      });
+      await flushHistoryWrites();
+      const { client: late } = makeClient();
+      const { appliedPolicy } = await session.attach(late, "after_message", {
+        afterSeq: 1,
+      });
+      expect(appliedPolicy).toBe("full");
+    });
+
+    it("recorded frames carry strictly increasing seqs", async () => {
+      const { session, mock } = makeSession("sess_seq4", "u_seq4");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+      for (const text of ["a", "b", "c", "d"]) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_seq4",
+          update: { sessionUpdate: "agent_message_chunk", content: { text } },
+        });
+      }
+      await flushHistoryWrites();
+      const seqs = (await session.getHistorySnapshot()).map((e) => e.seq);
+      expect(seqs.every((n) => typeof n === "number")).toBe(true);
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i]!).toBeGreaterThan(seqs[i - 1]!);
+      }
+    });
+
     it("after_message without afterMessageId falls back to full", async () => {
       const { session } = makeSession();
       const { client: a } = makeClient();
