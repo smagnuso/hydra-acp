@@ -485,6 +485,30 @@ const TuiConfig = z.object({
   // running. Set false if your terminal renders this obnoxiously or you
   // just don't want it.
   progressIndicator: z.boolean().default(true),
+  // Which terminal-host adapter (src/tui/term-host) integrates with this
+  // pane — reporting, tab open/reveal, label sync, all of it.
+  //
+  //   true | "auto" (default) — autodetect from the real environment;
+  //     innermost host wins when more than one nests (paseo is a
+  //     deliberate exception to that rule — see term-host/index.ts).
+  //   false — disable terminal-host integration entirely: no reporting, no
+  //     launcher-mode tab opens, regardless of launcherModeWhenHosted.
+  //   "paseo" | "herdr" | "tmux" — force that adapter, bypassing detect().
+  //     For a host whose detection env vars don't survive to this process
+  //     (a wrapper that scrubs them) or for exercising an adapter you
+  //     aren't actually inside. The forced adapter still has to construct
+  //     successfully — it reads its own env vars from the real process
+  //     environment at that point, and simply comes up as no host if
+  //     they're missing, the same as a failed autodetect would.
+  //
+  // Must stay in step with the candidate ids in tui/term-host/index.ts —
+  // duplicated rather than imported because core must not depend on tui.
+  //
+  // HYDRA_ACP_TERMINAL_HOST overrides this for a single run, same values
+  // plus "1"/"0" as boolean spellings.
+  terminalHost: z
+    .union([z.boolean(), z.enum(["auto", "paseo", "herdr", "tmux"])])
+    .default(true),
   // When true, the TUI enters terminal-host launcher mode on its own in any
   // pane where a supported host (herdr or tmux) is detected, exactly as if
   // --terminal-host-launcher had been passed. Off by default: the mode

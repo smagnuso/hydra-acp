@@ -3,8 +3,10 @@ import {
   CANDIDATES,
   __resetTerminalHostForTests,
   initTerminalHost,
+  parseTerminalHostOverride,
   setTerminalHost,
   terminalHost,
+  terminalHostOverrideKeywords,
 } from "./index.js";
 import type { TerminalHost, TerminalHostCandidate } from "./types.js";
 
@@ -148,6 +150,85 @@ describe("initTerminalHost", () => {
     // pane. Screen's funnels run under the test suite; only an explicit init
     // from runTuiApp makes them live.
     expect(terminalHost()).toBeNull();
+  });
+});
+
+describe("initTerminalHost override", () => {
+  afterEach(() => {
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_PANE_ID;
+    delete process.env.TMUX;
+    delete process.env.TMUX_PANE;
+  });
+
+  it("false disables the host even when the env matches a candidate", () => {
+    const host = initTerminalHost(
+      { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/h.sock", HERDR_PANE_ID: "w1:p1" },
+      false,
+    );
+    expect(host).toBeNull();
+    expect(terminalHost()).toBeNull();
+  });
+
+  it("forces the named candidate ahead of one that would otherwise win by list order", () => {
+    // herdr precedes tmux in CANDIDATES, so an ordinary detect() walk would
+    // resolve herdr here. Forcing "tmux" has to skip detect() outright, not
+    // just reorder the walk, to win against it.
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_SOCKET_PATH = "/tmp/h.sock";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    process.env.TMUX = "/tmp/tmux-1000/default,4091673,0";
+    process.env.TMUX_PANE = "%4";
+    const host = initTerminalHost(process.env, "tmux");
+    expect(host?.id).toBe("tmux");
+  });
+
+  it('"auto" and true behave like the default detect() walk', () => {
+    const env = {
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: "/tmp/h.sock",
+      HERDR_PANE_ID: "w1:p1",
+    };
+    expect(initTerminalHost(env, "auto")?.id).toBe("herdr");
+    expect(initTerminalHost(env, true)?.id).toBe("herdr");
+  });
+
+  it("a forced id whose adapter can't construct comes up as no host, not a throw", () => {
+    // tmuxCandidate.create() throws when process.env lacks TMUX/TMUX_PANE —
+    // same failure mode as a missed autodetect, deliberately not surfaced
+    // differently just because the id was forced.
+    expect(initTerminalHost({}, "tmux")).toBeNull();
+  });
+});
+
+describe("parseTerminalHostOverride", () => {
+  it("parses boolean spellings", () => {
+    expect(parseTerminalHostOverride("true")).toBe(true);
+    expect(parseTerminalHostOverride("1")).toBe(true);
+    expect(parseTerminalHostOverride("false")).toBe(false);
+    expect(parseTerminalHostOverride("0")).toBe(false);
+  });
+
+  it('parses "auto" and every candidate id', () => {
+    expect(parseTerminalHostOverride("auto")).toBe("auto");
+    for (const c of CANDIDATES) {
+      expect(parseTerminalHostOverride(c.id)).toBe(c.id);
+    }
+  });
+
+  it("returns undefined for anything else, leaving the error message to the caller", () => {
+    expect(parseTerminalHostOverride("bogus")).toBeUndefined();
+    expect(parseTerminalHostOverride("")).toBeUndefined();
+  });
+});
+
+describe("terminalHostOverrideKeywords", () => {
+  it("lists every token parseTerminalHostOverride accepts", () => {
+    const keywords = terminalHostOverrideKeywords();
+    for (const token of ["true", "false", "1", "0", "auto", ...CANDIDATES.map((c) => c.id)]) {
+      expect(keywords).toContain(token);
+    }
   });
 });
 

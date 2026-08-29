@@ -70,18 +70,79 @@ export const CANDIDATES: readonly TerminalHostCandidate[] = [
   tmuxCandidate,
 ];
 
+/**
+ * What to do about detection, per tui.terminalHost / --terminal-host /
+ * HYDRA_ACP_TERMINAL_HOST.
+ *
+ *   true | "auto" — run the normal detect() walk over CANDIDATES.
+ *   false         — never activate a host.
+ *   a candidate id — construct that one directly, skipping detect()
+ *                    entirely (for it AND for every candidate ahead of it
+ *                    in CANDIDATES order).
+ */
+export type TerminalHostOverride =
+  | boolean
+  | "auto"
+  | (typeof CANDIDATES)[number]["id"];
+
+/** Every string spelling parseTerminalHostOverride() accepts, for error text. */
+export function terminalHostOverrideKeywords(): readonly string[] {
+  return ["true", "false", "1", "0", "auto", ...CANDIDATES.map((c) => c.id)];
+}
+
+/**
+ * Parse one raw token (a --terminal-host value, or the env var behind it via
+ * resolveOption) into an override. Undefined means unrecognised — the
+ * caller decides whether that's a hard error (cli.ts, before the TUI takes
+ * the terminal) or something to ignore.
+ *
+ * Pure and side-effect free on purpose: cli.ts owns how a bad value is
+ * reported.
+ */
+export function parseTerminalHostOverride(
+  raw: string,
+): TerminalHostOverride | undefined {
+  if (raw === "true" || raw === "1") {
+    return true;
+  }
+  if (raw === "false" || raw === "0") {
+    return false;
+  }
+  if (raw === "auto") {
+    return "auto";
+  }
+  const match = CANDIDATES.find((c) => c.id === raw);
+  return match ? (match.id as TerminalHostOverride) : undefined;
+}
+
 let active: TerminalHost | null = null;
 
 /**
  * Resolve and activate the terminal host for this process.
  *
  * Called once from runTuiApp; paired with releaseTerminalHost() on exit.
- * Returns the host (or null when we aren't inside a recognised one) so the
- * caller can log which integration is live.
+ * Returns the host (or null when we aren't inside a recognised one, or
+ * override is false) so the caller can log which integration is live.
  */
 export function initTerminalHost(
   env: NodeJS.ProcessEnv = process.env,
+  override: TerminalHostOverride = "auto",
 ): TerminalHost | null {
+  if (override === false) {
+    active = null;
+    return null;
+  }
+  if (override !== true && override !== "auto") {
+    const forced = CANDIDATES.find((c) => c.id === override);
+    if (forced) {
+      try {
+        active = forced.create();
+      } catch {
+        active = null;
+      }
+      return active;
+    }
+  }
   for (const candidate of CANDIDATES) {
     let detected = false;
     try {

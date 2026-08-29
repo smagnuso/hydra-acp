@@ -165,6 +165,7 @@ import {
   restoreReportedCwd,
 } from "./terminal-user-var.js";
 import { initTerminalHost } from "./term-host/index.js";
+import type { TerminalHostOverride } from "./term-host/index.js";
 import {
   openInNewTab,
   revealOrOpen,
@@ -768,6 +769,11 @@ export interface TuiOptions {
   // the config and turn the mode back on; the refusal has to propagate to
   // stay refused.
   terminalHostLauncherOptOut?: boolean;
+  // --terminal-host from the CLI (already flag-vs-HYDRA_ACP_TERMINAL_HOST
+  // resolved and validated by dispatchTui before the TUI took the
+  // terminal). Beats tui.terminalHost for this run only; undefined means
+  // "nothing passed, use config".
+  terminalHostOverride?: TerminalHostOverride;
   // Auto-approve every session/request_permission instead of showing
   // the modal. Wire bypass for the user; the CLI prints a stderr
   // warning at startup so it's never silent. Useful for unattended
@@ -1205,11 +1211,6 @@ async function dispatchToTerminalHost(
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   installCrashLogging();
-  // Opt in to terminal-host reporting for the real TUI only. The taps live
-  // in Screen, so without this gate anything constructing a Screen —
-  // notably the test suite — would report to the developer's own pane.
-  // Paired with releaseTerminalHost() in the finally below.
-  initTerminalHost();
   // Tabs this process opens inherit the mode, so an index-shaped workspace
   // stays index-shaped however deep the tab tree goes.
   setLauncherMode(
@@ -1223,6 +1224,17 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // the buffer here — we don't consume resource timing anyway.
   performance.setResourceTimingBufferSize(0);
   const config = await loadConfig();
+  // Opt in to terminal-host reporting for the real TUI only. The taps live
+  // in Screen, so without this gate anything constructing a Screen —
+  // notably the test suite — would report to the developer's own pane.
+  // Paired with releaseTerminalHost() in the finally below. Needs config
+  // loaded first: opts.terminalHostOverride (from --terminal-host /
+  // HYDRA_ACP_TERMINAL_HOST) beats tui.terminalHost, which is the "auto"
+  // default initTerminalHost already knows how to handle.
+  initTerminalHost(
+    process.env,
+    opts.terminalHostOverride ?? config.tui.terminalHost,
+  );
   // Local daemon target unless the caller pre-resolved a remote one.
   // `hydra session attach hydra://...` does the resolution up front so
   // the password prompt happens before we touch the terminal; the

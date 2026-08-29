@@ -92,6 +92,10 @@ const KNOWN_VALUE_FLAGS = new Set([
   "stream-bytes",
   "stream-threshold",
   "tail",
+  // `hydra tui --terminal-host <id>`: force the term-host adapter (paseo,
+  // herdr, tmux), or true/false/auto. Overrides tui.terminalHost for one
+  // run; HYDRA_ACP_TERMINAL_HOST behind it via resolveOption.
+  "terminal-host",
   "timeout",
   "to",
 ]);

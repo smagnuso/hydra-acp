@@ -13,6 +13,7 @@ import {
   type ResolvedSession,
 } from "./cli/resolve-session.js";
 import { writeDebugLine } from "./tui/debug-log.js";
+import type { TerminalHostOverride } from "./tui/term-host/index.js";
 import { runInit } from "./cli/commands/init.js";
 import {
   runDaemonLogs,
@@ -994,6 +995,24 @@ async function dispatchTui(
     );
     process.exit(2);
   }
+  // --terminal-host (or HYDRA_ACP_TERMINAL_HOST behind it, via
+  // resolveOption): forces or disables the term-host adapter for this run,
+  // overriding tui.terminalHost. Validated here, before the TUI takes the
+  // terminal, same posture as the launcher-mode checks above.
+  const terminalHostRaw = resolveOption(flags, "terminal-host");
+  let terminalHostOverride: TerminalHostOverride | undefined;
+  if (terminalHostRaw !== undefined) {
+    const { parseTerminalHostOverride, terminalHostOverrideKeywords } =
+      await import("./tui/term-host/index.js");
+    const parsed = parseTerminalHostOverride(terminalHostRaw);
+    if (parsed === undefined) {
+      process.stderr.write(
+        `hydra-acp: --terminal-host must be one of ${terminalHostOverrideKeywords().join(", ")} (got ${JSON.stringify(terminalHostRaw)}).\n`,
+      );
+      process.exit(2);
+    }
+    terminalHostOverride = parsed;
+  }
   if (readonly && base.sessionId === undefined) {
     process.stderr.write(
       "hydra-acp: --readonly requires a session id. Pass --session <id-or-url> --readonly, or open the picker and press `v` on a session.\n",
@@ -1088,6 +1107,9 @@ async function dispatchTui(
   }
   if (launcherOffFlag) {
     tuiOpts.terminalHostLauncherOptOut = true;
+  }
+  if (terminalHostOverride !== undefined) {
+    tuiOpts.terminalHostOverride = terminalHostOverride;
   }
   if (base.sessionId !== undefined) {
     tuiOpts.sessionId = base.sessionId;
@@ -1325,6 +1347,10 @@ function printHelp(subcommand?: string): void {
         [ENTRY, "                                     layouts where each tab IS a session. Inherited by tabs this pane opens."],
         [ENTRY, "                                     Set tui.launcherModeWhenHosted to get this in every hosted pane."],
         [ENTRY, "  --no-terminal-host-launcher        Turn that off for one run, overriding tui.launcherModeWhenHosted."],
+        [ENTRY, "  --terminal-host <value>            TUI: force which term-host adapter integrates with this pane, overriding"],
+        [ENTRY, "                                     tui.terminalHost. true/auto autodetects (the default); false disables"],
+        [ENTRY, "                                     terminal-host integration entirely; paseo/herdr/tmux forces that one,"],
+        [ENTRY, "                                     bypassing detection. HYDRA_ACP_TERMINAL_HOST is the env equivalent (flag wins)."],
         [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
         [ENTRY, "                                     Set tui.skipPermissions to get this on every TUI run."],
         [ENTRY, "  --no-dangerously-skip-permissions  Turn that off for one run, overriding tui.skipPermissions."],

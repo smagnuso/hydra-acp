@@ -55,6 +55,7 @@ function testConfig(): HydraConfig {
       logMaxBytes: 5 * 1024 * 1024,
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
+      terminalHost: true,
       launcherModeWhenHosted: false,
       skipPermissions: false,
       defaultEnterAction: "amend" as const,
