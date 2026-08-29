@@ -1,13 +1,15 @@
 // `script` slot entries (see BarSlotEntry in core/config.ts) run a shell
 // command on a timer and cache its stdout for the render path to read
-// synchronously — resolveSide() never spawns anything itself.
+// synchronously — resolveSide() never spawns anything itself. The actual
+// exec-poll-cache primitive lives in ../shared/process-runner.ts; this file
+// is the bar-specific policy on top (single-line squash, command dedup).
 
-import { exec } from "node:child_process";
 import type { BarSideConfig } from "../../core/config.js";
 import type { BarLayoutConfig } from "./types.js";
-
-const EXEC_TIMEOUT_MS = 3_000;
-const EXEC_MAX_BUFFER = 64 * 1024;
+import {
+  createProcessRunner,
+  type ProcessRunner,
+} from "../shared/process-runner.js";
 
 /**
  * Walk every side of an (already `"..."`-expanded) bar config and collect
@@ -54,14 +56,7 @@ function sanitize(stdout: string): string | null {
   return collapsed.length === 0 ? null : collapsed;
 }
 
-export interface ScriptRunner {
-  /**
-   * Fire any due, not-already-running command in `commands`. Safe to call
-   * every tick regardless of tick granularity: a command is only spawned
-   * once its own `refreshMs` has elapsed since its last spawn.
-   */
-  poll(commands: ReadonlyMap<string, number>, now: number): void;
-}
+export type ScriptRunner = ProcessRunner;
 
 /**
  * Stateful runner: tracks in-flight commands and their last spawn time so
@@ -70,40 +65,16 @@ export interface ScriptRunner {
  */
 export function createScriptRunner(opts: {
   cwd: () => string | null;
+  // Per-command scoped daemon token (and any other env), keyed by the same
+  // command string collectScriptCommands() dedupes on — see
+  // shared/script-tokens.ts for how these get minted.
+  envFor?: (command: string) => Record<string, string> | undefined;
   onOutput: (command: string, output: string | null) => void;
 }): ScriptRunner {
-  const inFlight = new Set<string>();
-  const lastRun = new Map<string, number>();
-
-  const run = (command: string): void => {
-    inFlight.add(command);
-    exec(
-      command,
-      {
-        cwd: opts.cwd() ?? undefined,
-        timeout: EXEC_TIMEOUT_MS,
-        maxBuffer: EXEC_MAX_BUFFER,
-      },
-      (err, stdout) => {
-        inFlight.delete(command);
-        opts.onOutput(command, err ? null : sanitize(stdout));
-      },
-    );
-  };
-
-  return {
-    poll(commands, now) {
-      for (const [command, refreshMs] of commands) {
-        if (inFlight.has(command)) {
-          continue;
-        }
-        const last = lastRun.get(command);
-        if (last !== undefined && now - last < refreshMs) {
-          continue;
-        }
-        lastRun.set(command, now);
-        run(command);
-      }
-    },
-  };
+  return createProcessRunner({
+    cwd: opts.cwd,
+    envFor: opts.envFor,
+    sanitize,
+    onOutput: opts.onOutput,
+  });
 }

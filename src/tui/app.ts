@@ -144,6 +144,7 @@ import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import { formatTokens } from "./bar/fields.js";
 import { collectScriptCommands, createScriptRunner } from "./bar/scripts.js";
 import { expandBarConfig } from "./bar/slots.js";
+import { mintScriptTokens, revokeScriptTokens } from "./shared/script-tokens.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -1459,6 +1460,29 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   };
   process.once("exit", altScreenCleanup);
+  // Mint one "script"-kind daemon token per distinct composer-bar script
+  // command, all grouped under one process-lifetime sessionLabel so a
+  // single revoke call in the finally below cleans them all up. Computed
+  // once here (not inside runSession, which the picker/reconnect loop
+  // below can call more than once) because config.tui.composer/sessionbar
+  // don't change across that loop, and re-minting on every reconnect would
+  // just leak tokens under distinct labels.
+  const scriptSessionLabel = `script:${nanoid()}`;
+  const scriptCommandsForTokens = collectScriptCommands(
+    expandBarConfig({
+      composer: config.tui.composer,
+      sessionbar: config.tui.sessionbar,
+    }),
+    config.tui.scriptRefreshMs,
+  );
+  const scriptTokens =
+    scriptCommandsForTokens.size > 0
+      ? await mintScriptTokens(
+          target,
+          scriptSessionLabel,
+          scriptCommandsForTokens,
+        )
+      : new Map<string, string>();
   let nextOpts: TuiOptions | null = opts;
   try {
     while (nextOpts !== null) {
@@ -1470,6 +1494,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         exitHint,
         viewPrefs,
         pickerPrefs,
+        scriptTokens,
       );
     }
   } finally {
@@ -1489,6 +1514,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     restoreReportedCwd();
     leaveAltScreen();
     process.off("exit", altScreenCleanup);
+    if (scriptTokens.size > 0) {
+      await revokeScriptTokens(target, scriptSessionLabel);
+    }
   }
   // Re-surface the update notice on the way out so users who missed
   // the 30-second banner inside the TUI still see it. cli.ts suppresses
@@ -1720,6 +1748,9 @@ async function runSession(
   exitHint: { sessionId?: string; readonly?: boolean },
   viewPrefs: ViewPrefs,
   pickerPrefs: PickerPrefs,
+  // Per-command scoped daemon tokens for composer-bar script slots, minted
+  // once for the whole TUI process by the caller — see runTuiApp.
+  scriptTokens: ReadonlyMap<string, string>,
 ): Promise<TuiOptions | null> {
   // LAUNCHER MODE, startup path: this pane has no session of its own, so
   // it stays on the picker forever and every pick goes to the host.
@@ -4340,6 +4371,12 @@ async function runSession(
   if (scriptCommands.size > 0) {
     const scriptRunner = createScriptRunner({
       cwd: () => resolvedCwd,
+      envFor: (command) => {
+        const token = scriptTokens.get(command);
+        return token === undefined
+          ? undefined
+          : { HYDRA_ACP_TOKEN: token, HYDRA_ACP_DAEMON_URL: target.baseUrl };
+      },
       onOutput: (command, output) => screen.setScriptOutput(command, output),
     });
     scriptTicker = setInterval(() => {

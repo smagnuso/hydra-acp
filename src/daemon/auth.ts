@@ -112,17 +112,20 @@ export function tokenFromUpgradeRequest(
 
 export interface ProcessIdentity {
   name: string;
-  kind: "extension" | "transformer";
+  kind: "extension" | "transformer" | "script";
 }
 
 // Per-process token registry. Each spawned extension or transformer receives
-// its own token minted at spawn time. The daemon resolves identity (name,
-// kind) from the token, so a process cannot impersonate another, and method
+// its own token minted at spawn time. Composer-bar script slots mint a
+// "script"-kind token per distinct command instead, grouped under one
+// caller-supplied name (a per-TUI-process session label) so they can all be
+// revoked together on shutdown. The daemon resolves identity (name, kind)
+// from the token, so a process cannot impersonate another, and method/route
 // gating can be enforced by kind at the auth layer.
 export class ProcessTokenRegistry implements TokenValidator {
   private tokens = new Map<string, ProcessIdentity>();
 
-  mint(name: string, kind: "extension" | "transformer"): string {
+  mint(name: string, kind: "extension" | "transformer" | "script"): string {
     const token = generateServiceToken();
     this.tokens.set(token, { name, kind });
     return token;
@@ -150,6 +153,27 @@ export class ProcessTokenRegistry implements TokenValidator {
     }
     return `${identity.kind}:${identity.name}`;
   }
+}
+
+// Routes a "script"-kind token may reach. Composer-bar script slots run
+// arbitrary user-configured shell commands, already fully trusted locally,
+// but the token handed to that subprocess should still default-deny beyond
+// a narrow read-only surface rather than inherit the full REST API the way
+// the service/session tokens do.
+const SCRIPT_ALLOWED_ROUTES = new Set([
+  "GET /v1/sessions",
+  "GET /v1/sessions/:id",
+  "GET /v1/config",
+]);
+
+export function isScriptTokenRouteAllowed(
+  method: string,
+  routePattern: string | undefined,
+): boolean {
+  if (!routePattern) {
+    return false;
+  }
+  return SCRIPT_ALLOWED_ROUTES.has(`${method} ${routePattern}`);
 }
 
 export function constantTimeEqual(a: string, b: string): boolean {

@@ -39,6 +39,7 @@ import { SessionTokenStore } from "../core/session-tokens.js";
 import {
   bearerAuth,
   CompositeTokenValidator,
+  isScriptTokenRouteAllowed,
   ProcessTokenRegistry,
   SessionTokenValidator,
   StaticTokenValidator,
@@ -51,6 +52,7 @@ import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerProcessTokenRoutes } from "./routes/process-tokens.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 import { McpTokenRegistry } from "./mcp/token-registry.js";
 import { registerStdinMcpRoutes } from "./mcp/stdin-server.js";
@@ -165,6 +167,20 @@ export async function startDaemon(
       return;
     }
     await auth(request, reply);
+    if (reply.sent) {
+      return;
+    }
+    // "script"-kind tokens (composer-bar script slots, see
+    // routes/process-tokens.ts) get a narrow read-only surface rather
+    // than the full REST API the service/session tokens reach.
+    if (
+      request.authIdentity?.startsWith("script:") &&
+      !isScriptTokenRouteAllowed(request.method, request.routeOptions.url)
+    ) {
+      reply.code(403).send({
+        error: "script tokens may only access read-only session data",
+      });
+    }
   });
 
   // Periodically remove expired session tokens. Cheap O(n) walk; the
@@ -316,6 +332,7 @@ export async function startDaemon(
     rateLimiter: authRateLimiter,
     staticTokenValidator,
   });
+  registerProcessTokenRoutes(app, { processRegistry });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerRecallMcpRoutes(app, mcpTokenRegistry);
   const extensionMcpControls = registerExtensionMcpRoutes(
