@@ -4426,6 +4426,15 @@ async function runSession(
     // Prime immediately rather than waiting out the first tick.
     scriptRunner.poll(scriptCommands, Date.now());
   }
+  // Register process gadgets with the renderer BEFORE building the poller
+  // below — dueSidebarProcessCommands() calls isSidebarGadgetActive(),
+  // which needs SidebarRenderer to already know these ids or the very
+  // first "prime immediately" poll would see nothing as configured and
+  // silently skip every command.
+  screen.setSidebarProcessGadgets(
+    collectSidebarGadgetConfigs(config.tui.sidebar.gadgets),
+  );
+  screen.setSidebarGadgets(config.tui.sidebar.gadgets.map(sidebarGadgetId));
   // Sidebar process gadgets: same polling shape as the composer bar's, but
   // built directly on the shared runner (not bar/scripts.ts's wrapper) so
   // output keeps its newlines instead of being squashed to one line.
@@ -4433,6 +4442,27 @@ async function runSession(
     config.tui.sidebar.gadgets,
     config.tui.scriptRefreshMs,
   );
+  // Which gadget ids a command belongs to — a command shared by two
+  // gadgets keeps running as long as at least one of them is active.
+  // Matches the git/resources gadgets' own isSidebarGadgetActive gate:
+  // a folded (or unconfigured) gadget's script shouldn't shell out for a
+  // block nobody is currently reading.
+  const sidebarCommandGadgetIds = new Map<string, string[]>();
+  for (const gadget of collectSidebarGadgetConfigs(config.tui.sidebar.gadgets)) {
+    const ids = sidebarCommandGadgetIds.get(gadget.script) ?? [];
+    ids.push(gadget.id);
+    sidebarCommandGadgetIds.set(gadget.script, ids);
+  }
+  const dueSidebarProcessCommands = (): Map<string, number> => {
+    const due = new Map<string, number>();
+    for (const [command, refreshMs] of sidebarProcessCommands) {
+      const ids = sidebarCommandGadgetIds.get(command) ?? [];
+      if (ids.some((id) => screen.isSidebarGadgetActive(id))) {
+        due.set(command, refreshMs);
+      }
+    }
+    return due;
+  };
   if (sidebarProcessCommands.size > 0) {
     const sidebarProcessRunner = createProcessRunner({
       cwd: () => resolvedCwd,
@@ -4441,19 +4471,15 @@ async function runSession(
       onOutput: (command, output) => screen.setProcessOutput(command, output),
     });
     sidebarProcessTicker = setInterval(() => {
-      sidebarProcessRunner.poll(sidebarProcessCommands, Date.now());
+      sidebarProcessRunner.poll(dueSidebarProcessCommands(), Date.now());
     }, 1_000);
     sidebarProcessTicker.unref?.();
-    sidebarProcessRunner.poll(sidebarProcessCommands, Date.now());
+    sidebarProcessRunner.poll(dueSidebarProcessCommands(), Date.now());
   }
   // Seeded before the first paint too: a session whose history file is
   // already past the threshold should never flash the hints on its way to
   // collapsing them.
   syncHintsExhausted();
-  screen.setSidebarProcessGadgets(
-    collectSidebarGadgetConfigs(config.tui.sidebar.gadgets),
-  );
-  screen.setSidebarGadgets(config.tui.sidebar.gadgets.map(sidebarGadgetId));
   screen.setSidebarWidth(config.tui.sidebar.width ?? null);
   screen.setSidebarBorder(config.tui.sidebar.border);
   screen.setSidebarSnapshot({
