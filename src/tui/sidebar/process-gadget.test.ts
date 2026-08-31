@@ -4,6 +4,7 @@ import {
   collectSidebarGadgetCommands,
   collectSidebarGadgetConfigs,
   createProcessGadget,
+  extractMarkdownLinks,
   sanitizeProcessOutput,
   sidebarGadgetId,
 } from "./process-gadget.js";
@@ -46,6 +47,72 @@ describe("sanitizeProcessOutput", () => {
 
   it("trims leading/trailing whitespace", () => {
     expect(sanitizeProcessOutput("\n  hello  \n")).toBe("hello");
+  });
+});
+
+describe("extractMarkdownLinks", () => {
+  it("passes plain text through unchanged with no links", () => {
+    expect(extractMarkdownLinks("no links here")).toEqual({
+      body: "no links here",
+      links: [],
+    });
+  });
+
+  it("extracts a single link, stripping the markup down to its text", () => {
+    const { body, links } = extractMarkdownLinks(
+      "[#37140](https://github.netflix.net/corp/nrdp-nrdp/pull/37140)",
+    );
+    expect(body).toBe("#37140");
+    expect(links).toEqual([
+      {
+        start: 0,
+        end: 6,
+        url: "https://github.netflix.net/corp/nrdp-nrdp/pull/37140",
+      },
+    ]);
+  });
+
+  it("extracts a link surrounded by other text, with correct offsets", () => {
+    const { body, links } = extractMarkdownLinks("see [PR](http://x) now");
+    expect(body).toBe("see PR now");
+    expect(links).toEqual([{ start: 4, end: 6, url: "http://x" }]);
+    expect(body.slice(links[0]!.start, links[0]!.end)).toBe("PR");
+  });
+
+  it("handles balanced parens inside the URL", () => {
+    const { body, links } = extractMarkdownLinks("[x](http://a.com/(b))");
+    expect(body).toBe("x");
+    expect(links).toEqual([{ start: 0, end: 1, url: "http://a.com/(b)" }]);
+  });
+
+  it("handles multiple links on one line", () => {
+    const { body, links } = extractMarkdownLinks(
+      "[a](http://a) and [b](http://b)",
+    );
+    expect(body).toBe("a and b");
+    expect(links).toEqual([
+      { start: 0, end: 1, url: "http://a" },
+      { start: 6, end: 7, url: "http://b" },
+    ]);
+  });
+
+  it("leaves an unclosed bracket as literal text", () => {
+    expect(extractMarkdownLinks("[not a link")).toEqual({
+      body: "[not a link",
+      links: [],
+    });
+  });
+
+  it("leaves an unbalanced-paren URL as literal text", () => {
+    const text = "[x](http://unclosed";
+    expect(extractMarkdownLinks(text)).toEqual({ body: text, links: [] });
+  });
+
+  it("does not treat [text] with no following ( as a link", () => {
+    expect(extractMarkdownLinks("[just brackets] plain")).toEqual({
+      body: "[just brackets] plain",
+      links: [],
+    });
   });
 });
 
@@ -192,5 +259,60 @@ describe("createProcessGadget", () => {
       title: "My Log",
     });
     expect(gadget.title).toBe("My Log");
+  });
+
+  it("renders a markdown link as a stripped body with a links span", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "gh_pr" });
+    const lines = gadget.render(
+      snap(new Map([["gh_pr", "[#37140](https://example.com/pull/37140)"]])),
+      ctx(),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.body).toBe("#37140");
+    expect(lines[0]!.links).toEqual([
+      { start: 0, end: 6, url: "https://example.com/pull/37140" },
+    ]);
+  });
+
+  it("leaves a link-less line with no links field", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "echo hi" });
+    const lines = gadget.render(
+      snap(new Map([["echo hi", "plain text"]])),
+      ctx(),
+    );
+    expect(lines[0]!.links).toBeUndefined();
+  });
+
+  it("clips a link span that gets partially truncated", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "gh_pr" });
+    // Body is "#37140 some long trailing text" — truncate to 4 columns so
+    // the link span (0-6, "#37140") is cut mid-span.
+    const lines = gadget.render(
+      snap(
+        new Map([
+          [
+            "gh_pr",
+            "[#37140](https://example.com/pull/37140) some long trailing text",
+          ],
+        ]),
+      ),
+      ctx(4),
+    );
+    expect(lines[0]!.body).toBe("#371");
+    expect(lines[0]!.links).toEqual([
+      { start: 0, end: 4, url: "https://example.com/pull/37140" },
+    ]);
+  });
+
+  it("drops a link span that gets fully truncated away", () => {
+    const gadget = createProcessGadget({ id: "proc:x", script: "gh_pr" });
+    const lines = gadget.render(
+      snap(
+        new Map([["gh_pr", "prefix text [link](http://x) more text here"]]),
+      ),
+      ctx(6),
+    );
+    expect(lines[0]!.body).toBe("prefix");
+    expect(lines[0]!.links).toBeUndefined();
   });
 });

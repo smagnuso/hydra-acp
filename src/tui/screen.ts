@@ -754,6 +754,13 @@ export class Screen {
   // Typed row-scoped double-click targets, recorded alongside
   // sidebarRowPaths. Takes precedence over the path when a row has both.
   private sidebarRowDoubleActions = new Map<number, ChromeActionTarget>();
+  // Row → markdown-link spans (a process gadget's [text](url) output),
+  // rebuilt alongside sidebarRowPaths. Checked before sidebarRowPaths on
+  // double-click — see handleSidebarPress.
+  private sidebarRowLinks = new Map<
+    number,
+    Array<{ start: number; end: number; url: string }>
+  >();
   // Row → click regions, in absolute terminal columns. Rebuilt on every
   // sidebar paint alongside sidebarRowPaths. Two kinds: a pager arrow
   // (carries the target `index`) and a title row's fold toggle.
@@ -2059,6 +2066,7 @@ export class Screen {
     this.sidebarRowPaths.clear();
     this.sidebarRowDoubleActions.clear();
     this.sidebarRowActions.clear();
+    this.sidebarRowLinks.clear();
     this.sidebarPages = {};
     this.sidebarScrollOffset = 0;
     this.sidebarOverflowRows = 0;
@@ -7223,6 +7231,7 @@ export class Screen {
     this.sidebarRowPaths.clear();
     this.sidebarRowDoubleActions.clear();
     this.sidebarRowActions.clear();
+    this.sidebarRowLinks.clear();
     // Body origin: the gutter (blank columns + the rule/indicator channel)
     // sits between the column start and the body.
     const bodyCol = col + SIDEBAR_GUTTER;
@@ -7235,6 +7244,21 @@ export class Screen {
       }
       if (line?.doubleAction !== undefined) {
         this.sidebarRowDoubleActions.set(row, line.doubleAction);
+      }
+      if (line?.links !== undefined && line.links.length > 0) {
+        // line.links offsets are 0-based, half-open [start,end) indices
+        // into the CLEAN body — shift by bodyCol to get absolute terminal
+        // columns, the same convention sidebarRowActions converts to
+        // below (its start/end are a different, 1-based convention, hence
+        // the different arithmetic there).
+        this.sidebarRowLinks.set(
+          row,
+          line.links.map((l) => ({
+            start: bodyCol + l.start,
+            end: bodyCol + l.end,
+            url: l.url,
+          })),
+        );
       }
       if (line?.actions !== undefined && line.actions.length > 0) {
         this.sidebarRowActions.set(
@@ -7268,18 +7292,40 @@ export class Screen {
       // underlines; fall back to the row's trimmed extent for rows that
       // carry a path but no span (leading indent and trailing pad are
       // excluded either way).
+      //
+      // A row can ALSO carry markdown-style links (a process gadget's
+      // [text](url) output) — additive to the openPath span above, reusing
+      // the exact same linkSpansForWindow/osc8UrlFor machinery transcript
+      // rows use, so http(s) schemes get the terminal-native OSC 8 click
+      // exactly like prose links do. Sidebar rows are single, already
+      // width-truncated lines (no wrap window), so the window is just
+      // [0, body.length).
       const rowLinkSpans = ((): Array<{ start: number; end: number; url: string }> | null => {
-        if (line?.openPath === undefined || !line.openPath.startsWith("/")) {
-          return null;
+        const spans: Array<{ start: number; end: number; url: string }> = [];
+        if (
+          line?.openPath !== undefined &&
+          line.openPath.startsWith("/") &&
+          line.openSpan !== undefined
+        ) {
+          // An explicit span is required: rows compose glyphs, deltas,
+          // commands and gap padding, so guessing the extent is how the
+          // whole row ends up underlined. Rows without a span simply don't
+          // paint a link — they remain double-clickable via openPath.
+          spans.push({ ...line.openSpan, url: fileUrlForPath(line.openPath) });
         }
-        // An explicit span is required: rows compose glyphs, deltas,
-        // commands and gap padding, so guessing the extent is how the
-        // whole row ends up underlined. Rows without a span simply don't
-        // paint a link — they remain double-clickable via openPath.
-        if (line.openSpan === undefined) {
-          return null;
+        if (line?.links !== undefined) {
+          const linkSpans = this.linkSpansForWindow(
+            line.body,
+            line.links,
+            0,
+            line.body.length,
+            0,
+          );
+          if (linkSpans !== null) {
+            spans.push(...linkSpans);
+          }
         }
-        return [{ ...line.openSpan, url: fileUrlForPath(line.openPath) }];
+        return spans.length > 0 ? spans : null;
       })();
       const sig =
         formattedLineSig("sbar", bodyWidth, line, null, null, null) +
@@ -7422,6 +7468,20 @@ export class Screen {
       const target = this.sidebarRowDoubleActions.get(cell.y);
       if (target !== undefined) {
         this.dispatchBarAction(target.action, target.value);
+        return true;
+      }
+      const linkSpans = this.sidebarRowLinks.get(cell.y);
+      const linkHit = linkSpans?.find(
+        (s) => cell.x >= s.start && cell.x < s.end,
+      );
+      if (linkHit !== undefined) {
+        // dispatchLinkUrl returning false here means an http(s)/ssh/mailto
+        // scheme it deliberately declines to shell out for — the
+        // terminal's own OSC 8 click is the intended path for those, not
+        // a broken link. Unlike the sidebarRowPaths branch below (where a
+        // declined path IS an error, e.g. a deleted file), this is
+        // "handled" either way — no "can't open" notification.
+        this.dispatchLinkUrl(linkHit.url);
         return true;
       }
       const path = this.sidebarRowPaths.get(cell.y);

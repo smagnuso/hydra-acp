@@ -641,6 +641,132 @@ describe("Screen sidebar double-click to open", () => {
   });
 });
 
+describe("Screen sidebar process-gadget markdown links", () => {
+  beforeEach(() => {
+    vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const dispatchMouse = (screen: Screen, name: string, data: unknown): void => {
+    (
+      screen as unknown as {
+        handleMouse: (name: string, data?: unknown) => void;
+      }
+    ).handleMouse(name, data);
+  };
+
+  const click = (screen: Screen, x: number, y: number): void => {
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+  };
+
+  // Screen with a visible sidebar carrying one process gadget whose output
+  // is a single markdown link, plus a spy standing in for dispatchLinkUrl
+  // — mirrors it returning false for http(s), same as the real one does
+  // (screen.ts:5250-5255): the terminal's own OSC 8 click handles those,
+  // not a hydra-side spawn.
+  const withLinkGadget = (): {
+    screen: Screen;
+    dispatched: string[];
+    linkRow: number;
+    sidebarCol: number;
+  } => {
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    const dispatched: string[] = [];
+    (
+      screen as unknown as { dispatchLinkUrl: (url: string) => boolean }
+    ).dispatchLinkUrl = (url: string) => {
+      dispatched.push(url);
+      return false;
+    };
+    screen.setSidebarProcessGadgets([{ id: "proc:pr", script: "gh_pr" }]);
+    screen.setSidebarGadgets(["proc:pr"]);
+    screen.setSidebarSnapshot({
+      processOutputs: new Map([
+        ["gh_pr", "[#37140](https://example.com/pull/37140)"],
+      ]),
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const rowLinks = (
+      screen as unknown as {
+        sidebarRowLinks: Map<
+          number,
+          Array<{ start: number; end: number; url: string }>
+        >;
+      }
+    ).sidebarRowLinks;
+    const linkRow = [...rowLinks.keys()][0]!;
+    return {
+      screen,
+      dispatched,
+      linkRow,
+      sidebarCol: screen.width() + SIDEBAR_GUTTER_COLS + 1,
+    };
+  };
+
+  it("emits an OSC 8 hyperlink for a markdown link in process-gadget output", () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarProcessGadgets([{ id: "proc:pr", script: "gh_pr" }]);
+    screen.setSidebarGadgets(["proc:pr"]);
+    screen.setSidebarSnapshot({
+      processOutputs: new Map([
+        ["gh_pr", "[#37140](https://example.com/pull/37140)"],
+      ]),
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const all = writes.join("");
+    // Balanced opener/closer, same shape as the file:// case — the row's
+    // visible text goes through the term mock (ops), not process.stdout,
+    // so this channel only carries the raw OSC 8 escape bytes.
+    expect(all).toContain("\x1b]8;;https://example.com/pull/37140");
+    expect(all).toContain("\x1b]8;;\x1b\\");
+  });
+
+  it("dispatches the link's URL on the second click of a double-click", () => {
+    const { screen, dispatched, linkRow, sidebarCol } = withLinkGadget();
+    click(screen, sidebarCol, linkRow);
+    expect(dispatched).toEqual([]);
+    click(screen, sidebarCol, linkRow);
+    expect(dispatched).toEqual(["https://example.com/pull/37140"]);
+  });
+
+  // Regression guard for the exact bug this design avoided: a declined
+  // http(s) dispatch (the terminal handles it, not hydra) must not be
+  // treated as an error — that's the sidebarRowPaths branch's job, for
+  // an actually-missing file.
+  it("does not show a misleading notify when dispatchLinkUrl declines an http(s) URL", () => {
+    const { screen, linkRow, sidebarCol } = withLinkGadget();
+    const notified: string[] = [];
+    (screen as unknown as { notify: (msg: string) => void }).notify = (
+      msg: string,
+    ) => {
+      notified.push(msg);
+    };
+    click(screen, sidebarCol, linkRow);
+    click(screen, sidebarCol, linkRow);
+    expect(notified).toEqual([]);
+  });
+
+  it("treats a hit anywhere on the link text as one target", () => {
+    const { screen, dispatched, linkRow, sidebarCol } = withLinkGadget();
+    // "#37140" spans 6 columns from sidebarCol; click on the last char.
+    click(screen, sidebarCol + 5, linkRow);
+    click(screen, sidebarCol + 5, linkRow);
+    expect(dispatched).toEqual(["https://example.com/pull/37140"]);
+  });
+});
+
 describe("Screen sidebar scrolling", () => {
   beforeEach(() => {
     vi.spyOn(process.stdout, "write").mockReturnValue(true);
