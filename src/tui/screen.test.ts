@@ -4582,6 +4582,20 @@ describe("Screen turn-jump slide", () => {
     expect(getScrollOffset(screen)).toBe(41);
   });
 
+  it("retargets when content arrives before the first frame ticks", () => {
+    // scrollOffset only moves once the interval fires, so right after
+    // slideTo there's a real window where scrollOffset still reads 0
+    // even though a slide is under way. Content landing in that window
+    // must still shift where the slide is headed, or it lands short by
+    // exactly the rows that arrived.
+    const screen = filled(true);
+    slideTo(screen, 40);
+    expect(getScrollOffset(screen)).toBe(0);
+    screen.appendLines([{ body: "late", bodyStyle: "agent" }]);
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBe(41);
+  });
+
   it("lands immediately when the slide is turned off", () => {
     const screen = filled(false);
     slideTo(screen, 40);

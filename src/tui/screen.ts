@@ -2238,13 +2238,27 @@ export class Screen {
   // contributes N, not 1. Counting logical lines here was the original
   // bug: any wrapped append would slide the view up by N−1 rows.
   private adjustScrollForRowChange(delta: number): void {
-    if (this.scrollOffset > 0 && delta !== 0) {
+    if (delta === 0) {
+      return;
+    }
+    if (this.scrollOffset > 0) {
       // Content landing mid-slide would shift the rows out from under an
       // animation whose target was computed against the old layout, so
       // settle the slide first and let the anchor adjustment apply to the
       // final offset like it would for any other stationary view.
       this.cancelSlide(true);
       this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+      return;
+    }
+    // scrollOffset reads 0 for the whole gap between starting a slide
+    // (e.g. scrollToPrevTurn from the live tail) and its first animation
+    // tick — the interval callback is what actually moves it, up to
+    // SLIDE_FRAME_MS later. Content landing in that gap fell through the
+    // branch above and left slideTarget pointing at a row count computed
+    // against the pre-insertion layout, so the animation would land short
+    // of the turn boundary it was headed for by exactly this delta.
+    if (this.slideTimer !== null) {
+      this.slideTarget = Math.max(0, this.slideTarget + delta);
     }
   }
 
