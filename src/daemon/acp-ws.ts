@@ -1826,6 +1826,9 @@ export function registerAcpWsEndpoint(
           afterMessageId: params.afterMessageId,
           afterSeq: params.afterSeq,
           raw: drip,
+          ...(hydraAttach.historyLimit !== undefined
+            ? { historyLimit: hydraAttach.historyLimit }
+            : {}),
           // Lean clients opt into ref-form tool content via _meta; default
           // stays inline so existing/third-party clients are unaffected.
           ...(hydraAttach.toolContent !== undefined

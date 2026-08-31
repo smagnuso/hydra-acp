@@ -2794,11 +2794,14 @@ export class Session {
   // the HTTP /history endpoint.
   async getHistorySnapshot(
     tools: "inline" | "references" = "inline",
+    maxEntries?: number,
   ): Promise<CachedNotification[]> {
     if (!this.historyStore) {
       return [];
     }
-    return this.historyStore.load(this.sessionId, { tools }).catch(() => []);
+    return this.historyStore
+      .load(this.sessionId, { tools, ...(maxEntries !== undefined ? { maxEntries } : {}) })
+      .catch(() => []);
   }
 
   // Newest-first async iterator over the recall view (archives + live).
@@ -2988,6 +2991,7 @@ export class Session {
       afterSeq?: number;
       raw?: boolean;
       toolContent?: "inline" | "references";
+      historyLimit?: number;
     } = {},
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     if (this.closed) {
@@ -3031,6 +3035,7 @@ export class Session {
       afterSeq?: number;
       raw?: boolean;
       toolContent?: "inline" | "references";
+      historyLimit?: number;
     },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     // Search the raw snapshot, coalesce the slice. Coalescing first would
@@ -3046,7 +3051,25 @@ export class Session {
     // either way.
     const maybeCoalesce = (entries: CachedNotification[]): CachedNotification[] =>
       opts.raw ? entries : coalesceReplay(entries);
-    const raw = await this.getHistorySnapshot(opts.toolContent ?? "inline");
+    // Load with slack so snapToTurnBoundary below has somewhere to walk
+    // back to. load() tails the file to a flat entry count, which lands
+    // mid-turn almost every time (measured on a real session: 275 of the
+    // 277 file sizes it passed through), and a replay that opens mid-turn
+    // hands the client agent output whose prompt_received fell outside
+    // the window. Clients render that as a turn with no prompt above it,
+    // which reads exactly like the prompt was lost. The TUI and the
+    // browser both already snap their own render windows back to a turn
+    // boundary for this reason; the replay itself never did.
+    // 0 means the caller explicitly asked for everything (the browser's
+    // "Load full history"); otherwise its own cap, else ours.
+    const limit =
+      opts.historyLimit === 0
+        ? Infinity
+        : opts.historyLimit ?? this.historyMaxEntries;
+    const raw = await this.getHistorySnapshot(
+      opts.toolContent ?? "inline",
+      limit === Infinity ? Infinity : limit * 2,
+    );
     // Filter out state-update entries from historical data so a fresh-attaching
     // client sees only the synthesized snapshot (buildStateSnapshotReplay) for
     // canonical-state kinds like usage_update. Replaying historical usage_update
@@ -3058,7 +3081,10 @@ export class Session {
     // filtered array for cutoff lookup is safe.
     // usage_update is dropped from raw replay because buildStateSnapshotReplay
     // already synthesizes the latest snapshot; raw replay would cause cost rewind.
-    const replayable = raw.filter((e) => !isStateUpdate(e.method, e.params));
+    const replayable = snapToTurnBoundary(
+      raw.filter((e) => !isStateUpdate(e.method, e.params)),
+      limit,
+    );
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       // afterSeq wins when the client has one: it addresses a single
@@ -10669,6 +10695,38 @@ function ensureMessageIdOnUpdate(method: string, params: unknown): unknown {
     ...(params as Record<string, unknown>),
     update: { ...(p.update as Record<string, unknown>), messageId: generateMessageId() },
   };
+}
+
+// Trim a replay slice to `limit` entries, moving the cut back to the
+// nearest turn opener so the slice never begins part-way through a turn.
+//
+// A flat "last N entries" cut orphans whatever turn it lands inside: the
+// client receives that turn's agent output, tool calls and turn_complete
+// with no prompt_received ahead of them, and renders a headless turn.
+// Users read that as a prompt going missing, which is what it looks like.
+//
+// Bounded by what the caller loaded (callers pass 2x the limit), so one
+// enormous turn can't drag an unbounded amount of history into a replay.
+// Falls back to the plain cut when no opener sits in that slack — a
+// single turn longer than the whole budget still replays headless, but
+// truncating it to nothing would be worse.
+export function snapToTurnBoundary(
+  entries: CachedNotification[],
+  limit: number,
+): CachedNotification[] {
+  if (entries.length <= limit) {
+    return entries;
+  }
+  const cut = entries.length - limit;
+  for (let i = cut; i >= 0; i--) {
+    const params = entries[i]?.params as
+      | { update?: { sessionUpdate?: unknown } }
+      | undefined;
+    if (params?.update?.sessionUpdate === "prompt_received") {
+      return entries.slice(i);
+    }
+  }
+  return entries.slice(cut);
 }
 
 // Index of the entry carrying `seq`, or -1 if this history doesn't hold

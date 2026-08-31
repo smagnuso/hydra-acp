@@ -789,6 +789,90 @@ describe("Session", () => {
       }
     });
 
+    it("snapToTurnBoundary never opens a replay part-way through a turn", async () => {
+      const { snapToTurnBoundary } = await import("./session.js");
+      const mk = (kind: string, n: number) => ({
+        method: "session/update",
+        params: { update: { sessionUpdate: kind, messageId: `m${n}` } },
+        recordedAt: n,
+      });
+      // Two turns. A flat "last 4" cut lands inside turn 2, orphaning its
+      // output from the prompt that opened it.
+      const history = [
+        mk("prompt_received", 0),
+        mk("agent_message_chunk", 1),
+        mk("turn_complete", 2),
+        mk("prompt_received", 3),
+        mk("agent_message_chunk", 4),
+        mk("agent_message_chunk", 5),
+        mk("turn_complete", 6),
+      ];
+      const snapped = snapToTurnBoundary(history, 4);
+      expect(
+        (snapped[0]?.params as { update: { sessionUpdate: string } }).update
+          .sessionUpdate,
+      ).toBe("prompt_received");
+      expect(snapped).toHaveLength(4);
+      expect(
+        (snapped[0]?.params as { update: { messageId: string } }).update.messageId,
+      ).toBe("m3");
+    });
+
+    it("snapToTurnBoundary leaves a slice that already opens on a turn alone", async () => {
+      const { snapToTurnBoundary } = await import("./session.js");
+      const mk = (kind: string, n: number) => ({
+        method: "session/update",
+        params: { update: { sessionUpdate: kind, messageId: `m${n}` } },
+        recordedAt: n,
+      });
+      const history = [mk("prompt_received", 0), mk("turn_complete", 1)];
+      expect(snapToTurnBoundary(history, 10)).toHaveLength(2);
+      expect(snapToTurnBoundary(history, 2)).toHaveLength(2);
+    });
+
+    it("snapToTurnBoundary falls back to the flat cut when no opener is in reach", async () => {
+      const { snapToTurnBoundary } = await import("./session.js");
+      const mk = (n: number) => ({
+        method: "session/update",
+        params: { update: { sessionUpdate: "agent_message_chunk", messageId: `m${n}` } },
+        recordedAt: n,
+      });
+      // One turn longer than the whole budget: truncating to nothing
+      // would be worse than replaying it headless.
+      const history = [mk(0), mk(1), mk(2), mk(3)];
+      expect(snapToTurnBoundary(history, 2)).toHaveLength(2);
+    });
+
+    it("a capped replay still starts at a prompt", async () => {
+      const { session, mock } = makeSession("sess_snap", "u_snap");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+      for (let turn = 0; turn < 3; turn++) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_snap",
+          update: { sessionUpdate: "prompt_received", prompt: [{ type: "text", text: `p${turn}` }] },
+        });
+        for (let n = 0; n < 5; n++) {
+          mock.triggerNotification("session/update", {
+            sessionId: "u_snap",
+            update: { sessionUpdate: "agent_message_chunk", content: { text: `t${turn}-${n}` } },
+          });
+        }
+        mock.triggerNotification("session/update", {
+          sessionId: "u_snap",
+          update: { sessionUpdate: "turn_complete", stopReason: "end_turn" },
+        });
+      }
+      await flushHistoryWrites();
+      const { client: late } = makeClient();
+      const { entries } = await session.attach(late, "full", { raw: true });
+      const historical = entries.filter((e) => !isStateSnapshotEntry(e));
+      expect(
+        (historical[0]?.params as { update: { sessionUpdate: string } }).update
+          .sessionUpdate,
+      ).toBe("prompt_received");
+    });
+
     it("after_message without afterMessageId falls back to full", async () => {
       const { session } = makeSession();
       const { client: a } = makeClient();

@@ -184,6 +184,13 @@ export interface HydraMeta {
   // content; "references" sends blob refs and the client fetches bodies on
   // demand via GET /v1/sessions/:id/tools/:hash. Opt-in for lean clients.
   toolContent?: "inline" | "references";
+  // Opt-in override for how many history entries a replay may carry.
+  // Absent means the daemon's own cap. 0 means no cap: send it only for
+  // an explicit user action such as the browser's "Load full history",
+  // since an unbounded replay of a long session is a large payload.
+  // Whatever the value, the replay still snaps back to a turn boundary
+  // (Session.loadReplay) so it never opens part-way through a turn.
+  historyLimit?: number;
   // Hydra-specific session/detach RESPONSE field (the detach outcome).
   detachStatus?: "detached";
   // Session label (Session.title). Read off session/new params (the
@@ -445,6 +452,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.dripSpeed === "number" && obj.dripSpeed > 0) {
     out.dripSpeed = obj.dripSpeed;
+  }
+  if (typeof obj.historyLimit === "number" && Number.isFinite(obj.historyLimit) && obj.historyLimit >= 0) {
+    out.historyLimit = obj.historyLimit;
   }
   if (obj.toolContent === "inline" || obj.toolContent === "references") {
     out.toolContent = obj.toolContent;

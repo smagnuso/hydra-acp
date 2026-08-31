@@ -26,18 +26,24 @@ export interface HistoryEntry {
   method: string;
   params: unknown;
   recordedAt: number;
-  // Strictly increasing per session, unique per recorded frame, and the
-  // only sound cursor for after_message replay. messageId is not: agents
-  // stamp one id on every chunk of a reply (thought chunks included), so
-  // "resume after messageId M" cannot distinguish a client that has all
-  // of M from one that has only its first chunk — and resolving it to M's
-  // last frame silently dropped everything in between for the latter.
-  // See Session.recordAndBroadcast for how it's assigned and
-  // Session.loadReplay for how a cursor is resolved.
+  // Strictly increasing per session, unique per frame, and the only sound
+  // cursor for after_message replay.
   //
-  // Optional because every entry written before this field existed lacks
-  // one. Those stay replayable; they just can't be addressed by seq, and
-  // a client holding no seq falls back to the messageId cursor.
+  // messageId cannot serve that role: agents stamp one id on every chunk
+  // of a reply, thought chunks included, so "resume after messageId M"
+  // can't distinguish a client that has all of M from one that has only
+  // its first chunk. Resolving it to M's last frame silently dropped
+  // everything in between for the latter. See Session.recordAndBroadcast
+  // for how seq is assigned and Session.loadReplay for how a cursor is
+  // resolved.
+  //
+  // Optional for two reasons. Entries written before this field existed
+  // lack one: they stay replayable, they just can't be addressed by seq,
+  // and a client holding no seq falls back to the messageId cursor. And
+  // recordCurrentUsageSnapshot appends usage rows straight to disk for
+  // the cost/events series, bypassing recordAndBroadcast; isStateUpdate
+  // filters those back out of every replay, so they are never delivered
+  // to a client and can never be a cursor.
   seq?: number;
 }
 
