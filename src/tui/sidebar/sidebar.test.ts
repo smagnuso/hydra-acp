@@ -20,7 +20,12 @@ import {
   todoGadget,
   toolsGadget,
 } from "./gadgets.js";
-import { DEFAULT_GADGET_IDS, gadgetById, SidebarRenderer } from "./registry.js";
+import {
+  DEFAULT_GADGET_IDS,
+  expandSidebarGadgets,
+  gadgetById,
+  SidebarRenderer,
+} from "./registry.js";
 import { HydraConfig } from "../../core/config.js";
 import { emptySnapshot } from "./types.js";
 import type {
@@ -717,6 +722,63 @@ describe("SidebarRenderer", () => {
     expect(lines[0]!.body).not.toBe("");
     expect(lines.at(-1)!.body).not.toBe("");
     expect(lines.filter((l) => l.body === "")).toHaveLength(1);
+  });
+});
+
+describe("expandSidebarGadgets", () => {
+  it("passes a list through unchanged when it has no sentinel", () => {
+    const entries = ["activity", "git"];
+    expect(expandSidebarGadgets(entries)).toEqual(entries);
+  });
+
+  it("expands a bare sentinel to the full default list", () => {
+    expect(expandSidebarGadgets(["..."])).toEqual([...DEFAULT_GADGET_IDS]);
+  });
+
+  it("appends after an explicit entry without duplicating it", () => {
+    const result = expandSidebarGadgets([
+      "...",
+      { id: "proc:x", script: "echo hi" },
+    ]);
+    expect(result).toEqual([...DEFAULT_GADGET_IDS, { id: "proc:x", script: "echo hi" }]);
+  });
+
+  it("prepends before the sentinel and repositions instead of duplicating", () => {
+    const result = expandSidebarGadgets(["git", "...", "files"]);
+    const withoutMoved = DEFAULT_GADGET_IDS.filter(
+      (id) => id !== "git" && id !== "files",
+    );
+    expect(result).toEqual(["git", ...withoutMoved, "files"]);
+  });
+
+  it("only expands the first sentinel, dropping later ones", () => {
+    const result = expandSidebarGadgets(["...", "..."]);
+    expect(result).toEqual([...DEFAULT_GADGET_IDS]);
+  });
+
+  it("never expands to a process-gadget entry, only builtin ids", () => {
+    const result = expandSidebarGadgets([
+      { id: "proc:x", script: "echo hi" },
+      "...",
+    ]);
+    expect(result).toEqual([
+      { id: "proc:x", script: "echo hi" },
+      ...DEFAULT_GADGET_IDS,
+    ]);
+  });
+
+  it("drops a process gadget's id from the expansion if it collides with a builtin id", () => {
+    // Pathological but should not duplicate: a process gadget claiming a
+    // builtin's id string suppresses that builtin from the expansion,
+    // same as an explicit builtin string would.
+    const result = expandSidebarGadgets([
+      { id: "git", script: "echo hi" },
+      "...",
+    ]);
+    expect(result).toEqual([
+      { id: "git", script: "echo hi" },
+      ...DEFAULT_GADGET_IDS.filter((id) => id !== "git"),
+    ]);
   });
 });
 

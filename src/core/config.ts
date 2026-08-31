@@ -655,6 +655,11 @@ const TuiConfig = z.object({
       //     separated by a blank row.
       //   "none" — no rules at all, blank-row separation only.
       border: z.enum(["none", "rule", "frame"]).default("frame"),
+      // A bare "..." entry expands to the 11 builtins below (see
+      // expandSidebarGadgets in tui/sidebar/registry.ts) — the same
+      // relationship "..." has to a composer bar slot's built-in list —
+      // so a process gadget can be inserted without retyping the rest:
+      // ["...", {"id": "proc:x", "script": "..."}] appends one.
       gadgets: z
         .array(SidebarGadgetEntry)
         // Must stay in step with DEFAULT_GADGET_IDS in tui/sidebar/registry.ts.

@@ -10,8 +10,10 @@
 // paints it row by row with its own signature cache, so an unchanged
 // gadget also costs zero terminal bytes.
 
+import type { SidebarGadgetEntry } from "../../core/config.js";
 import type { FormattedLine } from "../format.js";
 import { BUILTIN_GADGETS } from "./gadgets.js";
+import { sidebarGadgetId } from "./process-gadget.js";
 import { isFramedBorder } from "./types.js";
 import type {
   Gadget,
@@ -62,6 +64,55 @@ export function gadgetById(id: string): Gadget | undefined {
 
 export function knownGadgetIds(): string[] {
   return BUILTIN_GADGETS.map((g) => g.id);
+}
+
+// Stands in for "everything the built-in sidebar puts here" — same
+// relationship DEFAULTS_SENTINEL/expandSide has to the composer bar's
+// slot lists (bar/slots.ts), so a user can insert one process gadget
+// without retyping all 11 builtins.
+export const SIDEBAR_DEFAULTS_SENTINEL = "...";
+
+/**
+ * Splice DEFAULT_GADGET_IDS in wherever "..." appears in a
+ * tui.sidebar.gadgets list.
+ *
+ * A builtin named explicitly elsewhere in the list is dropped from the
+ * expansion, so ["files", "...", "git"] repositions `files` to the front
+ * and `git` to the back without duplicating either — same rule
+ * bar/slots.ts's expandSide uses. Only the first "..." expands; later
+ * ones are dropped, matching the bar's "two expansions would duplicate
+ * every field" reasoning.
+ *
+ * Never expands to process-gadget entries — "..." means "the built-in
+ * list", the same thing it means on the bar side, not "everything else
+ * configured".
+ */
+export function expandSidebarGadgets(
+  entries: readonly SidebarGadgetEntry[],
+): SidebarGadgetEntry[] {
+  if (!entries.some((e) => e === SIDEBAR_DEFAULTS_SENTINEL)) {
+    return entries as SidebarGadgetEntry[];
+  }
+  const explicit = new Set<string>();
+  for (const e of entries) {
+    if (e !== SIDEBAR_DEFAULTS_SENTINEL) {
+      explicit.add(sidebarGadgetId(e));
+    }
+  }
+  const expansion = DEFAULT_GADGET_IDS.filter((id) => !explicit.has(id));
+  const out: SidebarGadgetEntry[] = [];
+  let expanded = false;
+  for (const e of entries) {
+    if (e === SIDEBAR_DEFAULTS_SENTINEL) {
+      if (!expanded) {
+        out.push(...expansion);
+        expanded = true;
+      }
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
 }
 
 // Emitted between gadget blocks in "none" / "rule" mode. Frozen and

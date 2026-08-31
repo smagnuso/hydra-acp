@@ -153,6 +153,7 @@ import {
   sanitizeProcessOutput,
   sidebarGadgetId,
 } from "./sidebar/process-gadget.js";
+import { expandSidebarGadgets } from "./sidebar/registry.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -1488,7 +1489,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // both surfaces. A command configured on both sides collapses to one
   // token either way, matching collectScriptCommands' own dedup rule.
   for (const [command, refreshMs] of collectSidebarGadgetCommands(
-    config.tui.sidebar.gadgets,
+    expandSidebarGadgets(config.tui.sidebar.gadgets),
     config.tui.scriptRefreshMs,
   )) {
     const existing = scriptCommandsForTokens.get(command);
@@ -4439,20 +4440,23 @@ async function runSession(
     // Prime immediately rather than waiting out the first tick.
     scriptRunner.poll(scriptCommands, Date.now());
   }
+  // Expanded once, up front: "..." stands in for the 11 builtins (same
+  // sentinel relationship the composer bar's own "..." has to its side
+  // defaults — see expandSidebarGadgets), so a config can insert one
+  // process gadget without retyping the rest.
+  const sidebarGadgets = expandSidebarGadgets(config.tui.sidebar.gadgets);
   // Register process gadgets with the renderer BEFORE building the poller
   // below — dueSidebarProcessCommands() calls isSidebarGadgetActive(),
   // which needs SidebarRenderer to already know these ids or the very
   // first "prime immediately" poll would see nothing as configured and
   // silently skip every command.
-  screen.setSidebarProcessGadgets(
-    collectSidebarGadgetConfigs(config.tui.sidebar.gadgets),
-  );
-  screen.setSidebarGadgets(config.tui.sidebar.gadgets.map(sidebarGadgetId));
+  screen.setSidebarProcessGadgets(collectSidebarGadgetConfigs(sidebarGadgets));
+  screen.setSidebarGadgets(sidebarGadgets.map(sidebarGadgetId));
   // Sidebar process gadgets: same polling shape as the composer bar's, but
   // built directly on the shared runner (not bar/scripts.ts's wrapper) so
   // output keeps its newlines instead of being squashed to one line.
   const sidebarProcessCommands = collectSidebarGadgetCommands(
-    config.tui.sidebar.gadgets,
+    sidebarGadgets,
     config.tui.scriptRefreshMs,
   );
   // Which gadget ids a command belongs to — a command shared by two
@@ -4461,7 +4465,7 @@ async function runSession(
   // a folded (or unconfigured) gadget's script shouldn't shell out for a
   // block nobody is currently reading.
   const sidebarCommandGadgetIds = new Map<string, string[]>();
-  for (const gadget of collectSidebarGadgetConfigs(config.tui.sidebar.gadgets)) {
+  for (const gadget of collectSidebarGadgetConfigs(sidebarGadgets)) {
     const ids = sidebarCommandGadgetIds.get(gadget.script) ?? [];
     ids.push(gadget.id);
     sidebarCommandGadgetIds.set(gadget.script, ids);
