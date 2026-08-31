@@ -71,7 +71,7 @@ function fakeConfig(): HydraConfig {
       pinned: false,
     },
     defaultAgent: "claude-acp",
-    defaultModels: {},
+    sessionDefaults: {},
     defaultCwd: homedir(),
     compressToolContent: true,
     sessionListColdLimit: 20,
@@ -1111,7 +1111,7 @@ describe("config.agents extends", () => {
     const derived = listed.agents.find((a) => a.id === "opencode-home");
     const base = listed.agents.find((a) => a.id === "opencode");
     // Clients (e.g. the TUI composer preview) resolve per-agent config
-    // maps like defaultModels via this chain — see
+    // maps like sessionDefaults via this chain — see
     // lookupInheritedAgentValue. Losing it here silently breaks that
     // resolution for every derived agent.
     expect(derived?.extendsChain).toEqual(["opencode-home", "opencode"]);

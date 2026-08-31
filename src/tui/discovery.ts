@@ -223,7 +223,7 @@ export interface DiscoveredAgent {
   name: string;
   description?: string;
   // Inheritance chain, most specific first — lets callers resolve
-  // per-agent config maps like defaultModels correctly for a derived
+  // per-agent config maps like sessionDefaults correctly for a derived
   // agent (e.g. one added via `agent add --extends`) instead of only
   // checking its own id. See ResolvedAgent / lookupInheritedAgentValue.
   extendsChain?: string[];

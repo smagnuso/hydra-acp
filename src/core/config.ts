@@ -128,7 +128,7 @@ const LocalAgentConfig = z.object({
   // top: objects merge, scalars and arrays replace, this entry wins.
   //
   // Prefer naming the canonical base id. Per-agent config maps keyed by
-  // agent id (defaultModels, agentOverrides) walk this chain most-specific
+  // agent id (sessionDefaults, agentOverrides) walk this chain most-specific
   // first, and that walk matches ids as written.
   extends: z.string().optional(),
   name: z.string().optional(),
@@ -807,14 +807,16 @@ export const HydraConfig = z.object({
   // specific npm version of opencode). Keyed by agent id.
   agentOverrides: z.record(z.string(), AgentOverrideConfig).default({}),
   defaultAgent: z.string().default("opencode"),
-  // Optional per-agent default model id. When a brand-new agent process
-  // is spawned (session/new path), hydra issues session/set_model with
-  // the matching entry so the user lands on their preferred model from
-  // the first prompt. Not applied on resurrect — those sessions keep
-  // whatever the user last selected. Keys are agent ids; values are the
-  // raw model id strings the agent expects (claude-acp: "claude-opus-4-7",
-  // opencode: "openai/gpt-5-codex" or "ncp-anthropic/claude-opus-4-7", …).
-  defaultModels: z.record(z.string(), z.string()).default({}),
+  // Optional per-agent default session configuration, seeded once at
+  // fresh session/new (never on resurrect). Keyed by agent id; each
+  // value maps configId -> desired value (e.g. { model: "claude-opus-4-7",
+  // mode: "plan", effort: "high" }). "model" and "mode" are hydra-reserved
+  // ids seeded through their dedicated verbs (session/set_model and
+  // session/set_mode); every other id (e.g. "effort") is agent-defined
+  // and seeded via session/set_config_option, same as
+  // `/hydra config <id> <value>` does at runtime. See bootstrapAgent in
+  // session-manager.ts.
+  sessionDefaults: z.record(z.string(), z.record(z.string(), z.string())).default({}),
   // Optional override: the agent used to produce session synopses
   // (title + structured digest) at close / picker T / `/hydra title`.
   // When set, every background synopsis spawns an ephemeral copy of
@@ -1028,6 +1030,50 @@ export async function migrateLegacyAuthToken(): Promise<void> {
   );
 }
 
+// One-shot heal for installs predating sessionDefaults: fold legacy
+// top-level defaultModels[agentId] into sessionDefaults[agentId].model,
+// then drop defaultModels. Idempotent — a no-op once defaultModels is
+// gone. An existing sessionDefaults[agent].model wins over the legacy
+// value for that agent (only reachable via a hand-edited file mid-heal).
+export async function migrateLegacyDefaultModels(): Promise<void> {
+  const raw = await readConfigFile();
+  const legacy =
+    raw.defaultModels && typeof raw.defaultModels === "object" &&
+    !Array.isArray(raw.defaultModels)
+      ? (raw.defaultModels as Record<string, unknown>)
+      : undefined;
+  if (!legacy) {
+    return;
+  }
+
+  const sessionDefaults =
+    raw.sessionDefaults && typeof raw.sessionDefaults === "object" &&
+    !Array.isArray(raw.sessionDefaults)
+      ? (raw.sessionDefaults as Record<string, unknown>)
+      : {};
+  for (const [agentId, modelId] of Object.entries(legacy)) {
+    if (typeof modelId !== "string") {
+      continue;
+    }
+    const entry =
+      sessionDefaults[agentId] && typeof sessionDefaults[agentId] === "object" &&
+      !Array.isArray(sessionDefaults[agentId])
+        ? (sessionDefaults[agentId] as Record<string, unknown>)
+        : {};
+    if (entry.model === undefined) {
+      entry.model = modelId;
+    }
+    sessionDefaults[agentId] = entry;
+  }
+  raw.sessionDefaults = sessionDefaults;
+  delete raw.defaultModels;
+
+  await writeJsonAtomic(paths.config(), raw, { mode: 0o600 });
+  process.stderr.write(
+    `hydra-acp: migrated defaultModels to sessionDefaults in ${paths.config()}.\n`,
+  );
+}
+
 // The global config, with no directory overlay applied. This is what the
 // DAEMON must use — it is long-lived and per-machine, so a per-cwd overlay
 // would be meaningless there — and what computeConfigDigest must hash, or
@@ -1037,6 +1083,7 @@ export async function loadGlobalConfig(): Promise<HydraConfig> {
   // Heal legacy layout before reading config.json so the parse sees the
   // post-migration shape rather than a stale snapshot.
   await migrateLegacyAuthToken();
+  await migrateLegacyDefaultModels();
   return HydraConfig.parse(await readConfigFile());
 }
 
@@ -1050,6 +1097,7 @@ export async function loadGlobalConfig(): Promise<HydraConfig> {
 // unrelated `hydra agent set`.
 export async function loadConfig(): Promise<HydraConfig> {
   await migrateLegacyAuthToken();
+  await migrateLegacyDefaultModels();
   const raw = await readConfigFile();
   const overlay = currentDirectoryOverlay();
   return HydraConfig.parse(overlay ? deepMergeConfig(raw, overlay) : raw);
@@ -1073,9 +1121,10 @@ export async function writeConfig(config: HydraConfig): Promise<void> {
 export async function updateRawConfig(
   mutate: (raw: Record<string, unknown>) => void,
 ): Promise<void> {
-  // Heal legacy auth-token layout first so the raw object we hand back
-  // matches what loadConfig would see (no orphan daemon.authToken).
+  // Heal legacy layout first so the raw object we hand back matches what
+  // loadConfig would see (no orphan daemon.authToken or defaultModels).
   await migrateLegacyAuthToken();
+  await migrateLegacyDefaultModels();
   const raw = await readConfigFile();
   mutate(raw);
   // Validate the mutated shape; throws before any write if it's invalid.
@@ -1125,29 +1174,34 @@ export async function setTuiSidebarEnabled(enabled: boolean): Promise<void> {
   });
 }
 
-// Convenience over updateRawConfig for persisting the default agent and
-// optionally its default model in one atomic write. Used by `hydra agent
-// set` and the TUI agent switch. Pass model=undefined to set only the
-// agent; pass a model to also record it under defaultModels[agent].
+// Convenience over updateRawConfig for persisting the default agent in
+// one atomic write. Used by `hydra agent set` and the TUI agent switch.
 export async function setDefaultAgent(agentId: string): Promise<void> {
   await updateRawConfig((raw) => {
     raw.defaultAgent = agentId;
   });
 }
 
-// Set the default model for a specific agent without touching the
-// top-level defaultAgent. Used by `hydra agent set <agent> <model>`.
-export async function setDefaultModelForAgent(
+// Set sessionDefaults[agentId][configId] = value in a single atomic
+// write, without touching the top-level defaultAgent. Used by
+// `hydra agent set <agent> <configId> <value>`.
+export async function setSessionDefaultForAgent(
   agentId: string,
-  modelId: string,
+  configId: string,
+  value: string,
 ): Promise<void> {
   await updateRawConfig((raw) => {
-    const models =
-      raw.defaultModels && typeof raw.defaultModels === "object"
-        ? (raw.defaultModels as Record<string, unknown>)
+    const sessionDefaults =
+      raw.sessionDefaults && typeof raw.sessionDefaults === "object"
+        ? (raw.sessionDefaults as Record<string, unknown>)
         : {};
-    models[agentId] = modelId;
-    raw.defaultModels = models;
+    const entry =
+      sessionDefaults[agentId] && typeof sessionDefaults[agentId] === "object"
+        ? (sessionDefaults[agentId] as Record<string, unknown>)
+        : {};
+    entry[configId] = value;
+    sessionDefaults[agentId] = entry;
+    raw.sessionDefaults = sessionDefaults;
   });
 }
 

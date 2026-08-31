@@ -1,14 +1,15 @@
 import type { AdvertisedModel } from "./hydra-commands.js";
 
 // Shared model-id resolver. All three places that turn a user-supplied
-// model id into one we hand to `session/set_model` — the `defaultModels`
+// model id into one we hand to `session/set_model` — the `sessionDefaults`
 // / `--model` seed in bootstrapAgent, the daemon's `session/set_model`
 // WS handler (decideSetModel), and the `/model` slash command — funnel
 // through this so they agree on what "close enough" means. The same
-// underlying logic is also reused for /hydra config option values via
-// `resolveCandidate`.
+// underlying logic is also reused for /hydra config option values, and
+// for bootstrapAgent's generic (non-model, non-mode) config-default seed,
+// via `resolveCandidate`.
 //
-// The motivating case: a user configures `defaultModels[pi-dev] =
+// The motivating case: a user configures `sessionDefaults[pi-dev].model =
 // "claude-opus-4-7"`, but the agent advertises the fully-qualified
 // `anthropic/claude-opus-4-7`. The bare id isn't an exact string match,
 // so the old code rejected it and silently fell back to the agent's

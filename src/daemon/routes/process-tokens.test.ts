@@ -29,7 +29,7 @@ function testConfig(): HydraConfig {
       pinned: false,
     },
     defaultAgent: "claude-acp",
-    defaultModels: {},
+    sessionDefaults: {},
     defaultCwd: os.homedir(),
     compressToolContent: true,
     sessionListColdLimit: 20,

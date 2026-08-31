@@ -99,7 +99,7 @@ import type {
   AdvertisedModel,
   ConfigOption,
 } from "./hydra-commands.js";
-import { resolveModelId } from "./model-resolve.js";
+import { resolveModelId, resolveCandidate } from "./model-resolve.js";
 import {
   inferModelVerbFromResult,
   requestModelChange,
@@ -147,10 +147,15 @@ export interface CreateSessionParams {
   mcpServers?: unknown[];
   title?: string;
   agentArgs?: string[];
-  // One-shot model override. When set, wins over defaultModels[agentId]
+  // One-shot model override. When set, wins over sessionDefaults[agentId]
   // during bootstrapAgent. Not persisted — resurrect and agent-switch
   // paths don't see it.
   model?: string;
+  // One-shot per-agent config-default overrides (e.g. from a directory
+  // `.hydra-acp.json`), keyed by configId. Wins over sessionDefaults
+  // (global config) but loses to the dedicated `model` field above for
+  // "model" specifically. Not persisted — same lifetime as `model`.
+  configDefaults?: Record<string, string>;
   // Per-request callback that fires while the agent's binary or npm
   // package is being fetched. Forwarded to planSpawn; the daemon WS
   // handler uses it to push hydra-acp/agents/install_progress
@@ -313,13 +318,14 @@ export interface SessionManagerOptions {
   // Fast-reap window for a session with zero attached clients that has
   // never been promoted to interactive — see Session.scheduleOrphanCheck.
   orphanTimeoutMs?: number;
-  // Per-agent default model id. When a brand-new agent process is spawned
-  // (the bootstrapAgent path: create(), /hydra agent switch, import
-  // re-seed), hydra issues session/set_model with the entry that matches
-  // the agent id so the user lands on their preferred model from the
-  // first prompt. Resurrect paths (session/load) skip this — those
-  // sessions already carry a user-chosen model from the prior incarnation.
-  defaultModels?: Record<string, string>;
+  // Per-agent default session configuration (model/mode/effort/…). When a
+  // brand-new agent process is spawned (the bootstrapAgent path: create(),
+  // /hydra agent switch, import re-seed), hydra seeds each configured
+  // dimension through its matching verb so the user lands on their
+  // preferred setup from the first prompt. Resurrect paths (session/load)
+  // skip this — those sessions already carry a user-chosen configuration
+  // from the prior incarnation.
+  sessionDefaults?: Record<string, Record<string, string>>;
   // Optional override: every background synopsis runs on this agent
   // instead of the session's source agent. Forwarded to the synopsis
   // coordinator. Unset → coordinator uses each session's own agentId.
@@ -407,7 +413,7 @@ export class SessionManager {
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private orphanTimeoutMs: number;
-  private defaultModels: Record<string, string>;
+  private sessionDefaults: Record<string, Record<string, string>>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
   private compactionAgent?: string;
@@ -489,7 +495,7 @@ export class SessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.orphanTimeoutMs = options.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
-    this.defaultModels = options.defaultModels ?? {};
+    this.sessionDefaults = options.sessionDefaults ?? {};
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
     this.compactionAgent = options.compactionAgent;
@@ -1031,6 +1037,7 @@ export class SessionManager {
       agentArgs: params.agentArgs,
       mcpServers: params.mcpServers,
       model: params.model,
+      configDefaults: params.configDefaults,
       onInstallProgress: params.onInstallProgress,
       forwardedEnv: params.forwardedEnv,
       selfSessionId: sessionId,
@@ -4729,7 +4736,7 @@ export class SessionManager {
     return out;
   }
 
-  // Issue session/set_model for a seed model (defaultModels / --model) at
+  // Issue session/set_model for a seed model (sessionDefaults / --model) at
   // bootstrap, logging success or a non-fatal rejection. `where` is the
   // human-readable provenance string used in log lines. A bad id in config
   // shouldn't break session creation, so a rejection is swallowed.
@@ -4770,6 +4777,33 @@ export class SessionManager {
     }
   }
 
+  // Issue session/set_mode for a seed mode (sessionDefaults[agentId].mode)
+  // at bootstrap, after the model seed has settled — a model switch can
+  // clamp/invalidate the current mode, so seeding mode first could be
+  // immediately undone. Mirrors applySeedModel's log-and-swallow tone; no
+  // fuzzy resolution, mode ids are a small discrete advertised set and the
+  // caller already checked membership.
+  private async applySeedMode(
+    agent: AgentInstance,
+    sessionId: string,
+    modeId: string,
+    where: string,
+  ): Promise<{ accepted: boolean; result?: unknown }> {
+    try {
+      const result = await agent.connection.request("session/set_mode", {
+        sessionId,
+        modeId,
+      });
+      this.logger?.info(`${where}: session/set_mode accepted`);
+      return { accepted: true, result };
+    } catch (err) {
+      this.logger?.warn(
+        `${where} rejected by agent (${(err as Error).message}); session will use the agent's own default mode`,
+      );
+      return { accepted: false };
+    }
+  }
+
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
   // → session/new. Shared by create() and the /hydra agent path so both
   // go through the same env / capabilities / error-handling.
@@ -4778,10 +4812,15 @@ export class SessionManager {
     cwd: string;
     agentArgs?: string[];
     mcpServers?: unknown[];
-    // Per-invocation model override; takes priority over defaultModels.
+    // Per-invocation model override; takes priority over sessionDefaults.
     // Only create() forwards this — the agent-switch and import-reseed
     // callsites omit it so the session stays on its existing model.
     model?: string;
+    // Per-invocation config-default overrides (e.g. resolved from a
+    // directory `.hydra-acp.json`), keyed by configId. Wins over the
+    // daemon's own sessionDefaults[agentId] but loses to `model` above
+    // for "model" specifically. Only create() forwards this.
+    configDefaults?: Record<string, string>;
     // Per-invocation install-progress callback. Only the WS handler
     // wires this — the in-process /hydra agent-switch path leaves it
     // undefined and falls back to the daemon-log sink.
@@ -4868,23 +4907,26 @@ export class SessionManager {
       // Which verb this agent takes for model changes, read off the shape
       // of its model advertisement (see core/model-verb.ts).
       const modelVerb = inferModelVerbFromResult(newResult);
-      // defaultModels is keyed by agent id, and an agent derived via
+      // sessionDefaults is keyed by agent id, and an agent derived via
       // config.agents `extends` usually has no entry of its own. Walk the
       // inheritance chain most-specific-first so `opencode-home` picks up
-      // `defaultModels[opencode]` rather than silently landing on whatever
-      // the agent defaults to.
-      const inheritedModel = lookupInheritedAgentValue(
-        this.defaultModels,
+      // `sessionDefaults[opencode]` rather than silently landing on
+      // whatever the agent defaults to.
+      const inheritedDefaults = lookupInheritedAgentValue(
+        this.sessionDefaults,
         agentDef,
       );
-      const desired = params.model ?? inheritedModel?.value;
+      const inherited = inheritedDefaults?.value;
+      const configDefaults = params.configDefaults;
+      const provenanceAgentId = inheritedDefaults?.from ?? params.agentId;
+      const desired = params.model ?? configDefaults?.model ?? inherited?.model;
       // The accepted seed's reply, when one was sent and accepted. Carries
       // the agent's post-switch configOptions snapshot; see below.
       let seedReply: unknown;
       if (desired && desired !== initialModel) {
         // Resolve against the agent's advertised model list when we have
-        // one. Surfaces config typos (e.g. defaultModels[opencode] set to
-        // a claude-acp-shaped id) before they corrupt the session —
+        // one. Surfaces config typos (e.g. sessionDefaults[opencode].model
+        // set to a claude-acp-shaped id) before they corrupt the session —
         // opencode in particular silently splits an unknown modelId on `/`
         // and stores garbage, which then makes every subsequent prompt
         // return end_turn instantly. resolveModelId also bridges
@@ -4898,7 +4940,9 @@ export class SessionManager {
         const where =
           params.model !== undefined
             ? `model=${JSON.stringify(desired)}`
-            : `defaultModels[${inheritedModel?.from ?? params.agentId}]=${JSON.stringify(desired)}`;
+            : configDefaults?.model !== undefined
+              ? `configDefaults.model=${JSON.stringify(desired)}`
+              : `sessionDefaults[${provenanceAgentId}].model=${JSON.stringify(desired)}`;
         if (resolution.kind === "exact" || resolution.kind === "none") {
           // Only adopt the desired id if the agent actually accepted it;
           // a rejection leaves the session on the agent's own default.
@@ -4941,15 +4985,106 @@ export class SessionManager {
         }
       }
       const initialModes = extractInitialModes(newResult);
-      const initialMode = extractInitialCurrentMode(newResult);
-      // Read the dimensions off the seed's reply when one was accepted:
-      // it describes the model the session is actually on, where newResult
-      // describes the one that was just replaced. claude-acp rebuilds its
-      // effort levels per model (and drops the option for a model with
-      // none), so preferring newResult here advertised levels the agent
-      // would go on to refuse, at a currentValue belonging to the old
-      // model. Only the model/mode extractors above can keep using
-      // newResult — hydra tracks the seeded model itself, in initialModel.
+      let initialMode = extractInitialCurrentMode(newResult);
+
+      // Seed mode next, after the model settles above — a model switch
+      // can clamp/invalidate the current mode (a model-then-mode order
+      // avoids seeding a mode the switch is about to undo). configDefaults
+      // (directory overlay, one-shot) wins over the daemon's own
+      // sessionDefaults[agentId], same precedence as model.
+      const desiredMode = configDefaults?.mode ?? inherited?.mode;
+      if (desiredMode && desiredMode !== initialMode) {
+        const modeWhere =
+          configDefaults?.mode !== undefined
+            ? `configDefaults.mode=${JSON.stringify(desiredMode)}`
+            : `sessionDefaults[${provenanceAgentId}].mode=${JSON.stringify(desiredMode)}`;
+        if (initialModes.length > 0 && !initialModes.some((m) => m.id === desiredMode)) {
+          const known = initialModes.map((m) => m.id).join(", ");
+          this.logger?.warn(
+            `${modeWhere} not in agent's availableModes ([${known}]); skipping session/set_mode, session will use ${JSON.stringify(initialMode)}`,
+          );
+        } else {
+          const seededMode = await this.applySeedMode(
+            agent,
+            sessionIdRaw,
+            desiredMode,
+            modeWhere,
+          );
+          if (seededMode.accepted) {
+            initialMode = desiredMode;
+            if (hasConfigOptions(seededMode.result)) {
+              seedReply = seededMode.result;
+            }
+          }
+        }
+      }
+
+      // Seed everything else (effort, etc.) last, after mode settles —
+      // an agent-defined dimension's advertised option set can itself be
+      // rebuilt per model (e.g. claude-acp's effort levels), so resolve
+      // against the freshest snapshot we have rather than newResult's
+      // pre-seed one.
+      const restDefaults: Record<string, string> = {
+        ...(inherited ?? {}),
+        ...(configDefaults ?? {}),
+      };
+      delete restDefaults.model;
+      delete restDefaults.mode;
+      if (Object.keys(restDefaults).length > 0) {
+        let currentOptions = extractInitialConfigOptions(
+          hasConfigOptions(seedReply) ? seedReply : newResult,
+        );
+        for (const [configId, value] of Object.entries(restDefaults)) {
+          const optWhere = `sessionDefaults[${provenanceAgentId}].${configId}=${JSON.stringify(value)}`;
+          const option = currentOptions.find((o) => o.id === configId);
+          if (!option) {
+            this.logger?.warn(
+              `${optWhere}: agent does not currently advertise configId=${configId}; skipping session/set_config_option`,
+            );
+            continue;
+          }
+          const resolution = resolveCandidate(
+            value,
+            option.options.map((o) => o.value),
+          );
+          if (resolution.kind !== "exact" && resolution.kind !== "resolved") {
+            this.logger?.warn(
+              `${optWhere} ${resolution.kind}; skipping session/set_config_option`,
+            );
+            continue;
+          }
+          const resolvedValue =
+            resolution.kind === "resolved" ? resolution.modelId : value;
+          if (resolvedValue === option.currentValue) {
+            continue;
+          }
+          try {
+            const reply = await agent.connection.request<Record<string, unknown>>(
+              "session/set_config_option",
+              { sessionId: sessionIdRaw, configId, value: resolvedValue },
+            );
+            this.logger?.info(`${optWhere}: session/set_config_option accepted`);
+            if (hasConfigOptions(reply)) {
+              currentOptions = extractInitialConfigOptions(reply);
+              seedReply = reply;
+            }
+          } catch (err) {
+            this.logger?.warn(
+              `${optWhere}: session/set_config_option rejected by agent (${(err as Error).message})`,
+            );
+          }
+        }
+      }
+
+      // Read the dimensions off the last accepted seed's reply, when one
+      // was sent and accepted: it describes the state the session is
+      // actually on, where newResult describes the one that was just
+      // replaced. claude-acp rebuilds its effort levels per model (and
+      // drops the option for a model with none), so preferring newResult
+      // here would advertise levels the agent would go on to refuse, at a
+      // currentValue belonging to the old model. Only the model/mode
+      // extractors above can keep using newResult — hydra tracks the
+      // seeded model/mode itself, in initialModel/initialMode.
       //
       // Gated on the reply actually carrying the array, not merely on a
       // seed having run: session/set_model (still the lead verb, and the
@@ -5604,9 +5739,9 @@ export class SessionManager {
   // Replace the tier-"live" values this manager was constructed with.
   // Read per session/new, so a change lands on the next created session;
   // sessions already running keep what they were created with.
-  setLiveConfig(next: { defaultModels?: Record<string, string> }): void {
-    if (next.defaultModels) {
-      this.defaultModels = next.defaultModels;
+  setLiveConfig(next: { sessionDefaults?: Record<string, Record<string, string>> }): void {
+    if (next.sessionDefaults) {
+      this.sessionDefaults = next.sessionDefaults;
     }
   }
 

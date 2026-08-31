@@ -2858,7 +2858,7 @@ describe("extractInitialModels", () => {
   });
 });
 
-describe("SessionManager: defaultModels", () => {
+describe("SessionManager: sessionDefaults", () => {
   it("issues session/set_model after session/new and seeds currentModel", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
@@ -2871,7 +2871,7 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
 
     const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
@@ -2899,14 +2899,14 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
 
     await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
-  it("skips session/set_model when no defaultModel is configured for the agent", async () => {
+  it("skips session/set_model when no default model is configured for the agent", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -2917,15 +2917,15 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
 
     await manager.create({ cwd: WORK_CWD, agentId: "claude-code" });
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
-  it("passes persisted model (not defaultModels config) to session/load _meta on resurrect for claude-acp", async () => {
-    // _meta.claudeCode.options.model must use the persisted model — not defaultModels[agentId].
+  it("passes persisted model (not sessionDefaults config) to session/load _meta on resurrect for claude-acp", async () => {
+    // _meta.claudeCode.options.model must use the persisted model — not sessionDefaults[agentId].model.
     const mocks: ReturnType<typeof makeMockAgent>[] = [];
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
@@ -2939,7 +2939,7 @@ describe("SessionManager: defaultModels", () => {
         return m.agent;
       },
       undefined,
-      { defaultModels: { "claude-acp": "sonnet" } },
+      { sessionDefaults: { "claude-acp": { model: "sonnet" } } },
     );
 
     await manager.resurrect({
@@ -2956,6 +2956,12 @@ describe("SessionManager: defaultModels", () => {
       _meta: { claudeCode: { options: { model: "opus[1m]" } } },
     });
     expect(loadCall?.[1]._meta?.claudeCode?.options?.model).not.toBe("sonnet");
+    // No session/set_mode or session/set_config_option either — resurrect
+    // never reads sessionDefaults, only the persisted state.
+    expect(req.mock.calls.some((c) => c[0] === "session/set_mode")).toBe(false);
+    expect(
+      req.mock.calls.some((c) => c[0] === "session/set_config_option"),
+    ).toBe(false);
   });
 
   it("does not inject _meta.claudeCode into session/load for non-claude-acp agents", async () => {
@@ -2988,7 +2994,7 @@ describe("SessionManager: defaultModels", () => {
     expect(loadCall?.[1]._meta).toBeUndefined();
   });
 
-  it("prefers params.model over defaultModels[agentId] on create", async () => {
+  it("prefers params.model over sessionDefaults[agentId].model on create", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -3000,7 +3006,7 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
 
     const session = await manager.create({
@@ -3016,7 +3022,7 @@ describe("SessionManager: defaultModels", () => {
     expect(session.currentModel).toBe("openai/gpt-5");
   });
 
-  it("uses params.model when no defaultModel is configured", async () => {
+  it("uses params.model when no default model is configured", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -3028,7 +3034,7 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
-      { defaultModels: {} },
+      { sessionDefaults: {} },
     );
 
     await manager.create({
@@ -3058,17 +3064,17 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "bogus/no-such-model" } },
+      { sessionDefaults: { opencode: { model: "bogus/no-such-model" } } },
     );
 
     const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
     expect(session.currentModel).toBe("openai/gpt-4o");
   });
 
-  it("skips session/set_model when defaultModels[agentId] is not in the agent's advertised availableModels", async () => {
-    // Regression: with defaultModels[opencode] set to a value that
-    // looks like a claude-acp id (e.g. "claude-opus-4-7[1m]" — a real
-    // user-config bug we hit), the old code would fire set_model
+  it("skips session/set_model when sessionDefaults[agentId].model is not in the agent's advertised availableModels", async () => {
+    // Regression: with sessionDefaults[opencode].model set to a value
+    // that looks like a claude-acp id (e.g. "claude-opus-4-7[1m]" — a
+    // real user-config bug we hit), the old code would fire set_model
     // anyway, opencode would silently store garbage as the model id,
     // and every subsequent prompt returned end_turn with no message.
     // Validate against the response's advertised list before firing.
@@ -3094,7 +3100,7 @@ describe("SessionManager: defaultModels", () => {
       undefined,
       // Intentionally a claude-acp-shaped id on an opencode agent.
       {
-        defaultModels: { opencode: "claude-opus-4-7[1m]" },
+        sessionDefaults: { opencode: { model: "claude-opus-4-7[1m]" } },
         logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
       },
     );
@@ -3120,11 +3126,11 @@ describe("SessionManager: defaultModels", () => {
     ]);
   });
 
-  it("resolves a bare defaultModels id to the provider-prefixed advertised id", async () => {
-    // The motivating bug: defaultModels[pi-dev] = "claude-opus-4-7" but
-    // the agent advertises "anthropic/claude-opus-4-7". The bare id isn't
-    // an exact match, but it's the only trailing-segment match, so we
-    // resolve it and fire set_model with the advertised id.
+  it("resolves a bare sessionDefaults model id to the provider-prefixed advertised id", async () => {
+    // The motivating bug: sessionDefaults[pi-dev].model = "claude-opus-4-7"
+    // but the agent advertises "anthropic/claude-opus-4-7". The bare id
+    // isn't an exact match, but it's the only trailing-segment match, so
+    // we resolve it and fire set_model with the advertised id.
     const mock = makeMockAgent({ agentId: "pi-dev", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -3145,7 +3151,7 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("pi-dev")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { "pi-dev": "claude-opus-4-7" } },
+      { sessionDefaults: { "pi-dev": { model: "claude-opus-4-7" } } },
     );
 
     const session = await manager.create({ cwd: WORK_CWD, agentId: "pi-dev" });
@@ -3158,7 +3164,7 @@ describe("SessionManager: defaultModels", () => {
     expect(session.currentModel).toBe("anthropic/claude-opus-4-7");
   });
 
-  it("skips set_model when a bare defaultModels id is ambiguous across providers", async () => {
+  it("skips set_model when a bare sessionDefaults model id is ambiguous across providers", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -3181,7 +3187,7 @@ describe("SessionManager: defaultModels", () => {
       () => mock.agent,
       undefined,
       {
-        defaultModels: { opencode: "claude-opus-4-7" },
+        sessionDefaults: { opencode: { model: "claude-opus-4-7" } },
         logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
       },
     );
@@ -3212,7 +3218,7 @@ describe("SessionManager: defaultModels", () => {
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
 
     await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
@@ -3220,6 +3226,302 @@ describe("SessionManager: defaultModels", () => {
     expect(requestMock.mock.calls[2]).toEqual([
       "session/set_model",
       { sessionId: "u_fresh", modelId: "openai/gpt-5-codex" },
+    ]);
+  });
+
+  it("seeds mode after model settles, via session/set_mode", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        modes: {
+          currentModeId: "default",
+          availableModes: [{ id: "default" }, { id: "plan" }],
+        },
+      })
+      .mockResolvedValueOnce({ ok: true }) // session/set_model
+      .mockResolvedValueOnce({ ok: true }); // session/set_mode
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: {
+          opencode: { model: "openai/gpt-5-codex", mode: "plan" },
+        },
+      },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+
+    expect(requestMock.mock.calls[2]?.[0]).toBe("session/set_model");
+    expect(requestMock.mock.calls[3]).toEqual([
+      "session/set_mode",
+      { sessionId: "u_fresh", modeId: "plan" },
+    ]);
+    expect(session.currentMode).toBe("plan");
+  });
+
+  it("skips session/set_mode when no default mode is configured", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { sessionDefaults: {} },
+    );
+
+    await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+    expect(requestMock.mock.calls.length).toBe(2);
+  });
+
+  it("skips session/set_mode when the configured mode isn't in the agent's advertised availableModes", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock.mockResolvedValueOnce({ protocolVersion: 1 }).mockResolvedValueOnce({
+      sessionId: "u_fresh",
+      modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
+    });
+
+    const warnMessages: string[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: { opencode: { mode: "no-such-mode" } },
+        logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
+      },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+
+    // initialize + session/new only — NO session/set_mode.
+    expect(requestMock.mock.calls.length).toBe(2);
+    expect(session.currentMode).toBe("default");
+    expect(warnMessages.length).toBe(1);
+    expect(warnMessages[0]).toContain("no-such-mode");
+    expect(warnMessages[0]).toContain("availableModes");
+  });
+
+  it("seeds a generic configId (effort) last, resolving against the current advertised options", async () => {
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "medium",
+            options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        // session/set_config_option reply: the effort options rebuilt
+        // for whichever model the session actually landed on.
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "high",
+            options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+          },
+        ],
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      { sessionDefaults: { "claude-acp": { effort: "high" } } },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "claude-acp" });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_config_option",
+      { sessionId: "u_fresh", configId: "effort", value: "high" },
+    ]);
+    expect(
+      session.buildConfigOptions().find((o) => o.id === "effort")?.currentValue,
+    ).toBe("high");
+  });
+
+  it("resolves a generic configId value fuzzily against the advertised options", async () => {
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "anthropic/medium",
+            options: [
+              { value: "anthropic/medium", name: "Medium" },
+              { value: "anthropic/high", name: "High" },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      { sessionDefaults: { "claude-acp": { effort: "high" } } },
+    );
+
+    await manager.create({ cwd: WORK_CWD, agentId: "claude-acp" });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_config_option",
+      { sessionId: "u_fresh", configId: "effort", value: "anthropic/high" },
+    ]);
+  });
+
+  it("skips a generic configId the agent doesn't currently advertise", async () => {
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh", configOptions: [] });
+
+    const warnMessages: string[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: { "claude-acp": { effort: "high" } },
+        logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
+      },
+    );
+
+    await manager.create({ cwd: WORK_CWD, agentId: "claude-acp" });
+
+    expect(requestMock.mock.calls.length).toBe(2);
+    expect(warnMessages.length).toBe(1);
+    expect(warnMessages[0]).toContain("does not currently advertise");
+  });
+
+  it("skips a generic configId value that's ambiguous against the advertised options", async () => {
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "medium",
+            options: [
+              { value: "anthropic/high", name: "High" },
+              { value: "openai/high", name: "High" },
+            ],
+          },
+        ],
+      });
+
+    const warnMessages: string[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: { "claude-acp": { effort: "high" } },
+        logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
+      },
+    );
+
+    await manager.create({ cwd: WORK_CWD, agentId: "claude-acp" });
+
+    expect(requestMock.mock.calls.length).toBe(2);
+    expect(warnMessages.length).toBe(1);
+    expect(warnMessages[0]).toContain("ambiguous");
+  });
+
+  it("resolves a generic configId against the post-model-seed snapshot, not session/new's", async () => {
+    // claude-acp rebuilds effort levels per model: session/new advertises
+    // one set, and the model seed's reply advertises a different one for
+    // the model the session actually landed on. The effort seed must
+    // resolve against the LATTER, not the stale session/new snapshot.
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: { currentModelId: "claude-sonnet-4-6" },
+        // session/new's effort snapshot has no "max" option.
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "medium",
+            options: [{ value: "medium", name: "Medium" }],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        // session/set_model's reply advertises the opus-only "max" level.
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "medium",
+            options: [
+              { value: "medium", name: "Medium" },
+              { value: "max", name: "Max" },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ ok: true }); // session/set_config_option
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: {
+          "claude-acp": { model: "claude-opus-4-7", effort: "max" },
+        },
+      },
+    );
+
+    await manager.create({ cwd: WORK_CWD, agentId: "claude-acp" });
+
+    expect(requestMock.mock.calls[2]?.[0]).toBe("session/set_model");
+    expect(requestMock.mock.calls[3]).toEqual([
+      "session/set_config_option",
+      { sessionId: "u_fresh", configId: "effort", value: "max" },
     ]);
   });
 });
@@ -4280,7 +4582,7 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { "claude-code": "opus" } },
+      { sessionDefaults: { "claude-code": { model: "opus" } } },
     );
     const session = await manager.create({
       agentId: "claude-code",
@@ -4322,7 +4624,7 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      { sessionDefaults: { opencode: { model: "openai/gpt-5-codex" } } },
     );
     const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
 

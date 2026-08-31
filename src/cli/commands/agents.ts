@@ -3,7 +3,7 @@ import * as path from "node:path";
 import {
   loadConfig,
   setDefaultAgent,
-  setDefaultModelForAgent,
+  setSessionDefaultForAgent,
   setAgentOverride,
   setLocalAgent,
   setRegistryPinned,
@@ -324,7 +324,8 @@ export async function runAgentsLogs(
 
 export async function runAgentsSet(
   agentId: string | undefined,
-  modelId: string | undefined,
+  configId: string | undefined,
+  value: string | undefined,
 ): Promise<void> {
   const config = await loadConfig();
 
@@ -375,21 +376,28 @@ export async function runAgentsSet(
     }
   }
 
-  // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
-  // "openai/gpt-5-codex"), so we don't try to validate the model against
-  // the agent. When a modelId is provided we only update the per-agent
-  // default model; the top-level defaultAgent is only changed when the
-  // user runs `hydra agent set <agent>` without a model.
-  if (modelId !== undefined) {
-    await setDefaultModelForAgent(agentId, modelId);
+  // configId values (model, mode, effort, …) are opaque agent-specific
+  // strings, so we don't try to validate them against the agent. When a
+  // configId is provided we only update that per-agent default; the
+  // top-level defaultAgent is only changed when the user runs
+  // `hydra agent set <agent>` with neither.
+  if (configId !== undefined) {
+    if (value === undefined) {
+      process.stderr.write(
+        `hydra agent set: '${configId}' needs a value, e.g. hydra agent set ${agentId} ${configId} <value>\n`,
+      );
+      process.exit(2);
+      return;
+    }
+    await setSessionDefaultForAgent(agentId, configId, value);
   } else {
     await setDefaultAgent(agentId);
   }
 
   const disk = readAgentDefaults(await readRawConfig());
-  if (modelId !== undefined && agentId !== disk.agent) {
+  if (configId !== undefined && value !== undefined && agentId !== disk.agent) {
     process.stdout.write(
-      `Default model for ${agentId} is now ${modelId}.\n`,
+      `Default ${configId} for ${agentId} is now ${value}.\n`,
     );
   }
   process.stdout.write(`${formatDefaultLine(disk)}\n`);
@@ -421,11 +429,15 @@ function readAgentDefaults(
 ): { agent: string; model?: string } {
   const agent =
     typeof raw.defaultAgent === "string" ? raw.defaultAgent : "(unset)";
-  const models =
-    raw.defaultModels && typeof raw.defaultModels === "object"
-      ? (raw.defaultModels as Record<string, unknown>)
+  const sessionDefaults =
+    raw.sessionDefaults && typeof raw.sessionDefaults === "object"
+      ? (raw.sessionDefaults as Record<string, unknown>)
       : {};
-  const rawModel = models[agent];
+  const entry =
+    sessionDefaults[agent] && typeof sessionDefaults[agent] === "object"
+      ? (sessionDefaults[agent] as Record<string, unknown>)
+      : {};
+  const rawModel = entry.model;
   return typeof rawModel === "string"
     ? { agent, model: rawModel }
     : { agent };

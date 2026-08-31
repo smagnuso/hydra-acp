@@ -2,7 +2,7 @@ import { hydraHome } from "../core/paths.js";
 import {
   resolveDirectoryConfig,
   stringField,
-  stringMapField,
+  nestedStringMapField,
 } from "../core/directory-config.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import type { HydraConfig } from "../core/config.js";
@@ -10,7 +10,7 @@ import type { HydraConfig } from "../core/config.js";
 // The picker composer's top-right "agent•model" label is a preview of
 // what a new session created from this composer would use — and both
 // halves of it are cwd-dependent, because a `.hydra-acp.json` between the
-// cwd and $HOME can set `defaultAgent` / `defaultModels`. The label is not
+// cwd and $HOME can set `defaultAgent` / `sessionDefaults`. The label is not
 // decoration: picker's makeNewResult sends both values on session/new, so
 // whatever it shows is what gets created.
 //
@@ -43,11 +43,12 @@ export interface ComposerAgentInputs {
   // possible statement of intent ("run THIS agent"), stronger even than
   // a `.hydra-acp.json` for the tree, so it sits above everything else.
   explicitAgentId?: string;
-  // defaultAgent / defaultModels as written in the `.hydra-acp.json`
-  // layers for the cwd in question, NOT the already-merged config. The
-  // distinction is the whole point of the precedence rule below: once
-  // merged, there is no way to tell a directory's deliberate statement
-  // from the global default it happened to override.
+  // defaultAgent / sessionDefaults (model only) as written in the
+  // `.hydra-acp.json` layers for the cwd in question, NOT the
+  // already-merged config. The distinction is the whole point of the
+  // precedence rule below: once merged, there is no way to tell a
+  // directory's deliberate statement from the global default it happened
+  // to override.
   directoryDefaultAgent?: string;
   directoryDefaultModels?: Record<string, string>;
   prefs: ComposerAgentPrefs;
@@ -84,7 +85,7 @@ export function resolveComposerAgent(
   if (agentId === undefined || agentId.length === 0) {
     return {};
   }
-  // defaultModels is keyed by agent id, and an agent derived via
+  // sessionDefaults is keyed by agent id, and an agent derived via
   // config.agents `extends` usually has no entry of its own — walk the
   // inheritance chain most-specific-first, same as session-manager.ts
   // does when it actually seeds a session's model.
@@ -107,6 +108,24 @@ export function resolveComposerAgent(
   return { agentId, ...(model !== undefined ? { model } : {}) };
 }
 
+// This module only ever displays the model half of a sessionDefaults
+// entry — mode/effort defaults have no picker-label equivalent (see the
+// module comment). Drops any agent with no configured model.
+function modelsOnly(
+  sessionDefaults: Record<string, Record<string, string>> | undefined,
+): Record<string, string> | undefined {
+  if (!sessionDefaults) {
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [agentId, entry] of Object.entries(sessionDefaults)) {
+    if (typeof entry.model === "string") {
+      out[agentId] = entry.model;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export interface ComposerAgentForCwd extends ComposerAgentSelection {
   // Something the caller should surface but that we deliberately did not
   // act on. Currently only a `home` key: see below.
@@ -126,7 +145,7 @@ export interface ComposerAgentForCwd extends ComposerAgentSelection {
 // later loadConfig() in this process must still describe the directory
 // hydra was launched from.
 //
-// Keys other than defaultAgent / defaultModels are ignored on purpose.
+// Keys other than defaultAgent / sessionDefaults are ignored on purpose.
 // They are either `overlay: "inert"` already (see core/config-tiers) or,
 // like `tui`, feed layout that the picker computed when it opened.
 export async function composerAgentForCwd(args: {
@@ -148,7 +167,7 @@ export async function composerAgentForCwd(args: {
     // through with no directory layer.
   }
   const dirAgent = stringField(merged, "defaultAgent");
-  const dirModels = stringMapField(merged, "defaultModels");
+  const dirModels = modelsOnly(nestedStringMapField(merged, "sessionDefaults"));
   const selection = resolveComposerAgent({
     ...(args.explicitAgentId !== undefined
       ? { explicitAgentId: args.explicitAgentId }
@@ -160,7 +179,7 @@ export async function composerAgentForCwd(args: {
       ? { fallbackAgentId: args.fallbackAgentId }
       : {}),
     configDefaultAgent: args.config.defaultAgent,
-    configDefaultModels: args.config.defaultModels,
+    configDefaultModels: modelsOnly(args.config.sessionDefaults),
     availableAgents: args.availableAgents,
   });
   if (homeRequest !== undefined && homeRequest !== hydraHome()) {

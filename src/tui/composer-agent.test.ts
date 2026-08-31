@@ -154,14 +154,14 @@ describe("resolveComposerAgent", () => {
 describe("composerAgentForCwd", () => {
   const config = HydraConfig.parse({
     defaultAgent: "opencode",
-    defaultModels: { opencode: "grok" },
+    sessionDefaults: { opencode: { model: "grok" } },
   });
 
-  it("reads defaultAgent and defaultModels out of the tree's config", async () => {
+  it("reads defaultAgent and sessionDefaults out of the tree's config", async () => {
     const dir = path.join(root, "work");
     await writeConfigAt(dir, {
       defaultAgent: "claude-acp",
-      defaultModels: { "claude-acp": "opus" },
+      sessionDefaults: { "claude-acp": { model: "opus" } },
     });
     expect(
       await composerAgentForCwd({
@@ -177,7 +177,7 @@ describe("composerAgentForCwd", () => {
     const dir = path.join(root, "work-explicit");
     await writeConfigAt(dir, {
       defaultAgent: "claude-acp",
-      defaultModels: { "claude-acp": "opus" },
+      sessionDefaults: { "claude-acp": { model: "opus" } },
     });
     expect(
       await composerAgentForCwd({

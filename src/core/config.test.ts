@@ -8,6 +8,7 @@ import {
   expandHome,
   loadConfig,
   migrateLegacyAuthToken,
+  migrateLegacyDefaultModels,
   setAgentOverride,
   setTuiSidebarEnabled,
   writeConfig,
@@ -33,8 +34,8 @@ describe("defaultConfig", () => {
     expect(defaultConfig().defaultCwd).toBe("~");
   });
 
-  it("defaults defaultModels to an empty object (no per-agent overrides)", () => {
-    expect(defaultConfig().defaultModels).toEqual({});
+  it("defaults sessionDefaults to an empty object (no per-agent overrides)", () => {
+    expect(defaultConfig().sessionDefaults).toEqual({});
   });
 
   it("leaves tui.sessionColumns unset by default", () => {
@@ -265,6 +266,76 @@ describe("migrateLegacyAuthToken", () => {
       mode: 0o600,
     });
     await expect(migrateLegacyAuthToken()).rejects.toThrow(/present in both/);
+  });
+});
+
+describe("migrateLegacyDefaultModels", () => {
+  it("is a no-op when no legacy field is present", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({ defaultAgent: "opencode" }) + "\n",
+      "utf8",
+    );
+    await migrateLegacyDefaultModels();
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw).toEqual({ defaultAgent: "opencode" });
+  });
+
+  it("folds a legacy defaultModels entry into sessionDefaults[agent].model and drops defaultModels", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        defaultAgent: "opencode",
+        defaultModels: { "claude-acp": "claude-opus-4-7" },
+      }) + "\n",
+      "utf8",
+    );
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await migrateLegacyDefaultModels();
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.defaultModels).toBeUndefined();
+    expect(raw.sessionDefaults).toEqual({
+      "claude-acp": { model: "claude-opus-4-7" },
+    });
+    warn.mockRestore();
+  });
+
+  it("keeps an existing sessionDefaults[agent].model over a conflicting legacy value", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        defaultModels: { "claude-acp": "legacy-model" },
+        sessionDefaults: { "claude-acp": { model: "new-model", mode: "plan" } },
+      }) + "\n",
+      "utf8",
+    );
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await migrateLegacyDefaultModels();
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.defaultModels).toBeUndefined();
+    expect(raw.sessionDefaults).toEqual({
+      "claude-acp": { model: "new-model", mode: "plan" },
+    });
+    warn.mockRestore();
+  });
+
+  it("is idempotent once defaultModels is gone", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        sessionDefaults: { "claude-acp": { model: "claude-opus-4-7" } },
+      }) + "\n",
+      "utf8",
+    );
+    await migrateLegacyDefaultModels();
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.sessionDefaults).toEqual({
+      "claude-acp": { model: "claude-opus-4-7" },
+    });
   });
 });
 

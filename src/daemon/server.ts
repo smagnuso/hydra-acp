@@ -242,7 +242,7 @@ export async function startDaemon(
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     orphanTimeoutMs: config.daemon.nonInteractiveOrphanTimeoutSeconds * 1_000,
-    defaultModels: config.defaultModels,
+    sessionDefaults: config.sessionDefaults,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,
     compactionAgent: config.compaction?.agent,
@@ -318,7 +318,7 @@ export async function startDaemon(
   registerConfigRoutes(app, () => ({
     defaultAgent: liveConfig.defaultAgent,
     defaultCwd: liveConfig.defaultCwd,
-    defaultModels: { ...liveConfig.defaultModels },
+    sessionDefaults: { ...liveConfig.sessionDefaults },
     ...(liveConfig.synopsisAgent !== undefined
       ? { synopsisAgent: liveConfig.synopsisAgent }
       : {}),
@@ -494,7 +494,7 @@ export async function startDaemon(
       : undefined;
 
   // Push tier-"live" config into the running daemon when config.json
-  // changes, so `defaultAgent`, `defaultModels`, `agents` and friends no
+  // changes, so `defaultAgent`, `sessionDefaults`, `agents` and friends no
   // longer need a restart. See core/config-tiers for the classification
   // and why a forgotten key fails the build rather than going silently
   // stale. Tier-"warn" keys can't be applied, so they surface as drift on
@@ -504,7 +504,7 @@ export async function startDaemon(
     apply: (next) => {
       liveConfig = next;
       registry.setConfig(next);
-      manager.setLiveConfig({ defaultModels: next.defaultModels });
+      manager.setLiveConfig({ sessionDefaults: next.sessionDefaults });
       sessionRouteDefaults.agentId = next.defaultAgent;
       sessionRouteDefaults.cwd = next.defaultCwd;
       setExtraScrubbedEnv(next.daemon.scrubEnv);

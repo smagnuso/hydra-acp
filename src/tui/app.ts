@@ -32,7 +32,7 @@ import {
   setTuiConfigValue,
   setTuiSidebarEnabled,
   setDefaultAgent,
-  setDefaultModelForAgent,
+  setSessionDefaultForAgent,
   hasConfiguredDefaultAgent,
   resolveInAppSelection,
   type HydraConfig,
@@ -868,7 +868,7 @@ interface ViewPrefs {
   // "save as config.defaultAgent" path.
   lastChosenAgent?: string;
   // Model that goes with lastChosenAgent. Tracked separately (rather than
-  // re-derived from config.defaultModels on every picker open) for the
+  // re-derived from config.sessionDefaults on every picker open) for the
   // same reason: the composer's choice has to survive session switches.
   lastChosenModel?: string;
 }
@@ -1347,8 +1347,8 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // to `codex-acp` through the registry's exact-id → unique-prefix
   // ladder. Doing it here (before viewPrefs, picker, session/new) means
   // the canonical id flows through every downstream lookup — most
-  // importantly `config.defaultModels[<canonical>]` for the picker's
-  // top-right "agent•model" stamp, and the daemon's own session/new
+  // importantly `config.sessionDefaults[<canonical>]?.model` for the
+  // picker's top-right "agent•model" stamp, and the daemon's own session/new
   // canonicalization, which now sees the same id we display. Silent
   // no-op when the daemon is unreachable or the id doesn't resolve —
   // the daemon will error on session/new with the real message.
@@ -5524,24 +5524,22 @@ async function runSession(
       });
   };
 
-  // `s` on a chooser row. Only the dimensions with a config home can be
-  // persisted; the rest say so rather than silently doing nothing, matching
-  // how ^O reports its session-only rows.
+  // `s` on a chooser row. "agent" saves the top-level defaultAgent; every
+  // other dimension (model, mode, effort, or whatever the agent
+  // advertises) saves under sessionDefaults[agentId][configId] — the
+  // generic per-agent config-default map bootstrapAgent seeds from.
   const saveConfigDefault = (configId: string, value: string): void => {
     void (async (): Promise<void> => {
       try {
         if (configId === "agent") {
           await setDefaultAgent(value);
-        } else if (configId === "model") {
+        } else {
           const agentId = resolvedAgentId || agentInfoName || "";
           if (!agentId) {
-            screen.notify("can't save a model default without an agent");
+            screen.notify(`can't save a ${configId} default without an agent`);
             return;
           }
-          await setDefaultModelForAgent(agentId, value);
-        } else {
-          screen.notify(`${configId} is session-only, not saved`);
-          return;
+          await setSessionDefaultForAgent(agentId, configId, value);
         }
         screen.notify(`saved default: ${configId} ${value}`);
       } catch (err) {
@@ -11079,10 +11077,10 @@ async function ensureAgentForNew(
   rememberComposerAgent(
     viewPrefs,
     result.agentId,
-    lookupInheritedAgentValue(config.defaultModels, {
+    lookupInheritedAgentValue(config.sessionDefaults, {
       id: result.agentId,
       extendsChain: chosenAgentEntry?.extendsChain,
-    })?.value,
+    })?.value.model,
   );
   if (result.persist) {
     try {

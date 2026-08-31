@@ -69,11 +69,11 @@ describe("computeConfigDigest", () => {
     expect(computeConfigDigest(a)).toBe(computeConfigDigest(b));
   });
 
-  it("ignores tui and defaultModels and agents", () => {
+  it("ignores tui and sessionDefaults and agents", () => {
     const a = baseConfig();
     const b: HydraConfig = {
       ...baseConfig(),
-      defaultModels: { "claude-acp": "opus" },
+      sessionDefaults: { "claude-acp": { model: "opus" } },
       agents: { foo: { command: "/bin/foo" } },
       tui: { ...baseConfig().tui, mouse: !baseConfig().tui.mouse },
     };
@@ -123,7 +123,7 @@ describe("configDriftSummary", () => {
     const current: HydraConfig = {
       ...baseConfig(),
       defaultAgent: "other",
-      defaultModels: { x: "y" },
+      sessionDefaults: { x: { model: "y" } },
       daemon: { ...baseConfig().daemon, port: 9999 },
     };
     expect(configDriftSummary(booted, current)).toEqual([]);

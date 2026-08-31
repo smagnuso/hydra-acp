@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { currentPlatformKey } from "../../core/binary-install.js";
 import { paths } from "../../core/paths.js";
-import { canonicalAgentId, runAgentsUninstall } from "./agents.js";
+import { canonicalAgentId, runAgentsSet, runAgentsUninstall } from "./agents.js";
 import { parseAddFlags } from "./_shared.js";
 
 const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -58,6 +58,47 @@ describe("runAgentsUninstall", () => {
     await runAgentsUninstall("never-installed-agent");
     const msg = stdoutSpy.mock.calls.map((c) => String(c[0])).join("");
     expect(msg).toContain("Nothing to remove");
+  });
+});
+
+describe("runAgentsSet", () => {
+  it("sets defaultAgent when called with no configId/value", async () => {
+    await runAgentsSet("claude-acp", undefined, undefined);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.defaultAgent).toBe("claude-acp");
+    expect(raw.sessionDefaults).toBeUndefined();
+  });
+
+  it("sets sessionDefaults[agent].model for a bare configId=model value", async () => {
+    await runAgentsSet("claude-acp", "model", "claude-opus-4-7");
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.sessionDefaults).toEqual({
+      "claude-acp": { model: "claude-opus-4-7" },
+    });
+    expect(raw.defaultAgent).toBeUndefined();
+  });
+
+  it("sets sessionDefaults[agent].mode for a non-model configId", async () => {
+    await runAgentsSet("claude-acp", "mode", "plan");
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.sessionDefaults).toEqual({ "claude-acp": { mode: "plan" } });
+  });
+
+  it("accumulates multiple configId writes for the same agent", async () => {
+    await runAgentsSet("claude-acp", "model", "claude-opus-4-7");
+    await runAgentsSet("claude-acp", "effort", "high");
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.sessionDefaults).toEqual({
+      "claude-acp": { model: "claude-opus-4-7", effort: "high" },
+    });
+  });
+
+  it("errors and exits when configId is given without a value", async () => {
+    await expect(
+      runAgentsSet("claude-acp", "mode", undefined),
+    ).rejects.toThrow(/process\.exit\(2\)/);
+    const msg = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    expect(msg).toContain("needs a value");
   });
 });
 

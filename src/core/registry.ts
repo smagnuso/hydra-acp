@@ -164,7 +164,7 @@ export interface AgentChainRef {
 }
 
 // Most-specific-wins lookup over a config map keyed by agent id
-// (defaultModels, agentOverrides): try the agent's own id, then each id it
+// (sessionDefaults, agentOverrides): try the agent's own id, then each id it
 // extends, in order. `from` is the key that actually matched, so callers
 // can name it in diagnostics rather than reporting the id the user asked
 // for and leaving them hunting for a setting they never wrote.
@@ -281,7 +281,7 @@ export class Registry {
   // shouldn't force a network refetch.
   //
   // Only affects FUTURE spawns. A session already running an agent keeps
-  // its process until it restarts, which is the same way defaultModels
+  // its process until it restarts, which is the same way sessionDefaults
   // has always behaved on resurrect.
   setConfig(next: HydraConfig): void {
     this.config = next;
@@ -701,8 +701,8 @@ export interface AgentListEntry {
   // same-id registry entry); "registry" → the network registry document.
   source: "local" | "registry";
   // Inheritance chain, most specific first (see ResolvedAgent). Lets a
-  // client resolve per-agent config maps like defaultModels correctly for
-  // a derived agent instead of only checking its own id.
+  // client resolve per-agent config maps like sessionDefaults correctly
+  // for a derived agent instead of only checking its own id.
   extendsChain?: string[];
   // Optional onboarding hints (T4) — surfaced so the TUI can paint a
   // helpful AUTH_REQUIRED banner without a second round trip.

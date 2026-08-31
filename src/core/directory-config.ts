@@ -339,15 +339,45 @@ export function stringMapField(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+// Two levels of the same tolerant plain-object walk stringMapField does:
+// non-object/array outer or inner values are dropped rather than thrown on
+// (a `.hydra-acp.json` is hand-edited, and a typo shouldn't break the
+// whole file), and only string leaves survive.
+export function nestedStringMapField(
+  obj: Record<string, unknown>,
+  key: string,
+): Record<string, Record<string, string>> | undefined {
+  const v = obj[key];
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    return undefined;
+  }
+  const out: Record<string, Record<string, string>> = {};
+  for (const [agentId, entry] of Object.entries(v)) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const inner: Record<string, string> = {};
+    for (const [configId, value] of Object.entries(entry)) {
+      if (typeof value === "string") {
+        inner[configId] = value;
+      }
+    }
+    if (Object.keys(inner).length > 0) {
+      out[agentId] = inner;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export interface DirectorySessionDefaults {
   agentId?: string;
-  models?: Record<string, string>;
+  configDefaults?: Record<string, Record<string, string>>;
 }
 
 // The daemon-side counterpart to composerAgentForCwd's directory read: any
 // session-creation path that has a finalized cwd can call this to get the
-// same `defaultAgent` / `defaultModels` a `.hydra-acp.json` between that cwd
-// and $HOME would hand the TUI picker. Callers still apply their own
+// same `defaultAgent` / `sessionDefaults` a `.hydra-acp.json` between that
+// cwd and $HOME would hand the TUI picker. Callers still apply their own
 // precedence (an explicit agentId in the request always wins).
 export async function resolveDirectorySessionDefaults(
   cwd: string,
@@ -359,9 +389,9 @@ export async function resolveDirectorySessionDefaults(
     return {};
   }
   const agentId = stringField(merged, "defaultAgent");
-  const models = stringMapField(merged, "defaultModels");
+  const configDefaults = nestedStringMapField(merged, "sessionDefaults");
   return {
     ...(agentId !== undefined ? { agentId } : {}),
-    ...(models !== undefined ? { models } : {}),
+    ...(configDefaults !== undefined ? { configDefaults } : {}),
   };
 }

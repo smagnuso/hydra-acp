@@ -935,11 +935,11 @@ export function registerAcpWsEndpoint(
         const agentId =
           explicitAgentId ?? directoryDefaults.agentId ?? deps.defaultAgent;
         const agentChain = await deps.registry?.getAgent(agentId);
-        const directoryModel = lookupInheritedAgentValue(
-          directoryDefaults.models,
+        const directoryConfig = lookupInheritedAgentValue(
+          directoryDefaults.configDefaults,
           agentChain ?? { id: agentId },
         )?.value;
-        const model = explicitModel ?? directoryModel;
+        const model = explicitModel ?? directoryConfig?.model;
 
         // Children spawned by transformers are non-interactive by default:
         // they exist to do automated work driven by the transformer, not
@@ -959,6 +959,7 @@ export function registerAcpWsEndpoint(
           transformChain: [], // children start with no chain by default
           title,
           model,
+          configDefaults: directoryConfig,
         });
         return { childSessionId: child.sessionId };
       });
@@ -1411,7 +1412,7 @@ export function registerAcpWsEndpoint(
           : (deps.manager.defaultTransformers ?? []);
       const transformChain = deps.transformers?.resolveChain(transformerNames) ?? [];
       // A `.hydra-acp.json` between params.cwd and $HOME can set
-      // `defaultAgent` / `defaultModels`. Directory config used to be
+      // `defaultAgent` / `sessionDefaults`. Directory config used to be
       // resolved client-side only (the TUI picker), so every other client
       // (editor shims, `hydra launch`) always landed on the daemon's global
       // default instead. cwd is local to this machine, so the daemon can
@@ -1424,11 +1425,11 @@ export function registerAcpWsEndpoint(
       // Mirrors resolveComposerAgent's model lookup: walk the resolved
       // agent's extends chain, most-specific first, so a derived agent
       // picks up a directory default set on its base. Falls back to
-      // manager.create's own defaultModels[agentId] handling when this cwd
-      // has no directory override.
+      // manager.create's own sessionDefaults[agentId] handling when this
+      // cwd has no directory override.
       const agentChain = await deps.registry?.getAgent(resolvedAgentId);
-      const directoryModel = lookupInheritedAgentValue(
-        directoryDefaults.models,
+      const directoryConfig = lookupInheritedAgentValue(
+        directoryDefaults.configDefaults,
         agentChain ?? { id: resolvedAgentId },
       )?.value;
       // If the client requested in-memory stdin streaming, mint a bearer
@@ -1509,7 +1510,8 @@ export function registerAcpWsEndpoint(
           mcpServers: augmentedMcpServers,
           title: hydraMeta.title,
           agentArgs: hydraMeta.agentArgs,
-          model: hydraMeta.model ?? directoryModel,
+          model: hydraMeta.model ?? directoryConfig?.model,
+          configDefaults: directoryConfig,
           onInstallProgress: makeInstallProgressForwarder(connection),
           transformChain,
           originatingClient: state.clientInfo,

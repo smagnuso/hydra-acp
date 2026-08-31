@@ -194,7 +194,7 @@ Read-only snapshot of the daemon's effective config. Mutations go through `~/.hy
 {
   "defaultAgent":         "claude-acp",
   "defaultCwd":           "~",
-  "defaultModels":        { "claude-acp": "claude-opus-4-7" },
+  "sessionDefaults":      { "claude-acp": { "model": "claude-opus-4-7", "mode": "plan" } },
   "synopsisAgent":        "claude-acp",                       // optional
   "synopsisModel":        "claude-haiku-4-5-20251001",        // optional
   "defaultTransformers":  []
@@ -1254,7 +1254,9 @@ A model switch can also invalidate the current permission mode; claude-agent-acp
 
 Pruning ids absent from a reply is gated on the reply naming at least one id other than the one that was set. That is what distinguishes a full snapshot from an agent reporting back the single value it just applied; pruning on the latter would delete dimensions the agent still offers. An agent that answers with only the changed id keeps its other options, at the cost of a stale picker surviving until its next full snapshot.
 
-The same applies to hydra's own seed at bring-up. When `--model` or `defaultModels` names a model the agent didn't start on, the reply to that seed carries the dimensions rebuilt for the model the session is actually on, and is harvested in place of the `session/new` snapshot describing the one it replaced (claude-agent-acp rebuilds its effort levels per model, and drops the option entirely for a model that has none). A seed answered via `session/set_model`, which returns no snapshot, leaves the `session/new` dimensions standing.
+The same applies to hydra's own seed at bring-up. When `--model` or `sessionDefaults[agentId].model` names a model the agent didn't start on, the reply to that seed carries the dimensions rebuilt for the model the session is actually on, and is harvested in place of the `session/new` snapshot describing the one it replaced (claude-agent-acp rebuilds its effort levels per model, and drops the option entirely for a model that has none). A seed answered via `session/set_model`, which returns no snapshot, leaves the `session/new` dimensions standing.
+
+**`config.sessionDefaults[agentId]` seeds more than the model.** Keyed by agent id, each entry is a `configId -> value` map (`{"model": "claude-opus-4-7", "mode": "plan", "effort": "high"}`) applied once at fresh `session/new` (never on resurrect — those sessions keep whatever they last had), in a fixed order: `model` first, via the verb-inference above; `mode` next, via `session/set_mode`; then every other id, via `session/set_config_option`. The ordering isn't arbitrary — a model switch can clamp the current mode (previous paragraph) and rebuilds a model-dependent dimension like `effort` (paragraph above), so seeding either before the model settles would just be undone or resolved against a stale option list. `sessionDefaults` is a config-file / `.hydra-acp.json`-overlay concept resolved daemon-side before the request is built; it adds no new field to `session/new`'s wire params. `hydra agent set <agent> <configId> <value>` is the CLI surface for it; `hydra agent set <agent>` (no configId) instead sets the top-level `defaultAgent`.
 
 `category` is how a client is expected to recognize what a dimension *means*, independent of its `id` or `name` — agent-shell, for instance, finds claude-agent-acp's effort picker by `category: "thought_level"` alone. The vocabulary: `model`/`mode` (hydra's own two dimensions), any reserved spec string an agent defines, an agent's own `_`-prefixed custom category, or hydra's `_hydra_*` namespace (currently just `_hydra_agent`, hydra's backend selector). An agent-advertised dimension with no `category` on the wire is surfaced as `"other"` rather than dropped.
 

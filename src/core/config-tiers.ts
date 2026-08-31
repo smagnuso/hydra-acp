@@ -93,20 +93,21 @@ export const CONFIG_TIERS: { [K in keyof HydraConfig]-?: ConfigKeyTier } = {
   // $HOME the same way composerAgentForCwd does, via
   // resolveDirectorySessionDefaults. A caller-supplied agentId/model still
   // wins outright when present; the daemon's own config.defaultAgent /
-  // defaultModels is the last fallback, not a competing source.
+  // sessionDefaults is the last fallback, not a competing source.
   defaultAgent: { reload: "live", overlay: "effective" },
   defaultCwd: { reload: "live", overlay: "effective" },
   // Partial on purpose: WS session/new and child_session/spawn resolve a
-  // directory defaultModels the same way defaultAgent does, keyed by the
-  // resolved agent's extends chain. REST POST /v1/sessions does not —
-  // that route has never accepted a `model` field at all, so a directory
-  // override has nothing to plug into there regardless of overlay
-  // resolution.
-  defaultModels: {
+  // directory sessionDefaults entry the same way defaultAgent does, keyed
+  // by the resolved agent's extends chain, and can seed model/mode/effort
+  // that way. REST POST /v1/sessions does not — that route has never
+  // accepted a `model` (or any config-option) field at all, so a
+  // directory override has nothing to plug into there regardless of
+  // overlay resolution.
+  sessionDefaults: {
     reload: "live",
     overlay: "partial",
     overlayNote:
-      "applies to WS session/new and child_session/spawn; POST /v1/sessions has no model field to apply it to",
+      "applies to WS session/new and child_session/spawn; POST /v1/sessions has no model/mode/effort field to apply any of it to",
   },
 
   // --- warn: snapshotted at boot, drift reported ----------------------

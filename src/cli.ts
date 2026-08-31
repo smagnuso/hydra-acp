@@ -842,7 +842,7 @@ async function main(): Promise<void> {
         return;
       }
       if (sub === "set") {
-        await runAgentsSet(positional[2], positional[3]);
+        await runAgentsSet(positional[2], positional[3], positional[4]);
         return;
       }
       if (sub === "pin") {
@@ -1405,9 +1405,9 @@ function printHelp(subcommand?: string): void {
     [AGENT, "  hydra-acp agent [list]                      List agents in the cached registry"],
     [AGENT, "  hydra-acp agent refresh                     Force a registry re-fetch"],
     [AGENT, "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)"],
-    [AGENT, "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>])."],
+    [AGENT, "  hydra-acp agent set [<id>] [<configId> <value>]  With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> <configId> <value>, set a per-agent session default (config.sessionDefaults[<id>][<configId>]) — e.g. `agent set claude-acp model claude-opus-4-7`, `agent set claude-acp mode plan`, `agent set claude-acp effort high`."],
     [AGENT, "  hydra-acp agent pin <id> [packageSpec]      Pin a registry agent to a specific npm version (e.g. opencode-ai@0.5.12). Omit packageSpec to clear. Sidesteps a broken upstream publish."],
-    [AGENT, "  hydra-acp agent add <id> [--extends BASE] [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent. Without --extends it bypasses the registry and --command defaults to <id> (resolved off PATH). With --extends it derives from BASE: env merges, args replace, and per-agent config keyed by BASE's id (defaultModels, agentOverrides) is inherited. A --command replaces BASE's distribution outright."],
+    [AGENT, "  hydra-acp agent add <id> [--extends BASE] [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent. Without --extends it bypasses the registry and --command defaults to <id> (resolved off PATH). With --extends it derives from BASE: env merges, args replace, and per-agent config keyed by BASE's id (sessionDefaults, agentOverrides) is inherited. A --command replaces BASE's distribution outright."],
     [AGENT, "  hydra-acp agent remove <id>                 Remove a local agent (config only; leaves the on-disk install cache)"],
     [AGENT, "  hydra-acp agent uninstall <id>              Delete <id>'s cached install (~/.hydra-acp/agents/<platform>/<id>/) so the next session re-downloads"],
     [REGISTRY, "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch."],

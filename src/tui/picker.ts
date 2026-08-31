@@ -157,10 +157,10 @@ export type PickerResult =
       // of opts.agentId when creating the session.
       agentId?: string;
       // Chosen model, tracked alongside agentId so the caller can seed
-      // config.defaultModels or forward to session/new. Currently only
+      // config.sessionDefaults or forward to session/new. Currently only
       // ever set indirectly: when the user switches agent via the
       // composer's agent picker, model updates to
-      // config.defaultModels[newAgent] (undefined if none).
+      // config.sessionDefaults[newAgent]?.model (undefined if none).
       model?: string;
     }
   | { kind: "abort" }
@@ -2400,10 +2400,10 @@ export async function pickSession(
         // (`extends: "claude-acp"`) with no default of its own falls back
         // to its base's, mirroring ensureAgentForNew's lookup in app.ts.
         const chosenAgentEntry = agents.find((a) => a.id === result.agentId);
-        composerModel = lookupInheritedAgentValue(opts.config.defaultModels, {
+        composerModel = lookupInheritedAgentValue(opts.config.sessionDefaults, {
           id: result.agentId,
           extendsChain: chosenAgentEntry?.extendsChain,
-        })?.value;
+        })?.value.model;
         opts.onComposerAgentChange?.(composerAgentId, composerModel);
         if (result.persist) {
           // Mirror ensureAgentForNew's persistence behavior: the `s`
