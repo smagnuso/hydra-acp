@@ -5660,36 +5660,73 @@ export class Screen {
   // whose key was already forgotten via clearKey — the line stays painted
   // and carries its stamp. Returns null for padding rows, rows outside
   // the scrollback area, or plainly-appended (unkeyed) lines.
-  // First link URL anywhere in the keyed block that owns row `y`.
+  // Nearest link URL in the keyed block that owns row `y`, by wrapped-row
+  // distance from the click.
   //
   // Restores the reach the retired app-side block handler had: an
   // edit-diff block's link lives on its header row, but a double-click on
   // any of its diff-body rows used to open the file too, and that should
   // keep working. Underlining stays narrow (only real spans paint); this
   // widens the CLICK target to the block, not the decoration.
+  //
+  // Picks the nearest linked row rather than the first one in document
+  // order: a multi-link prose block (e.g. several markdown-linked paths
+  // followed by an unlinked one) would otherwise always resolve to
+  // whichever link happens to come first, regardless of which row was
+  // actually clicked.
   private blockLinkUrlAt(y: number): string | null {
     const key = this.keyAtRow(y);
     if (key === null) {
       return null;
     }
+    // agent: blocks are one continuous streamed utterance (see
+    // appendAgentText in app.ts), not a single conceptual target — a reply
+    // can carry several unrelated markdown links plus plain unlinked text.
+    // "Nearest link in the block" still isn't scoped enough there (nothing
+    // stops the nearest link from being paragraphs away), so this fallback
+    // tier is limited to the structured single-target blocks it was built
+    // for (edit-diff, tool-call). An unlinked row in agent prose falls
+    // through to tryOpenFileAt's plain path-token scan instead, same as
+    // hover already treats agent: blocks as having no block-wide affordance
+    // (keyAndSubAtRow's caller in the pointer-shape handler).
+    if (key.startsWith("agent:")) {
+      return null;
+    }
     const w = this.contentWidth();
+    const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
       return null;
     }
     const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    // Mirrors keyAtRow's row→wrapped-index mapping so distances are
+    // measured in the same coordinate space as `wrapped`.
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
+    const padTop = Math.max(0, visibleRows - slice.length);
+    const sliceIdx = y - top - padTop;
+    const clickedIdx = start + sliceIdx;
     // Scans linkSpans rather than links: wrapped rows are derived objects
     // and only the projected spans are propagated onto them. Spans carry
     // the resolved URL, which is all this needs. Consequence: a block whose
     // only link is one the terminal can't open (hydra://, filtered out by
     // osc8UrlFor) isn't reachable by this widest fallback — those live in
     // prose, where the exact-hit and row-level tiers already cover them.
-    for (const row of wrapped) {
-      if (row.blockKey === key && row.linkSpans !== undefined && row.linkSpans.length > 0) {
-        return row.linkSpans[0]?.url ?? null;
+    let bestUrl: string | null = null;
+    let bestDist = Infinity;
+    for (let i = 0; i < wrapped.length; i++) {
+      const row = wrapped[i]!;
+      if (row.blockKey !== key || row.linkSpans === undefined || row.linkSpans.length === 0) {
+        continue;
+      }
+      const dist = Math.abs(i - clickedIdx);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestUrl = row.linkSpans[0]?.url ?? null;
       }
     }
-    return null;
+    return bestUrl;
   }
 
   private keyAtRow(y: number): string | null {
