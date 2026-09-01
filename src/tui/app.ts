@@ -1414,7 +1414,6 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     defaultEnterAction: config.tui.defaultEnterAction,
     sidebarVisible: config.tui.sidebar.enabled,
     sidebarCollapsed: [],
-    ...(opts.agentId ? { lastChosenAgent: opts.agentId } : {}),
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
   // picker so re-opening via ^p restores the same filtered view the
@@ -5975,13 +5974,12 @@ async function runSession(
         } catch {
           // ignore
         }
-        // Same formula as the initial picker, so the composer's top-right
-        // "agent•model" reflects what a fresh session from this composer
-        // would use — independent of which session the user is currently
-        // attached to. opts.agentId sits low in that precedence precisely
-        // because it is rewritten to the attached session's agent on
-        // every attach / cycle; see the ViewPrefs field docs.
-        const resolveComposerFor = (
+        // The composer's top-right "agent•model" reflects what a fresh
+        // session from this composer would use. opts.agentId (the
+        // attached session's agent) only seeds the initial label — it is
+        // not a statement about any other directory, so ^O's cwd change
+        // must not carry it forward; see resolveComposerForCwd below.
+        const resolveComposerForInitialCwd = (
           forCwd: string,
         ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
           composerAgentForCwd({
@@ -5996,8 +5994,24 @@ async function runSession(
               : {}),
             availableAgents,
           });
+        // ^O moved the picker to a different directory — resolve strictly
+        // from that directory's own config (falling through to the
+        // configured global default), never from the session we happened
+        // to be attached to when the picker opened.
+        const resolveComposerForCwd = (
+          forCwd: string,
+        ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
+          composerAgentForCwd({
+            cwd: forCwd,
+            config,
+            prefs: viewPrefs,
+            ...(opts.explicitAgentId !== undefined
+              ? { explicitAgentId: opts.explicitAgentId }
+              : {}),
+            availableAgents,
+          });
         const { agentId: composerAgentId, model: composerModel } =
-          await resolveComposerFor(resolvedCwd);
+          await resolveComposerForInitialCwd(resolvedCwd);
         const choice: PickerResult = await pickSession(term, {
           cwd: resolvedCwd,
           sessions,
@@ -6011,7 +6025,7 @@ async function runSession(
           onComposerAgentChange: (agentId, model) => {
             rememberComposerAgent(viewPrefs, agentId, model);
           },
-          onCwdChange: resolveComposerFor,
+          onCwdChange: resolveComposerForCwd,
         });
         if (choice.kind === "abort") {
           // finally restarts the screen.
@@ -10590,7 +10604,11 @@ async function resolveSession(
     } catch {
       // ignore
     }
-    const resolveComposerFor = (
+    // opts.agentId (the attached session's agent) only seeds the initial
+    // label. ^O moving the picker to a different directory must resolve
+    // strictly from that directory's own config, never from the session
+    // we happened to be attached to when the picker opened.
+    const resolveComposerForInitialCwd = (
       forCwd: string,
     ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
       composerAgentForCwd({
@@ -10603,8 +10621,20 @@ async function resolveSession(
         ...(opts.agentId !== undefined ? { fallbackAgentId: opts.agentId } : {}),
         availableAgents,
       });
+    const resolveComposerForCwd = (
+      forCwd: string,
+    ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
+      composerAgentForCwd({
+        cwd: forCwd,
+        config,
+        prefs: viewPrefs,
+        ...(opts.explicitAgentId !== undefined
+          ? { explicitAgentId: opts.explicitAgentId }
+          : {}),
+        availableAgents,
+      });
     const { agentId: composerAgentId, model: composerModel } =
-      await resolveComposerFor(cwd);
+      await resolveComposerForInitialCwd(cwd);
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
@@ -10620,7 +10650,7 @@ async function resolveSession(
       onComposerAgentChange: (agentId, model) => {
         rememberComposerAgent(viewPrefs, agentId, model);
       },
-      onCwdChange: resolveComposerFor,
+      onCwdChange: resolveComposerForCwd,
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),

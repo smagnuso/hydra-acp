@@ -14,11 +14,16 @@ import type { HydraConfig } from "../core/config.js";
 // decoration: picker's makeNewResult sends both values on session/new, so
 // whatever it shows is what gets created.
 //
-// This module is the one place that formula lives. It has three callers:
-// seeding the initial picker, seeding the in-session picker, and
-// re-resolving after ^O changes the picker's cwd. They agreed by
-// copy-paste before, which is how ^O ended up creating a session in
-// directory B with directory A's agent.
+// This module is the one place that formula lives. It has callers of two
+// different shapes: seeding the picker (initial or in-session) with
+// fallbackAgentId set to the attached session's agent, and re-resolving
+// after ^O changes the picker's cwd with fallbackAgentId omitted. The two
+// shapes must stay distinct: ^O is the user deliberately pointing the
+// composer at a different directory, and that directory's own config (or,
+// failing that, the configured global default) has to win over whatever
+// agent the session we happened to be attached to was running — carrying
+// fallbackAgentId into the ^O path is how ^O once ended up creating a
+// session in directory B with directory A's agent.
 
 export interface ComposerAgentPrefs {
   lastChosenAgent?: string;
@@ -53,7 +58,10 @@ export interface ComposerAgentInputs {
   directoryDefaultModels?: Record<string, string>;
   prefs: ComposerAgentPrefs;
   // opts.agentId — rewritten to the attached session's agent on every
-  // attach / cycle, so it sits below the user's own choice.
+  // attach / cycle, so it sits below the user's own choice. Callers must
+  // omit this when re-resolving for a directory the user just navigated
+  // to via ^O: it is a statement about the previously attached session,
+  // not about the new cwd.
   fallbackAgentId?: string;
   configDefaultAgent?: string;
   configDefaultModels?: Record<string, string>;
