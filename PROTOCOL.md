@@ -2173,6 +2173,22 @@ turn in flight, since the session is not finished with you. Note this makes
 armed-but-idle session is dispatched immediately rather than queued. Clients
 that need the distinction should read `busy` and `armedTasks` separately.
 
+**A one-shot armed task also blocks `isQuiescedForSwap`.** A compaction
+swap (or any upstream rotation: `/hydra agent`, `/hydra restart`, workspace
+move) kills the old agent process outright, and a background job it owned
+dies with it: nothing downstream can wake for it afterward. `quiesceBlocker`
+therefore treats a confidently one-shot armed task (a backgrounded `Bash`;
+level-sourced `taskType: "local_bash"`) as a blocker, the same as an open
+tool-call chain, and a parked swap retries once the task discharges.
+Deliberately narrower than the `armedTasks` display count: a **repeating**
+watch (`Monitor`) never discharges on its own, so gating on one would stall
+compaction forever, defeating the reason it exists. An unrecognized
+level-sourced `taskType` fails open (does not block) for the same reason:
+today only `"local_bash"` is verified one-shot. A swap that still had to
+abandon work (a leaked entry, or a genuinely repeating watch) is reported
+after the fact via the `"Stopped N background task(s) with the previous
+agent"` notice rather than blocked on.
+
 **Two sources, and which one you get.** The count is derived either from a
 **level** signal published by the agent, or, when the agent does not publish
 one, from **edge inference** by the daemon. The level is authoritative and

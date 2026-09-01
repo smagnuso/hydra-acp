@@ -582,6 +582,16 @@ const BACKGROUND_TASK_LABEL_MAX = 120;
 // just stops a long session accumulating one entry per tool call forever.
 const TOOL_LABEL_LIMIT = 128;
 
+// Level-sourced `taskType` strings known to be one-shot (PROTOCOL.md's
+// "one-shot versus repeating armings" table). Only the backgrounded-Bash
+// case is verified live; a Monitor's level-layer type string is unknown
+// and the SDK states the level must not be joined to the edge stream's
+// `repeating` flag. Anything not in this set is left unblocked in
+// quiesceBlocker on purpose: gating on an unrecognized or genuinely
+// repeating type would risk stalling a swap forever, which defeats the
+// reason the swap exists (bounding context size).
+const ONE_SHOT_LEVEL_TASK_TYPES = new Set(["local_bash"]);
+
 // An armed background task counts toward the "this session may wake itself
 // up" badge until something authoritative discharges it: the resumption it
 // causes (one-shots only, see openUnsolicitedTurn) or an explicit TaskStop.
@@ -1933,11 +1943,15 @@ export class Session {
    * - hydra is driving the agent outside the queue (a compaction seed, a
    *   `/hydra agent` transcript injection).
    * - a mode_change or model_change transition is in progress.
+   * - a known one-shot background task (backgrounded Bash) is still armed.
+   *   Deliberately narrower than `armedBackgroundTasks`: a repeating watch
+   *   (Monitor) never discharges on its own, so gating on one would stall
+   *   a swap forever. See `pendingOneShotBackgroundTasks`.
    * - a tool-call chain is open (some tool_call has no tool_call_update
    *   with status="completed"|"failed").
    *
    * Split out from the boolean because "the agent is still working" was
-   * the answer for all five, and four of them are invisible from a
+   * the answer for all six, and five of them are invisible from a
    * composer: the user sees an idle session and a message telling them to
    * wait for a turn that already ended. Naming the term is the difference
    * between "wait a second and retry" and "this is broken".
@@ -1963,6 +1977,14 @@ export class Session {
     }
     if (this.modeChangeInFlight) {
       return "a mode change is still settling; try again in a moment";
+    }
+    const pendingOneShot = this.pendingOneShotBackgroundTasks();
+    if (pendingOneShot.length > 0) {
+      return (
+        `${pendingOneShot.length} background task(s) still running (${pendingOneShot.join(", ")}); ` +
+        `a swap would kill the agent process and abandon them. Wait for them to finish, or cancel ` +
+        `them, then try again`
+      );
     }
     const open = await this.openToolCallIdsInHistory();
     if (open.length > 0) {
@@ -4127,6 +4149,31 @@ export class Session {
     }));
   }
 
+  // Labels of armed tasks confidently known to be one-shot, i.e. a swap
+  // killing the agent now would abandon work that was going to finish on
+  // its own. Used only by quiesceBlocker, deliberately not folded into
+  // `armedBackgroundTasks`, which is a display list and includes repeating
+  // watches on purpose.
+  //
+  // Edge-sourced entries carry `repeating` directly (isRepeatingArming).
+  // Level-sourced entries do not: the SDK forbids joining the level to the
+  // edge stream, so the only signal is `taskType`, and only "local_bash" is
+  // verified to mean one-shot (see ONE_SHOT_LEVEL_TASK_TYPES). An unknown
+  // taskType, or a repeating edge entry, is left out rather than guessed:
+  // false-negative here costs an abandoned task with a warning after the
+  // fact (unchanged from before this check existed); false-positive would
+  // stall a swap on a watch that never discharges on its own.
+  private pendingOneShotBackgroundTasks(): string[] {
+    if (this.sawBackgroundTaskLevel) {
+      return [...this.liveBackgroundTasks.values()]
+        .filter((t) => ONE_SHOT_LEVEL_TASK_TYPES.has(t.taskType))
+        .map((t) => t.description || t.taskType);
+    }
+    return [...this.armedTasks.values()]
+      .filter((t) => !t.repeating)
+      .map((t) => t.label);
+  }
+
   // When the longest-running armed task was armed, or undefined when none
   // are. Clients clock their "running Xs" readout from this: the useful
   // question is how long the job has been going, not how long the user has
@@ -4205,6 +4252,13 @@ export class Session {
       ...(since !== undefined ? { since } : {}),
       tasks,
     });
+    // A discharge here is the only edge that can flip quiesceBlocker's
+    // one-shot-background-task term without also touching history, so
+    // nothing else would prompt a parked compaction swap (session-manager's
+    // onceIdle waiter) to re-check. dispatchIdle's own isQuiescedSync gate
+    // doesn't look at armed tasks either way, so this is a no-op on every
+    // other term's account and only matters for that one.
+    this.dispatchIdle();
   }
 
   /**

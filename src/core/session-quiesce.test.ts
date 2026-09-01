@@ -54,6 +54,50 @@ function promptReceivedEntry(): Record<string, unknown> {
   return { sessionUpdate: "prompt_received" };
 }
 
+// A backgrounded Bash arming, as the edge stream reports it: a
+// tool_call_update carrying rawInput.run_in_background.
+function armBackgroundBashEntry(
+  toolCallId: string,
+  description = "long build",
+): Record<string, unknown> {
+  return {
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    title: "Terminal",
+    rawInput: { command: "ninja", description, run_in_background: true },
+  };
+}
+
+// A Monitor (repeating watch) arming, as the edge stream reports it: the
+// taskId rides _meta.claudeCode.toolResponse rather than rawInput.
+function armMonitorEntry(
+  toolCallId: string,
+  taskId: string,
+): Record<string, unknown> {
+  return {
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    title: "Monitor",
+    _meta: { claudeCode: { toolName: "Monitor", toolResponse: { taskId } } },
+  };
+}
+
+function backgroundTasksChangedLevel(
+  tasks: Array<{ task_id: string; task_type?: string; description?: string }>,
+): Record<string, unknown> {
+  return {
+    type: "system",
+    subtype: "background_tasks_changed",
+    tasks: tasks.map((t) => ({
+      task_id: t.task_id,
+      task_type: t.task_type ?? "local_bash",
+      description: t.description ?? "",
+    })),
+    uuid: "11111111-1111-1111-1111-111111111111",
+    session_id: "agent-sess",
+  };
+}
+
 describe("Session.isQuiescedForSwap", () => {
   it("returns true for an idle session with no history", async () => {
     const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
@@ -344,6 +388,142 @@ describe("Session.quiesceBlocker", () => {
     await triggerUpdate(mock, toolCallUpdateEntry("tc-1", "completed"));
 
     expect(await session.quiesceBlocker()).toBeUndefined();
+  });
+});
+
+describe("Session.isQuiescedForSwap and pending one-shot background tasks", () => {
+  it("blocks a swap while an edge-armed backgrounded Bash is still live", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qbg1",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qbg1",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, armBackgroundBashEntry("tc-bg1", "ninja rebuild"));
+
+    expect(await session.isQuiescedForSwap()).toBe(false);
+    const blocker = await session.quiesceBlocker();
+    expect(blocker).toContain("ninja rebuild");
+  });
+
+  it("does not block a swap for a repeating Monitor watch, edge-sourced", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qbg2",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qbg2",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, armMonitorEntry("tc-mon1", "task-1"));
+
+    // A repeating watch never discharges on its own, so gating on it would
+    // stall a swap forever; it must not be a quiesce blocker.
+    expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+
+  it("blocks a swap while a level-sourced local_bash task is live", () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qbg3",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qbg3",
+      historyStore: store,
+    });
+
+    mock.triggerNotification("_claude/sdkMessage", {
+      sessionId: "u-qbg3",
+      message: backgroundTasksChangedLevel([
+        { task_id: "bg1", description: "sleep 20 then echo done" },
+      ]),
+    });
+
+    return session.isQuiescedForSwap().then((quiesced) => {
+      expect(quiesced).toBe(false);
+    });
+  });
+
+  it("does not block a swap for an unrecognized level task_type", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qbg4",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qbg4",
+      historyStore: store,
+    });
+
+    mock.triggerNotification("_claude/sdkMessage", {
+      sessionId: "u-qbg4",
+      message: backgroundTasksChangedLevel([
+        { task_id: "bg1", task_type: "device_watch", description: "watching device" },
+      ]),
+    });
+
+    // Only "local_bash" is verified one-shot; an unrecognized type (which
+    // covers a real repeating Monitor whose level-layer type is unknown)
+    // must fail open rather than risk stalling a swap forever.
+    expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+
+  it("unparks a swap waiter the moment the one-shot task discharges via TaskStop", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qbg5",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qbg5",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, armBackgroundBashEntry("tc-bg5", "long test run"));
+    expect(await session.isQuiescedForSwap()).toBe(false);
+
+    let fired = false;
+    session.onceIdle(() => {
+      fired = true;
+    });
+    // isQuiescedSync (onceIdle's cheap gate) doesn't look at background
+    // tasks, so it already reads idle here; onceIdle only fires because
+    // dispatchIdle is invoked, which callers re-verify via the strong
+    // isQuiescedForSwap check before acting on.
+    expect(fired).toBe(false);
+
+    // TaskStop reports the id it cancelled via rawInput.task_id, matched
+    // against the id harvested at arming time. Backgrounded Bash carries
+    // its id in rawOutput prose rather than toolResponse.
+    await triggerUpdate(mock, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-bg5",
+      rawOutput: "Command running in background with ID: bashid123",
+    });
+    await triggerUpdate(mock, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-taskstop",
+      title: "TaskStop",
+      rawInput: { task_id: "bashid123" },
+    });
+
+    expect(fired).toBe(true);
+    expect(await session.isQuiescedForSwap()).toBe(true);
   });
 });
 
