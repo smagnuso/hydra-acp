@@ -1684,6 +1684,12 @@ export function _buildToolsLines(args: {
           ? formatElapsed(elapsed)
           : `took ${formatElapsed(elapsed)}`;
     const parts: string[] = [`${total} ${noun}`, timing];
+    // While live, a bare trailing timestamp would be ambiguous next to a
+    // running counter (start time? last update? now?) the way the frozen
+    // finish stamp isn't, so this one carries an explicit label.
+    if (inProgress) {
+      parts.push(`started ${formatWallClock(startedAt)}`);
+    }
     // Surface the hidden count while the block is live and capped so the
     // user knows there's more behind the collapse. Expand/collapse now
     // lives in the ^O options dialog, so we don't advertise a hotkey
