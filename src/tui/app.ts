@@ -133,6 +133,7 @@ import { promptStartupFailureBanner } from "./startup-failure-banner.js";
 import {
   emergencyTerminalReset,
   formatElapsed,
+  formatWallClock,
   guardTerminalDimensions,
   Screen,
   resolveAmbiguousWide,
@@ -1657,17 +1658,21 @@ export function _buildToolsLines(args: {
   const stoppedLabel = isAmended
     ? `amended · ${formatElapsed(elapsed)}`
     : `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
+  // Wall-clock stamp appended once the block freezes, so scanning back
+  // through scrollback (or a replayed transcript) shows when a turn
+  // actually finished, not just how long it took.
+  const finishedSuffix = inProgress ? "" : ` · ${formatWallClock(end)}`;
   let summary: string;
   if (total === 0) {
     // Pre-tool state — the block exists purely as a "still working"
     // indicator while the agent is thinking, then freezes as "thought · Xs"
     // at turn end so the user has a visible trace of the reasoning time.
     if (stoppedReason !== null) {
-      summary = stoppedLabel;
+      summary = stoppedLabel + finishedSuffix;
     } else {
       summary = inProgress
         ? `thinking · ${formatElapsed(elapsed)}`
-        : `thought · ${formatElapsed(elapsed)}`;
+        : `thought · ${formatElapsed(elapsed)}${finishedSuffix}`;
     }
   } else {
     const noun = total === 1 ? "tool" : "tools";
@@ -1685,7 +1690,7 @@ export function _buildToolsLines(args: {
     if (inProgress && capped && hidden > 0) {
       parts.push(`${hidden} hidden`);
     }
-    summary = parts.join(" · ");
+    summary = parts.join(" · ") + finishedSuffix;
   }
   // Pure-thinking placeholder (no tool has fired yet and the turn is
   // still live) renders yellow to match the busy banner / active plan /

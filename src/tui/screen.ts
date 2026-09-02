@@ -53,10 +53,10 @@ import {
   setReportSuspended,
 } from "./term-host/report.js";
 import { publishReportedCwd } from "./terminal-user-var.js";
-import { fileUrlForPath, formatElapsed } from "./format.js";
+import { fileUrlForPath, formatElapsed, formatWallClock } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
 
-export { formatElapsed };
+export { formatElapsed, formatWallClock };
 import type {
   Attachment,
   InputDispatcher,

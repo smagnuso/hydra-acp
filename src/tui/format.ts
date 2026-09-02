@@ -1721,6 +1721,18 @@ export function formatElapsed(ms: number): string {
   return remMin === 0 ? `${hr}h` : `${hr}h ${remMin}m`;
 }
 
+// Wall-clock stamp for a frozen tools-block header (e.g. "01/13/2026
+// 09:13:33"), local time. Distinct from formatElapsed's relative span: this
+// is what lets someone scanning back through a session's scrollback (or a
+// replayed transcript) tell *when* a turn actually finished.
+export function formatWallClock(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const date = `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${d.getFullYear()}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `${date} ${time}`;
+}
+
 export interface ToolLineState {
   // ACP tool `kind` from the wire ("read" | "edit" | "delete" | "move" |
   // "search" | "execute" | "think" | "fetch" | "other"), when the agent
