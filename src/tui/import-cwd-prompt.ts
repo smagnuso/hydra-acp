@@ -16,6 +16,8 @@ import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import {
   completeLocalPath,
+  pathShadowBoundary,
+  pathShadowCommitBoundary,
   pickInitialLocalCwd,
   validateLocalCwd,
 } from "../core/cwd.js";
@@ -77,7 +79,24 @@ export async function promptForImportCwd(
       ]
     : [];
 
-  const editor = new LineEditor(defaultCwd);
+  // A directory path always ends in "/" here (matching Emacs's
+  // `default-directory` convention) so that typing a bare "~" or a
+  // second "/" right away is enough to trigger the shadow below — the
+  // user shouldn't have to type a separating "/" themselves first.
+  const editor = new LineEditor(
+    defaultCwd.endsWith("/") ? defaultCwd : defaultCwd + "/",
+  );
+  // Once a shadow trigger is unambiguous — a real "/" after "~", or a
+  // doubled "//" — actually drop the shadowed prefix instead of leaving
+  // it dimmed forever. A dangling "~" alone stays dimmed-but-present
+  // (see pathShadowCommitBoundary) since it might still grow into
+  // "~user", a literal path rather than a home-dir marker.
+  const commitShadow = (): void => {
+    const boundary = pathShadowCommitBoundary(editor.text);
+    if (boundary > 0) {
+      editor.setText(editor.text.slice(boundary));
+    }
+  };
   let errorLine: string | null = null;
   let busy = false;
   let layout: BoxLayout | null = null;
@@ -181,18 +200,39 @@ export async function promptForImportCwd(
     if (scrollOffset > 0 && visible.length > 0) {
       visible = "…" + visible.slice(1);
     }
+    // Mirrors `file-name-shadow-mode`: a prefix that
+    // `substitute-in-file-name`-style collapsing would discard (a stray
+    // "/foo/~/" or "/foo//") renders dimmed rather than disappearing.
+    // The buffer keeps the full text — backspacing un-shadows it — and
+    // only the value used on accept/Tab is the collapsed one.
+    const boundary = pathShadowBoundary(text);
+    const paintSegment = (segStart: number, seg: string): void => {
+      if (seg.length === 0) {
+        return;
+      }
+      const segEnd = segStart + seg.length;
+      if (boundary <= segStart) {
+        paint(term, "content", seg);
+      } else if (boundary >= segEnd) {
+        paint(term, "modal-hint", seg);
+      } else {
+        const cut = boundary - segStart;
+        paint(term, "modal-hint", seg.slice(0, cut));
+        paint(term, "content", seg.slice(cut));
+      }
+    };
     const rel = cur - scrollOffset;
     if (busy) {
-      paint(term, "content", visible);
+      paintSegment(scrollOffset, visible);
       return;
     }
     if (rel >= visible.length) {
-      paint(term, "content", visible);
+      paintSegment(scrollOffset, visible);
       paint(term, "input-cursor", " ");
     } else {
-      paint(term, "content", visible.slice(0, rel));
+      paintSegment(scrollOffset, visible.slice(0, rel));
       paint(term, "input-cursor", visible[rel] ?? " ");
-      paint(term, "content", visible.slice(rel + 1));
+      paintSegment(scrollOffset + rel + 1, visible.slice(rel + 1));
     }
   };
 
@@ -289,12 +329,14 @@ export async function promptForImportCwd(
             return;
           }
           editor.setText(next, { recordUndo: true });
+          commitShadow();
           errorLine = null;
           repaintInput();
         });
         return;
       }
       if (editor.handleKey(name, data?.isCharacter === true)) {
+        commitShadow();
         errorLine = null;
         repaintInput();
         return;

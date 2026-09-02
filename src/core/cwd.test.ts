@@ -4,9 +4,63 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   completeLocalPath,
+  pathShadowBoundary,
+  pathShadowCommitBoundary,
   pickInitialLocalCwd,
   validateLocalCwd,
 } from "./cwd.js";
+
+// Table verified against GNU Emacs 29.3's `substitute-in-file-name`,
+// which implements the same "guess what you meant" collapsing that
+// ido-find-file relies on.
+describe("pathShadowBoundary", () => {
+  it.each([
+    ["/etc/passwd/~/", "~/"],
+    ["/etc/passwd/~", "~"],
+    ["/etc/passwd~/", "/etc/passwd~/"], // no "/" before "~" — literal
+    ["/etc/passwd/~user", "/etc/passwd/~user"], // named user, not bare
+    ["/etc/passwd/~user/", "/etc/passwd/~user/"],
+    ["/etc//foo", "/foo"],
+    ["/etc///foo", "/foo"],
+    ["foo//bar", "/bar"],
+    ["foo//", "/"],
+    ["//", "/"],
+    ["///", "/"],
+    ["/", "/"],
+    ["~", "~"],
+    ["", ""],
+    ["a", "a"],
+    ["~//foo", "/foo"],
+    ["/foo/~//bar", "/bar"],
+    ["/a/~/b//c", "/c"], // rightmost trigger (the "//") wins over "~/"
+    ["/a//b/~/c", "~/c"], // rightmost trigger (the "~/") wins over "//"
+    ["~/a/~x/b/~/c", "~/c"],
+  ])("collapses %j to %j", (input, expected) => {
+    expect(input.slice(pathShadowBoundary(input))).toBe(expected);
+  });
+});
+
+// The live-typing sibling: one keystroke more conservative than
+// pathShadowBoundary on both branches. A dangling "~" needs an explicit
+// trailing "/" before it commits (might still grow into "~user"), and a
+// run of slashes needs a *third* one before it commits (two might still
+// be a typo about to be backspaced) — collapsing down to the single
+// trailing "/" left once the redundant ones are dropped.
+describe("pathShadowCommitBoundary", () => {
+  it.each([
+    ["/etc/passwd/~/", "~/"], // trailing "/" confirms it — commits
+    ["/etc/passwd/~", "/etc/passwd/~"], // dangling "~" — not yet committed
+    ["/etc/passwd/~user", "/etc/passwd/~user"],
+    ["/etc//", "/etc//"], // exactly two slashes — not yet committed
+    ["/etc///", "/"], // a third slash confirms it — commits
+    ["/etc///foo", "/foo"],
+    ["/etc/", "/etc/"],
+    ["~", "~"],
+    ["", ""],
+  ])("collapses %j to %j", (input, expected) => {
+    expect(input.slice(pathShadowCommitBoundary(input))).toBe(expected);
+  });
+});
 
 describe("validateLocalCwd", () => {
   let tmpDir: string;
@@ -78,6 +132,25 @@ describe("validateLocalCwd", () => {
 
   it("trims surrounding whitespace before resolving", async () => {
     const result = await validateLocalCwd(`  ${tmpDir}  `);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.path).toBe(path.resolve(tmpDir));
+    }
+  });
+
+  it("collapses a stray prefix before a bare ~ to just home", async () => {
+    const result = await validateLocalCwd("/not-a-real-dir/~");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.path).toBe(path.resolve(os.homedir()));
+    }
+  });
+
+  it("collapses a doubled slash to just the tail", async () => {
+    // tmpDir already starts with "/", so gluing a trailing-slash prefix
+    // onto it produces a "//" at the seam — exactly what a leftover
+    // ^O buffer looks like after typing a fresh absolute path.
+    const result = await validateLocalCwd(`/not-a-real-dir/${tmpDir}`);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.path).toBe(path.resolve(tmpDir));
@@ -189,5 +262,12 @@ describe("completeLocalPath", () => {
     // We can't assert exact entries (home dir varies) but readdir on
     // $HOME should produce at least one entry on any developer box.
     expect(result.matches.length).toBeGreaterThan(0);
+  });
+
+  it("collapses a stray prefix before the tab-completed token", async () => {
+    const result = await completeLocalPath(`/not-a-real-dir/${tmpDir}/ap`);
+    expect(result.prefix).toBe(`${tmpDir}/`);
+    expect(result.basePrefix).toBe("ap");
+    expect(result.matches).toEqual(["apple/", "apricot.txt"]);
   });
 });
