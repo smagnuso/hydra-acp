@@ -115,10 +115,10 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["hi"]);
   });
 
-  it("Ctrl+X emits toggle-mouse without mutating the buffer", () => {
+  it("Ctrl+X emits edit-in-editor without mutating the buffer", () => {
     const d = new InputDispatcher();
     feed(d, [ch("h"), ch("i")]);
-    expect(feed(d, [k("ctrl-x")])).toEqual([{ type: "toggle-mouse" }]);
+    expect(feed(d, [k("ctrl-x")])).toEqual([{ type: "edit-in-editor" }]);
     expect(d.state().buffer).toEqual(["hi"]);
   });
 

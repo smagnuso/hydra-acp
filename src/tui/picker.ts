@@ -51,6 +51,7 @@ import {
   type Attachment,
   type KeyEvent,
 } from "./input.js";
+import { editTextInEditor } from "./edit-in-editor.js";
 import {
   computePromptLayout,
   computePromptVisualRows,
@@ -2017,6 +2018,26 @@ export async function pickSession(
     // keeps the box border label in sync with the new count.
     renderFromScratch();
   };
+  // ^X: hand the composer draft to $VISUAL/$EDITOR. withdrawTerminalForChild
+  // / reclaimTerminalFromChild are the same terminal-kit teardown/re-install
+  // pair ^Z suspend uses, called directly instead of through a SIGTSTP round
+  // trip. Both are non-null by the time a keystroke can reach this — they're
+  // assigned right after installGrab() in the same setup block.
+  const handleEditInEditor = async (): Promise<void> => {
+    const edited = await editTextInEditor(composer.expandedText(), {
+      suspend: () => withdrawTerminalForChild?.(),
+      resume: () => reclaimTerminalFromChild?.(),
+      notify: (message) => {
+        transientStatus = message;
+        paintIndicator();
+      },
+    });
+    if (edited === null) {
+      return;
+    }
+    composer.setBuffer(edited, composer.state().attachments);
+    renderFromScratch();
+  };
   const repaintSessionRow = (sessionIdx: number): void => {
     if (
       sessionIdx < scrollOffset ||
@@ -2123,6 +2144,13 @@ export async function pickSession(
   // exists) so the suspend closure can refer to the same listeners /
   // teardown bits cleanup() uses. Null on Windows (no SIGTSTP / SIGCONT).
   let suspend: (() => void) | null = null;
+  // Same withdraw/reclaim pair ^Z suspend uses, exposed separately so ^X
+  // (edit composer in $EDITOR) can hand the terminal to a foreground
+  // child without going through an actual SIGTSTP/SIGCONT round trip.
+  // Assigned unconditionally once installGrab/uninstallGrab exist —
+  // unlike `suspend`, this isn't gated on signal support.
+  let withdrawTerminalForChild: (() => void) | null = null;
+  let reclaimTerminalFromChild: (() => void) | null = null;
   // Forward-declared layer dispatcher. Assigned once the focus stack is
   // constructed; rawStdinHandler uses it to route synthetic key events
   // for terminal-kit's blind spots (Ctrl-_, Alt-_) straight to the
@@ -3917,6 +3945,8 @@ export async function pickSession(
         for (const effect of effects) {
           if (effect.type === "attachment-request") {
             void ingestClipboardAttachment();
+          } else if (effect.type === "edit-in-editor") {
+            void handleEditInEditor();
           }
         }
         if (unchanged) {
@@ -4616,6 +4646,29 @@ export async function pickSession(
       term.hideCursor(false);
     };
     installGrab();
+    // Shared by ^Z suspend and ^X (edit composer in $EDITOR): tear down
+    // everything a foreground process would fight over (grab, alt
+    // screen), and its reverse. Route alt-screen re-entry through
+    // terminal-kit so its internal fullscreen tracking stays consistent
+    // with what's on the wire. Whatever we yielded to can have scrambled
+    // DECCKM, kitty kbd, mouse, modifyOtherKeys, bracketed paste, cursor
+    // visibility — re-assert every mode the picker depends on before
+    // installGrab() turns bracketed paste back on and the first repaint
+    // goes out.
+    withdrawTerminalForChild = (): void => {
+      uninstallGrab();
+      term.fullscreen(false);
+      writeControl(`${AUTOWRAP_ON}${SHOW_CURSOR}`);
+    };
+    reclaimTerminalFromChild = (): void => {
+      term.fullscreen(true);
+      resetPickerTerminalModes();
+      term.hideCursor();
+      installGrab();
+      if (!resolved) {
+        forceFullRepaint();
+      }
+    };
     // ^Z suspend. Tears down terminal state (alt screen, raw mode, paste
     // mode, grabInput), raises SIGTSTP on ourselves so the kernel stops
     // the process, and re-installs everything on SIGCONT. The picker
@@ -4629,33 +4682,17 @@ export async function pickSession(
           return;
         }
         suspendInProgress = false;
-        // Route alt-screen re-entry through terminal-kit so its internal
-        // fullscreen tracking stays consistent with what's on the wire.
-        term.fullscreen(true);
-        // The shell we yielded to during ^Z can have scrambled DECCKM,
-        // kitty kbd, mouse, modifyOtherKeys, bracketed paste, cursor
-        // visibility — re-assert every mode the picker depends on
-        // before installGrab() turns bracketed paste back on and the
-        // first repaint goes out.
-        resetPickerTerminalModes();
-        term.hideCursor();
-        installGrab();
-        if (!resolved) {
-          forceFullRepaint();
-        }
+        reclaimTerminalFromChild?.();
       };
       suspend = (): void => {
         if (suspendInProgress || resolved) {
           return;
         }
         suspendInProgress = true;
-        uninstallGrab();
-        // Leave the alt-screen buffer so the host shell is visible while
-        // we're stopped. Re-enable cursor; restore auto-wrap so any
-        // shell job-control message renders cleanly. Use term.fullscreen
-        // so terminal-kit's own state tracking matches the wire.
-        term.fullscreen(false);
-        writeControl(`${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
+        withdrawTerminalForChild?.();
+        // Trailing newline so any shell job-control message renders
+        // cleanly under the cursor withdrawTerminalForChild left visible.
+        writeControl("\n");
         process.once("SIGCONT", onCont);
         process.kill(process.pid, "SIGTSTP");
       };

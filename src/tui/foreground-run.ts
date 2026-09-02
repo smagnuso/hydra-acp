@@ -84,8 +84,6 @@ export async function runForegroundChild(
   spec: ForegroundSpec,
   deps: ForegroundDeps,
 ): Promise<ForegroundOutcome> {
-  const spawnFn =
-    deps.spawn ?? ((await import("node:child_process")).spawn as SpawnFn);
   const write = deps.write ?? ((text: string) => void process.stdout.write(text));
   const unpark = parkSignals();
   deps.suspend();
@@ -93,6 +91,13 @@ export async function runForegroundChild(
   if (spec.banner !== undefined) {
     write(spec.banner);
   }
+  // Resolved after suspend, not before: an awaited dynamic import yields to
+  // the event loop, and anything that lands in that gap (a sidebar/script
+  // timer tick, a daemon push) would paint for real onto the still-live
+  // screen a moment before CLEAR_SCREEN_HOME wipes it — a timing-dependent
+  // flash rather than a reproducible bug.
+  const spawnFn =
+    deps.spawn ?? ((await import("node:child_process")).spawn as SpawnFn);
   return await new Promise<ForegroundOutcome>((resolve) => {
     let settled = false;
     const settle = (outcome: ForegroundOutcome): void => {

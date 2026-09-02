@@ -161,6 +161,7 @@ import {
   type InputEffect,
   type KeyEvent,
 } from "./input.js";
+import { editTextInEditor } from "./edit-in-editor.js";
 import {
   MAX_ATTACHMENT_BYTES,
   formatSize,
@@ -1019,7 +1020,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Double-click bar", "cwd opens · title renames · agent/model/mode pick · else copy"],
   ["Click in a modal", "row picks / cycles it · hint words act · wheel walks the list"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
-  ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
+  ["^X", "edit prompt in $VISUAL/$EDITOR"],
   null,
   ["^C", "cancel turn (twice to exit)"],
   ["Esc", "cancel turn and prefill draft"],
@@ -6582,17 +6583,6 @@ async function runSession(
           viewPrefs.showThoughts ? "thoughts shown" : "thoughts hidden",
         );
         return;
-      case "toggle-mouse": {
-        const next = !screen.isMouseEnabled();
-        screen.setMouseEnabled(next);
-        viewPrefs.mouseEnabled = next;
-        screen.notify(
-          next
-            ? "mouse capture on — wheel scrolls; shift+drag to select text"
-            : "mouse capture off — click-drag selects text; PgUp/PgDn scrolls",
-        );
-        return;
-      }
       case "show-help":
         toggleHelpModal();
         return;
@@ -6609,7 +6599,27 @@ async function runSession(
       case "attachment-request":
         void handleClipboardAttachment(effect.source);
         return;
+      case "edit-in-editor":
+        void handleEditInEditor();
+        return;
     }
+  };
+
+  // ^X: same suspend/resume contract as the double-click open-file path
+  // (screen.stop() / screen.start() around runForegroundChild), but the
+  // payload is the composer's own draft rather than a file on disk.
+  const handleEditInEditor = async (): Promise<void> => {
+    const edited = await editTextInEditor(dispatcher.expandedText(), {
+      suspend: () => screen.stop(),
+      resume: () => screen.start(),
+      notify: (message) => screen.notify(message),
+    });
+    if (edited === null) {
+      return;
+    }
+    dispatcher.setBuffer(edited, dispatcher.state().attachments);
+    screen.setAttachments(dispatcher.state().attachments);
+    screen.refreshPrompt();
   };
 
   // Resolves each dropped token — either an absolute path on disk

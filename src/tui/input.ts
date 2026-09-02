@@ -119,7 +119,10 @@ export type InputEffect =
   | { type: "toggle-questions" }
   | { type: "toggle-thoughts" }
   | { type: "toggle-sidebar" }
-  | { type: "toggle-mouse" }
+  // ^X: hand the current buffer to $VISUAL/$EDITOR and load back whatever
+  // the editor left behind. The app owns the temp file and the foreground
+  // spawn; the dispatcher just asks for it.
+  | { type: "edit-in-editor" }
   | { type: "show-help" }
   // Dispatcher → app: please acquire content from the named source and
   // either add an attachment (image) or paste text. "clipboard" is the
@@ -691,7 +694,7 @@ export class InputDispatcher {
         this.killWordAlpha();
         return [];
       case "ctrl-x":
-        return [{ type: "toggle-mouse" }];
+        return [{ type: "edit-in-editor" }];
       case "ctrl-y":
         this.recordEdit();
         this.yank();
