@@ -12,6 +12,12 @@ import {
 import type { SpawnFn } from "./foreground-run.js";
 
 describe("resolveEditorCommand", () => {
+  it("prefers $HYDRA_EDITOR over $VISUAL and $EDITOR", () => {
+    expect(
+      resolveEditorCommand({ HYDRA_EDITOR: "hx", VISUAL: "code --wait", EDITOR: "vim" }),
+    ).toEqual(["hx"]);
+  });
+
   it("prefers $VISUAL over $EDITOR", () => {
     expect(resolveEditorCommand({ VISUAL: "code --wait", EDITOR: "vim" })).toEqual([
       "code",
@@ -27,7 +33,13 @@ describe("resolveEditorCommand", () => {
     expect(resolveEditorCommand({ VISUAL: "  ", EDITOR: "vim" })).toEqual(["vim"]);
   });
 
-  it("returns null when neither is set", () => {
+  it("skips a blank $HYDRA_EDITOR rather than letting it shadow $VISUAL", () => {
+    expect(
+      resolveEditorCommand({ HYDRA_EDITOR: "  ", VISUAL: "code --wait", EDITOR: "vim" }),
+    ).toEqual(["code", "--wait"]);
+  });
+
+  it("returns null when none are set", () => {
     expect(resolveEditorCommand({})).toBeNull();
   });
 });
@@ -98,11 +110,13 @@ describe("editTextInEditor", () => {
     expect(h.log[1]).toContain("spawn:code:--wait ");
   });
 
-  it("returns null and notifies when neither $VISUAL nor $EDITOR is set", async () => {
+  it("returns null and notifies when none of $HYDRA_EDITOR, $VISUAL, $EDITOR is set", async () => {
     const h = harness(null);
     const result = await editTextInEditor("text", { ...h.deps, env: {} });
     expect(result).toBeNull();
-    expect(h.log).toEqual(["notify:no $VISUAL or $EDITOR set — nothing to edit with"]);
+    expect(h.log).toEqual([
+      "notify:no $HYDRA_EDITOR, $VISUAL or $EDITOR set — nothing to edit with",
+    ]);
   });
 
   it("returns null on a nonzero exit, discarding whatever the editor wrote", async () => {

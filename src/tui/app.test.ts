@@ -448,6 +448,16 @@ describe("resolveOpenFileCommand", () => {
     });
   });
 
+  it("prefers $HYDRA_EDITOR over $VISUAL and $EDITOR", () => {
+    expect(
+      resolveOpenFileCommand(undefined, {
+        HYDRA_EDITOR: "hx",
+        VISUAL: "gvim",
+        EDITOR: "nano",
+      }),
+    ).toEqual({ argv: "hx", source: "env" });
+  });
+
   it("falls back to $VISUAL before $EDITOR", () => {
     expect(
       resolveOpenFileCommand(undefined, { VISUAL: "gvim", EDITOR: "nano" }),
@@ -475,6 +485,16 @@ describe("resolveOpenFileCommand", () => {
     expect(
       resolveOpenFileCommand(undefined, { VISUAL: "", EDITOR: "vim" }),
     ).toEqual({ argv: "vim", source: "env" });
+  });
+
+  it("steps over a blank $HYDRA_EDITOR to reach $VISUAL", () => {
+    expect(
+      resolveOpenFileCommand(undefined, {
+        HYDRA_EDITOR: "",
+        VISUAL: "gvim",
+        EDITOR: "vim",
+      }),
+    ).toEqual({ argv: "gvim", source: "env" });
   });
 
   it("marks the env fallback so the TUI knows to run it in the foreground", () => {

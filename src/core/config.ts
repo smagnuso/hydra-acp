@@ -466,21 +466,22 @@ const TuiConfig = z.object({
   //   - Array: pre-split argv with the same %f / %n substitution rules
   //     (use this when an arg must contain literal whitespace). Example:
   //       ["code", "--goto", "%f:%n"]
-  // Unset falls back to $VISUAL, then $EDITOR, treated as the string
-  // form. Those carry no %f/%n, so the path is appended; the line number
-  // is passed in the editor's own syntax when it's one we know (`vim +42`,
-  // `hx path:42`) and dropped otherwise.
-  // With none of the three set the feature is off — double-click
+  // Unset falls back to $HYDRA_EDITOR, then $VISUAL, then $EDITOR, treated
+  // as the string form. Those carry no %f/%n, so the path is appended; the
+  // line number is passed in the editor's own syntax when it's one we know
+  // (`vim +42`, `hx path:42`) and dropped otherwise.
+  // With none of the four set the feature is off — double-click
   // continues to snap the word for clipboard copy. A command set here is
   // spawned detached with stdio ignored; failures are surfaced via the
-  // in-app notification line, not blocking the TUI. The $VISUAL/$EDITOR
-  // fallback runs in the foreground instead — see openFileInTerminal.
+  // in-app notification line, not blocking the TUI. The
+  // $HYDRA_EDITOR/$VISUAL/$EDITOR fallback runs in the foreground instead
+  // — see openFileInTerminal.
   openFileCommand: z.union([z.string(), z.array(z.string())]).optional(),
   // Whether the open-file gesture hands the terminal to the editor and
   // waits for it, rather than spawning it in the background.
   //
   // Unset (the default) decides by where the command came from: the
-  // $VISUAL / $EDITOR fallback runs in the foreground, an explicit
+  // $HYDRA_EDITOR/$VISUAL/$EDITOR fallback runs in the foreground, an explicit
   // openFileCommand runs detached. That split is the convention those
   // variables already carry — `crontab -e`, `git commit` and `visudo` all
   // require $EDITOR to block and own the terminal, which is why

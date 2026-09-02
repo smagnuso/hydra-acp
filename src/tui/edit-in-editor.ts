@@ -1,6 +1,6 @@
-// Round-trips composer text through $VISUAL/$EDITOR: write the buffer to a
-// temp file, hand the terminal to the editor via runForegroundChild, read
-// the result back once it exits cleanly.
+// Round-trips composer text through $HYDRA_EDITOR/$VISUAL/$EDITOR: write the
+// buffer to a temp file, hand the terminal to the editor via
+// runForegroundChild, read the result back once it exits cleanly.
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,14 +12,14 @@ import {
 } from "./foreground-run.js";
 
 // Same fallback and blank-value handling as resolveOpenFileCommand
-// (app.ts): $VISUAL then $EDITOR, skipping a blank value rather than
-// letting it shadow the other. Unlike openFileCommand there's no
-// hydra-specific config to check first — this feature has no file to
-// target, so there's nothing for a %f/%n command to point at.
+// (app.ts): $HYDRA_EDITOR then $VISUAL then $EDITOR, skipping a blank
+// value rather than letting it shadow the next one. Unlike openFileCommand
+// there's no hydra-specific config to check first — this feature has no
+// file to target, so there's nothing for a %f/%n command to point at.
 export function resolveEditorCommand(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] | null {
-  const fromEnv = [env.VISUAL, env.EDITOR].find(
+  const fromEnv = [env.HYDRA_EDITOR, env.VISUAL, env.EDITOR].find(
     (value) => value !== undefined && value.trim() !== "",
   );
   if (fromEnv === undefined) {
@@ -35,16 +35,16 @@ export interface EditTextDeps extends ForegroundDeps {
 }
 
 // Returns the edited text, or null when nothing should replace the
-// caller's buffer: no $VISUAL/$EDITOR configured, the editor failed to
-// launch, or it exited nonzero. foreground-run.ts already notifies why
-// in the nonzero/error cases.
+// caller's buffer: no $HYDRA_EDITOR/$VISUAL/$EDITOR configured, the editor
+// failed to launch, or it exited nonzero. foreground-run.ts already
+// notifies why in the nonzero/error cases.
 export async function editTextInEditor(
   text: string,
   deps: EditTextDeps,
 ): Promise<string | null> {
   const argv = resolveEditorCommand(deps.env);
   if (argv === null) {
-    deps.notify?.("no $VISUAL or $EDITOR set — nothing to edit with");
+    deps.notify?.("no $HYDRA_EDITOR, $VISUAL or $EDITOR set — nothing to edit with");
     return null;
   }
   const [program, ...args] = argv as [string, ...string[]];

@@ -961,16 +961,16 @@ export interface ResolvedOpenFileCommand {
   source: "config" | "env";
 }
 
-// tui.openFileCommand wins; absent that, fall back to $VISUAL then
-// $EDITOR. Which branch won is part of the answer, because it decides how
-// the child is spawned: $VISUAL/$EDITOR carry a "block and own the
-// terminal" contract that crontab -e, git commit and visudo all rely on,
-// so those run in the foreground (screen down, editor owns the tty, repaint
-// on exit). An explicit tui.openFileCommand keeps the detached background
-// spawn, which is what a GUI editor wants. See tui.openFileInTerminal to
-// override either default.
+// tui.openFileCommand wins; absent that, fall back to $HYDRA_EDITOR, then
+// $VISUAL, then $EDITOR. Which branch won is part of the answer, because
+// it decides how the child is spawned: $HYDRA_EDITOR/$VISUAL/$EDITOR carry
+// a "block and own the terminal" contract that crontab -e, git commit and
+// visudo all rely on, so those run in the foreground (screen down, editor
+// owns the tty, repaint on exit). An explicit tui.openFileCommand keeps the
+// detached background spawn, which is what a GUI editor wants. See
+// tui.openFileInTerminal to override either default.
 //
-// Note that having any of the three set also enables the single-click
+// Note that having any of the four set also enables the single-click
 // debounce that defers block toggles by 500ms so a double-click can win;
 // that's the cost of having the gesture live at all.
 export function resolveOpenFileCommand(
@@ -980,9 +980,9 @@ export function resolveOpenFileCommand(
   if (configured !== undefined) {
     return { argv: configured, source: "config" };
   }
-  // Skip a blank VISUAL rather than letting it shadow a real EDITOR —
+  // Skip a blank value rather than letting it shadow the next tier —
   // `VISUAL= EDITOR=vim` is a normal thing to have in a shell profile.
-  const fromEnv = [env.VISUAL, env.EDITOR].find(
+  const fromEnv = [env.HYDRA_EDITOR, env.VISUAL, env.EDITOR].find(
     (value) => value !== undefined && value.trim() !== "",
   );
   if (fromEnv === undefined) {
@@ -1016,11 +1016,11 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+PgUp / Alt+PgDn", "jump to previous / next prompt"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
-  ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR — a $EDITOR takes over the terminal until you quit it)"],
+  ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $HYDRA_EDITOR/$VISUAL/$EDITOR — a $EDITOR takes over the terminal until you quit it)"],
   ["Double-click bar", "cwd opens · title renames · agent/model/mode pick · else copy"],
   ["Click in a modal", "row picks / cycles it · hint words act · wheel walks the list"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
-  ["^X", "edit prompt in $VISUAL/$EDITOR"],
+  ["^X", "edit prompt in $HYDRA_EDITOR/$VISUAL/$EDITOR"],
   null,
   ["^C", "cancel turn (twice to exit)"],
   ["Esc", "cancel turn and prefill draft"],

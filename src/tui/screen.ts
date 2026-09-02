@@ -1263,7 +1263,7 @@ export class Screen {
     // when disabled). String form is shell-style split on whitespace —
     // good enough for editor invocations without quoted spaces; users
     // who need a literal space in an arg pass the array form instead.
-    // Purely option-driven: the $VISUAL / $EDITOR fallback is resolved by
+    // Purely option-driven: the $HYDRA_EDITOR / $VISUAL / $EDITOR fallback is resolved by
     // resolveOpenFileCommand at the config-wiring layer, not here, so
     // Screen's behavior doesn't shift with the ambient environment (it
     // gates the click-debounce path, which tests and users both notice).
