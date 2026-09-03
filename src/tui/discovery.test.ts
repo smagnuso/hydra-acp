@@ -222,6 +222,35 @@ describe("mergeSessionListPage", () => {
     const merged = mergeSessionListPage(current, page, true);
     expect(merged).toEqual([cold("s1", "2025-01-02T00:00:00Z")]);
   });
+
+  it("picks up a field change on a row that stays warm (busy flipping mid-turn)", () => {
+    // The daemon returns the full warm set on every incremental page, and
+    // `busy` lives only in its memory (never in meta.json, so no mtime
+    // moves when it flips). If the merge failed to take the incoming warm
+    // copy, the picker would render a mid-turn session as WARM forever.
+    const current = [{ ...warm("s1"), busy: false }];
+    const page = {
+      sessions: [{ ...warm("s1"), busy: true }],
+      removed: [],
+      cursor: 6,
+    };
+    expect(mergeSessionListPage(current, page, true)[0]?.busy).toBe(true);
+  });
+
+  it("purges a local row with an unknown status instead of stranding it as a live-looking ghost", () => {
+    // Regression: the purge used to key on `status === "warm"`, so a row
+    // whose status was missing survived AND had nothing in page.sessions
+    // to overwrite it. session-row.ts's formatState treats any non-"cold"
+    // status as live, so it rendered as WARM on every subsequent poll,
+    // forever — the full-replace code this merge superseded had wiped it.
+    const ghost = { ...warm("ghost"), status: undefined } as unknown as DiscoveredSession;
+    const merged = mergeSessionListPage(
+      [ghost, cold("keep")],
+      { sessions: [], removed: [], cursor: 7 },
+      true,
+    );
+    expect(merged.map((s) => s.sessionId)).toEqual(["keep"]);
+  });
 });
 
 describe("killSession", () => {

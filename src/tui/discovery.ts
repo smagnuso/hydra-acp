@@ -274,8 +274,18 @@ export function mergeSessionListPage(
     return page.sessions;
   }
   const merged = new Map(current.map((s) => [s.sessionId, s]));
+  // Purge anything NOT definitively cold, rather than only `=== "warm"`.
+  // The incoming page carries the complete truth for every non-cold row,
+  // so a local row that isn't cold must either come back in this response
+  // or not exist. Keying the purge on `=== "warm"` left a row with a
+  // missing/unknown status un-purged AND un-overwritten (nothing in
+  // page.sessions to replace it), and session-row.ts's formatState treats
+  // any non-"cold" status as live — so it rendered as a WARM row forever,
+  // immortal across every subsequent poll. The old full-replace code wiped
+  // such a row on the next refresh; incremental merging is what made it
+  // permanent, so this has to be defensive rather than trusting producers.
   for (const s of merged.values()) {
-    if (s.status === "warm") {
+    if (s.status !== "cold") {
       merged.delete(s.sessionId);
     }
   }
