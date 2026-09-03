@@ -15,6 +15,11 @@ export const Tombstone = z.object({
   version: z.literal(1),
   agentId: z.string(),
   upstreamSessionId: z.string(),
+  // The hydra session this tombstone was written for. Absent on
+  // tombstones from before the field existed. Lets the session store's
+  // change index learn about deletions that predate the daemon's start,
+  // so a `since=` client holding an older cursor still sees them.
+  sessionId: z.string().optional(),
   deletedAt: z.string(),
   // Agent's last-reported updatedAt for this session at the moment we
   // deleted, snapshotted from SessionRecord.updatedAt. Compared against

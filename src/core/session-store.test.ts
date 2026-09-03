@@ -271,3 +271,92 @@ describe("SessionStore", () => {
     expect(r?.workspace?.vcs).toBeUndefined();
   });
 });
+
+describe("SessionStore change index", () => {
+  const record = (id: string) =>
+    recordFromMemorySession({
+      sessionId: id,
+      upstreamSessionId: `u_${id}`,
+      agentId: "claude-acp",
+      cwd: "/w",
+    });
+  // Consecutive writes get distinct mtimes on every filesystem this runs
+  // on, but a few ms of slack keeps the boundary assertions honest.
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+
+  it("seeds from disk, so records written before the index existed are visible", async () => {
+    const writer = new SessionStore();
+    await writer.write(record("hydra_session_a"));
+    await writer.write(record("hydra_session_b"));
+    const store = new SessionStore();
+    const cursor = await store.cursor();
+    expect(cursor).toBeGreaterThan(0);
+    const all = await store.listChangedSince(0);
+    expect(all.records.map((r) => r.sessionId).sort()).toEqual([
+      "hydra_session_a",
+      "hydra_session_b",
+    ]);
+    expect(all.removed).toEqual([]);
+    expect(all.cursor).toBe(cursor);
+  });
+
+  it("returns only records written at or after the cursor", async () => {
+    const store = new SessionStore();
+    await store.write(record("hydra_session_old"));
+    await settle();
+    const c0 = await store.cursor();
+    await settle();
+    await store.write(record("hydra_session_new"));
+    const delta = await store.listChangedSince(c0);
+    const ids = delta.records.map((r) => r.sessionId);
+    expect(ids).toContain("hydra_session_new");
+    // `>=`: the row stamped exactly at the cursor is re-sent, nothing older is.
+    expect(ids).toContain("hydra_session_old");
+    expect(delta.cursor).toBeGreaterThan(c0);
+    const quiet = await store.listChangedSince(delta.cursor + 1);
+    expect(quiet.records).toEqual([]);
+    expect(quiet.removed).toEqual([]);
+  });
+
+  it("reports deletions after the cursor, and stops reporting older ones", async () => {
+    const store = new SessionStore();
+    await store.write(record("hydra_session_keep"));
+    await store.write(record("hydra_session_drop"));
+    await settle();
+    const c0 = await store.cursor();
+    await settle();
+    await store.delete("hydra_session_drop");
+    const delta = await store.listChangedSince(c0);
+    expect(delta.removed).toEqual(["hydra_session_drop"]);
+    expect(delta.records.map((r) => r.sessionId)).not.toContain(
+      "hydra_session_drop",
+    );
+    const later = await store.listChangedSince(delta.cursor + 1);
+    expect(later.removed).toEqual([]);
+  });
+
+  it("touch advances a record's cursor position without rewriting it", async () => {
+    const store = new SessionStore();
+    await store.write(record("hydra_session_touch"));
+    const before = await store.read("hydra_session_touch");
+    await settle();
+    const c0 = await store.cursor();
+    await settle();
+    await store.touch("hydra_session_touch");
+    const delta = await store.listChangedSince(c0 + 1);
+    expect(delta.records.map((r) => r.sessionId)).toEqual(["hydra_session_touch"]);
+    expect(await store.read("hydra_session_touch")).toEqual(before);
+    await expect(store.touch("hydra_session_missing")).resolves.toBeUndefined();
+  });
+
+  it("markDeleted seeds a past deletion but never overrides a live row", async () => {
+    const store = new SessionStore();
+    await store.write(record("hydra_session_live"));
+    const at = Date.now();
+    await store.markDeleted("hydra_session_gone", at);
+    await store.markDeleted("hydra_session_live", at + 1000);
+    const delta = await store.listChangedSince(0);
+    expect(delta.removed).toEqual(["hydra_session_gone"]);
+    expect(delta.records.map((r) => r.sessionId)).toEqual(["hydra_session_live"]);
+  });
+});

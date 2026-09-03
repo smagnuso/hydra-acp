@@ -447,13 +447,162 @@ function assertSafeId(id: string): void {
   }
 }
 
+// One row of the change index: the record file's mtime, or the moment
+// the record was deleted. `deleted` rows stay in the index so a client
+// polling with `since=` learns about the removal.
+interface IndexEntry {
+  mtimeMs: number;
+  deleted: boolean;
+}
+
+export interface ChangedSince {
+  records: SessionRecord[];
+  removed: string[];
+  cursor: number;
+}
+
 export class SessionStore {
+  // id -> IndexEntry, seeded lazily from a readdir + stat on first use and
+  // kept current by write()/delete()/touch(). Lets `since=` listings skip
+  // reading every meta.json: only rows with mtime >= since are read.
+  private index: Map<string, IndexEntry> | undefined;
+  private indexSeed: Promise<void> | undefined;
+
   async write(record: Omit<SessionRecord, "version">): Promise<void> {
     assertSafeId(record.sessionId);
     const full: SessionRecord = { version: 1, ...record };
     await writeJsonAtomic(paths.sessionFile(record.sessionId), full, {
       mode: 0o600,
     });
+    await this.reindex(record.sessionId);
+  }
+
+  // Advance a record's mtime without rewriting it. Used when a session
+  // cools down: nothing in the record changes, but its list entry does
+  // (warm -> cold), and a `since=` client only sees rows whose mtime moved.
+  async touch(sessionId: string): Promise<void> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return;
+    }
+    const now = new Date();
+    try {
+      await fs.utimes(paths.sessionFile(sessionId), now, now);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT") {
+        throw err;
+      }
+      return;
+    }
+    await this.reindex(sessionId);
+  }
+
+  // Record a deletion that happened before this index existed (seeded
+  // from tombstones at daemon startup). Never overrides a live row.
+  async markDeleted(sessionId: string, atMs: number): Promise<void> {
+    await this.ensureIndex();
+    const current = this.index!.get(sessionId);
+    if (current && !current.deleted) {
+      return;
+    }
+    if (current && current.mtimeMs >= atMs) {
+      return;
+    }
+    this.index!.set(sessionId, { mtimeMs: atMs, deleted: true });
+  }
+
+  // Newest mtime the index knows about. A client that passes this back as
+  // `since` gets every row that changed after the listing it was issued
+  // with; a row stamped exactly at the cursor is re-sent, so callers merge
+  // idempotently rather than treating a re-sent row as a change.
+  async cursor(): Promise<number> {
+    await this.ensureIndex();
+    let max = 0;
+    for (const entry of this.index!.values()) {
+      if (entry.mtimeMs > max) {
+        max = entry.mtimeMs;
+      }
+    }
+    return max;
+  }
+
+  async listChangedSince(sinceMs: number): Promise<ChangedSince> {
+    const cursor = await this.cursor();
+    const changed: string[] = [];
+    const removed: string[] = [];
+    for (const [id, entry] of this.index!) {
+      if (entry.mtimeMs < sinceMs) {
+        continue;
+      }
+      if (entry.deleted) {
+        removed.push(id);
+      } else {
+        changed.push(id);
+      }
+    }
+    const settled = await Promise.all(
+      changed.map((id) => this.read(id).catch(() => undefined)),
+    );
+    const records: SessionRecord[] = [];
+    for (const record of settled) {
+      if (record) {
+        records.push(record);
+      }
+    }
+    return { records, removed, cursor };
+  }
+
+  async ensureIndex(): Promise<void> {
+    if (this.index) {
+      return;
+    }
+    if (!this.indexSeed) {
+      this.indexSeed = this.seedIndex();
+    }
+    await this.indexSeed;
+  }
+
+  private async seedIndex(): Promise<void> {
+    const index = new Map<string, IndexEntry>();
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(paths.sessionsDir());
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT") {
+        throw err;
+      }
+    }
+    await Promise.all(
+      entries.map(async (id) => {
+        if (!SESSION_ID_PATTERN.test(id)) {
+          return;
+        }
+        try {
+          const st = await fs.stat(paths.sessionFile(id));
+          index.set(id, { mtimeMs: st.mtimeMs, deleted: false });
+        } catch {
+          // No meta.json (transcript-only dir, or racing a delete).
+        }
+      }),
+    );
+    this.index = index;
+  }
+
+  // Refresh one row from disk. A no-op until something has asked for the
+  // index; while the seed is in flight, wait for it so a write that raced
+  // the seed's stat still lands with its final mtime.
+  private async reindex(sessionId: string): Promise<void> {
+    if (!this.indexSeed) {
+      return;
+    }
+    await this.indexSeed;
+    try {
+      const st = await fs.stat(paths.sessionFile(sessionId));
+      this.index!.set(sessionId, { mtimeMs: st.mtimeMs, deleted: false });
+    } catch {
+      // Deleted between write and stat; delete() records that.
+    }
   }
 
   async read(sessionId: string): Promise<SessionRecord | undefined> {
@@ -474,6 +623,10 @@ export class SessionStore {
   async delete(sessionId: string): Promise<void> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return;
+    }
+    if (this.indexSeed) {
+      await this.indexSeed;
+      this.index!.set(sessionId, { mtimeMs: Date.now(), deleted: true });
     }
     try {
       await fs.unlink(paths.sessionFile(sessionId));

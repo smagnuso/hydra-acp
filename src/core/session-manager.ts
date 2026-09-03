@@ -313,6 +313,32 @@ export interface ResurrectParams {
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
 
+export interface SessionListFilter {
+  cwd?: string;
+  includeNonInteractive?: boolean;
+  // Restrict to one side of the warm/cold split, named for the
+  // SessionListEntry field it filters on.
+  //
+  // "warm" is the one that earns its keep: it skips the cold-record
+  // walk, which is the entire cost of a list on a machine with a long
+  // history — a thousand records to stat and serialize so a caller can
+  // throw away all but the handful actually running. Anything POLLING
+  // for live state must pass it, or poll listSince() with a cursor.
+  status?: "warm" | "cold";
+}
+
+// A listing and the store cursor it was read at. See SessionStore.cursor()
+// for the cursor's contract (mtime-based, `>=` on the next poll).
+export interface SessionListing {
+  entries: SessionListEntry[];
+  cursor: number;
+}
+
+export interface SessionListDelta extends SessionListing {
+  // Session ids deleted at or after the requested cursor.
+  removed: string[];
+}
+
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
   // Fast-reap window for a session with zero attached clients that has
@@ -441,7 +467,7 @@ export class SessionManager {
   // enough that concurrent pollers share one read.
   private listCache = new Map<
     string,
-    { expiresAt: number; promise: Promise<SessionListEntry[]> }
+    { expiresAt: number; promise: Promise<SessionListing> }
   >();
   private static readonly LIST_CACHE_TTL_MS = 500;
   private logger?: AgentLogger;
@@ -5377,6 +5403,12 @@ export class SessionManager {
       this.sessions.delete(session.sessionId);
       this.driftNoticed.delete(session.sessionId);
       this.invalidateListCache();
+      // A cold-down changes the list entry (warm -> cold) without touching
+      // the record, so bump its mtime or a `since=` client never hears
+      // that the row left the warm set.
+      if (!deleteRecord) {
+        void this.store.touch(session.sessionId).catch(() => undefined);
+      }
       // Release the workspace only when the record is going away too.
       // A close WITHOUT deleteRecord is a cold-down, not a deletion: the
       // session can be resurrected later and must find its workspace
@@ -5910,21 +5942,16 @@ export class SessionManager {
     };
   }
 
-  async list(
-    filter: {
-      cwd?: string;
-      includeNonInteractive?: boolean;
-      // Restrict to one side of the warm/cold split, named for the
-      // SessionListEntry field it filters on.
-      //
-      // "warm" is the one that earns its keep: it skips the cold-record
-      // walk, which is the entire cost of a list on a machine with a long
-      // history — a thousand records to stat and serialize so a caller can
-      // throw away all but the handful actually running. Anything POLLING
-      // for live state must pass it.
-      status?: "warm" | "cold";
-    } = {},
-  ): Promise<SessionListEntry[]> {
+  async list(filter: SessionListFilter = {}): Promise<SessionListEntry[]> {
+    return (await this.listing(filter)).entries;
+  }
+
+  // list() plus the store cursor the entries were read at. Handing the
+  // cursor to a client lets it poll listSince() for changes instead of
+  // re-reading every record. Cached together so a cached listing never
+  // pairs with a newer cursor than it was built from, which would let a
+  // write that landed in between vanish from the client's view.
+  async listing(filter: SessionListFilter = {}): Promise<SessionListing> {
     const key =
       `${filter.cwd ?? ""}|${filter.includeNonInteractive ? "1" : "0"}` +
       `|${filter.status ?? ""}`;
@@ -5954,27 +5981,86 @@ export class SessionManager {
   }
 
   private async listUncached(
-    filter: {
-      cwd?: string;
-      includeNonInteractive?: boolean;
-      status?: "warm" | "cold";
-    } = {},
-  ): Promise<SessionListEntry[]> {
+    filter: SessionListFilter = {},
+  ): Promise<SessionListing> {
+    // Taken before any record is read: a write that lands during the
+    // read has an mtime above this cursor and is picked up next poll.
+    const cursor = await this.store.cursor();
+    const { entries, liveIds } = await this.warmRows(filter);
+    if (filter.status === "warm") {
+      return { entries, cursor };
+    }
+    // Propagate disk errors so list()'s cache entry evicts and the next
+    // caller retries instead of seeing an empty cold-record set wedged
+    // in the 500ms list cache.
+    const records = await this.store.list().catch((err: unknown) => {
+      this.logger?.warn(
+        `session list: store.list() failed: ${(err as Error)?.message ?? String(err)}`,
+      );
+      throw err;
+    });
+    entries.push(...(await this.coldRows(records, liveIds, filter)));
+    entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    return { entries, cursor };
+  }
+
+  // Incremental variant of listing(): every warm row (they change
+  // constantly and cost nothing to build), only the cold rows whose record
+  // was written at or after `sinceMs`, and the ids deleted since then.
+  // `sinceMs` is a cursor from an earlier listing()/listSince() response.
+  // Not cached: it reads only the changed records, so there is nothing
+  // worth sharing between callers.
+  async listSince(
+    filter: SessionListFilter,
+    sinceMs: number,
+  ): Promise<SessionListDelta> {
+    const { entries, liveIds } = await this.warmRows(filter);
+    if (filter.status === "warm") {
+      return { entries, removed: [], cursor: await this.store.cursor() };
+    }
+    const changed = await this.store.listChangedSince(sinceMs);
+    entries.push(...(await this.coldRows(changed.records, liveIds, filter)));
+    entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    return { entries, removed: changed.removed, cursor: changed.cursor };
+  }
+
+  // Seed the store's change index and fold in deletions recorded before
+  // this daemon started, so a client polling with a cursor from a
+  // previous daemon run still learns about a session deleted in between.
+  async seedSessionIndex(): Promise<void> {
+    await this.store.ensureIndex();
+    const tombstones = await this.tombstones.list().catch(() => []);
+    for (const t of tombstones) {
+      if (t.sessionId === undefined) {
+        continue;
+      }
+      const at = Date.parse(t.deletedAt);
+      if (Number.isNaN(at)) {
+        continue;
+      }
+      await this.store.markDeleted(t.sessionId, at);
+    }
+  }
+
+  // Filter rule (when includeNonInteractive is false, the default):
+  // only effective === true is visible. False (cat one-shots) and
+  // undefined (fresh editor panels that never typed) are both hidden.
+  // The "user just created a session and is about to type" objection
+  // doesn't apply — that user is inside their own TUI for that
+  // session, not staring at the picker.
+  private static includeRow(
+    filter: SessionListFilter,
+    interactive: boolean | undefined,
+  ): boolean {
+    if (filter.includeNonInteractive) return true;
+    return interactive === true;
+  }
+
+  private async warmRows(
+    filter: SessionListFilter,
+  ): Promise<{ entries: SessionListEntry[]; liveIds: Set<string> }> {
     const entries: SessionListEntry[] = [];
     const liveIds = new Set<string>();
-    // Filter rule (when includeNonInteractive is false, the default):
-    // only effective === true is visible. False (cat one-shots) and
-    // undefined (fresh editor panels that never typed) are both hidden.
-    // The "user just created a session and is about to type" objection
-    // doesn't apply — that user is inside their own TUI for that
-    // session, not staring at the picker.
-    const includeRow = (interactive: boolean | undefined): boolean => {
-      if (filter.includeNonInteractive) return true;
-      return interactive === true;
-    };
-    // Stat all sessions (warm + cold) in parallel. The sequential
-    // historyStatus loop was the dominant cost when the picker opened
-    // against a directory with hundreds of cold sessions.
     const liveSessions = [...this.sessions.values()].filter(
       (s) => matchesCwdFilter(filter.cwd, s),
     );
@@ -5985,11 +6071,14 @@ export class SessionManager {
       for (const session of liveSessions) {
         liveIds.add(session.sessionId);
       }
+      return { entries, liveIds };
     }
-    const liveStats =
-      filter.status === "cold"
-        ? []
-        : await Promise.all(liveSessions.map((s) => historyStatus(s.sessionId)));
+    // Stat all live sessions in parallel; the sequential historyStatus
+    // loop was the dominant cost when the picker opened against a
+    // directory with hundreds of sessions.
+    const liveStats = await Promise.all(
+      liveSessions.map((s) => historyStatus(s.sessionId)),
+    );
     for (let i = 0; i < liveStats.length; i += 1) {
       const session = liveSessions[i]!;
       const hist = liveStats[i]!;
@@ -6003,7 +6092,7 @@ export class SessionManager {
         },
         hist.hasContent,
       );
-      if (!includeRow(interactive)) {
+      if (!SessionManager.includeRow(filter, interactive)) {
         continue;
       }
       const used = hist.mtime ?? new Date(session.updatedAt).toISOString();
@@ -6042,18 +6131,15 @@ export class SessionManager {
         forkSynthesisState: session.forkSynthesisState,
       });
     }
-    if (filter.status === "warm") {
-      return entries;
-    }
-    // Propagate disk errors so list()'s cache entry evicts and the next
-    // caller retries instead of seeing an empty cold-record set wedged
-    // in the 500ms list cache.
-    const records = await this.store.list().catch((err: unknown) => {
-      this.logger?.warn(
-        `session list: store.list() failed: ${(err as Error)?.message ?? String(err)}`,
-      );
-      throw err;
-    });
+    return { entries, liveIds };
+  }
+
+  private async coldRows(
+    records: SessionRecord[],
+    liveIds: Set<string>,
+    filter: SessionListFilter,
+  ): Promise<SessionListEntry[]> {
+    const entries: SessionListEntry[] = [];
     const coldRecords = records.filter(
       (r) => !liveIds.has(r.sessionId) && matchesCwdFilter(filter.cwd, r),
     );
@@ -6064,7 +6150,7 @@ export class SessionManager {
       const r = coldRecords[i]!;
       const hist = coldStats[i]!;
       const interactive = effectiveInteractive(r, hist.hasContent);
-      if (!includeRow(interactive)) {
+      if (!SessionManager.includeRow(filter, interactive)) {
         continue;
       }
       const used = hist.mtime ?? r.updatedAt;
@@ -6095,7 +6181,6 @@ export class SessionManager {
         forkSynthesisState: r.forkSynthesisState,
       });
     }
-    entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return entries;
   }
 
@@ -6755,6 +6840,7 @@ export class SessionManager {
         .add({
           agentId: await this.agentStoreKey(pair.agentId, storeKeys),
           upstreamSessionId: pair.upstreamSessionId,
+          sessionId,
           deletedAt,
           upstreamUpdatedAt: current.upstreamUpdatedAt,
           cwd: current.cwd,

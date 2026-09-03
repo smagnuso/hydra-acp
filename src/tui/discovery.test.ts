@@ -5,10 +5,13 @@ import {
   fetchWithTimeout,
   killSession,
   listSessions,
+  listSessionsPage,
+  mergeSessionListPage,
   pickMostRecent,
   searchSessions,
   syncInstalledAgents,
 } from "./discovery.js";
+import type { DiscoveredSession } from "./discovery.js";
 import { toRow } from "../cli/session-row.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 
@@ -111,6 +114,113 @@ describe("listSessions", () => {
 
   it("returns [] when sessions field missing", async () => {
     expect(await listSessions(target, {}, fakeOk({}))).toEqual([]);
+  });
+});
+
+describe("listSessionsPage", () => {
+  it("omits since from the query when not passed", async () => {
+    const captured: { url: string } = { url: "" };
+    const fetchImpl = (async (input: string) => {
+      captured.url = input as string;
+      return new Response(JSON.stringify({ sessions: [] }), { status: 200 });
+    }) as typeof fetch;
+    await listSessionsPage(target, { includeNonInteractive: true }, fetchImpl);
+    expect(captured.url).not.toContain("since");
+  });
+
+  it("passes since as a query param and surfaces removed + cursor", async () => {
+    const captured: { url: string } = { url: "" };
+    const fetchImpl = (async (input: string) => {
+      captured.url = input as string;
+      return new Response(
+        JSON.stringify({
+          sessions: [
+            {
+              sessionId: "s1",
+              cwd: "/x",
+              updatedAt: "2025-01-01T00:00:00Z",
+              status: "cold",
+            },
+          ],
+          removed: ["s0"],
+          cursor: 1700000000123,
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const page = await listSessionsPage(target, { since: 1700000000000 }, fetchImpl);
+    expect(captured.url).toContain("since=1700000000000");
+    expect(page.removed).toEqual(["s0"]);
+    expect(page.cursor).toBe(1700000000123);
+    expect(page.sessions.map((s) => s.sessionId)).toEqual(["s1"]);
+  });
+
+  it("defaults removed to [] and cursor to 0 for a daemon predating this field", async () => {
+    const page = await listSessionsPage(target, {}, fakeOk({ sessions: [] }));
+    expect(page.removed).toEqual([]);
+    expect(page.cursor).toBe(0);
+  });
+});
+
+describe("mergeSessionListPage", () => {
+  const warm = (id: string): DiscoveredSession => ({
+    sessionId: id,
+    cwd: "/w",
+    updatedAt: "2025-01-01T00:00:00Z",
+    attachedClients: 1,
+    status: "warm",
+  });
+  const cold = (id: string, updatedAt = "2025-01-01T00:00:00Z"): DiscoveredSession => ({
+    sessionId: id,
+    cwd: "/w",
+    updatedAt,
+    attachedClients: 0,
+    status: "cold",
+  });
+
+  it("replaces wholesale for a non-incremental (first / full) page", () => {
+    const current = [warm("stale"), cold("also-stale")];
+    const page = { sessions: [cold("fresh")], removed: [], cursor: 1 };
+    expect(mergeSessionListPage(current, page, false)).toEqual([cold("fresh")]);
+  });
+
+  it("upserts changed cold rows and leaves untouched cold rows alone", () => {
+    const current = [cold("unchanged"), cold("stale", "2025-01-01T00:00:00Z")];
+    const page = {
+      sessions: [cold("stale", "2025-01-02T00:00:00Z")],
+      removed: [],
+      cursor: 2,
+    };
+    const merged = mergeSessionListPage(current, page, true);
+    expect(merged).toContainEqual(cold("unchanged"));
+    expect(merged).toContainEqual(cold("stale", "2025-01-02T00:00:00Z"));
+    expect(merged).toHaveLength(2);
+  });
+
+  it("drops ids in removed", () => {
+    const current = [cold("keep"), cold("drop")];
+    const page = { sessions: [], removed: ["drop"], cursor: 3 };
+    expect(mergeSessionListPage(current, page, true).map((s) => s.sessionId)).toEqual([
+      "keep",
+    ]);
+  });
+
+  it("replaces the ENTIRE warm set on every incremental page, even a warm row absent from it", () => {
+    // The daemon always answers an incremental request with the complete
+    // warm set. A warm row this merge doesn't see in `page.sessions` is
+    // therefore gone (cooled, killed, resurrected under a new id) —
+    // never carried forward as a stale warm entry.
+    const current = [warm("was-warm-1"), warm("was-warm-2"), cold("cold-1")];
+    const page = { sessions: [warm("was-warm-1")], removed: [], cursor: 4 };
+    const merged = mergeSessionListPage(current, page, true);
+    expect(merged.map((s) => s.sessionId).sort()).toEqual(["cold-1", "was-warm-1"]);
+  });
+
+  it("a session cooling down (present as a changed cold row) replaces its stale warm copy", () => {
+    const current = [warm("s1")];
+    const page = { sessions: [cold("s1", "2025-01-02T00:00:00Z")], removed: [], cursor: 5 };
+    const merged = mergeSessionListPage(current, page, true);
+    expect(merged).toEqual([cold("s1", "2025-01-02T00:00:00Z")]);
   });
 });
 

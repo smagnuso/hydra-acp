@@ -431,6 +431,14 @@ export async function startDaemon(
     );
   }
 
+  // Awaited: a `since=` listing answered before the index knows about
+  // pre-restart deletions would leave that client with a phantom row.
+  try {
+    await manager.seedSessionIndex();
+  } catch (err) {
+    app.log.warn(`session index seed failed: ${(err as Error).message}`);
+  }
+
   // Fire-and-forget: resurrect any sessions that had pending queued
   // prompts at the last shutdown / crash and replay them. Errors are
   // logged inside the method; not awaited so daemon boot isn't held

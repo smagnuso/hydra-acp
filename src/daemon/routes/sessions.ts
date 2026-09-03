@@ -11,7 +11,11 @@ import {
   estimateTokens,
   estimateContextChars,
 } from "../../core/compaction-heuristic.js";
-import type { SessionManager, WorkspaceRequest } from "../../core/session-manager.js";
+import type {
+  SessionListFilter,
+  SessionManager,
+  WorkspaceRequest,
+} from "../../core/session-manager.js";
 import type { HistoryEntry as HistoryStoreEntry } from "../../core/history-store.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
 import { aggregateFileEdits, foldHunks } from "../../core/history-edits.js";
@@ -84,13 +88,31 @@ export function registerSessionRoutes(
   // registry comes up empty — no `set_plan`, no planner tools at all.
   extMcpDeps: ExtensionMcpMintDeps = {},
 ): void {
-  app.get("/v1/sessions", async (request) => {
+  app.get("/v1/sessions", async (request, reply) => {
     const query = request.query as
-      | { cwd?: string; includeNonInteractive?: string; status?: string }
+      | {
+          cwd?: string;
+          includeNonInteractive?: string;
+          status?: string;
+          since?: string;
+        }
       | undefined;
     const includeNonInteractive =
       query?.includeNonInteractive === "1" ||
       query?.includeNonInteractive === "true";
+    // `since=<cursor>`: a cursor from an earlier response. The answer is
+    // then every warm row plus only the cold rows written at or after the
+    // cursor, with `removed` naming ids deleted since. Same shape either
+    // way; only the contents narrow.
+    let since: number | undefined;
+    if (query?.since !== undefined) {
+      since = Number(query.since);
+      if (!Number.isFinite(since) || since < 0) {
+        return reply.code(400).send({
+          error: `since must be a non-negative number, got ${JSON.stringify(query.since)}`,
+        });
+      }
+    }
     // `status=warm` returns only live sessions, served without touching the
     // session store. Cheap enough to poll: a machine with a thousand cold
     // records answers it from the in-memory map instead of statting all of
@@ -104,12 +126,21 @@ export function registerSessionRoutes(
       query?.status === "warm" || query?.status === "cold"
         ? query.status
         : undefined;
-    const sessions = await manager.list({
+    const filter: SessionListFilter = {
       cwd: query?.cwd,
       includeNonInteractive,
-      ...(status ? { status } : {}),
-    });
-    return { sessions };
+      ...(status ? { status: status as "warm" | "cold" } : {}),
+    };
+    if (since !== undefined) {
+      const delta = await manager.listSince(filter, since);
+      return {
+        sessions: delta.entries,
+        removed: delta.removed,
+        cursor: delta.cursor,
+      };
+    }
+    const listing = await manager.listing(filter);
+    return { sessions: listing.entries, removed: [], cursor: listing.cursor };
   });
 
   // Single-session info — the same shape as one `GET /v1/sessions`

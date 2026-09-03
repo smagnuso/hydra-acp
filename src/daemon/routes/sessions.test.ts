@@ -531,6 +531,75 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.awaitingInput).toBe(false);
   });
 
+  it("GET /v1/sessions always returns a cursor, and an empty removed list without since", async () => {
+    await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
+    const body = (await res.json()) as {
+      sessions: unknown[];
+      removed: string[];
+      cursor: number;
+    };
+    expect(body.removed).toEqual([]);
+    expect(typeof body.cursor).toBe("number");
+    expect(body.cursor).toBeGreaterThan(0);
+  });
+
+  it("GET /v1/sessions?since= reports a cold session created after the cursor, and stays warm-current", async () => {
+    // Establish a cursor before anything is created.
+    const first = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
+    const { cursor } = (await first.json()) as { cursor: number };
+
+    const warm = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const cold = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await cold.close({ deleteRecord: false });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true&since=${cursor}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; status: string }>;
+      removed: string[];
+      cursor: number;
+    };
+    const ids = body.sessions.map((s) => s.sessionId);
+    // Warm rows are unconditional, regardless of when their record last changed.
+    expect(ids).toContain(warm.sessionId);
+    // The cold session's record was written (on close) after the cursor.
+    expect(ids).toContain(cold.sessionId);
+    expect(body.removed).toEqual([]);
+    expect(body.cursor).toBeGreaterThanOrEqual(cursor);
+  });
+
+  it("GET /v1/sessions?since= reports a deleted session in removed", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await session.close({ deleteRecord: false });
+
+    const before = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
+    const { cursor } = (await before.json()) as { cursor: number };
+
+    expect(await harness.manager.deleteRecord(session.sessionId)).toBe(true);
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true&since=${cursor}`,
+    );
+    const body = (await res.json()) as { removed: string[] };
+    expect(body.removed).toEqual([session.sessionId]);
+  });
+
+  it("GET /v1/sessions?since= rejects a non-numeric cursor", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?since=not-a-number`,
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("GET /v1/sessions includes compactionState when present on a session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",

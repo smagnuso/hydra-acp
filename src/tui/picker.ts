@@ -33,7 +33,8 @@ import {
   deleteSession,
   fetchWithTimeout,
   killSession,
-  listSessions,
+  listSessionsPage,
+  mergeSessionListPage,
   regenSessionTitle,
   renameSession,
   searchSessions,
@@ -462,6 +463,11 @@ export async function pickSession(
   // and updated by the ^p cwd-change prompt.
   let currentCwd = opts.cwd;
   let allSessions: DiscoveredSession[] = sortSessions(opts.sessions, currentCwd);
+  // Cursor from the last listSessionsPage() response. undefined until the
+  // picker's own first refresh (opts.sessions came from the caller, not a
+  // page we have a cursor for), so that refresh is a full listing same as
+  // before; every refresh after merges incrementally via applySessionPage.
+  let sessionCursor: number | undefined;
   // Single source of truth for persistent filters from prefs. Both the
   // initial paint and applyFilter (after a toggle) route through this so
   // adding a new filter is a one-place change. The transient search
@@ -2654,6 +2660,19 @@ export async function pickSession(
         .join("\n");
       return `${selectedIdx}:${scrollOffset}:${transientStatus ?? ""}\n${cells}`;
     };
+    // Merge a listSessionsPage() response into allSessions and advance
+    // sessionCursor. See mergeSessionListPage (discovery.ts) for the
+    // incremental-merge contract.
+    const applySessionPage = (
+      page: { sessions: DiscoveredSession[]; removed: string[]; cursor: number },
+      incremental: boolean,
+    ): void => {
+      allSessions = sortSessions(
+        mergeSessionListPage(allSessions, page, incremental),
+        currentCwd,
+      );
+      sessionCursor = page.cursor;
+    };
     const refresh = async (
       preferredId?: string,
       refreshOpts: { silent?: boolean; signal?: AbortSignal } = {},
@@ -2661,8 +2680,10 @@ export async function pickSession(
       try {
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const beforeTotal = total;
-        const next = await listSessions(opts.target, {
+        const incremental = sessionCursor !== undefined;
+        const page = await listSessionsPage(opts.target, {
           includeNonInteractive: true,
+          since: sessionCursor,
           signal: refreshOpts.signal,
         });
         // Snapshot the session the cursor is on right now — after the
@@ -2674,7 +2695,7 @@ export async function pickSession(
         const followId =
           preferredId ??
           (selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined);
-        allSessions = sortSessions(next, currentCwd);
+        applySessionPage(page, incremental);
         applyFilter();
         if (followId !== undefined) {
           const idx = visible.findIndex((s) => s.sessionId === followId);

@@ -153,14 +153,32 @@ export interface ListOptions {
   // its layer lifetime so a stuck refresh aborts when the picker tears
   // down or when the user fires a fresh refresh.
   signal?: AbortSignal;
+  // Cursor from a previous listSessionsPage() response. When set, the
+  // daemon returns every warm session plus only the cold ones that
+  // changed since, instead of statting and serializing every cold
+  // record on disk — see PROTOCOL.md's GET /v1/sessions `since=`. A
+  // caller that only wants the plain array (listSessions) can't use
+  // this: there'd be nowhere to put `removed`, and merging it in wrong
+  // silently drops sessions from the caller's view. Poll via
+  // listSessionsPage instead and merge using its `removed`/`cursor`.
+  since?: number;
 }
 
-export async function listSessions(
+export interface SessionListPage {
+  sessions: DiscoveredSession[];
+  // Session ids deleted at or after `since`. Always [] when `since` was
+  // not passed (nothing to report — the full list already excludes them).
+  removed: string[];
+  // Pass back as `since` on the next call to keep polling incrementally.
+  cursor: number;
+}
+
+export async function listSessionsPage(
   target: RemoteTarget,
   opts: ListOptions = {},
   // Allow tests to inject a fetch implementation. Defaults to the global one.
   fetchImpl: typeof fetch = fetch,
-): Promise<DiscoveredSession[]> {
+): Promise<SessionListPage> {
   const url = new URL(`${target.baseUrl}/v1/sessions`);
   if (opts.cwd) {
     url.searchParams.set("cwd", opts.cwd);
@@ -173,6 +191,9 @@ export async function listSessions(
   }
   if (opts.status) {
     url.searchParams.set("status", opts.status);
+  }
+  if (opts.since !== undefined) {
+    url.searchParams.set("since", String(opts.since));
   }
   const response = await fetchWithTimeout(
     url.toString(),
@@ -188,34 +209,83 @@ export async function listSessions(
   }
   const body = (await response.json()) as {
     sessions?: Array<Partial<DiscoveredSession> & { sessionId: string; cwd: string; updatedAt: string; attachedClients?: number }>;
+    removed?: string[];
+    cursor?: number;
   };
-  if (!Array.isArray(body.sessions)) {
-    return [];
+  const sessions = Array.isArray(body.sessions)
+    ? body.sessions.map((s) => ({
+        sessionId: s.sessionId,
+        cwd: s.cwd,
+        updatedAt: s.updatedAt,
+        attachedClients: s.attachedClients ?? 0,
+        status: s.status ?? "warm",
+        upstreamSessionId: s.upstreamSessionId,
+        agentId: s.agentId,
+        currentModel: s.currentModel,
+        currentUsage: s.currentUsage,
+        title: s.title,
+        importedFromMachine: s.importedFromMachine,
+        importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
+        forkedFromSessionId: s.forkedFromSessionId,
+        forkedFromMessageId: s.forkedFromMessageId,
+        busy: s.busy,
+        awaitingInput: s.awaitingInput,
+        armedTasks: s.armedTasks,
+        originatingClient: s.originatingClient,
+        interactive: s.interactive,
+        priority: s.priority,
+        compactionState: s.compactionState,
+        forkSynthesisState: s.forkSynthesisState,
+      }))
+    : [];
+  return {
+    sessions,
+    removed: Array.isArray(body.removed) ? body.removed : [],
+    cursor: typeof body.cursor === "number" ? body.cursor : 0,
+  };
+}
+
+export async function listSessions(
+  target: RemoteTarget,
+  opts: ListOptions = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<DiscoveredSession[]> {
+  return (await listSessionsPage(target, opts, fetchImpl)).sessions;
+}
+
+// Merge a listSessionsPage() response into a caller's existing session
+// list. `incremental` should be false for a page fetched with no `since`
+// (a plain replace) and true for one fetched with a cursor.
+//
+// On an incremental page the daemon returns the FULL warm set plus only
+// the cold rows that changed, so: drop the OLD warm rows (the incoming
+// warm set is the complete, current truth), drop anything in `removed`,
+// then upsert what came back — new/changed cold rows and the fresh warm
+// rows both land by the same upsert. A session that went warm->cold
+// between polls is covered without special-casing: the daemon bumps that
+// record's mtime on cool-down specifically so it shows up here as a
+// changed cold row instead of surviving as a stale warm entry.
+export function mergeSessionListPage(
+  current: DiscoveredSession[],
+  page: SessionListPage,
+  incremental: boolean,
+): DiscoveredSession[] {
+  if (!incremental) {
+    return page.sessions;
   }
-  return body.sessions.map((s) => ({
-    sessionId: s.sessionId,
-    cwd: s.cwd,
-    updatedAt: s.updatedAt,
-    attachedClients: s.attachedClients ?? 0,
-    status: s.status ?? "warm",
-    upstreamSessionId: s.upstreamSessionId,
-    agentId: s.agentId,
-    currentModel: s.currentModel,
-    currentUsage: s.currentUsage,
-    title: s.title,
-    importedFromMachine: s.importedFromMachine,
-    importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
-    forkedFromSessionId: s.forkedFromSessionId,
-    forkedFromMessageId: s.forkedFromMessageId,
-    busy: s.busy,
-    awaitingInput: s.awaitingInput,
-    armedTasks: s.armedTasks,
-    originatingClient: s.originatingClient,
-    interactive: s.interactive,
-    priority: s.priority,
-    compactionState: s.compactionState,
-    forkSynthesisState: s.forkSynthesisState,
-  }));
+  const merged = new Map(current.map((s) => [s.sessionId, s]));
+  for (const s of merged.values()) {
+    if (s.status === "warm") {
+      merged.delete(s.sessionId);
+    }
+  }
+  for (const id of page.removed) {
+    merged.delete(id);
+  }
+  for (const s of page.sessions) {
+    merged.set(s.sessionId, s);
+  }
+  return [...merged.values()];
 }
 
 export interface DiscoveredAgent {

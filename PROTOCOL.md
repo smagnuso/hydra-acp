@@ -212,6 +212,9 @@ List sessions known to the daemon.
 - `cwd=<path>` — filter to sessions opened against this working directory. Matches a session's effective `cwd` **or**, for a session running in an isolated workspace, its `workspace.sourceCwd`. So filtering by a repository returns both the plain sessions in it and every workspace derived from it, while filtering by a workspace path returns only that one. This is a match on the recorded derivation edge, **not** a path-prefix test: a workspace lives outside its source tree and shares no prefix with it. See [Workspace isolation](#workspace-isolation).
 - `includeNonInteractive=1` — include piped `hydra cat` sessions that are normally hidden.
 - `status=warm` | `status=cold` — return only one side of the warm/cold split, filtering on the entry's own `status` field. `warm` is answered from the daemon's in-memory session map without reading the session store, so it stays cheap on an install with a large history: a client watching live state (busy / awaiting-input) should poll this rather than the full list, which has to stat and serialize every cold record for a caller that will discard them. An unrecognised value is ignored and the full list returned, which is also how a daemon predating this parameter behaves — so a client that needs the guarantee should still check `status` on each row.
+- `since=<cursor>` — incremental listing. Pass the `cursor` from a previous response and the daemon returns **every warm entry** plus **only the cold entries whose record changed at or after that cursor**, with `removed` naming the sessions deleted since. The response shape is unchanged; only the contents narrow. A client polling the list should use this: a full listing reads and validates every record on disk (tens of MB on a long-lived install), an incremental one reads only what changed. Combines with `cwd`, `includeNonInteractive` and `status` as usual. `400` if the value is not a non-negative number.
+
+  Merge rule: replace the client's warm set with the response's warm entries, upsert the cold entries by `sessionId`, delete the `removed` ids, then store the new `cursor`. The cursor is the newest record mtime the daemon knows, and the filter is `>=`, so the newest row can be re-sent on the next poll; treat a re-sent row as an upsert, not a change. A cursor stays valid across daemon restarts: it is derived from file mtimes, and deletions are recovered from tombstones at startup. A client that never sends `since` sees exactly the pre-cursor behaviour.
 
 **Response — `200 OK`**
 
@@ -223,7 +226,7 @@ List sessions known to the daemon.
       "agentId":         "claude-acp",
       "cwd":             "/work",
       "title":           "fix flaky test",
-      "status":          "live",     // "live" | "cold"
+      "status":          "warm",     // "warm" | "cold"
       "busy":            false,
       "attachedClients": 2,
       "updatedAt":       "2026-05-29T18:01:23.000Z"
@@ -231,7 +234,9 @@ List sessions known to the daemon.
       // importedFromMachine, forkedFromSessionId, …)
     },
     …
-  ]
+  ],
+  "removed": [],                    // session ids deleted since `since`; always [] without it
+  "cursor":  1788396252071.123      // pass back as `since=` on the next poll
 }
 ```
 
