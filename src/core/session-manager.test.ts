@@ -27,6 +27,7 @@ import {
 } from "../__tests__/test-utils.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 import { HYDRA_CAT_CLIENT_NAME } from "./hydra-version.js";
+import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return {
@@ -2074,6 +2075,59 @@ describe("SessionManager: /hydra agent persistence", () => {
     }
     expect(record?.pendingAgentSwap).toBe("new");
     expect(record?.agentId).toBe("old");
+  });
+
+  it("scheduleCompaction skips synthesis entirely for a session with zero turns, dispatching the swap straight onto the empty tail", async () => {
+    const oldMock = makeMockAgent({ agentId: "old", cwd: WORK_CWD });
+    const handed: MockAgentControls[] = [oldMock];
+    let idx = 0;
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("old"), fakeRegistryAgent("new")]),
+      () => {
+        const m = handed[idx++];
+        if (!m) throw new Error("unexpected extra spawner call");
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_old" });
+        return m.agent;
+      },
+    );
+
+    const session = await manager.create({
+      cwd: WORK_CWD,
+      agentId: "old",
+    });
+
+    // No prompts sent — the session has zero turns.
+    const coordinatorSpy = vi.spyOn(
+      SynopsisCoordinator.prototype,
+      "scheduleCompaction",
+    );
+    const dispatchSpy = vi.spyOn(
+      manager as unknown as {
+        dispatchSynthesisSwap: (...args: unknown[]) => Promise<void>;
+      },
+      "dispatchSynthesisSwap",
+    );
+
+    manager.scheduleCompaction(session.sessionId, { targetAgentId: "new" });
+
+    // The fast-path check is async (reads the record + history off disk);
+    // wait for dispatchSynthesisSwap to be called rather than polling a
+    // fixed sleep.
+    for (let i = 0; i < 50 && dispatchSpy.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      session.sessionId,
+      undefined,
+      0,
+      "new",
+    );
+    expect(coordinatorSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -87,6 +87,7 @@ import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator, type HydraCompactionPayload } from "./synopsis-coordinator.js";
 import { generateSynopsis } from "./synopsis-agent.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
+import { countTurns } from "./history-aggregate.js";
 import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
 import { collectToolBlobHashes } from "./tool-content.js";
 import { paths, shortenHomePath } from "./paths.js";
@@ -7456,11 +7457,22 @@ export class SessionManager {
       void (async () => {
         try {
           const record = await this.store.read(sessionId);
+          const history = await this.histories.load(sessionId, { maxEntries: Infinity });
+          if (countTurns(history as unknown as Array<{ method?: unknown; params?: unknown }>) === 0) {
+            // Nothing was ever said to the outgoing agent, so there's
+            // nothing to summarize: swap straight onto the (empty)
+            // verbatim tail instead of spawning a synthesis run just to
+            // synthesize silence.
+            this.logger?.info(
+              `compaction: zero-turn fast-path swap sessionId=${sessionId} target=${targetAgentId}`,
+            );
+            await this.dispatchSynthesisSwap(sessionId, undefined, history.length, targetAgentId);
+            return;
+          }
           if (!record?.synopsis || record.summarizedThroughEntry === undefined) {
             this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
             return;
           }
-          const history = await this.histories.load(sessionId, { maxEntries: Infinity });
           if (history.length !== record.summarizedThroughEntry) {
             this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
             return;
