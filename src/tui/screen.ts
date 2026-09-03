@@ -63,6 +63,8 @@ import type {
   KeyEvent,
   KeyName,
 } from "./input.js";
+import { KEYNAME_CHORD_TABLE } from "./input.js";
+import { ChordMatcher } from "./chord.js";
 import {
   columnToOffset,
   columnToOffsetFromSegments,
@@ -1165,6 +1167,12 @@ export class Screen {
   private lastFocusInAt = 0;
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
+  // Chord state for multi-keystroke bindings (Ctrl+X Ctrl+E, …). Every
+  // mapped KeyName — whether it came from terminal-kit's own "key" event
+  // or from our CSI-27/CSI-u raw-stdin interception — is routed through
+  // dispatchKeyName() so a chord prefix is recognized no matter which of
+  // the three paths produced it.
+  private chordMatcher = new ChordMatcher<KeyName>(KEYNAME_CHORD_TABLE);
   private mouseEnabled: boolean;
   // Last OS pointer-shape we asked the terminal to render via OSC 22.
   // Used to debounce writes so we only emit on transitions (entering
@@ -1829,7 +1837,7 @@ export class Screen {
       const code = parseInt(m[2]!, 10);
       const name = mapCsiUToKeyName(code, mod);
       if (name !== null) {
-        this.onKey([{ type: "key", name }]);
+        this.dispatchKeyName(name);
       } else if ((mod === 1 || mod === 2) && code >= 32 && code < 127) {
         // Printable ASCII with no modifier or shift — the user typed a
         // character. xterm reports the already-shifted codepoint in the
@@ -1863,7 +1871,7 @@ export class Screen {
       const mod = m[2] !== undefined ? parseInt(m[2], 10) : 1;
       const name = mapCsiUToKeyName(code, mod);
       if (name !== null) {
-        this.onKey([{ type: "key", name }]);
+        this.dispatchKeyName(name);
       }
       lastEnd = m.index + m[0].length;
     }
@@ -3830,32 +3838,40 @@ export class Screen {
       writeDebugLine({ tag: "key", name, isChar: !!data.isCharacter });
     }
     if (data.isCharacter) {
+      // A stray chord prefix must never eat the character typed right
+      // after it — clear the pending state and let the character through
+      // unconditionally rather than routing it through the chord matcher.
+      this.chordMatcher.clear();
       this.onKey([{ type: "char", ch: name }]);
       return;
     }
     // Keyboard scroll-back navigation. Mouse wheel is handled separately
     // via the "mouse" event channel — see handleMouse.
     if (name === "PAGE_UP") {
+      this.chordMatcher.clear();
       this.scrollBy(this.scrollPageSize());
       return;
     }
     if (name === "PAGE_DOWN") {
+      this.chordMatcher.clear();
       this.scrollBy(-this.scrollPageSize());
       return;
     }
     // Alt+PgUp / Alt+PgDn move by turn instead of by page, landing the
     // turn's user prompt on the top row.
     if (name === "ALT_PAGE_UP") {
+      this.chordMatcher.clear();
       this.scrollToPrevTurn();
       return;
     }
     if (name === "ALT_PAGE_DOWN") {
+      this.chordMatcher.clear();
       this.scrollToNextTurn();
       return;
     }
     const mapped = mapKeyName(name);
     if (mapped) {
-      this.onKey([{ type: "key", name: mapped }]);
+      this.dispatchKeyName(mapped);
       return;
     }
     // A Ctrl chord that maps to nothing is dropped here. That is exactly
@@ -3870,7 +3886,30 @@ export class Screen {
     // has no termconfig for that and falls back to none.js, whose keymap
     // has no CTRL_* entries at all.
     if (name.startsWith("CTRL_")) {
+      this.chordMatcher.clear();
       this.revealHints();
+    }
+  }
+
+  // Single funnel for every already-mapped KeyName, regardless of which of
+  // the three producers (terminal-kit's "key" event via mapKeyName, or the
+  // CSI-27 / CSI-u raw-stdin paths via mapCsiUToKeyName) resolved it. Runs
+  // the chord matcher so a registered prefix (e.g. ctrl-x) arms instead of
+  // firing immediately, and an unmatched completion aborts silently rather
+  // than leaking a half-chord to the dispatcher.
+  private dispatchKeyName(name: KeyName): void {
+    const result = this.chordMatcher.feed(name);
+    switch (result.kind) {
+      case "pass":
+        this.onKey([{ type: "key", name: result.token }]);
+        return;
+      case "armed":
+        return;
+      case "aborted":
+        // Same feedback as an unbound Ctrl chord — the keypress did
+        // nothing, so surface what does work.
+        this.revealHints();
+        return;
     }
   }
 
@@ -10644,6 +10683,13 @@ export function mapKeyName(name: string): KeyName | null {
       return "ctrl-w";
     case "CTRL_X":
       return "ctrl-x";
+    // Synthetic name, never sent by a terminal: emitted by the raw-name
+    // ChordMatcher (chord.ts's RAW_KEY_CHORD_TABLE) when it resolves a
+    // Ctrl+X Ctrl+E chord for a caller that works in raw-name space
+    // (runModalPrompt, the session picker) rather than through Screen's
+    // own KeyName-space chord matcher.
+    case "CTRL_X_CTRL_E":
+      return "ctrl-x-ctrl-e";
     case "CTRL_Y":
       return "ctrl-y";
     case "ESCAPE":

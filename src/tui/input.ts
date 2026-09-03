@@ -4,6 +4,8 @@
 // responsible for translating terminal-kit key names into KeyEvents and
 // rendering the state.
 
+import { type ChordTable, buildChordTable, CHORD_TIMEOUT_MS } from "./chord.js";
+
 export type KeyName =
   | "enter"
   | "alt-enter"
@@ -45,10 +47,21 @@ export type KeyName =
   | "ctrl-t"
   | "ctrl-w"
   | "ctrl-x"
+  | "ctrl-x-ctrl-e"
   | "ctrl-y"
   | "ctrl-underscore"
   | "alt-underscore"
   | "escape";
+
+// Ctrl+X is a chord prefix, not a bound key on its own — it arms, waiting
+// for a completion key, exactly like emacs/readline's C-x. `Screen` runs
+// every KeyName through a ChordMatcher built from this table before it
+// ever reaches InputDispatcher.handleKey, so "ctrl-x" alone never surfaces
+// here; only the resolved "ctrl-x-ctrl-e" does.
+export const KEYNAME_CHORD_TABLE: ChordTable<KeyName> = buildChordTable(
+  [["ctrl-x", "ctrl-e", "ctrl-x-ctrl-e"]],
+  CHORD_TIMEOUT_MS,
+);
 
 // One attached image, ready to be sent as an ACP image content block. data
 // is base64-encoded raw bytes (PNG/JPEG/etc.); mimeType matches. name and
@@ -694,6 +707,11 @@ export class InputDispatcher {
         this.killWordAlpha();
         return [];
       case "ctrl-x":
+        // Unreachable in practice: Screen's chord matcher swallows a bare
+        // ctrl-x while it waits for ctrl-e, so this KeyName never reaches
+        // handleKey. Kept only so the switch stays exhaustive over KeyName.
+        return [];
+      case "ctrl-x-ctrl-e":
         return [{ type: "edit-in-editor" }];
       case "ctrl-y":
         this.recordEdit();

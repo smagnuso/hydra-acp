@@ -1020,7 +1020,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Double-click bar", "cwd opens · title renames · agent/model/mode pick · else copy"],
   ["Click in a modal", "row picks / cycles it · hint words act · wheel walks the list"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
-  ["^X", "edit prompt in $HYDRA_EDITOR/$VISUAL/$EDITOR"],
+  ["^X ^E", "edit prompt in $HYDRA_EDITOR/$VISUAL/$EDITOR"],
   null,
   ["^C", "cancel turn (twice to exit)"],
   ["Esc", "cancel turn and prefill draft"],

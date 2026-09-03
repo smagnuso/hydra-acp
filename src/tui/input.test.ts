@@ -115,10 +115,17 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["hi"]);
   });
 
-  it("Ctrl+X emits edit-in-editor without mutating the buffer", () => {
+  it("bare Ctrl+X is a no-op — it's a chord prefix Screen resolves upstream", () => {
     const d = new InputDispatcher();
     feed(d, [ch("h"), ch("i")]);
-    expect(feed(d, [k("ctrl-x")])).toEqual([{ type: "edit-in-editor" }]);
+    expect(feed(d, [k("ctrl-x")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["hi"]);
+  });
+
+  it("Ctrl+X Ctrl+E emits edit-in-editor without mutating the buffer", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("ctrl-x-ctrl-e")])).toEqual([{ type: "edit-in-editor" }]);
     expect(d.state().buffer).toEqual(["hi"]);
   });
 

@@ -37,6 +37,7 @@ import {
   writeControl,
 } from "./ansi.js";
 import { paint, SGR_RESET } from "./theme/index.js";
+import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -277,6 +278,11 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
   }
   return await new Promise<T>((resolve) => {
     let resolved = false;
+    // Chord support (Ctrl+X Ctrl+E, …) shared with the session picker via
+    // RAW_KEY_CHORD_TABLE — see chord.ts. No modal currently binds a
+    // chord's resolved name, so this is a no-op today, but it keeps every
+    // modal prompt aligned with Screen and the picker for free.
+    const chordMatcher = new ChordMatcher<string>(RAW_KEY_CHORD_TABLE);
     const handleResize = (): void => {
       if (resolved) {
         return;
@@ -291,7 +297,22 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
       if (resolved) {
         return;
       }
-      onKey(name, matches, data, finish);
+      if (data?.isCharacter) {
+        // A stray chord prefix must not eat the character typed right
+        // after it.
+        chordMatcher.clear();
+        onKey(name, matches, data, finish);
+        return;
+      }
+      const result = chordMatcher.feed(name);
+      switch (result.kind) {
+        case "pass":
+          onKey(result.token, matches, data, finish);
+          return;
+        case "armed":
+        case "aborted":
+          return;
+      }
     };
     const handleMouse = (
       name: string,

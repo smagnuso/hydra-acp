@@ -67,6 +67,7 @@ import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { LineEditor } from "./line-editor.js";
 import { completePathToken, extractPathToken } from "./file-completion.js";
 import { drawBox, readTermHeight, readTermWidth } from "./prompt-utils.js";
+import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
 import {
@@ -2472,13 +2473,33 @@ export async function pickSession(
       findLayerActive = false;
       popLayer(); // restores picker layer → renderFromScratch
     };
+    // Chord support (Ctrl+X Ctrl+E, …) shared with runModalPrompt via
+    // RAW_KEY_CHORD_TABLE — see chord.ts. Sits ahead of the focus stack so
+    // every layer (composer, findComposer, cwd/agent sub-prompts) gets it
+    // uniformly instead of each reinventing it.
+    const chordMatcher = new ChordMatcher<string>(RAW_KEY_CHORD_TABLE);
     const dispatch = (
       name: string,
       _matches: unknown,
       data?: { isCharacter?: boolean },
     ): void => {
       resetAutoRefresh();
-      focusStack[focusStack.length - 1]?.onKey(name, _matches, data);
+      if (data?.isCharacter) {
+        // A stray chord prefix must not eat the character typed right
+        // after it.
+        chordMatcher.clear();
+        focusStack[focusStack.length - 1]?.onKey(name, _matches, data);
+        return;
+      }
+      const result = chordMatcher.feed(name);
+      switch (result.kind) {
+        case "pass":
+          focusStack[focusStack.length - 1]?.onKey(result.token, _matches, data);
+          return;
+        case "armed":
+        case "aborted":
+          return;
+      }
     };
     const dispatchResize = (): void => {
       if (resolved) return;
@@ -2488,6 +2509,10 @@ export async function pickSession(
     // rawStdinHandler for the synthetic Ctrl-_ / Alt-_ events.
     dispatchToActiveLayer = (name: string): void => {
       if (resolved) return;
+      // Bypasses dispatch()/chordMatcher entirely — clear any pending
+      // chord so a stray Ctrl-_/Alt-_ right after a prefix key can't
+      // later be misread as completing it.
+      chordMatcher.clear();
       focusStack[focusStack.length - 1]?.onKey(name, null, {});
     };
 

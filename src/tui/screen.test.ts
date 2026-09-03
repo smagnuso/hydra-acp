@@ -4715,3 +4715,53 @@ describe("Screen turn keys under key repeat", () => {
     expect(getScrollOffset(screen)).toBeLessThan(headed);
   });
 });
+
+describe("Screen chord matcher", () => {
+  function makeChordScreen(): { screen: Screen; seen: KeyEvent[] } {
+    const screen = makeScreen();
+    const seen: KeyEvent[] = [];
+    (screen as unknown as { onKey: (e: KeyEvent[]) => void }).onKey = (e) => {
+      seen.push(...e);
+    };
+    return { screen, seen };
+  }
+
+  function press(screen: Screen, name: string, isCharacter = false): void {
+    (
+      screen as unknown as {
+        handleKey: (n: string, d: { isCharacter?: boolean }) => void;
+      }
+    ).handleKey(name, { isCharacter });
+  }
+
+  it("Ctrl+X Ctrl+E resolves to a single ctrl-x-ctrl-e event, not two", () => {
+    const { screen, seen } = makeChordScreen();
+    press(screen, "CTRL_X");
+    expect(seen).toEqual([]); // armed, swallowed — no ctrl-x leaks through
+    press(screen, "CTRL_E");
+    expect(seen).toEqual([{ type: "key", name: "ctrl-x-ctrl-e" }]);
+  });
+
+  it("Ctrl+X followed by an unrelated ctrl chord drops both keys", () => {
+    const { screen, seen } = makeChordScreen();
+    press(screen, "CTRL_X");
+    press(screen, "CTRL_A");
+    expect(seen).toEqual([]);
+    // The matcher is unarmed again afterward.
+    press(screen, "CTRL_E");
+    expect(seen).toEqual([{ type: "key", name: "ctrl-e" }]);
+  });
+
+  it("a plain character typed right after Ctrl+X is not eaten", () => {
+    const { screen, seen } = makeChordScreen();
+    press(screen, "CTRL_X");
+    press(screen, "e", true);
+    expect(seen).toEqual([{ type: "char", ch: "e" }]);
+  });
+
+  it("Ctrl+E alone (no prior Ctrl+X) behaves exactly as before", () => {
+    const { screen, seen } = makeChordScreen();
+    press(screen, "CTRL_E");
+    expect(seen).toEqual([{ type: "key", name: "ctrl-e" }]);
+  });
+});

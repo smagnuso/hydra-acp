@@ -170,6 +170,11 @@ export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfig>;
 // Accepted keys for `tui.hotkeys`. Duplicates the KeyName union in
 // src/tui/input.ts intentionally — core/ must not import from tui/. If
 // the KeyName union grows, extend this list.
+//
+// "ctrl-x" is a chord prefix, not a deliverable key: Screen's chord
+// matcher (src/tui/chord.ts) swallows it while it waits for a completion
+// key, so a hotkey bound to bare "ctrl-x" will never fire. Bind
+// "ctrl-x-ctrl-e" instead.
 const TUI_HOTKEY_KEY_NAMES = z.enum([
   "enter",
   "alt-enter",
@@ -210,6 +215,7 @@ const TUI_HOTKEY_KEY_NAMES = z.enum([
   "ctrl-t",
   "ctrl-w",
   "ctrl-x",
+  "ctrl-x-ctrl-e",
   "ctrl-y",
   "ctrl-underscore",
   "alt-underscore",
@@ -733,8 +739,10 @@ const TuiConfig = z.object({
   // HYDRA_AGENT / HYDRA_BASE_URL / HYDRA_TOKEN_FILE. Keys that collide
   // with a hotkey the TUI already binds (ctrl-c, ctrl-r, ctrl-p, …) are
   // pre-empted by that binding — set your hotkey to one of the unbound
-  // keys (ctrl-x, ctrl-y, ctrl-underscore). Example:
-  //   { "ctrl-x": { "command": "/home/me/bin/hydra-to-emacs.sh %s" } }
+  // keys (ctrl-x-ctrl-e, ctrl-y, ctrl-underscore). "ctrl-x" alone is a
+  // chord prefix (see "ctrl-x-ctrl-e" below) and never reaches hotkey
+  // dispatch on its own. Example:
+  //   { "ctrl-x-ctrl-e": { "command": "/home/me/bin/hydra-to-emacs.sh %s" } }
   hotkeys: z
     .record(
       TUI_HOTKEY_KEY_NAMES,
