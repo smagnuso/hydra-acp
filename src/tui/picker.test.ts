@@ -137,6 +137,7 @@ function makePicker(opts: {
   composerModel?: string;
   availableAgents?: Array<{ id: string; extendsChain?: string[] }>;
   sessionDefaults?: Record<string, Record<string, string>>;
+  hotkeys?: Record<string, { command: string | string[] }>;
   onCwdChange?: (
     cwd: string,
   ) => Promise<{ agentId?: string; model?: string; notice?: string }>;
@@ -194,7 +195,7 @@ function makePicker(opts: {
   ) as unknown as Terminal;
 
   const config = {
-    tui: { cwdColumnMaxWidth: 40 },
+    tui: { cwdColumnMaxWidth: 40, hotkeys: opts.hotkeys ?? {} },
     ...(opts.sessionDefaults !== undefined
       ? { sessionDefaults: opts.sessionDefaults }
       : {}),
@@ -896,6 +897,19 @@ describe("pickSession composer", () => {
       kind: "attach",
       sessionId: "hydra-bbb",
     });
+  });
+
+  it("a configured ctrl-x-ctrl-e hotkey pre-empts edit-in-editor and surfaces via composerHint", async () => {
+    // An empty command hits runUserHotkey's synchronous "empty command"
+    // notify path — no real child process, no async wait needed. (A
+    // non-empty command would actually spawn, which this suite avoids.)
+    const drv = makePicker({
+      sessions,
+      hotkeys: { "ctrl-x-ctrl-e": { command: "" } },
+    });
+    drv.press("CTRL_X");
+    drv.press("CTRL_E");
+    expect(drv.output()).toContain("hotkey: empty command");
   });
 });
 

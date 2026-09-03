@@ -68,6 +68,7 @@ import { LineEditor } from "./line-editor.js";
 import { completePathToken, extractPathToken } from "./file-completion.js";
 import { drawBox, readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
+import { runUserHotkey } from "./user-hotkey.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
 import {
@@ -1943,6 +1944,52 @@ export async function pickSession(
     }
     composerHint = null;
     repaintComposerStatus();
+  };
+
+  // User-configured hotkeys from tui.hotkeys (core/config.ts) — the same
+  // config app.ts's live-session composer reads via tryHandleUserHotkey.
+  // No session exists yet here, so %s / HYDRA_SESSION_ID substitutes to ""
+  // rather than a real id; cwd and agent reflect the composer's current
+  // draft. The picker has no scrollback to append command output to, so
+  // it surfaces through composerHint instead — the same one-line status
+  // area completion hints use.
+  const tryHandleComposerHotkey = (name: string): boolean => {
+    const spec = (
+      opts.config.tui.hotkeys as Record<
+        string,
+        { command: string | string[] } | undefined
+      >
+    )[name];
+    if (!spec) {
+      return false;
+    }
+    runUserHotkey(
+      spec,
+      {
+        sessionId: "",
+        cwd: currentCwd,
+        agentId: composerAgentId ?? "",
+        baseUrl: opts.target.baseUrl,
+        tokenFile: paths.authToken(),
+      },
+      {
+        notify: (msg) => {
+          composerHint = msg;
+          repaintComposerStatus();
+        },
+        cwd: currentCwd,
+        emitLines: (lines) => {
+          if (lines.length === 0) {
+            return;
+          }
+          const first = lines[0]!.text;
+          composerHint =
+            lines.length > 1 ? `${first} (+${lines.length - 1} more)` : first;
+          repaintComposerStatus();
+        },
+      },
+    );
+    return true;
   };
 
   const repaintComposerBody = (): void => {
@@ -3962,6 +4009,10 @@ export async function pickSession(
         } else {
           const mapped = mapKeyName(name);
           if (mapped !== null) {
+            if (tryHandleComposerHotkey(mapped)) {
+              placeComposerCursor();
+              return;
+            }
             event = { type: "key", name: mapped };
           }
         }

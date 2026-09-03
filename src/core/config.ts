@@ -732,16 +732,20 @@ const TuiConfig = z.object({
     .optional(),
   // User-defined key bindings that spawn an external command. Keyed by
   // the KeyName from src/tui/input.ts (e.g. "ctrl-x", "ctrl-underscore").
-  // The command runs detached with stdio ignored — fire-and-forget.
-  // Substitutions in string/array args: %s session id, %c cwd, %a agent
-  // id, %u daemon base URL, %t token-file path, %% literal %. The same
-  // values are also exported as HYDRA_SESSION_ID / HYDRA_CWD /
-  // HYDRA_AGENT / HYDRA_BASE_URL / HYDRA_TOKEN_FILE. Keys that collide
-  // with a hotkey the TUI already binds (ctrl-c, ctrl-r, ctrl-p, …) are
-  // pre-empted by that binding — set your hotkey to one of the unbound
-  // keys (ctrl-x-ctrl-e, ctrl-y, ctrl-underscore). "ctrl-x" alone is a
-  // chord prefix (see "ctrl-x-ctrl-e" below) and never reaches hotkey
-  // dispatch on its own. Example:
+  // Checked both in the live session composer (app.ts) and the session
+  // picker's new-session composer (picker.ts) — the picker has no session
+  // yet, so %s / HYDRA_SESSION_ID substitutes to "" there. The command's
+  // stdout/stderr are captured and echoed back once it exits (not
+  // detached: killing the TUI kills the child). Substitutions in
+  // string/array args: %s session id, %c cwd, %a agent id, %u daemon base
+  // URL, %t token-file path, %% literal %. The same values are also
+  // exported as HYDRA_SESSION_ID / HYDRA_CWD / HYDRA_AGENT /
+  // HYDRA_BASE_URL / HYDRA_TOKEN_FILE. Keys that collide with a hotkey the
+  // TUI already binds (ctrl-c, ctrl-r, ctrl-p, …) are pre-empted by that
+  // binding — set your hotkey to one of the unbound keys (ctrl-x-ctrl-e,
+  // ctrl-y, ctrl-underscore). "ctrl-x" alone is a chord prefix (see
+  // "ctrl-x-ctrl-e" below) and never reaches hotkey dispatch on its own.
+  // Example:
   //   { "ctrl-x-ctrl-e": { "command": "/home/me/bin/hydra-to-emacs.sh %s" } }
   hotkeys: z
     .record(
