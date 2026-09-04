@@ -260,6 +260,14 @@ export class ForeignSessionCache {
           sessions.clear();
         }
         for (const raw of body.sessions ?? []) {
+          // Deliberately NOT excluding the peer's own dormant import
+          // mirrors (importedFromMachine set, upstreamSessionId not)
+          // here — this cache backs a general-purpose data surface
+          // (GET /v1/sessions), and a local dormant mirror isn't
+          // excluded from that same endpoint either. "Worth showing in
+          // the picker/browser's default view" is a presentation
+          // decision, made client-side (see filterByHost's remote:
+          // branch), not a reason to make the data not exist.
           const foreignId = formatForeignSessionId({
             name: summary.name,
             localId: String(raw.sessionId),

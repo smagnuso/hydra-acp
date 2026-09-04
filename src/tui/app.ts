@@ -6090,9 +6090,17 @@ async function runSession(
         // cwd wizard. cancel aborts the switch (resume warm session);
         // back loops to re-show the picker.
         const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+        // A session can carry BOTH remote and importedFromMachine at
+        // once — e.g. a federated peer's own session that it itself
+        // imported from somewhere, its old provenance rides through
+        // the merge unchanged. remote wins: this entry is live and
+        // stays live on the peer, so it must attach-forward, never
+        // trigger the local-import wizard just because it also has
+        // import baggage from the peer's own history.
         const isImportedFirstLaunch =
           chosen !== undefined &&
           !!chosen.importedFromMachine &&
+          !chosen.remote &&
           !chosen.upstreamSessionId &&
           choice.readonly !== true;
         if (!isImportedFirstLaunch) {
@@ -10775,9 +10783,14 @@ async function resolveSession(
     // the fork-vs-view dialog (and on fork-local, a cwd dialog). Cancel
     // tears down the TUI; back returns here to re-show the picker.
     const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+    // See the sibling check further down for why `!chosen.remote` is
+    // required here too: a federated entry can carry importedFromMachine
+    // from the peer's own history, and remote must win — it's live and
+    // stays live on the peer, never a local-import candidate.
     const isImportedFirstLaunch =
       chosen !== undefined &&
       !!chosen.importedFromMachine &&
+      !chosen.remote &&
       !chosen.upstreamSessionId &&
       !opts.readonly;
     if (isImportedFirstLaunch) {

@@ -3367,8 +3367,13 @@ export async function pickSession(
           return;
         }
         const session = visible.find((s) => s.sessionId === hit.sessionId);
+        // remote wins over importedFromMachine — see app.ts's
+        // isImportedFirstLaunch for why a federated entry can carry
+        // both and must never be treated as a local-import candidate.
         const isImportedPassive =
-          !!session?.importedFromMachine && !session.upstreamSessionId;
+          !!session?.importedFromMachine &&
+          !session.remote &&
+          !session.upstreamSessionId;
         // Snippet currently shown for this hit (cycled by n/p, LEFT/RIGHT) —
         // its recordedAt is what the attach jumps to.
         const jumpToRecordedAt =
@@ -4892,6 +4897,21 @@ function isFromThisMachine(
   return locals.has(importedFromMachine);
 }
 
+// True when a federated entry is, on the *peer's own* side, a dormant
+// import mirror it has never attached to — importedFromMachine rides
+// through the merge unchanged from the peer's own record (see
+// daemon/routes/session-forward.ts's ForeignSessionCache, which
+// deliberately does NOT filter these out of the data — that's a
+// general-purpose cache, this is a presentation decision made here
+// instead). Not "what's happening on the peer" in any useful sense —
+// inert leftover data nobody there has claimed — so it's excluded from
+// that remote's own bucket, the same way it'd be excluded from
+// "__local" if it were a local dormant mirror. Still visible under
+// "__all", same as a local one is.
+function isDormantOnPeer(s: { importedFromMachine?: string; upstreamSessionId?: string }): boolean {
+  return !!s.importedFromMachine && !s.upstreamSessionId;
+}
+
 // Filter-value namespace prefixes. A `hydra remote add`'s name is
 // human-chosen and very commonly just the machine's hostname (as in
 // `hydra remote add mrclean mrclean.local`) — the exact same string
@@ -4919,10 +4939,13 @@ const HOST_FILTER_PREFIX = "host:";
 //                  graduates to "__local" and stops appearing here.
 //   "remote:<n>" — sessions live on the `hydra remote` registered under
 //                  <n> (session.remote === n — see
-//                  daemon/routes/session-forward.ts). Unlike an imported
-//                  mirror, a federated session never graduates out of this
-//                  bucket into "__local": it stays live on the peer for as
-//                  long as it's federated, there's no local copy to bind.
+//                  daemon/routes/session-forward.ts), excluding any that
+//                  are themselves a dormant, never-attached import mirror
+//                  on that peer's own side (see isDormantOnPeer) — those
+//                  still show under "__all". Unlike an imported mirror, a
+//                  federated session never graduates out of this bucket
+//                  into "__local": it stays live on the peer for as long
+//                  as it's federated, there's no local copy to bind.
 // A bare, unprefixed value (no known persisted preference should look
 // like this going forward) is treated as a pre-namespacing "host:"
 // value for backward compatibility with an already-saved preference —
@@ -4945,7 +4968,7 @@ export function filterByHost(
   }
   if (hostFilter.startsWith(REMOTE_FILTER_PREFIX)) {
     const name = hostFilter.slice(REMOTE_FILTER_PREFIX.length);
-    return sessions.filter((s) => s.remote === name);
+    return sessions.filter((s) => s.remote === name && !isDormantOnPeer(s));
   }
   const machine = hostFilter.startsWith(HOST_FILTER_PREFIX)
     ? hostFilter.slice(HOST_FILTER_PREFIX.length)
@@ -4959,17 +4982,19 @@ export function filterByHost(
 }
 
 // Cycle the host filter through "__local" → each federated remote with
-// at least one live session (alphabetical) → each peer host with at
-// least one passive mirror (alphabetical) → "__all" → back to
+// at least one non-dormant session (alphabetical) → each peer host with
+// at least one passive mirror (alphabetical) → "__all" → back to
 // "__local". A peer host whose sessions have all been attached locally
 // drops out of the cycle because the "host:<m>" filter would render an
-// empty list for it — a federated remote never drops out this way (see
-// filterByHost). Local hostnames (this box or HYDRA_ACP_LOCAL_HOSTS)
-// also drop out since they roll up into "__local". Values are
-// namespaced ("remote:<n>" / "host:<m>", see filterByHost) precisely so
-// a remote and an imported-machine bucket that happen to share a name
-// stay distinct rather than silently merging. Exported so
-// picker.test.ts can drive the transitions.
+// empty list for it; a federated remote drops out the same way if
+// every one of its sessions is itself a dormant, never-attached import
+// mirror on the peer's own side (see isDormantOnPeer / filterByHost).
+// Local hostnames (this box or HYDRA_ACP_LOCAL_HOSTS) also drop out
+// since they roll up into "__local". Values are namespaced
+// ("remote:<n>" / "host:<m>", see filterByHost) precisely so a remote
+// and an imported-machine bucket that happen to share a name stay
+// distinct rather than silently merging. Exported so picker.test.ts
+// can drive the transitions.
 export function nextHostFilter(
   current: string,
   sessions: ReadonlyArray<{
@@ -4983,7 +5008,12 @@ export function nextHostFilter(
   const hosts = new Set<string>();
   for (const s of sessions) {
     if (s.remote) {
-      remotes.add(s.remote);
+      // A remote whose sessions are ALL dormant mirrors on the peer's
+      // own side would render an empty list if selected — same reason
+      // an imported host with no passive mirrors left drops out below.
+      if (!isDormantOnPeer(s)) {
+        remotes.add(s.remote);
+      }
       continue;
     }
     if (

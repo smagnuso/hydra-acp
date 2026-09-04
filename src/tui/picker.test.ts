@@ -401,6 +401,24 @@ describe("nextHostFilter", () => {
     expect(nextHostFilter("remote:mrclean", items)).toBe("host:mrclean");
     expect(nextHostFilter("host:mrclean", items)).toBe("__all");
   });
+
+  it("a remote whose only sessions are dormant mirrors on the peer's side drops out of the cycle", () => {
+    // The peer's own record still carries importedFromMachine for a
+    // session it imported but never attached to — that's not "a live
+    // session on this remote" from a picker's perspective.
+    const items = [
+      { remote: "peerb", importedFromMachine: "somewhere-else" },
+    ];
+    expect(nextHostFilter("__local", items)).toBe("__all");
+  });
+
+  it("a remote with a mix of dormant and live sessions still appears in the cycle", () => {
+    const items = [
+      { remote: "peerb", importedFromMachine: "somewhere-else" },
+      { remote: "peerb" },
+    ];
+    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+  });
 });
 
 describe("describeHostFilter", () => {
@@ -534,6 +552,26 @@ describe("filterByHost", () => {
     expect(filterByHost([live, importedMirror], "host:mrclean")).toEqual([
       importedMirror,
     ]);
+  });
+
+  it("remote:<n>: excludes a session that's a dormant import mirror on the peer's own side", () => {
+    const dormant = session({ remote: "peerb", importedFromMachine: "somewhere-else" });
+    const live = session({ remote: "peerb" });
+    expect(filterByHost([dormant, live], "remote:peerb")).toEqual([live]);
+  });
+
+  it("remote:<n>: includes a peer's import once the peer itself has attached to it", () => {
+    const claimed = session({
+      remote: "peerb",
+      importedFromMachine: "somewhere-else",
+      upstreamSessionId: "u_on_peer",
+    });
+    expect(filterByHost([claimed], "remote:peerb")).toEqual([claimed]);
+  });
+
+  it("__all: still includes a remote's dormant import mirrors", () => {
+    const dormant = session({ remote: "peerb", importedFromMachine: "somewhere-else" });
+    expect(filterByHost([dormant], "__all")).toEqual([dormant]);
   });
 });
 

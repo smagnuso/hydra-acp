@@ -233,4 +233,25 @@ describe("ForeignSessionCache", () => {
     await cache.refreshNow();
     expect(cache.list({ includeNonInteractive: true })).toEqual([]);
   });
+
+  it("includes the peer's own dormant import mirrors — this is a general-purpose data cache, not a presentation filter", async () => {
+    // Deciding these aren't worth showing by default is the picker's/
+    // browser's job (filterByHost's remote: branch), same as a local
+    // dormant mirror isn't excluded from GET /v1/sessions either.
+    const store = await storeWithPeer("foo");
+    cache = new ForeignSessionCache(store, {
+      fetchImpl: fakeFetch([
+        {
+          sessionId: "dormant",
+          interactive: true,
+          status: "cold",
+          importedFromMachine: "somewhere-else",
+          // no upstreamSessionId — never claimed on the peer.
+        },
+      ]),
+    });
+    await cache.refreshNow();
+    const [entry] = cache.list({ includeNonInteractive: true });
+    expect(entry).toMatchObject({ sessionId: "foo:dormant", remote: "foo" });
+  });
 });
