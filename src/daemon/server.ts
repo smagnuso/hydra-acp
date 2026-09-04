@@ -54,6 +54,7 @@ import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerRemoteRoutes } from "./routes/remotes.js";
 import { registerSessionForwardHook } from "./routes/session-forward.js";
+import { ForeignSessionRegistry } from "./acp-forward.js";
 import { PeerStore } from "../core/peer-store.js";
 import { registerProcessTokenRoutes } from "./routes/process-tokens.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
@@ -153,6 +154,7 @@ export async function startDaemon(
 
   const sessionTokenStore = await SessionTokenStore.load();
   const peerStore = await PeerStore.load();
+  const foreignSessions = new ForeignSessionRegistry(peerStore);
   const authRateLimiter = new AuthRateLimiter();
   const processRegistry = new ProcessTokenRegistry();
   const staticTokenValidator = new StaticTokenValidator(serviceToken);
@@ -366,6 +368,7 @@ export async function startDaemon(
     extensionMcpControls,
     getDaemonOrigin,
     registry,
+    foreignSessions,
   });
 
   // Plain-HTTP listener placement:

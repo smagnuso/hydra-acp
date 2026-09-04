@@ -26,6 +26,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [Transformers](#transformers)
 - [MCP endpoints](#mcp-endpoints)
 - [ACP wire protocol](#acp-wire-protocol)
+  - [Federated ("foreign") sessions](#federated-foreign-sessions)
   - [The `hydra-acp` meta namespace](#the-hydra-acp-meta-namespace)
   - [Agent-initiated turns](#agent-initiated-turns)
   - [Prompt-queue surface](#prompt-queue-surface)
@@ -1317,6 +1318,16 @@ All Hydra additions live under a single vendor prefix, `hydra-acp/`, and follow 
 Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, attach, message, session_event).
 
 The `hydra-acp/transformer/*` methods are transformer-specific: only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
+
+### Federated ("foreign") sessions
+
+`session/attach`, `session/detach`, `session/prompt`, and `session/cancel` addressed at a federated session id (`name:localId` — see [Remotes](#remotes) and [Sessions](#sessions)) are transparently forwarded to the peer registered under `name`, using this daemon's own stored peer credential (`daemon/acp-forward.ts`). To the peer, this looks like an ordinary client attaching over its normal `/acp` endpoint — no protocol extension is required or visible on the peer's side.
+
+Once attached, `session/update` notifications and `hydra-acp/session/request_permission` requests the peer sends for that session are relayed back to the local client with the id re-wrapped; a `hydra-acp/session/closed` from the peer (or the peer connection dropping entirely) is relayed the same way and clears the forwarding registration.
+
+**Single local attacher per foreign session, for now.** A federated session can be attached from at most one local client at a time. A second local `session/attach` for an already-forwarded id is rejected with `AlreadyAttached` (`-32012`) rather than silently doing the wrong thing — the peer's own per-connection attach bookkeeping tracks one attachment per `(connection, sessionId)` pair, so this daemon can't just call `session/attach` twice on its one shared peer connection to fake multi-client fan-out without stomping the first attach. True fan-out (multiple local clients sharing one upstream attach, with history replay for a late joiner) is a planned follow-up, not yet implemented.
+
+Only these four methods forward today; other session-scoped methods (`hydra-acp/attention/*`, `hydra-acp/session/tool_content`, slash commands, …) are not yet extended to federated ids.
 
 **Model changes: two upstream verbs.** Clients may set a session's model with either `session/set_model {sessionId, modelId}` or `session/set_config_option {sessionId, configId: "model", value}` — the daemon accepts both and normalizes. Upstream, the agent may implement only one: recent `@agentclientprotocol/sdk` releases (the 0.26 line, the 1.x line) **removed `session/set_model` from the dispatch table**, so agents built on them (`pi-acp`, `claude-agent-acp` ≥ 0.66) answer `-32601 MethodNotFound` to it and accept only the config-option form, while older agents accept `session/set_model`.
 

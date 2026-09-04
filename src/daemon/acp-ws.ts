@@ -80,6 +80,10 @@ import {
   registerBlockingEdge,
   wouldDeadlock,
 } from "./message-guard.js";
+import {
+  wrapStreamForForwarding,
+  type ForeignSessionRegistry,
+} from "./acp-forward.js";
 
 interface ClientState {
   clientId: string;
@@ -146,6 +150,10 @@ export interface AcpWsDeps {
   // protocol-only client can enumerate selectable agents without the
   // REST `GET /v1/agents` endpoint.
   registry?: Registry;
+  // When provided, session/{attach,detach,prompt,cancel} addressed at
+  // a federated ("name:localId") session id are diverted to this
+  // registry instead of the local handlers below — see acp-forward.ts.
+  foreignSessions?: ForeignSessionRegistry;
 }
 
 // JSON-RPC error helper: synthesizes an Error with the `code` (and
@@ -362,11 +370,23 @@ export function registerAcpWsEndpoint(
     }
 
     const processIdentity = deps.processRegistry?.resolve(token);
+    const clientId = `hydra_client_${nanoid(12)}`;
 
-    const stream = wsToMessageStream(socket);
+    const rawStream = wsToMessageStream(socket);
+    // `targetBox.connection` is filled in immediately below — the
+    // wrapper needs to hand the JsonRpcConnection back to the registry
+    // as the relay target for a foreign session's future traffic, but
+    // that connection doesn't exist until it's built from this very
+    // stream. Safe because message delivery is async; nothing can flow
+    // through the wrapper before the assignment on the next line runs.
+    const targetBox: { connection?: JsonRpcConnection } = {};
+    const stream = deps.foreignSessions
+      ? wrapStreamForForwarding(rawStream, deps.foreignSessions, targetBox, clientId)
+      : rawStream;
     const connection = new JsonRpcConnection(stream);
+    targetBox.connection = connection;
     const state: ClientState = {
-      clientId: `hydra_client_${nanoid(12)}`,
+      clientId,
       processIdentity,
       attached: new Map(),
     };
@@ -380,6 +400,7 @@ export function registerAcpWsEndpoint(
         session?.detach(att.clientId);
       }
       state.attached.clear();
+      deps.foreignSessions?.detachClient(clientId);
       // NB: we deliberately do NOT reap on raw WS close. `cat` always
       // closes its socket on exit but only sends session/detach when not
       // --detach (cat.ts), so reaping here would tear down --detach
