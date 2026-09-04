@@ -35,7 +35,7 @@ import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
 } from "../extension-mcp-mint.js";
-import { createOnRemote, listForeignSessions } from "./session-forward.js";
+import { createOnRemote, ForeignSessionCache } from "./session-forward.js";
 import type { PeerStore } from "../../core/peer-store.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
@@ -89,10 +89,16 @@ export function registerSessionRoutes(
   // (Slack `!session`, browser, etc.) need this or their agent's tool
   // registry comes up empty — no `set_plan`, no planner tools at all.
   extMcpDeps: ExtensionMcpMintDeps = {},
-  // Optional. When provided, GET /v1/sessions merges in every stored
-  // peer's own list (host-prefixed) alongside the local one. Absent
-  // in tests that don't care about federation.
+  // Optional. When provided, POST /v1/sessions with a `remote` field
+  // forwards to that peer instead of creating locally. Absent in tests
+  // that don't care about federation.
   peerStore?: PeerStore,
+  // Optional. When provided, GET /v1/sessions merges in every stored
+  // peer's own (periodically-refreshed) session list, host-prefixed,
+  // on every call — incremental (`since=`) or not. See
+  // ForeignSessionCache's doc comment for why this reads a cache
+  // rather than fetching peers live per-request.
+  foreignSessions?: ForeignSessionCache,
 ): void {
   app.get("/v1/sessions", async (request, reply) => {
     const query = request.query as
@@ -137,31 +143,31 @@ export function registerSessionRoutes(
       includeNonInteractive,
       ...(status ? { status: status as "warm" | "cold" } : {}),
     };
+    // Peer merge applies to any plain (non-cwd-scoped) call, whether
+    // incremental or not — `cwd` is a local-filesystem filter that
+    // means nothing against a peer's own tree, but `since` gets no
+    // special treatment here: reading foreignSessions' cache is cheap
+    // regardless, unlike a live per-peer fetch (see that class's doc
+    // comment for why a `since=` call skipping this was actually a bug
+    // in practice, not a deliberate scope cut).
+    const foreign =
+      foreignSessions && !filter.cwd
+        ? foreignSessions.list({ includeNonInteractive, ...(status ? { status } : {}) })
+        : [];
     if (since !== undefined) {
       const delta = await manager.listSince(filter, since);
       return {
-        sessions: delta.entries,
+        sessions: [...delta.entries, ...foreign],
         removed: delta.removed,
         cursor: delta.cursor,
       };
     }
     const listing = await manager.listing(filter);
-    // Peer merge only applies to a plain "give me everything" call:
-    // `cwd` is a local-filesystem filter that means nothing against a
-    // peer's own tree, and incremental listing above already
-    // returned before reaching here.
-    if (peerStore && !filter.cwd) {
-      const foreign = await listForeignSessions(peerStore, {
-        includeNonInteractive,
-        ...(status ? { status } : {}),
-      });
-      return {
-        sessions: [...listing.entries, ...foreign],
-        removed: [],
-        cursor: listing.cursor,
-      };
-    }
-    return { sessions: listing.entries, removed: [], cursor: listing.cursor };
+    return {
+      sessions: [...listing.entries, ...foreign],
+      removed: [],
+      cursor: listing.cursor,
+    };
   });
 
   // Single-session info — the same shape as one `GET /v1/sessions`

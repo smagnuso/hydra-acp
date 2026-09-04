@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AddressInfo } from "node:net";
 import { registerSessionRoutes } from "./sessions.js";
-import { registerSessionForwardHook } from "./session-forward.js";
+import { ForeignSessionCache, registerSessionForwardHook } from "./session-forward.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { Registry, type RegistryAgent } from "../../core/registry.js";
 import { PeerStore } from "../../core/peer-store.js";
@@ -32,6 +32,9 @@ interface Node {
   mocks: MockAgentControls[];
   baseUrl: string;
   port: number;
+  // Only set when built with a peerStore. Tests call refreshNow()
+  // explicitly rather than waiting on the real interval timer.
+  foreignSessionCache?: ForeignSessionCache;
 }
 
 async function buildNode(peerStore?: PeerStore): Promise<Node> {
@@ -49,13 +52,28 @@ async function buildNode(peerStore?: PeerStore): Promise<Node> {
     },
   );
   const app = Fastify();
-  registerSessionRoutes(app, manager, { agentId: "claude-code", cwd: "/w" }, {}, peerStore);
+  const foreignSessionCache = peerStore ? new ForeignSessionCache(peerStore) : undefined;
+  registerSessionRoutes(
+    app,
+    manager,
+    { agentId: "claude-code", cwd: "/w" },
+    {},
+    peerStore,
+    foreignSessionCache,
+  );
   if (peerStore) {
     registerSessionForwardHook(app, { store: peerStore });
   }
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
-  return { app, manager, mocks, baseUrl: `http://127.0.0.1:${addr.port}`, port: addr.port };
+  return {
+    app,
+    manager,
+    mocks,
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    port: addr.port,
+    foreignSessionCache,
+  };
 }
 
 function future(deltaMs = 60_000): string {
@@ -173,6 +191,11 @@ describe("session forwarding", () => {
       interactive: true,
     });
 
+    // The list-merge reads from a's periodically-refreshed cache, not
+    // a live per-request fetch — force it rather than waiting on the
+    // real interval timer.
+    await a.foreignSessionCache!.refreshNow();
+
     const res = await fetch(`${a.baseUrl}/v1/sessions`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -190,9 +213,30 @@ describe("session forwarding", () => {
     expect(foreignEntry?.remote).toBe("peerb");
   });
 
+  it("GET /v1/sessions?since=... also merges peer sessions, not just a full listing", async () => {
+    // Regression: the merge originally only ran on a plain (no
+    // `since=`) call. A real client only ever makes that call once —
+    // every poll after its first uses `since=`, so federated sessions
+    // appeared exactly once and never again. See ForeignSessionCache's
+    // doc comment.
+    const remote = await b.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+      interactive: true,
+    });
+    await a.foreignSessionCache!.refreshNow();
+
+    const res = await fetch(`${a.baseUrl}/v1/sessions?since=0`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sessions: Array<{ sessionId: string }> };
+    const ids = body.sessions.map((s) => s.sessionId);
+    expect(ids).toContain(`peerb:${remote.sessionId}`);
+  });
+
   it("GET /v1/sessions?cwd=... excludes peer sessions", async () => {
     await a.manager.create({ cwd: "/w", agentId: "claude-code", interactive: true });
     await b.manager.create({ cwd: "/w", agentId: "claude-code", interactive: true });
+    await a.foreignSessionCache!.refreshNow();
 
     const res = await fetch(`${a.baseUrl}/v1/sessions?cwd=%2Fw`);
     const body = (await res.json()) as { sessions: Array<{ sessionId: string }> };

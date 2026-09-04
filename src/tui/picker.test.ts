@@ -76,6 +76,7 @@ const attachCalls = {
 };
 import {
   createPickerPrefs,
+  describeHostFilter,
   filterByHost,
   matchesSearch,
   nextHostFilter,
@@ -329,9 +330,9 @@ describe("nextHostFilter", () => {
   ];
 
   it("cycles local → first peer → next peer → all → local", () => {
-    expect(nextHostFilter("__local", sessions)).toBe("machine-a");
-    expect(nextHostFilter("machine-a", sessions)).toBe("machine-b");
-    expect(nextHostFilter("machine-b", sessions)).toBe("__all");
+    expect(nextHostFilter("__local", sessions)).toBe("host:machine-a");
+    expect(nextHostFilter("host:machine-a", sessions)).toBe("host:machine-b");
+    expect(nextHostFilter("host:machine-b", sessions)).toBe("__all");
     expect(nextHostFilter("__all", sessions)).toBe("__local");
   });
 
@@ -345,7 +346,7 @@ describe("nextHostFilter", () => {
     // Mimics the post-refresh case where a peer host vanished from
     // allSessions while its hostname was selected.
     const drained = [{ importedFromMachine: "machine-a" }];
-    expect(nextHostFilter("machine-z", drained)).toBe("__local");
+    expect(nextHostFilter("host:machine-z", drained)).toBe("__local");
   });
 
   it("drops peer hosts whose imports have all been bound to a local agent", () => {
@@ -355,8 +356,8 @@ describe("nextHostFilter", () => {
       { importedFromMachine: "machine-a" },
       { importedFromMachine: "machine-b", upstreamSessionId: "u_abc" },
     ];
-    expect(nextHostFilter("__local", mixed)).toBe("machine-a");
-    expect(nextHostFilter("machine-a", mixed)).toBe("__all");
+    expect(nextHostFilter("__local", mixed)).toBe("host:machine-a");
+    expect(nextHostFilter("host:machine-a", mixed)).toBe("__all");
   });
 
   it("skips this machine's hostname since self-imports roll into __local", () => {
@@ -365,19 +366,19 @@ describe("nextHostFilter", () => {
       { importedFromMachine: "machine-a" },
     ];
     const locals = new Set(["blackbox"]);
-    expect(nextHostFilter("__local", items, locals)).toBe("machine-a");
-    expect(nextHostFilter("machine-a", items, locals)).toBe("__all");
+    expect(nextHostFilter("__local", items, locals)).toBe("host:machine-a");
+    expect(nextHostFilter("host:machine-a", items, locals)).toBe("__all");
     expect(nextHostFilter("__all", items, locals)).toBe("__local");
   });
 
-  it("includes federated remotes in the cycle alongside imported hosts", () => {
+  it("includes federated remotes in the cycle before imported hosts", () => {
     const items = [
       { importedFromMachine: "machine-a" },
       { remote: "peerb" },
     ];
-    expect(nextHostFilter("__local", items)).toBe("machine-a");
-    expect(nextHostFilter("machine-a", items)).toBe("peerb");
-    expect(nextHostFilter("peerb", items)).toBe("__all");
+    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+    expect(nextHostFilter("remote:peerb", items)).toBe("host:machine-a");
+    expect(nextHostFilter("host:machine-a", items)).toBe("__all");
   });
 
   it("a federated remote with no attach never drops out of the cycle", () => {
@@ -385,7 +386,32 @@ describe("nextHostFilter", () => {
     // upstreamSessionId), a federated session always stays live on the
     // peer — there's no local-graduation escape hatch for it.
     const items = [{ remote: "peerb", upstreamSessionId: "u_on_peer" }];
-    expect(nextHostFilter("__local", items)).toBe("peerb");
+    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+  });
+
+  it("a remote and an imported machine sharing a name get distinct cycle entries", () => {
+    // Regression: `hydra remote add mrclean mrclean.local` names the
+    // remote exactly the machine's own hostname, which importedFromMachine
+    // also uses. Without namespacing these collapse into one bucket.
+    const items = [
+      { remote: "mrclean" },
+      { importedFromMachine: "mrclean" },
+    ];
+    expect(nextHostFilter("__local", items)).toBe("remote:mrclean");
+    expect(nextHostFilter("remote:mrclean", items)).toBe("host:mrclean");
+    expect(nextHostFilter("host:mrclean", items)).toBe("__all");
+  });
+});
+
+describe("describeHostFilter", () => {
+  it("formats each namespace for display, stripping the prefix", () => {
+    expect(describeHostFilter("__local")).toBe("host: local");
+    expect(describeHostFilter("remote:mrclean")).toBe("remote: mrclean");
+    expect(describeHostFilter("host:mrclean")).toBe("host: mrclean");
+  });
+
+  it("treats a pre-namespacing persisted value as an imported host", () => {
+    expect(describeHostFilter("mrclean")).toBe("host: mrclean");
   });
 });
 
@@ -429,7 +455,7 @@ describe("filterByHost", () => {
     expect(filterByHost([s], "__local", locals)).toEqual([]);
   });
 
-  it("<host>: includes passive mirrors from that host only", () => {
+  it("host:<m>: includes passive mirrors from that host only", () => {
     const passive = session({ importedFromMachine: "broom" });
     const attached = session({
       importedFromMachine: "broom",
@@ -437,8 +463,13 @@ describe("filterByHost", () => {
     });
     const otherPeer = session({ importedFromMachine: "dustpan" });
     expect(
-      filterByHost([passive, attached, otherPeer], "broom", locals),
+      filterByHost([passive, attached, otherPeer], "host:broom", locals),
     ).toEqual([passive]);
+  });
+
+  it("a bare (pre-namespacing) value is treated as host:<m> for backward compat", () => {
+    const passive = session({ importedFromMachine: "broom" });
+    expect(filterByHost([passive], "broom", locals)).toEqual([passive]);
   });
 
   it("__all: includes everything", () => {
@@ -462,10 +493,10 @@ describe("filterByHost", () => {
     ]);
   });
 
-  it("<host>: never returns anything for a local hostname", () => {
+  it("host:<m>: never returns anything for a local hostname", () => {
     const selfImport = session({ importedFromMachine: "blackbox" });
     const locals = new Set(["blackbox"]);
-    expect(filterByHost([selfImport], "blackbox", locals)).toEqual([]);
+    expect(filterByHost([selfImport], "host:blackbox", locals)).toEqual([]);
   });
 
   it("__local: excludes federated sessions even when upstreamSessionId is set", () => {
@@ -476,16 +507,33 @@ describe("filterByHost", () => {
     expect(filterByHost([s], "__local")).toEqual([]);
   });
 
-  it("<name>: includes only the federated sessions for that remote", () => {
+  it("remote:<n>: includes only the federated sessions for that remote", () => {
     const onPeerB = session({ remote: "peerb" });
     const onPeerC = session({ remote: "peerc" });
     const imported = session({ importedFromMachine: "broom" });
-    expect(filterByHost([onPeerB, onPeerC, imported], "peerb")).toEqual([onPeerB]);
+    expect(filterByHost([onPeerB, onPeerC, imported], "remote:peerb")).toEqual([
+      onPeerB,
+    ]);
   });
 
   it("__all: includes federated sessions too", () => {
     const items = [session({}), session({ remote: "peerb" })];
     expect(filterByHost(items, "__all")).toEqual(items);
+  });
+
+  it("a remote and an imported machine sharing a name don't leak into each other's bucket", () => {
+    // Regression for the mrclean/mrclean.local collision: a live
+    // federated session and an old bundle-import mirror can carry the
+    // exact same name/hostname string, and must land in different
+    // buckets rather than both matching one filter value.
+    const live = session({ remote: "mrclean" });
+    const importedMirror = session({ importedFromMachine: "mrclean" });
+    expect(filterByHost([live, importedMirror], "remote:mrclean")).toEqual([
+      live,
+    ]);
+    expect(filterByHost([live, importedMirror], "host:mrclean")).toEqual([
+      importedMirror,
+    ]);
   });
 });
 

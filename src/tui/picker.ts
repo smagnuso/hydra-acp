@@ -246,8 +246,8 @@ export interface PickOptions {
 // without churning the filter call sites.
 export interface PickerFilters {
   cwdOnly: boolean;
-  // "__local" | "__all" | host name. See `hostFilter` in pickSession
-  // for the cycle order and meaning.
+  // "__local" | "__all" | "remote:<name>" | "host:<machine>". See
+  // filterByHost/nextHostFilter for the cycle order and meaning.
   hostFilter: string;
   // When false (default), the picker only renders rows the daemon
   // marked interactive (real conversations). Cat one-shots and
@@ -1074,11 +1074,7 @@ export async function pickSession(
       parts.push({ kind: "plain", text: "cwd-only" });
     }
     if (prefs.filters.hostFilter !== "__all") {
-      const text =
-        prefs.filters.hostFilter === "__local"
-          ? "host: local"
-          : `host: ${prefs.filters.hostFilter}`;
-      parts.push({ kind: "host", text });
+      parts.push({ kind: "host", text: describeHostFilter(prefs.filters.hostFilter) });
     }
     if (prefs.filters.includeNonInteractive) {
       parts.push({ kind: "plain", text: "+non-interactive" });
@@ -4896,23 +4892,41 @@ function isFromThisMachine(
   return locals.has(importedFromMachine);
 }
 
-// Apply the picker's host filter to a session list. Sentinel values:
-//   "__all"   — no filter.
-//   "__local" — sessions created here, imported from this machine
-//               (self-restore via archiver / manual export+import), OR
-//               imported from another host and already bound to a local
-//               agent (upstreamSessionId set). The "I'm working on this
-//               here" bucket. Federated (remote-set) sessions never land
-//               here — see below.
-//   <host>    — passive mirrors imported from <host> that haven't been
-//               attached locally yet. Once you attach, the session
-//               graduates to "__local" and stops appearing here.
-//   <name>    — sessions live on the `hydra remote` registered under
-//               <name> (session.remote === name — see
-//               daemon/routes/session-forward.ts). Unlike an imported
-//               mirror, a federated session never graduates out of this
-//               bucket into "__local": it stays live on the peer for as
-//               long as it's federated, there's no local copy to bind.
+// Filter-value namespace prefixes. A `hydra remote add`'s name is
+// human-chosen and very commonly just the machine's hostname (as in
+// `hydra remote add mrclean mrclean.local`) — the exact same string
+// the old bundle-import path already records in importedFromMachine
+// (also a hostname, via thisMachine()). Without a prefix, "mrclean" as
+// a bare filter value can't tell "the live remote named mrclean" from
+// "an old imported mirror from the machine named mrclean" apart, and
+// silently merges two unrelated session sets under one bucket — a real
+// bug, not a hypothetical, caught when a federated remote happened to
+// share a name with a years-old bundle import from the same box.
+const REMOTE_FILTER_PREFIX = "remote:";
+const HOST_FILTER_PREFIX = "host:";
+
+// Apply the picker's host filter to a session list. Sentinel/namespaced
+// values:
+//   "__all"      — no filter.
+//   "__local"    — sessions created here, imported from this machine
+//                  (self-restore via archiver / manual export+import), OR
+//                  imported from another host and already bound to a local
+//                  agent (upstreamSessionId set). The "I'm working on this
+//                  here" bucket. Federated (remote-set) sessions never land
+//                  here — see below.
+//   "host:<m>"   — passive mirrors imported from machine <m> that haven't
+//                  been attached locally yet. Once you attach, the session
+//                  graduates to "__local" and stops appearing here.
+//   "remote:<n>" — sessions live on the `hydra remote` registered under
+//                  <n> (session.remote === n — see
+//                  daemon/routes/session-forward.ts). Unlike an imported
+//                  mirror, a federated session never graduates out of this
+//                  bucket into "__local": it stays live on the peer for as
+//                  long as it's federated, there's no local copy to bind.
+// A bare, unprefixed value (no known persisted preference should look
+// like this going forward) is treated as a pre-namespacing "host:"
+// value for backward compatibility with an already-saved preference —
+// see nextHostFilter's doc comment.
 export function filterByHost(
   sessions: DiscoveredSession[],
   hostFilter: string,
@@ -4929,23 +4943,33 @@ export function filterByHost(
           !!s.upstreamSessionId),
     );
   }
+  if (hostFilter.startsWith(REMOTE_FILTER_PREFIX)) {
+    const name = hostFilter.slice(REMOTE_FILTER_PREFIX.length);
+    return sessions.filter((s) => s.remote === name);
+  }
+  const machine = hostFilter.startsWith(HOST_FILTER_PREFIX)
+    ? hostFilter.slice(HOST_FILTER_PREFIX.length)
+    : hostFilter; // pre-namespacing persisted value
   return sessions.filter(
     (s) =>
-      s.remote === hostFilter ||
-      (s.importedFromMachine === hostFilter &&
-        !hostnames.has(hostFilter) &&
-        !s.upstreamSessionId),
+      s.importedFromMachine === machine &&
+      !hostnames.has(machine) &&
+      !s.upstreamSessionId,
   );
 }
 
-// Cycle the host filter through "__local" → each peer host with at
-// least one passive mirror or federated session (alphabetical) →
-// "__all" → back to "__local". A peer host whose sessions have all been
-// attached locally drops out of the cycle because the "<host>" filter
-// would render an empty list for it — a federated remote never drops
-// out this way (see filterByHost). Local hostnames (this box or
-// HYDRA_ACP_LOCAL_HOSTS) also drop out since they roll up into
-// "__local". Exported so picker.test.ts can drive the transitions.
+// Cycle the host filter through "__local" → each federated remote with
+// at least one live session (alphabetical) → each peer host with at
+// least one passive mirror (alphabetical) → "__all" → back to
+// "__local". A peer host whose sessions have all been attached locally
+// drops out of the cycle because the "host:<m>" filter would render an
+// empty list for it — a federated remote never drops out this way (see
+// filterByHost). Local hostnames (this box or HYDRA_ACP_LOCAL_HOSTS)
+// also drop out since they roll up into "__local". Values are
+// namespaced ("remote:<n>" / "host:<m>", see filterByHost) precisely so
+// a remote and an imported-machine bucket that happen to share a name
+// stay distinct rather than silently merging. Exported so
+// picker.test.ts can drive the transitions.
 export function nextHostFilter(
   current: string,
   sessions: ReadonlyArray<{
@@ -4955,10 +4979,11 @@ export function nextHostFilter(
   }>,
   hostnames: Set<string> = localMachines(),
 ): string {
+  const remotes = new Set<string>();
   const hosts = new Set<string>();
   for (const s of sessions) {
     if (s.remote) {
-      hosts.add(s.remote);
+      remotes.add(s.remote);
       continue;
     }
     if (
@@ -4969,12 +4994,33 @@ export function nextHostFilter(
       hosts.add(s.importedFromMachine);
     }
   }
-  const ordered = ["__local", ...[...hosts].sort(), "__all"];
+  const ordered = [
+    "__local",
+    ...[...remotes].sort().map((n) => `${REMOTE_FILTER_PREFIX}${n}`),
+    ...[...hosts].sort().map((m) => `${HOST_FILTER_PREFIX}${m}`),
+    "__all",
+  ];
   const idx = ordered.indexOf(current);
   if (idx === -1) {
     return "__local";
   }
   return ordered[(idx + 1) % ordered.length] ?? "__local";
+}
+
+// Strips the namespace prefix for display — the status line shows
+// "remote: mrclean" or "host: mrclean" (still legible even when both
+// exist under the same name), never the raw "remote:mrclean" value.
+export function describeHostFilter(hostFilter: string): string {
+  if (hostFilter === "__local") {
+    return "host: local";
+  }
+  if (hostFilter.startsWith(REMOTE_FILTER_PREFIX)) {
+    return `remote: ${hostFilter.slice(REMOTE_FILTER_PREFIX.length)}`;
+  }
+  if (hostFilter.startsWith(HOST_FILTER_PREFIX)) {
+    return `host: ${hostFilter.slice(HOST_FILTER_PREFIX.length)}`;
+  }
+  return `host: ${hostFilter}`; // pre-namespacing persisted value
 }
 
 // Case-insensitive substring match across the session's user-visible

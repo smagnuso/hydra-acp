@@ -53,7 +53,7 @@ import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerRemoteRoutes } from "./routes/remotes.js";
-import { registerSessionForwardHook } from "./routes/session-forward.js";
+import { ForeignSessionCache, registerSessionForwardHook } from "./routes/session-forward.js";
 import { ForeignSessionRegistry } from "./acp-forward.js";
 import { PeerHealthTracker } from "./peer-health.js";
 import { PeerStore } from "../core/peer-store.js";
@@ -165,6 +165,8 @@ export async function startDaemon(
   const foreignSessions = new ForeignSessionRegistry(peerStore);
   const peerHealth = new PeerHealthTracker(peerStore);
   peerHealth.start();
+  const foreignSessionCache = new ForeignSessionCache(peerStore);
+  foreignSessionCache.start();
   const authRateLimiter = new AuthRateLimiter();
   const processRegistry = new ProcessTokenRegistry();
   const staticTokenValidator = new StaticTokenValidator(serviceToken);
@@ -331,6 +333,7 @@ export async function startDaemon(
       getDaemonOrigin,
     },
     peerStore,
+    foreignSessionCache,
   );
   registerSessionForwardHook(app, { store: peerStore });
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
@@ -550,6 +553,7 @@ export async function startDaemon(
 
   const shutdown = async (): Promise<void> => {
     peerHealth.stop();
+    foreignSessionCache.stop();
     stopConfigReload();
     if (stopSessionGc) {
       stopSessionGc();
