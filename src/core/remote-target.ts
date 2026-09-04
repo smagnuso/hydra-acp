@@ -331,7 +331,7 @@ export type TlsHandshakeResult =
   | { kind: "untrusted"; fingerprint: string; subject?: string; issuer?: string }
   | { kind: "error"; message: string };
 
-async function defaultTlsHandshake(
+export async function defaultTlsHandshake(
   host: string,
   port: number,
 ): Promise<TlsHandshakeResult> {
@@ -447,7 +447,7 @@ async function loopbackTargetForUrl(
   };
 }
 
-async function promptYesNo(prompt: string): Promise<boolean> {
+export async function promptYesNo(prompt: string): Promise<boolean> {
   process.stdout.write(prompt);
   return new Promise<boolean>((resolve) => {
     let buf = "";

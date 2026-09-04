@@ -39,6 +39,15 @@ export interface PeerRecord {
   // daemon ever sees.
   label?: string;
   addedAt: string;
+  // sha256 of the peer's leaf TLS cert (DER), lowercase hex, no
+  // separators — mirrors RemotesStore's field of the same name.
+  // Captured by `hydra remote add`'s TOFU prompt when the peer
+  // presents a cert that doesn't validate against the system trust
+  // store. Loaded into the process-wide pin map at daemon startup
+  // (see tls-trust.ts's loadPinsFromPeerStore) so a self-signed peer
+  // keeps working across daemon restarts without re-prompting.
+  pinnedFingerprint?: string;
+  pinnedAt?: string;
 }
 
 export interface PeerSummary {
@@ -48,6 +57,8 @@ export interface PeerSummary {
   expiresAt: string;
   label?: string;
   addedAt: string;
+  pinnedFingerprint?: string;
+  pinnedAt?: string;
 }
 
 interface PeersFile {
@@ -91,13 +102,15 @@ export class PeerStore {
 
   list(): PeerSummary[] {
     return Object.values(this.data.entries)
-      .map(({ name, host, port, expiresAt, label, addedAt }) => ({
+      .map(({ name, host, port, expiresAt, label, addedAt, pinnedFingerprint, pinnedAt }) => ({
         name,
         host,
         port,
         expiresAt,
         label,
         addedAt,
+        pinnedFingerprint,
+        pinnedAt,
       }))
       .sort((a, b) => a.addedAt.localeCompare(b.addedAt));
   }
@@ -138,6 +151,12 @@ function normalise(raw: unknown): PeersFile {
     };
     if (typeof v.label === "string") {
       record.label = v.label;
+    }
+    if (typeof v.pinnedFingerprint === "string") {
+      record.pinnedFingerprint = v.pinnedFingerprint;
+    }
+    if (typeof v.pinnedAt === "string") {
+      record.pinnedAt = v.pinnedAt;
     }
     out[key] = record;
   }

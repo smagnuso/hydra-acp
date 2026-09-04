@@ -7,11 +7,13 @@ import {
   fetchPeerFingerprint,
   formatFingerprint,
   getPin,
+  loadPinsFromPeerStore,
   loadPinsFromStore,
   setPin,
   sha256Hex,
 } from "./tls-trust.js";
 import { RemotesStore } from "./remotes-store.js";
+import { PeerStore } from "./peer-store.js";
 
 describe("formatFingerprint", () => {
   it("groups hex pairs with colons", () => {
@@ -80,6 +82,55 @@ describe("pin map", () => {
     _resetForTests();
     loadPinsFromStore(store);
     expect(getPin("h", 1)).toBeUndefined();
+  });
+
+  it("loadPinsFromPeerStore hydrates from a PeerStore", async () => {
+    const store = await PeerStore.load();
+    await store.set({
+      name: "foo",
+      host: "foo.example.com",
+      port: 8443,
+      token: "tok",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      addedAt: new Date().toISOString(),
+      pinnedFingerprint: "abc123",
+    });
+    _resetForTests();
+    loadPinsFromPeerStore(store);
+    expect(getPin("foo.example.com", 8443)).toBe("abc123");
+  });
+
+  it("loadPinsFromPeerStore skips entries without a fingerprint", async () => {
+    const store = await PeerStore.load();
+    await store.set({
+      name: "foo",
+      host: "h",
+      port: 1,
+      token: "tok",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      addedAt: new Date().toISOString(),
+    });
+    _resetForTests();
+    loadPinsFromPeerStore(store);
+    expect(getPin("h", 1)).toBeUndefined();
+  });
+
+  it("loadPinsFromPeerStore is additive — it doesn't clear pins already set", async () => {
+    const store = await PeerStore.load();
+    await store.set({
+      name: "foo",
+      host: "foo.example.com",
+      port: 8443,
+      token: "tok",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      addedAt: new Date().toISOString(),
+      pinnedFingerprint: "abc123",
+    });
+    _resetForTests();
+    setPin("other.example.com", 443, "deadbeef");
+    loadPinsFromPeerStore(store);
+    expect(getPin("other.example.com", 443)).toBe("deadbeef");
+    expect(getPin("foo.example.com", 8443)).toBe("abc123");
   });
 });
 

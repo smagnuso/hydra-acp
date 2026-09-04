@@ -198,26 +198,30 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 
 ```jsonc
 {
-  "name":     "foo",           // local alias; see PEER_NAME_PATTERN above
-  "host":     "foo.example.com",
-  "port":     55514,          // optional, defaults to the daemon's default port
-  "password": "<peer's master password>",
-  "label":    "<optional human label, ≤256 chars — shown in the PEER's own `auth list`>",
-  "ttlSec":   31536000        // optional; otherwise the peer's login default
+  "name":              "foo",           // local alias; see PEER_NAME_PATTERN above
+  "host":              "foo.example.com",
+  "port":              55514,          // optional, defaults to the daemon's default port
+  "password":          "<peer's master password>",
+  "label":             "<optional human label, ≤256 chars — shown in the PEER's own `auth list`>",
+  "ttlSec":            31536000,       // optional; otherwise the peer's login default
+  "pinnedFingerprint": "<optional; sha256 of the peer's leaf TLS cert, lowercase hex>"
 }
 ```
+
+`pinnedFingerprint` is how a self-signed peer cert gets trusted: the *caller* (`hydra remote add`) does its own TLS handshake probe before this request, and if the peer's cert doesn't validate against the system trust store, shows the fingerprint to a human and asks them to confirm — the same TOFU flow `hydra session attach hydra://...` already does for a human login (`core/remote-target.ts`'s `defaultTlsHandshake`). Once confirmed, the fingerprint is sent here, pinned (`setPin`) *before* this route attempts its own login to the peer, and persisted on the stored record so it survives a daemon restart (`daemon/peer-health.ts`'s sibling, `loadPinsFromPeerStore`, reloads every stored pin at startup). Omit it entirely for a peer with a CA-signed cert — normal validation applies, nothing to pin.
 
 **Response — `201 Created`**
 
 ```jsonc
 {
-  "name":      "foo",
-  "host":      "foo.example.com",
-  "port":      55514,
-  "label":     "<optional>",
-  "expiresAt": "2027-06-04T19:00:00.000Z",
-  "addedAt":   "2026-09-04T19:00:00.000Z",
-  "status":    "ok"    // seeded "ok" immediately — see GET /v1/remotes
+  "name":              "foo",
+  "host":              "foo.example.com",
+  "port":              55514,
+  "label":             "<optional>",
+  "expiresAt":         "2027-06-04T19:00:00.000Z",
+  "addedAt":           "2026-09-04T19:00:00.000Z",
+  "status":            "ok",    // seeded "ok" immediately — see GET /v1/remotes
+  "pinnedFingerprint": "<optional>"
 }
 ```
 
@@ -254,7 +258,8 @@ This is visibility only: forwarding a REST or ACP call to a peer always makes it
       "expiresAt":     "<ISO-8601>",
       "addedAt":       "<ISO-8601>",
       "status":        "ok",              // "ok" | "unauthorized" | "unreachable" | "unknown"
-      "lastCheckedAt": "<ISO-8601>"        // absent if status is "unknown"
+      "lastCheckedAt": "<ISO-8601>",       // absent if status is "unknown"
+      "pinnedFingerprint": "<optional>"
     },
     …
   ]
@@ -263,7 +268,7 @@ This is visibility only: forwarding a REST or ACP call to a peer always makes it
 
 #### `DELETE /v1/remotes/:name`
 
-Un-federate a peer: best-effort revokes this daemon's token on the peer (`POST /v1/auth/logout`, failures ignored so an already-unreachable peer doesn't block cleanup) and forgets the local record.
+Un-federate a peer: best-effort revokes this daemon's token on the peer (`POST /v1/auth/logout`, failures ignored so an already-unreachable peer doesn't block cleanup) and forgets the local record. Also unpins the peer's cert (`clearPin`) — but only if no *other* remote name still points at the same host:port (two names can share one peer; see `core/peer-store.ts`), so removing one alias never yanks trust out from under another that's still using it.
 
 **Response**
 

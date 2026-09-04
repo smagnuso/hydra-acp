@@ -57,6 +57,7 @@ import { registerSessionForwardHook } from "./routes/session-forward.js";
 import { ForeignSessionRegistry } from "./acp-forward.js";
 import { PeerHealthTracker } from "./peer-health.js";
 import { PeerStore } from "../core/peer-store.js";
+import { installGlobalTlsTrust, loadPinsFromPeerStore } from "../core/tls-trust.js";
 import { registerProcessTokenRoutes } from "./routes/process-tokens.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 import { McpTokenRegistry } from "./mcp/token-registry.js";
@@ -155,6 +156,12 @@ export async function startDaemon(
 
   const sessionTokenStore = await SessionTokenStore.load();
   const peerStore = await PeerStore.load();
+  // Idempotent — a real entry point (daemon-entry.ts, cli.ts) already
+  // calls this before startDaemon runs, but a test harness calling
+  // startDaemon directly wouldn't otherwise, and a self-signed peer's
+  // pin is useless if the pinning dispatcher was never installed.
+  installGlobalTlsTrust();
+  loadPinsFromPeerStore(peerStore);
   const foreignSessions = new ForeignSessionRegistry(peerStore);
   const peerHealth = new PeerHealthTracker(peerStore);
   peerHealth.start();

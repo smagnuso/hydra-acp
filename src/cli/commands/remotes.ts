@@ -1,6 +1,11 @@
-import { parseHydraUrl } from "../../core/remote-url.js";
+import { parseHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { promptPassword } from "../../core/prompt-password.js";
-import { defaultLabel } from "../../core/remote-target.js";
+import {
+  defaultLabel,
+  defaultTlsHandshake,
+  promptYesNo,
+} from "../../core/remote-target.js";
+import { formatFingerprint } from "../../core/tls-trust.js";
 import { daemonFetch } from "./_shared.js";
 import { resolveOption } from "../parse-args.js";
 
@@ -13,6 +18,7 @@ interface PeerSummary {
   addedAt: string;
   status?: "ok" | "unauthorized" | "unreachable" | "unknown";
   lastCheckedAt?: string;
+  pinnedFingerprint?: string;
 }
 
 // Accepts a bare "host", "host:port", or a full "hydra://host[:port]/"
@@ -40,6 +46,68 @@ export async function runRemoteAdd(
     process.stderr.write(`${(err as Error).message}\n`);
     process.exit(2);
   }
+  // TOFU, same as the human hydra:// login path (resolveRemoteTarget)
+  // — probe BEFORE asking for a password so credentials never cross an
+  // unverified channel. Loopback never needs this: the daemon dials
+  // its peers over plain http for loopback hosts (see
+  // core/peer-login.ts), so there's no cert to trust in the first
+  // place.
+  let pinnedFingerprint: string | undefined;
+  if (!isLoopbackHost(target.host)) {
+    // A previously-accepted fingerprint for this exact name, if any —
+    // so re-running `remote add` to refresh a token before it expires
+    // (the documented refresh path) doesn't re-prompt for a cert
+    // that's already been through this once. Only a fingerprint that's
+    // new or has genuinely CHANGED needs a human to look at it again.
+    const existing = await daemonFetch("/v1/remotes", { expectStatus: 200 });
+    const existingBody = existing.body as { remotes: PeerSummary[] };
+    const previousPin = existingBody.remotes.find((r) => r.name === name)
+      ?.pinnedFingerprint;
+
+    const probe = await defaultTlsHandshake(target.host, target.port);
+    if (probe.kind === "error") {
+      process.stderr.write(
+        `Could not connect to ${target.host}:${target.port} for TLS handshake: ${probe.message}\n`,
+      );
+      process.exit(1);
+    }
+    if (probe.kind === "untrusted") {
+      if (previousPin === probe.fingerprint) {
+        pinnedFingerprint = probe.fingerprint;
+      } else {
+        const summary =
+          probe.subject || probe.issuer
+            ? `\n  subject: ${probe.subject ?? "(unknown)"}\n  issuer:  ${probe.issuer ?? "(unknown)"}`
+            : "";
+        if (previousPin) {
+          // Mirrors SSH's "REMOTE HOST IDENTIFICATION HAS CHANGED"
+          // warning — could be a legitimate cert rotation on the
+          // peer, could be something worse; either way it's not the
+          // routine case and deserves louder phrasing than first-trust.
+          process.stderr.write(
+            `WARNING: the certificate presented by ${target.host}:${target.port} has changed since it was last trusted.\n` +
+              `  previous sha256: ${formatFingerprint(previousPin)}\n` +
+              `  new sha256:      ${formatFingerprint(probe.fingerprint)}${summary}\n`,
+          );
+        } else {
+          process.stderr.write(
+            `The certificate presented by ${target.host}:${target.port} is not signed by a trusted CA.\n` +
+              `  sha256: ${formatFingerprint(probe.fingerprint)}${summary}\n`,
+          );
+        }
+        const ok = await promptYesNo(
+          `Trust this certificate for ${target.host}:${target.port}? [y/N]: `,
+        );
+        if (!ok) {
+          process.stderr.write("Aborted: certificate not trusted.\n");
+          process.exit(1);
+        }
+        pinnedFingerprint = probe.fingerprint;
+      }
+    }
+    // probe.kind === "trusted" → CA-signed; no pin needed.
+  }
+
   // Defaults to this machine's hostname, same as the human login path
   // (resolveRemoteTarget) — so the peer's own `auth list` shows which
   // daemon a token belongs to instead of an anonymous entry.
@@ -54,7 +122,14 @@ export async function runRemoteAdd(
 
   const res = await daemonFetch("/v1/remotes", {
     method: "POST",
-    body: { name, host: target.host, port: target.port, password, label },
+    body: {
+      name,
+      host: target.host,
+      port: target.port,
+      password,
+      label,
+      ...(pinnedFingerprint ? { pinnedFingerprint } : {}),
+    },
   });
   if (res.status === 201) {
     const body = res.body as PeerSummary;

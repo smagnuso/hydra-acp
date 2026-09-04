@@ -7,6 +7,7 @@ import {
   loginToPeer,
   logoutFromPeer,
 } from "../../core/peer-login.js";
+import { clearPin, setPin } from "../../core/tls-trust.js";
 import type { PeerHealthTracker } from "../peer-health.js";
 
 const AddBody = z.object({
@@ -16,6 +17,13 @@ const AddBody = z.object({
   password: z.string().min(1),
   label: z.string().min(1).max(256).optional(),
   ttlSec: z.number().int().positive().optional(),
+  // Set by `hydra remote add` after its own TOFU probe/prompt when the
+  // peer presents a cert that doesn't validate against the system
+  // trust store — see core/remote-target.ts's defaultTlsHandshake for
+  // the human-login flow this mirrors. Trusted as given: the CLI is
+  // the one with a terminal to actually show the fingerprint to a
+  // human, this route just records the decision that was already made.
+  pinnedFingerprint: z.string().min(1).optional(),
 });
 
 export interface RemoteRoutesDeps {
@@ -44,6 +52,14 @@ export function registerRemoteRoutes(
       });
     }
     const port = body.port ?? DEFAULT_DAEMON_PORT;
+
+    // Pin BEFORE logging in, not after: the login fetch itself needs
+    // the pinning dispatcher to already trust this fingerprint for a
+    // self-signed peer, or it fails cert validation before ever
+    // reaching loginToPeer.
+    if (body.pinnedFingerprint) {
+      setPin(body.host, port, body.pinnedFingerprint);
+    }
 
     let issued: { token: string; expiresAt: string };
     try {
@@ -74,6 +90,9 @@ export function registerRemoteRoutes(
       expiresAt: issued.expiresAt,
       addedAt,
       ...(body.label !== undefined ? { label: body.label } : {}),
+      ...(body.pinnedFingerprint !== undefined
+        ? { pinnedFingerprint: body.pinnedFingerprint, pinnedAt: addedAt }
+        : {}),
     };
     await deps.store.set(record);
     // We just logged in successfully — seed the health snapshot rather
@@ -86,6 +105,7 @@ export function registerRemoteRoutes(
       expiresAt: record.expiresAt,
       label: record.label,
       addedAt: record.addedAt,
+      pinnedFingerprint: record.pinnedFingerprint,
       status: deps.health?.get(record.name)?.status ?? "unknown",
     });
   });
@@ -117,6 +137,16 @@ export function registerRemoteRoutes(
       });
       await deps.store.delete(name);
       deps.health?.forget(name);
+      // Only unpin if no other remote name still points at this same
+      // host:port (see peer-store.ts — two names sharing a host:port
+      // is supported) — otherwise this would yank trust out from
+      // under an entry that's still using it.
+      const stillPinned = deps.store
+        .list()
+        .some((r) => r.host === existing.host && r.port === existing.port);
+      if (!stillPinned) {
+        clearPin(existing.host, existing.port);
+      }
       return reply.code(204).send();
     },
   );

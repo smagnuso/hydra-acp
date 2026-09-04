@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { startDaemon, type DaemonHandle } from "../server.js";
 import type { HydraConfig } from "../../core/config.js";
 import { setPassword } from "../../core/password.js";
+import { _resetForTests, getPin } from "../../core/tls-trust.js";
 
 const A_TOKEN = "hydra_token_" + "a".repeat(52);
 const B_TOKEN = "hydra_token_" + "b".repeat(52);
@@ -102,6 +103,7 @@ describe("remote routes", () => {
   let bPort: number;
 
   beforeEach(async () => {
+    _resetForTests();
     await setPassword(PEER_PASSWORD);
     b = await startDaemon(testConfig(), B_TOKEN);
     bPort = port(b);
@@ -114,6 +116,7 @@ describe("remote routes", () => {
     await b?.shutdown().catch(() => undefined);
     a = null;
     b = null;
+    _resetForTests();
   });
 
   it("POST /v1/remotes logs into the peer and stores a summary (no token)", async () => {
@@ -285,5 +288,85 @@ describe("remote routes", () => {
       headers: { Authorization: `Bearer ${A_TOKEN}` },
     });
     expect(del.status).toBe(404);
+  });
+
+  it("POST /v1/remotes with pinnedFingerprint sets the pin and persists it", async () => {
+    const res = await fetch(`${aUrl}/v1/remotes`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${A_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "b",
+        host: "127.0.0.1",
+        port: bPort,
+        password: PEER_PASSWORD,
+        pinnedFingerprint: "abc123",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { pinnedFingerprint?: string };
+    expect(body.pinnedFingerprint).toBe("abc123");
+    expect(getPin("127.0.0.1", bPort)).toBe("abc123");
+
+    const list = await fetch(`${aUrl}/v1/remotes`, {
+      headers: { Authorization: `Bearer ${A_TOKEN}` },
+    });
+    const listBody = (await list.json()) as {
+      remotes: Array<{ pinnedFingerprint?: string }>;
+    };
+    expect(listBody.remotes[0]?.pinnedFingerprint).toBe("abc123");
+  });
+
+  it("DELETE /v1/remotes/:name clears the pin when no other remote shares its host:port", async () => {
+    await fetch(`${aUrl}/v1/remotes`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${A_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "b",
+        host: "127.0.0.1",
+        port: bPort,
+        password: PEER_PASSWORD,
+        pinnedFingerprint: "abc123",
+      }),
+    });
+    expect(getPin("127.0.0.1", bPort)).toBe("abc123");
+
+    await fetch(`${aUrl}/v1/remotes/b`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${A_TOKEN}` },
+    });
+    expect(getPin("127.0.0.1", bPort)).toBeUndefined();
+  });
+
+  it("DELETE /v1/remotes/:name leaves the pin alone when another remote still shares its host:port", async () => {
+    for (const name of ["b1", "b2"]) {
+      await fetch(`${aUrl}/v1/remotes`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${A_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name,
+          host: "127.0.0.1",
+          port: bPort,
+          password: PEER_PASSWORD,
+          pinnedFingerprint: "abc123",
+        }),
+      });
+    }
+    expect(getPin("127.0.0.1", bPort)).toBe("abc123");
+
+    await fetch(`${aUrl}/v1/remotes/b1`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${A_TOKEN}` },
+    });
+    // b2 still points at the same host:port — the pin must survive.
+    expect(getPin("127.0.0.1", bPort)).toBe("abc123");
   });
 });

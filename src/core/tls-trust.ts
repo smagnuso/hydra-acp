@@ -28,6 +28,7 @@ import {
   setGlobalDispatcher,
 } from "undici";
 import { hostKey, type RemotesStore } from "./remotes-store.js";
+import type { PeerStore } from "./peer-store.js";
 
 // In-memory pin map. Keyed by "host:port" to match RemotesStore. The
 // fingerprint is the sha256 of the leaf certificate's DER, lowercase
@@ -55,6 +56,22 @@ export function loadPinsFromStore(store: RemotesStore): void {
   for (const e of store.list()) {
     if (e.entry.pinnedFingerprint) {
       setPin(e.host, e.port, e.entry.pinnedFingerprint);
+    }
+  }
+}
+
+// Same idea as loadPinsFromStore, for the daemon's federation
+// registry instead of a human's remotes.json. Additive rather than
+// clearing first — unlike the CLI (one store per process), a daemon
+// process could in principle have both a RemotesStore and a PeerStore
+// loaded, and this must not stomp pins the other already set. Called
+// once at daemon startup (server.ts) so a peer pinned via `hydra
+// remote add` keeps working across a daemon restart without
+// re-prompting.
+export function loadPinsFromPeerStore(store: PeerStore): void {
+  for (const summary of store.list()) {
+    if (summary.pinnedFingerprint) {
+      setPin(summary.host, summary.port, summary.pinnedFingerprint);
     }
   }
 }
