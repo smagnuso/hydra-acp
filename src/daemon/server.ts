@@ -52,6 +52,9 @@ import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerRemoteRoutes } from "./routes/remotes.js";
+import { registerSessionForwardHook } from "./routes/session-forward.js";
+import { PeerStore } from "../core/peer-store.js";
 import { registerProcessTokenRoutes } from "./routes/process-tokens.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 import { McpTokenRegistry } from "./mcp/token-registry.js";
@@ -149,6 +152,7 @@ export async function startDaemon(
   });
 
   const sessionTokenStore = await SessionTokenStore.load();
+  const peerStore = await PeerStore.load();
   const authRateLimiter = new AuthRateLimiter();
   const processRegistry = new ProcessTokenRegistry();
   const staticTokenValidator = new StaticTokenValidator(serviceToken);
@@ -305,11 +309,18 @@ export async function startDaemon(
     port: config.daemon.port,
     compaction: config.compaction,
   };
-  registerSessionRoutes(app, manager, sessionRouteDefaults, {
-    extensionMcp,
-    mcpTokenRegistry,
-    getDaemonOrigin,
-  });
+  registerSessionRoutes(
+    app,
+    manager,
+    sessionRouteDefaults,
+    {
+      extensionMcp,
+      mcpTokenRegistry,
+      getDaemonOrigin,
+    },
+    peerStore,
+  );
+  registerSessionForwardHook(app, { store: peerStore });
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
   registerTransformerRoutes(app, transformers);
@@ -332,6 +343,7 @@ export async function startDaemon(
     rateLimiter: authRateLimiter,
     staticTokenValidator,
   });
+  registerRemoteRoutes(app, { store: peerStore });
   registerProcessTokenRoutes(app, { processRegistry });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerRecallMcpRoutes(app, mcpTokenRegistry);

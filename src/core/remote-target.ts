@@ -467,7 +467,7 @@ async function promptYesNo(prompt: string): Promise<boolean> {
   });
 }
 
-function defaultLabel(): string {
+export function defaultLabel(): string {
   // The daemon shows this in `hydra-acp auth list`. Use the host's
   // own short hostname so the daemon operator can tell which machine
   // issued the token.

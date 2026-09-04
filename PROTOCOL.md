@@ -14,6 +14,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
 - [REST API](#rest-api)
   - [Health](#health)
   - [Auth](#auth)
+  - [Remotes](#remotes)
   - [Config](#config)
   - [Sessions](#sessions)
   - [Attention](#attention)
@@ -182,6 +183,80 @@ Revoke a specific session token.
 - `204` — revoked.
 - `404` — token id unknown.
 
+### Remotes
+
+Federation: lets one daemon act as a client of another (`hydra remote add/list/remove`, mirroring `git remote add <name> <url>`). A remote entry is a session token *this* daemon holds for a *peer* daemon, obtained the same way a human obtains one (`POST /v1/auth/login` on the peer), just performed by the daemon itself instead of a CLI. This is a separate concept from the `remotes.json` credential cache the CLI/TUI keep for their own `hydra session attach hydra://host/...` logins — that file is per-human-machine; this registry is per-daemon and is what session forwarding (`name:sessionId` addressing, see [Sessions](#sessions)) routes through.
+
+Each remote is keyed by a **name** the caller chooses (`PEER_NAME_PATTERN` in `core/peer-store.ts`: starts with an alphanumeric, then alphanumerics/`.`/`_`/`-`, ≤64 chars — no colons or slashes). The name, not the peer's host/port, is what appears in federated session ids and in any address a client sees; the raw network location stays internal to this registry. Unlike `git remote add`, re-running `POST /v1/remotes` under a name that already exists **refreshes** the stored token instead of erroring — that's the documented way to renew a credential nearing `expiresAt`.
+
+#### `POST /v1/remotes`
+
+Log into a peer daemon and store the resulting session token under `name`. The password is used once for this exchange and is never persisted; only the peer's token and its expiry are kept. Never returns the token itself.
+
+**Request body**
+
+```jsonc
+{
+  "name":     "foo",           // local alias; see PEER_NAME_PATTERN above
+  "host":     "foo.example.com",
+  "port":     55514,          // optional, defaults to the daemon's default port
+  "password": "<peer's master password>",
+  "label":    "<optional human label, ≤256 chars — shown in the PEER's own `auth list`>",
+  "ttlSec":   31536000        // optional; otherwise the peer's login default
+}
+```
+
+**Response — `201 Created`**
+
+```jsonc
+{
+  "name":      "foo",
+  "host":      "foo.example.com",
+  "port":      55514,
+  "label":     "<optional>",
+  "expiresAt": "2027-06-04T19:00:00.000Z",
+  "addedAt":   "2026-09-04T19:00:00.000Z"
+}
+```
+
+**Errors**
+
+- `400` — invalid request body (including a `name` that doesn't match `PEER_NAME_PATTERN`).
+- `401` — wrong password for the peer.
+- `429` — the peer rate-limited the login attempt; back off.
+- `502` — the peer was unreachable, has no password configured, or returned a malformed response.
+
+#### `GET /v1/remotes`
+
+List configured peers. Metadata only — the token is never returned. A peer past its `expiresAt` is still listed (staleness is surfaced to the operator, not hidden); re-run `POST /v1/remotes` under the same name to refresh it.
+
+**Response — `200 OK`**
+
+```jsonc
+{
+  "remotes": [
+    {
+      "name":      "foo",
+      "host":      "foo.example.com",
+      "port":      55514,
+      "label":     "<optional>",
+      "expiresAt": "<ISO-8601>",
+      "addedAt":   "<ISO-8601>"
+    },
+    …
+  ]
+}
+```
+
+#### `DELETE /v1/remotes/:name`
+
+Un-federate a peer: best-effort revokes this daemon's token on the peer (`POST /v1/auth/logout`, failures ignored so an already-unreachable peer doesn't block cleanup) and forgets the local record.
+
+**Response**
+
+- `204` — removed.
+- `404` — no remote with that name.
+
 ### Config
 
 #### `GET /v1/config`
@@ -202,6 +277,14 @@ Read-only snapshot of the daemon's effective config. Mutations go through `~/.hy
 ```
 
 ### Sessions
+
+**Federated session ids.** A `sessionId` of the form `name:localId` (see `formatForeignSessionId` in `core/foreign-session-id.ts`) names a session owned by the federated peer registered under `name` (see [Remotes](#remotes)) rather than this daemon. Any route below shaped `/v1/sessions/:id...` transparently forwards to that peer using this daemon's own stored peer credential when given such an id — the caller never needs its own credential for the peer, and never sees the peer's raw host/port. Unrecognized/local-looking ids (no colon) are handled locally as always. An entry merged in from a peer (see `GET /v1/sessions` below) also carries `"remote": "<name>"`. This is deliberately a different field from `importedFromMachine` (set on a cold bundle-imported record — see `POST /v1/sessions/import`): `remote` marks a *live* session that stays live on the peer, `importedFromMachine` marks a static copy sitting locally; a client that folds both into one "which host" picker/dropdown still needs to branch on which field is set before deciding what clicking the entry should do.
+
+- `404` if this daemon has no remote registered under that name.
+- `502` if the peer is federated but unreachable or errors.
+- `501` for `?follow=1` on `/v1/sessions/:id/history` or `/v1/sessions/:id/events` — long-lived streaming isn't forwarded yet; attach directly to `hydra://<peer's host>[:port]/<localId>` instead (the *real* host/port, resolved server-side — the alias only works through forwarding).
+
+`GET /v1/sessions` additionally merges in every federated peer's own list (each entry's `sessionId` rewritten to the `host:localId` form above) whenever the call has no `cwd` filter and isn't an incremental (`since=`) poll — both of those are inherently local-machine-scoped and skip the merge. An unreachable peer is silently omitted from the merge rather than failing the whole listing (there's no peer-liveness tracking yet).
 
 #### `GET /v1/sessions`
 

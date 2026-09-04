@@ -78,6 +78,13 @@ export const paths = {
   // `hydra session attach hydra://<host>/...`. JSON object keyed by
   // "<host>:<port>" → { token, expiresAt, label? }. Mode 0600.
   remotes: () => path.join(hydraHome(), "remotes.json"),
+  // Daemon-owned registry of federated peer daemons. JSON object keyed
+  // by "<host>:<port>" → { token, expiresAt, label?, addedAt }. Mode
+  // 0600. Distinct from remotes.json: that file is a per-human-machine
+  // cache of credentials a *client* uses to attach to other daemons;
+  // this one is credentials this *daemon* uses to act as a client of
+  // its peers (see `hydra remote add`).
+  peers: () => path.join(hydraHome(), "peers.json"),
   pidFile: () => path.join(hydraHome(), "daemon.pid"),
   logFile: () => path.join(hydraHome(), "daemon.log"),
   currentLogFile: () => path.join(hydraHome(), "current.log"),

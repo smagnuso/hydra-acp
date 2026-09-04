@@ -85,6 +85,11 @@ import {
   runAuthPasswordSet,
   runAuthRevoke,
 } from "./cli/commands/auth.js";
+import {
+  runRemoteAdd,
+  runRemoteList,
+  runRemoteRemove,
+} from "./cli/commands/remotes.js";
 import { runShim } from "./shim/proxy.js";
 import { runCat } from "./cli/commands/cat.js";
 import {
@@ -922,6 +927,25 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "remote":
+    case "remotes": {
+      const sub = positional[1];
+      if (sub === "add") {
+        await runRemoteAdd(positional[2], positional[3], flags);
+        return;
+      }
+      if (sub === undefined || sub === "list") {
+        await runRemoteList();
+        return;
+      }
+      if (sub === "remove" || sub === "rm") {
+        await runRemoteRemove(positional[2]);
+        return;
+      }
+      process.stderr.write(`Unknown remote subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     case "config": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
@@ -1280,6 +1304,7 @@ const AGENT = ["agent", "agents"] as const;
 const REGISTRY = ["registry"] as const;
 const CONFIG = ["config"] as const;
 const AUTH = ["auth"] as const;
+const REMOTE = ["remote", "remotes"] as const;
 
 function printHelp(subcommand?: string): void {
   const lines: readonly HelpLine[] = [
@@ -1422,6 +1447,9 @@ function printHelp(subcommand?: string): void {
     [AUTH, "  hydra-acp auth password [--force]           Set the daemon's master password"],
     [AUTH, "  hydra-acp auth [list]                       List active session tokens"],
     [AUTH, "  hydra-acp auth revoke <id>                  Revoke a session token"],
+    [REMOTE, "  hydra-acp remote add <name> <host[:port]> [--label <text>]  Federate with a peer daemon under a local name (prompts for its password; matches `git remote add`)"],
+    [REMOTE, "  hydra-acp remote [list]                     List federated peer daemons"],
+    [REMOTE, "  hydra-acp remote remove <name>              Un-federate a peer daemon and revoke its token"],
     [TUI, "  hydra-acp tui [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>] [--prompt <text>]"],
     [TUI, "                                     --prompt seeds a new session's first turn (fires immediately with --new,"],
     [TUI, "                                     otherwise pre-fills the picker's composer). Not valid with --session."],

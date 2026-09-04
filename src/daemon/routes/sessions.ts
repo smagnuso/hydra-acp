@@ -35,6 +35,8 @@ import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
 } from "../extension-mcp-mint.js";
+import { listForeignSessions } from "./session-forward.js";
+import type { PeerStore } from "../../core/peer-store.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
 // GET /v1/sessions/events. Additive only — new kinds may be added
@@ -87,6 +89,10 @@ export function registerSessionRoutes(
   // (Slack `!session`, browser, etc.) need this or their agent's tool
   // registry comes up empty — no `set_plan`, no planner tools at all.
   extMcpDeps: ExtensionMcpMintDeps = {},
+  // Optional. When provided, GET /v1/sessions merges in every stored
+  // peer's own list (host-prefixed) alongside the local one. Absent
+  // in tests that don't care about federation.
+  peerStore?: PeerStore,
 ): void {
   app.get("/v1/sessions", async (request, reply) => {
     const query = request.query as
@@ -140,6 +146,21 @@ export function registerSessionRoutes(
       };
     }
     const listing = await manager.listing(filter);
+    // Peer merge only applies to a plain "give me everything" call:
+    // `cwd` is a local-filesystem filter that means nothing against a
+    // peer's own tree, and incremental listing above already
+    // returned before reaching here.
+    if (peerStore && !filter.cwd) {
+      const foreign = await listForeignSessions(peerStore, {
+        includeNonInteractive,
+        ...(status ? { status } : {}),
+      });
+      return {
+        sessions: [...listing.entries, ...foreign],
+        removed: [],
+        cursor: listing.cursor,
+      };
+    }
     return { sessions: listing.entries, removed: [], cursor: listing.cursor };
   });
 
