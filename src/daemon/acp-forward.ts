@@ -7,8 +7,8 @@
 // Unlike the REST forwarding hook (one request in, one response out),
 // a WS attach is a standing relationship: the peer keeps pushing
 // notifications for as long as we're attached, so this needs a
-// persistent connection per peer plus bookkeeping of which local
-// client is currently attached to which foreign session — not just a
+// persistent connection plus bookkeeping of which local client is
+// currently attached to which foreign session — not just a
 // forward-and-forget.
 //
 // The peer sees nothing unusual: this daemon just looks like one more
@@ -16,17 +16,22 @@
 // authenticated with the stored peer token. No protocol extension is
 // required on the peer's side.
 //
-// Deliberately single-target per foreign session for now. The peer's
-// own per-connection attach bookkeeping (see acp-ws.ts's
-// `state.attached`, keyed by sessionId) evicts a prior attach on the
-// same connection rather than layering a second one — so calling
-// session/attach twice on our one shared peer connection for the same
-// localId, to represent two local fan-out clients, would silently
-// stomp the first attach's registration rather than create two. Real
-// multi-client fan-out needs the daemon itself to buffer/replay
-// history to a late-joining second local client, which this pass
-// doesn't do. A second local attach to an already-forwarded session is
-// rejected with AlreadyAttached rather than doing that incorrectly.
+// One dedicated upstream connection per LOCAL attach, not one shared
+// connection per peer. That costs an extra WS connection per attacher
+// but buys real multi-client fan-out for free: the peer's own
+// per-connection attach bookkeeping (acp-ws.ts's `state.attached`,
+// keyed by sessionId) evicts a prior attach on the *same* connection
+// rather than layering a second one, so two local clients sharing one
+// upstream connection would silently stomp each other's registration.
+// Giving each local attacher its own connection instead makes our
+// daemon look, from the peer's perspective, like N genuinely
+// independent clients attaching the same session — exactly the shape
+// the peer's existing multi-client support (history replay per
+// attach, connectedClients accounting, and — crucially —
+// Session.handlePermissionRequest's broadcast-with-abstention race)
+// is already built to handle correctly. We don't have to re-implement
+// any of that; we just relay each dedicated connection's traffic to
+// the one local target it belongs to.
 
 import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
@@ -50,15 +55,10 @@ export interface ForwardTarget {
   clientId: string;
 }
 
-interface ForeignSessionState {
+interface Attachment {
+  peerConnection: JsonRpcConnection;
   localId: string;
   target: ForwardTarget;
-}
-
-interface PeerLink {
-  connection: JsonRpcConnection;
-  // Keyed by the peer's own (unwrapped) session id.
-  sessions: Map<string, ForeignSessionState>;
 }
 
 // Injectable so tests can wire a fake peer without a real socket.
@@ -125,7 +125,14 @@ export function wrapStreamForForwarding(
 }
 
 export class ForeignSessionRegistry {
-  private peers = new Map<string, PeerLink>();
+  // One entry per local attach — keyed by (clientId, foreignId) so the
+  // same local connection attaching two different foreign sessions (or
+  // two different local connections attaching the *same* foreign
+  // session) each get their own independent dedicated upstream
+  // connection. See attachKey: a space separates the two halves
+  // since neither can contain one (clientId is minted internally;
+  // a foreignId's own separator is a colon).
+  private attachments = new Map<string, Attachment>();
 
   constructor(
     private readonly store: PeerStore,
@@ -144,205 +151,183 @@ export class ForeignSessionRegistry {
     target: ForwardTarget,
   ): Promise<JsonRpcMessage | undefined> {
     const isRequest = "id" in msg;
+    const id = isRequest ? (msg as JsonRpcRequest).id : undefined;
     const foreign = parseForeignSessionId(foreignId);
     if (!foreign) {
       return isRequest
-        ? errorResponse(
-            (msg as JsonRpcRequest).id,
-            JsonRpcErrorCodes.SessionNotFound,
-            `not a federated session id: ${foreignId}`,
-          )
+        ? errorResponse(id!, JsonRpcErrorCodes.SessionNotFound, `not a federated session id: ${foreignId}`)
         : undefined;
     }
-    const record = this.store.get(foreign.name);
-    if (!record) {
-      return isRequest
-        ? errorResponse(
-            (msg as JsonRpcRequest).id,
-            JsonRpcErrorCodes.SessionNotFound,
-            `No remote named "${foreign.name}". Run \`hydra remote add\` first.`,
-          )
-        : undefined;
-    }
-    const link = await this.getOrDialPeer(foreign.name, record);
-    if (!link) {
-      return isRequest
-        ? errorResponse(
-            (msg as JsonRpcRequest).id,
-            JsonRpcErrorCodes.InternalError,
-            `Could not reach remote "${foreign.name}".`,
-          )
-        : undefined;
-    }
+    const key = attachKey(target.clientId, foreignId);
     const upstreamParams = {
       ...(msg.params as Record<string, unknown> | undefined),
       sessionId: foreign.localId,
     };
 
     if (msg.method === "session/attach") {
-      if (link.sessions.has(foreign.localId)) {
+      const record = this.store.get(foreign.name);
+      if (!record) {
         return isRequest
           ? errorResponse(
-              (msg as JsonRpcRequest).id,
-              JsonRpcErrorCodes.AlreadyAttached,
-              `"${foreignId}" is already attached through this daemon (forwarded sessions don't yet support more than one local client).`,
+              id!,
+              JsonRpcErrorCodes.SessionNotFound,
+              `No remote named "${foreign.name}". Run \`hydra remote add\` first.`,
             )
           : undefined;
       }
+      // Re-attaching the same (client, foreignId) pair replaces the
+      // old upstream connection — mirrors evictPriorAttachment's
+      // "same connection re-attaching the same session" behavior for
+      // local sessions.
+      const stale = this.attachments.get(key);
+      if (stale) {
+        this.attachments.delete(key);
+        void stale.peerConnection.close().catch(() => undefined);
+      }
+      let peerConnection: JsonRpcConnection;
       try {
-        const result = await link.connection.request<Record<string, unknown>>(
+        peerConnection = await this.dial(record);
+      } catch (err) {
+        return isRequest
+          ? errorResponse(
+              id!,
+              JsonRpcErrorCodes.InternalError,
+              `Could not reach remote "${foreign.name}": ${(err as Error).message}`,
+            )
+          : undefined;
+      }
+      let result: Record<string, unknown>;
+      try {
+        result = await peerConnection.request<Record<string, unknown>>(
           "session/attach",
           upstreamParams,
         );
-        link.sessions.set(foreign.localId, { localId: foreign.localId, target });
-        const rewrapped =
-          result && typeof result.sessionId === "string"
-            ? { ...result, sessionId: foreignId }
-            : result;
-        return isRequest
-          ? { jsonrpc: "2.0", id: (msg as JsonRpcRequest).id, result: rewrapped }
-          : undefined;
       } catch (err) {
-        return isRequest
-          ? errorFromCatch((msg as JsonRpcRequest).id, err)
-          : undefined;
+        void peerConnection.close().catch(() => undefined);
+        return isRequest ? errorFromCatch(id!, err) : undefined;
       }
+      const attachment: Attachment = {
+        peerConnection,
+        localId: foreign.localId,
+        target,
+      };
+      this.wireAttachment(foreign.name, attachment);
+      this.attachments.set(key, attachment);
+      const rewrapped =
+        result && typeof result.sessionId === "string"
+          ? { ...result, sessionId: foreignId }
+          : result;
+      return isRequest ? { jsonrpc: "2.0", id: id!, result: rewrapped } : undefined;
+    }
+
+    const attachment = this.attachments.get(key);
+    if (!attachment) {
+      return isRequest
+        ? errorResponse(
+            id!,
+            JsonRpcErrorCodes.SessionNotFound,
+            `"${foreignId}" is not attached through this daemon.`,
+          )
+        : undefined;
     }
 
     if (msg.method === "session/detach") {
       let result: unknown;
       let caught: unknown;
       try {
-        result = await link.connection.request("session/detach", upstreamParams);
+        result = await attachment.peerConnection.request("session/detach", upstreamParams);
       } catch (err) {
         caught = err;
       }
-      link.sessions.delete(foreign.localId);
+      this.attachments.delete(key);
+      void attachment.peerConnection.close().catch(() => undefined);
       if (caught) {
-        return isRequest ? errorFromCatch((msg as JsonRpcRequest).id, caught) : undefined;
+        return isRequest ? errorFromCatch(id!, caught) : undefined;
       }
-      return isRequest
-        ? { jsonrpc: "2.0", id: (msg as JsonRpcRequest).id, result: result ?? {} }
-        : undefined;
+      return isRequest ? { jsonrpc: "2.0", id: id!, result: result ?? {} } : undefined;
     }
 
     // session/prompt, session/cancel — the only other forwardable
     // methods (see isForwardableMethod).
-    const state = link.sessions.get(foreign.localId);
-    if (!state) {
-      return isRequest
-        ? errorResponse(
-            (msg as JsonRpcRequest).id,
-            JsonRpcErrorCodes.SessionNotFound,
-            `"${foreignId}" is not attached through this daemon.`,
-          )
-        : undefined;
-    }
     if (isRequest) {
       try {
-        const result = await link.connection.request(msg.method, upstreamParams);
-        return { jsonrpc: "2.0", id: (msg as JsonRpcRequest).id, result };
+        const result = await attachment.peerConnection.request(msg.method, upstreamParams);
+        return { jsonrpc: "2.0", id: id!, result };
       } catch (err) {
-        return errorFromCatch((msg as JsonRpcRequest).id, err);
+        return errorFromCatch(id!, err);
       }
     }
-    await link.connection.notify(msg.method, upstreamParams).catch(() => undefined);
+    await attachment.peerConnection.notify(msg.method, upstreamParams).catch(() => undefined);
     return undefined;
   }
 
-  // Local WS connection closed — detach it from every foreign session
-  // it was the target of and forget the upstream attach. Best-effort:
-  // failures reaching the peer don't block local cleanup.
+  // Local WS connection closed — detach and close every dedicated
+  // upstream connection it owned. Best-effort: failures reaching the
+  // peer don't block local cleanup.
   detachClient(clientId: string): void {
-    for (const link of this.peers.values()) {
-      for (const [localId, state] of [...link.sessions.entries()]) {
-        if (state.target.clientId !== clientId) {
-          continue;
-        }
-        link.sessions.delete(localId);
-        void link.connection
-          .request("session/detach", { sessionId: localId })
-          .catch(() => undefined);
+    for (const [key, attachment] of [...this.attachments.entries()]) {
+      if (attachment.target.clientId !== clientId) {
+        continue;
       }
+      this.attachments.delete(key);
+      void attachment.peerConnection
+        .request("session/detach", { sessionId: attachment.localId })
+        .catch(() => undefined);
+      void attachment.peerConnection.close().catch(() => undefined);
     }
   }
 
-  private async getOrDialPeer(
-    name: string,
-    record: PeerRecord,
-  ): Promise<PeerLink | undefined> {
-    const existing = this.peers.get(name);
-    if (existing) {
-      return existing;
-    }
-    let connection: JsonRpcConnection;
-    try {
-      connection = await this.dial(record);
-    } catch {
-      return undefined;
-    }
-    const link: PeerLink = { connection, sessions: new Map() };
-    connection.onNotification("session/update", (params) => {
+  // Wires a freshly-attached dedicated connection's peer-originated
+  // traffic straight to the one local target it belongs to — no
+  // lookup needed, the target is fixed for this connection's lifetime.
+  private wireAttachment(name: string, attachment: Attachment): void {
+    const { peerConnection, localId, target } = attachment;
+    const foreignId = formatForeignSessionId({ name, localId });
+    const forget = (): void => {
+      this.attachments.delete(attachKey(target.clientId, foreignId));
+    };
+    peerConnection.onNotification("session/update", (params) => {
       const p = params as { sessionId?: string } | null;
-      if (!p || typeof p.sessionId !== "string") {
+      if (!p || p.sessionId !== localId) {
         return;
       }
-      const state = link.sessions.get(p.sessionId);
-      if (!state) {
-        return;
-      }
-      void state.target.connection
-        .notify("session/update", {
-          ...p,
-          sessionId: formatForeignSessionId({ name, localId: p.sessionId }),
-        })
+      void target.connection
+        .notify("session/update", { ...p, sessionId: foreignId })
         .catch(() => undefined);
     });
-    connection.onNotification("hydra-acp/session/closed", (params) => {
+    peerConnection.onNotification("hydra-acp/session/closed", (params) => {
       const p = params as { sessionId?: string } | null;
-      if (!p || typeof p.sessionId !== "string") {
+      if (!p || p.sessionId !== localId) {
         return;
       }
-      const state = link.sessions.get(p.sessionId);
-      link.sessions.delete(p.sessionId);
-      if (!state) {
-        return;
-      }
-      void state.target.connection
-        .notify("hydra-acp/session/closed", {
-          sessionId: formatForeignSessionId({ name, localId: p.sessionId }),
-        })
+      forget();
+      void target.connection
+        .notify("hydra-acp/session/closed", { sessionId: foreignId })
         .catch(() => undefined);
     });
-    connection.onRequest("hydra-acp/session/request_permission", async (params) => {
+    peerConnection.onRequest("hydra-acp/session/request_permission", async (params) => {
       const p = params as { sessionId?: string } | null;
-      if (!p || typeof p.sessionId !== "string") {
-        throw { code: JsonRpcErrorCodes.InvalidParams, message: "sessionId is required" };
+      if (!p || p.sessionId !== localId) {
+        // Shouldn't happen — this connection only ever attaches one
+        // session — but abstain rather than misroute if it somehow does.
+        throw { code: JsonRpcErrorCodes.MethodNotFound, message: "unexpected sessionId" };
       }
-      const state = link.sessions.get(p.sessionId);
-      if (!state) {
-        // No local client attached right now — abstain, same as any
-        // other client that can't answer. See Session.handlePermissionRequest.
-        throw { code: JsonRpcErrorCodes.MethodNotFound, message: "no local attachment" };
-      }
-      return state.target.connection.request("hydra-acp/session/request_permission", {
+      return target.connection.request("hydra-acp/session/request_permission", {
         ...p,
-        sessionId: formatForeignSessionId({ name, localId: p.sessionId }),
+        sessionId: foreignId,
       });
     });
-    connection.onClose(() => {
-      for (const state of link.sessions.values()) {
-        void state.target.connection
-          .notify("hydra-acp/session/closed", {
-            sessionId: formatForeignSessionId({ name, localId: state.localId }),
-          })
-          .catch(() => undefined);
-      }
-      this.peers.delete(name);
+    peerConnection.onClose(() => {
+      forget();
+      void target.connection
+        .notify("hydra-acp/session/closed", { sessionId: foreignId })
+        .catch(() => undefined);
     });
-    this.peers.set(name, link);
-    return link;
   }
+}
+
+function attachKey(clientId: string, foreignId: string): string {
+  return `${clientId} ${foreignId}`;
 }
 
 function errorResponse(
