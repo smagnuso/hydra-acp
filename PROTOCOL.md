@@ -216,7 +216,8 @@ Log into a peer daemon and store the resulting session token under `name`. The p
   "port":      55514,
   "label":     "<optional>",
   "expiresAt": "2027-06-04T19:00:00.000Z",
-  "addedAt":   "2026-09-04T19:00:00.000Z"
+  "addedAt":   "2026-09-04T19:00:00.000Z",
+  "status":    "ok"    // seeded "ok" immediately — see GET /v1/remotes
 }
 ```
 
@@ -231,18 +232,29 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 
 List configured peers. Metadata only — the token is never returned. A peer past its `expiresAt` is still listed (staleness is surfaced to the operator, not hidden); re-run `POST /v1/remotes` under the same name to refresh it.
 
+`status` reflects the daemon's own periodic liveness poll (`daemon/peer-health.ts`, every 30s, hitting the peer's `GET /v1/auth/verify` with the stored token) — not a real-time check made by this call. One of:
+
+- `"ok"` — last poll reached the peer and the token verified.
+- `"unauthorized"` — the peer answered but rejected the token (expired/revoked — re-run `POST /v1/remotes`).
+- `"unreachable"` — the peer didn't answer (network error, timeout, or down).
+- `"unknown"` — no poll has completed yet (daemon just started, or the peer was just added and hasn't been independently re-verified — though `POST /v1/remotes` seeds `"ok"` immediately in that case, see above).
+
+This is visibility only: forwarding a REST or ACP call to a peer always makes its own live attempt regardless of the cached `status`, which is why a stale `"ok"` can't cause a forward to wrongly succeed or fail — worst case, the status column lags reality by up to one poll interval.
+
 **Response — `200 OK`**
 
 ```jsonc
 {
   "remotes": [
     {
-      "name":      "foo",
-      "host":      "foo.example.com",
-      "port":      55514,
-      "label":     "<optional>",
-      "expiresAt": "<ISO-8601>",
-      "addedAt":   "<ISO-8601>"
+      "name":          "foo",
+      "host":          "foo.example.com",
+      "port":          55514,
+      "label":         "<optional>",
+      "expiresAt":     "<ISO-8601>",
+      "addedAt":       "<ISO-8601>",
+      "status":        "ok",              // "ok" | "unauthorized" | "unreachable" | "unknown"
+      "lastCheckedAt": "<ISO-8601>"        // absent if status is "unknown"
     },
     …
   ]

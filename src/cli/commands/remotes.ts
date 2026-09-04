@@ -11,6 +11,8 @@ interface PeerSummary {
   expiresAt: string;
   label?: string;
   addedAt: string;
+  status?: "ok" | "unauthorized" | "unreachable" | "unknown";
+  lastCheckedAt?: string;
 }
 
 // Accepts a bare "host", "host:port", or a full "hydra://host[:port]/"
@@ -76,6 +78,7 @@ export async function runRemoteList(): Promise<void> {
   const header = {
     name: "NAME",
     host: "HOST",
+    status: "STATUS",
     label: "LABEL",
     addedAt: "ADDED",
     expiresAt: "EXPIRES",
@@ -83,6 +86,7 @@ export async function runRemoteList(): Promise<void> {
   const rows = body.remotes.map((r) => ({
     name: r.name,
     host: `${r.host}:${r.port}`,
+    status: r.status ?? "unknown",
     label: r.label ?? "-",
     addedAt: r.addedAt,
     expiresAt: r.expiresAt,
@@ -90,6 +94,7 @@ export async function runRemoteList(): Promise<void> {
   const widths = {
     name: maxLen(header.name, rows.map((r) => r.name)),
     host: maxLen(header.host, rows.map((r) => r.host)),
+    status: maxLen(header.status, rows.map((r) => r.status)),
     label: maxLen(header.label, rows.map((r) => r.label)),
     addedAt: maxLen(header.addedAt, rows.map((r) => r.addedAt)),
   };
@@ -97,6 +102,7 @@ export async function runRemoteList(): Promise<void> {
     [
       r.name.padEnd(widths.name),
       r.host.padEnd(widths.host),
+      r.status.padEnd(widths.status),
       r.label.padEnd(widths.label),
       r.addedAt.padEnd(widths.addedAt),
       r.expiresAt,

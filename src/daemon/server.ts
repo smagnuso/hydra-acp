@@ -55,6 +55,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerRemoteRoutes } from "./routes/remotes.js";
 import { registerSessionForwardHook } from "./routes/session-forward.js";
 import { ForeignSessionRegistry } from "./acp-forward.js";
+import { PeerHealthTracker } from "./peer-health.js";
 import { PeerStore } from "../core/peer-store.js";
 import { registerProcessTokenRoutes } from "./routes/process-tokens.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
@@ -155,6 +156,8 @@ export async function startDaemon(
   const sessionTokenStore = await SessionTokenStore.load();
   const peerStore = await PeerStore.load();
   const foreignSessions = new ForeignSessionRegistry(peerStore);
+  const peerHealth = new PeerHealthTracker(peerStore);
+  peerHealth.start();
   const authRateLimiter = new AuthRateLimiter();
   const processRegistry = new ProcessTokenRegistry();
   const staticTokenValidator = new StaticTokenValidator(serviceToken);
@@ -345,7 +348,7 @@ export async function startDaemon(
     rateLimiter: authRateLimiter,
     staticTokenValidator,
   });
-  registerRemoteRoutes(app, { store: peerStore });
+  registerRemoteRoutes(app, { store: peerStore, health: peerHealth });
   registerProcessTokenRoutes(app, { processRegistry });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerRecallMcpRoutes(app, mcpTokenRegistry);
@@ -539,6 +542,7 @@ export async function startDaemon(
   });
 
   const shutdown = async (): Promise<void> => {
+    peerHealth.stop();
     stopConfigReload();
     if (stopSessionGc) {
       stopSessionGc();

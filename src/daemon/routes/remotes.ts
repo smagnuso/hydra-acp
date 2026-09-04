@@ -7,6 +7,7 @@ import {
   loginToPeer,
   logoutFromPeer,
 } from "../../core/peer-login.js";
+import type { PeerHealthTracker } from "../peer-health.js";
 
 const AddBody = z.object({
   name: z.string().min(1).max(64).regex(PEER_NAME_PATTERN),
@@ -19,6 +20,10 @@ const AddBody = z.object({
 
 export interface RemoteRoutesDeps {
   store: PeerStore;
+  // Optional so existing callers (and tests) that don't care about
+  // liveness don't have to construct one. Absent status just doesn't
+  // appear on list entries.
+  health?: PeerHealthTracker;
 }
 
 // `hydra remote add/list/remove`. See core/peer-store.ts for why this
@@ -71,6 +76,9 @@ export function registerRemoteRoutes(
       ...(body.label !== undefined ? { label: body.label } : {}),
     };
     await deps.store.set(record);
+    // We just logged in successfully — seed the health snapshot rather
+    // than leaving it "unknown" until the next poll tick.
+    deps.health?.markOk(record.name);
     return reply.code(201).send({
       name: record.name,
       host: record.host,
@@ -78,11 +86,20 @@ export function registerRemoteRoutes(
       expiresAt: record.expiresAt,
       label: record.label,
       addedAt: record.addedAt,
+      status: deps.health?.get(record.name)?.status ?? "unknown",
     });
   });
 
   app.get("/v1/remotes", async (_request, reply) => {
-    return reply.code(200).send({ remotes: deps.store.list() });
+    const remotes = deps.store.list().map((summary) => {
+      const snapshot = deps.health?.get(summary.name);
+      return {
+        ...summary,
+        status: snapshot?.status ?? "unknown",
+        ...(snapshot?.checkedAt ? { lastCheckedAt: snapshot.checkedAt } : {}),
+      };
+    });
+    return reply.code(200).send({ remotes });
   });
 
   app.delete<{ Params: { name: string } }>(
@@ -99,6 +116,7 @@ export function registerRemoteRoutes(
         token: existing.token,
       });
       await deps.store.delete(name);
+      deps.health?.forget(name);
       return reply.code(204).send();
     },
   );

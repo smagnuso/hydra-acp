@@ -141,6 +141,9 @@ describe("remote routes", () => {
     expect(body.label).toBe("b-label");
     expect(typeof body.expiresAt).toBe("string");
     expect(typeof body.addedAt).toBe("string");
+    // Seeded immediately from the login that just succeeded, not left
+    // "unknown" until the next health-poll tick.
+    expect(body.status).toBe("ok");
   });
 
   it("POST /v1/remotes rejects an invalid name", async () => {
@@ -205,6 +208,7 @@ describe("remote routes", () => {
     expect(summary).not.toHaveProperty("token");
     expect(summary?.name).toBe("b");
     expect(summary?.port).toBe(bPort);
+    expect(summary?.status).toBe("ok");
   });
 
   it("POST /v1/remotes with the wrong password returns 401 and stores nothing", async () => {
