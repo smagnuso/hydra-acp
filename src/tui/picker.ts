@@ -2205,6 +2205,11 @@ export async function pickSession(
   // unlike `suspend`, this isn't gated on signal support.
   let withdrawTerminalForChild: (() => void) | null = null;
   let reclaimTerminalFromChild: (() => void) | null = null;
+  // True from withdrawTerminalForChild until reclaimTerminalFromChild —
+  // guards autoRefreshTick, which otherwise keeps firing on its own timer
+  // while a foreground child (the ^X $EDITOR round trip) owns the tty and
+  // paints a stray picker row into it.
+  let terminalWithdrawnForChild = false;
   // Forward-declared layer dispatcher. Assigned once the focus stack is
   // constructed; rawStdinHandler uses it to route synthetic key events
   // for terminal-kit's blind spots (Ctrl-_, Alt-_) straight to the
@@ -2625,7 +2630,8 @@ export async function pickSession(
         focusStack.length > 1 ||
         mode !== "normal" ||
         searchActive ||
-        syncInFlight
+        syncInFlight ||
+        terminalWithdrawnForChild
       ) {
         return;
       }
@@ -4753,11 +4759,22 @@ export async function pickSession(
     // installGrab() turns bracketed paste back on and the first repaint
     // goes out.
     withdrawTerminalForChild = (): void => {
+      terminalWithdrawnForChild = true;
+      // A refresh already in flight would otherwise land its repaint
+      // after the tty has been handed to the child — same corruption
+      // the terminalWithdrawnForChild guard on autoRefreshTick prevents
+      // for refreshes that haven't started yet.
+      if (autoRefreshAbort) {
+        autoRefreshAbort.abort();
+        autoRefreshAbort = null;
+        autoRefreshInFlight = false;
+      }
       uninstallGrab();
       term.fullscreen(false);
       writeControl(`${AUTOWRAP_ON}${SHOW_CURSOR}`);
     };
     reclaimTerminalFromChild = (): void => {
+      terminalWithdrawnForChild = false;
       term.fullscreen(true);
       resetPickerTerminalModes();
       term.hideCursor();
