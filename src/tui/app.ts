@@ -60,6 +60,7 @@ export {
   CLARIFIER_QUESTION_DISMISS_METHOD,
 };
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
+import { parseForeignSessionId } from "../core/foreign-session-id.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
@@ -4520,6 +4521,9 @@ async function runSession(
     sessionId: resolvedSessionId === null
       ? null
       : stripHydraSessionPrefix(resolvedSessionId),
+    host: resolvedSessionId === null
+      ? null
+      : (parseForeignSessionId(resolvedSessionId)?.name ?? null),
     agent: sessionbarAgent,
     workspace:
       initialWorkspace === undefined

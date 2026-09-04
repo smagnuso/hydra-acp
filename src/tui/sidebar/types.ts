@@ -146,6 +146,12 @@ export interface SidebarSnapshot {
   // table, so measuring it locally would report someone else's process.
   resources: SidebarProcUsage[];
   sessionId: string | null;
+  // The federated peer name when this session lives on a remote daemon
+  // (see `hydra remote add`), null for a local one. sessionId above is
+  // already stripped of the "name:" prefix by the time it reaches here,
+  // so without this the info gadget would give no indication the session
+  // isn't local at all.
+  host: string | null;
   agent: string | null;
   model: string | null;
   mode: string | null;
@@ -358,6 +364,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     liveSessions: [],
     resources: [],
     sessionId: null,
+    host: null,
     agent: null,
     model: null,
     mode: null,

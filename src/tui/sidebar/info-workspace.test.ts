@@ -59,6 +59,31 @@ describe("info gadget — workspace", () => {
   });
 });
 
+describe("info gadget — host", () => {
+  it("says nothing about a host for a local session", () => {
+    const out = text(snap({ sessionId: "abc", agent: "claude-code" }));
+    expect(out).not.toMatch(/host/);
+  });
+
+  it("shows the peer name for a federated session", () => {
+    const out = text(snap({ sessionId: "abc", host: "mrclean" }));
+    expect(out).toContain("host");
+    expect(out).toContain("mrclean");
+  });
+
+  it("changes its version key when the host changes", () => {
+    const a = snap({ sessionId: "abc" });
+    const b = snap({ sessionId: "abc", host: "mrclean" });
+    expect(sessionInfoGadget.versionKey(a, ctx)).not.toBe(sessionInfoGadget.versionKey(b, ctx));
+  });
+
+  it("copies the host rather than opening a chooser", () => {
+    const lines = sessionInfoGadget.render(snap({ sessionId: "abc", host: "mrclean" }), ctx);
+    const hostLine = lines.find((l) => l.prefix?.includes("host"));
+    expect(hostLine?.doubleAction).toEqual({ action: "copy", value: "mrclean" });
+  });
+});
+
 describe("info gadget — the workspace row is openable", () => {
   it("opens the directory rather than copying a bare label", () => {
     // A directory you can see is a directory you will try to open. Routing
