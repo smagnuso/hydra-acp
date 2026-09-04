@@ -35,7 +35,7 @@ import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
 } from "../extension-mcp-mint.js";
-import { listForeignSessions } from "./session-forward.js";
+import { createOnRemote, listForeignSessions } from "./session-forward.js";
 import type { PeerStore } from "../../core/peer-store.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
@@ -226,7 +226,25 @@ export function registerSessionRoutes(
       // under _meta: the _meta nesting exists because ACP's session/new
       // forbids non-spec top-level fields, and this is not that method.
       workspace?: WorkspaceRequest;
+      // Create directly on a federated peer instead of locally — see
+      // createOnRemote for why none of this handler's local enrichment
+      // (extension MCP, directory config, …) applies in that case.
+      remote?: string;
     };
+    if (body.remote) {
+      if (!peerStore) {
+        return reply.code(404).send({
+          error: `No remote named "${body.remote}". Run \`hydra remote add\` first.`,
+        });
+      }
+      const result = await createOnRemote(peerStore, body.remote, {
+        cwd: body.cwd,
+        agentId: body.agentId,
+        mcpServers: body.mcpServers,
+        workspace: body.workspace,
+      });
+      return reply.code(result.status).send(result.body);
+    }
     const cwd = expandHome(body.cwd ?? defaults.cwd);
     // A `.hydra-acp.json` between `cwd` and $HOME can set `defaultAgent` for
     // this tree. Directory config used to be resolved client-side only, so

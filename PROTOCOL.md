@@ -445,7 +445,8 @@ Create a new session. Equivalent to ACP `session/new` over REST. An omitted `age
   "cwd":        "/work",                     // optional
   "agentId":    "claude-acp",                // optional
   "mcpServers": [ /* MCP descriptors */ ],   // optional
-  "workspace":  { "label": "feature-x" }     // optional; see Workspace isolation
+  "workspace":  { "label": "feature-x" },    // optional; see Workspace isolation
+  "remote":     "foo"                        // optional; see below
 }
 ```
 
@@ -454,6 +455,12 @@ request documented under [Workspace isolation](#workspace-isolation). It sits at
 the top level here because the `_meta` nesting exists to satisfy ACP's rule that
 `session/new` carries no non-spec top-level fields, and this is not that method.
 The `201` response echoes the resulting `workspace` object when one was created.
+
+**`remote`**: create the session directly on the federated peer registered under that name (see [Remotes](#remotes)) instead of locally. `cwd`/`agentId`/`mcpServers`/`workspace` forward as given — an omitted `cwd`/`agentId` resolves against the *peer's* defaults and directory config, not this daemon's, since the session will live entirely there. This daemon's own extension-MCP minting is skipped for a remote create (those descriptors point at loopback URLs on this box, unreachable from wherever the peer's agent actually runs); the peer performs its own enrichment for its own registered extensions. The response's `sessionId` comes back already in `name:localId` form (see [Sessions](#sessions)), so it can be attached/prompted/etc. exactly like any other federated id with no extra step.
+
+- `404` — no remote registered under that name.
+- `502` — the remote is registered but unreachable.
+- Any other status/body — passed through verbatim from the peer's own `POST /v1/sessions` response (e.g. a `500` if the peer failed to spawn the agent).
 
 **Response — `201 Created`**
 

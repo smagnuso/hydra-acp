@@ -1,4 +1,9 @@
-// Federation forwarding for every /v1/sessions/:id... REST route.
+// Federation forwarding for every /v1/sessions/:id... REST route, plus
+// two standalone helpers used by the sessions.ts route file directly:
+// listForeignSessions (the GET /v1/sessions list-merge) and
+// createOnRemote (POST /v1/sessions with a `remote` field, creating a
+// brand new session directly on a peer instead of locally — there's
+// no id to key a preHandler hook off yet at create time).
 //
 // Registered once as a global preHandler hook rather than per-route:
 // the hook is a no-op unless the matched route's *pattern* starts with
@@ -172,6 +177,82 @@ export async function listForeignSessions(
     }),
   );
   return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+}
+
+export interface CreateOnRemoteResult {
+  status: number;
+  body: unknown;
+}
+
+// POST /v1/sessions with a `remote` field forwards here instead of
+// calling manager.create() locally. Deliberately forwards only the
+// protocol-level fields (cwd, agentId, mcpServers, workspace) — the
+// local handler's enrichment (extension-MCP token minting, directory-
+// config resolution, transformer chain) is all specific to *this*
+// daemon's filesystem and registered extensions, and would be wrong
+// (or point at unreachable loopback URLs) if applied to a session
+// that's actually going to live on the peer. The peer runs that same
+// enrichment itself, against its own filesystem and its own
+// extensions, when it handles the forwarded plain create.
+export async function createOnRemote(
+  store: PeerStore,
+  remoteName: string,
+  body: {
+    cwd?: string;
+    agentId?: string;
+    mcpServers?: unknown[];
+    workspace?: unknown;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<CreateOnRemoteResult> {
+  const record = store.get(remoteName);
+  if (!record) {
+    return {
+      status: 404,
+      body: { error: `No remote named "${remoteName}". Run \`hydra remote add\` first.` },
+    };
+  }
+  const scheme = isLoopbackHost(record.host) ? "http" : "https";
+  const url = `${scheme}://${record.host}:${record.port}/v1/sessions`;
+  let upstream: Response;
+  try {
+    upstream = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${record.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    return {
+      status: 502,
+      body: {
+        error: `Could not reach remote "${remoteName}" (${record.host}:${record.port}): ${(err as Error).message}`,
+      },
+    };
+  }
+  const text = await upstream.text();
+  let parsed: unknown = null;
+  try {
+    parsed = text.length > 0 ? JSON.parse(text) : null;
+  } catch {
+    parsed = null;
+  }
+  if (!upstream.ok) {
+    return { status: upstream.status, body: parsed };
+  }
+  const result = parsed as { sessionId?: unknown } | null;
+  if (result && typeof result.sessionId === "string") {
+    return {
+      status: upstream.status,
+      body: {
+        ...result,
+        sessionId: formatForeignSessionId({ name: remoteName, localId: result.sessionId }),
+      },
+    };
+  }
+  return { status: upstream.status, body: parsed };
 }
 
 function isTruthy(v: unknown): boolean {

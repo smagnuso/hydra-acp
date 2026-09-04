@@ -198,4 +198,42 @@ describe("session forwarding", () => {
     const body = (await res.json()) as { sessions: Array<{ sessionId: string }> };
     expect(body.sessions.every((s) => !s.sessionId.startsWith("peerb:"))).toBe(true);
   });
+
+  it("POST /v1/sessions with remote set creates on the peer and returns the foreign id", async () => {
+    const res = await fetch(`${a.baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/on-peer", agentId: "claude-code", remote: "peerb" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { sessionId: string; cwd: string };
+    expect(body.sessionId).toMatch(/^peerb:/);
+    expect(body.cwd).toBe("/on-peer");
+
+    // It's a real session on B, not A — A never created anything.
+    const [, localId] = body.sessionId.split(":");
+    expect(b.manager.get(localId!)).toBeDefined();
+    expect(a.manager.get(body.sessionId)).toBeUndefined();
+  });
+
+  it("POST /v1/sessions with an unknown remote 404s instead of creating locally", async () => {
+    const res = await fetch(`${a.baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/w", agentId: "claude-code", remote: "nope" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /v1/sessions with no remote still creates locally as before", async () => {
+    const res = await fetch(`${a.baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/w", agentId: "claude-code" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { sessionId: string };
+    expect(body.sessionId).not.toContain(":");
+    expect(a.manager.get(body.sessionId)).toBeDefined();
+  });
 });
