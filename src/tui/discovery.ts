@@ -90,6 +90,14 @@ export interface DiscoveredSession {
   // look like they appeared out of nowhere.
   importedFromMachine?: string;
   importedFromUpstreamSessionId?: string;
+  // Set when this entry was merged in from a federated peer's own
+  // session list (see daemon/routes/session-forward.ts), naming the
+  // `hydra remote` this daemon knows it by. Deliberately distinct from
+  // importedFromMachine: that one marks a cold bundle-imported mirror
+  // and drives the "attach to pull this in locally" prompt; this one
+  // marks a session that's live and stays live on the peer, so
+  // attaching to it forwards through rather than importing anything.
+  remote?: string;
   // Set when this session was created by hydra-acp/session/fork.
   // forkedFromSessionId points to the local source session; forkedFromMessageId
   // is the messageId of the turn_complete the slice ended at.
@@ -226,6 +234,7 @@ export async function listSessionsPage(
         title: s.title,
         importedFromMachine: s.importedFromMachine,
         importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
+        remote: s.remote,
         forkedFromSessionId: s.forkedFromSessionId,
         forkedFromMessageId: s.forkedFromMessageId,
         busy: s.busy,

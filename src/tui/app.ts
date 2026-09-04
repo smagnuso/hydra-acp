@@ -6104,6 +6104,7 @@ async function runSession(
             target.isLocal &&
             chosen &&
             !chosen.importedFromMachine &&
+            !chosen.remote &&
             choice.readonly !== true
           ) {
             const v = await validateLocalCwd(chosen.cwd);
@@ -10798,7 +10799,13 @@ async function resolveSession(
     // an empty upstreamSessionId so the daemon reseeds a fresh agent
     // session there and replays history. Only for local, non-imported,
     // non-readonly picks — remote daemons own a cwd we can't stat here.
-    if (target.isLocal && chosen && !chosen.importedFromMachine && !opts.readonly) {
+    if (
+      target.isLocal &&
+      chosen &&
+      !chosen.importedFromMachine &&
+      !chosen.remote &&
+      !opts.readonly
+    ) {
       const v = await validateLocalCwd(chosen.cwd);
       if (!v.ok) {
         finalizePicker();

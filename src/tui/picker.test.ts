@@ -369,6 +369,24 @@ describe("nextHostFilter", () => {
     expect(nextHostFilter("machine-a", items, locals)).toBe("__all");
     expect(nextHostFilter("__all", items, locals)).toBe("__local");
   });
+
+  it("includes federated remotes in the cycle alongside imported hosts", () => {
+    const items = [
+      { importedFromMachine: "machine-a" },
+      { remote: "peerb" },
+    ];
+    expect(nextHostFilter("__local", items)).toBe("machine-a");
+    expect(nextHostFilter("machine-a", items)).toBe("peerb");
+    expect(nextHostFilter("peerb", items)).toBe("__all");
+  });
+
+  it("a federated remote with no attach never drops out of the cycle", () => {
+    // Unlike an imported mirror (which drops out once bound locally via
+    // upstreamSessionId), a federated session always stays live on the
+    // peer — there's no local-graduation escape hatch for it.
+    const items = [{ remote: "peerb", upstreamSessionId: "u_on_peer" }];
+    expect(nextHostFilter("__local", items)).toBe("peerb");
+  });
 });
 
 describe("filterByHost", () => {
@@ -448,6 +466,26 @@ describe("filterByHost", () => {
     const selfImport = session({ importedFromMachine: "blackbox" });
     const locals = new Set(["blackbox"]);
     expect(filterByHost([selfImport], "blackbox", locals)).toEqual([]);
+  });
+
+  it("__local: excludes federated sessions even when upstreamSessionId is set", () => {
+    // upstreamSessionId here is the peer's own agent-binding field,
+    // passed through unchanged by the merge — it must not be read as
+    // "already bound locally" the way it is for an import.
+    const s = session({ remote: "peerb", upstreamSessionId: "u_on_peer" });
+    expect(filterByHost([s], "__local")).toEqual([]);
+  });
+
+  it("<name>: includes only the federated sessions for that remote", () => {
+    const onPeerB = session({ remote: "peerb" });
+    const onPeerC = session({ remote: "peerc" });
+    const imported = session({ importedFromMachine: "broom" });
+    expect(filterByHost([onPeerB, onPeerC, imported], "peerb")).toEqual([onPeerB]);
+  });
+
+  it("__all: includes federated sessions too", () => {
+    const items = [session({}), session({ remote: "peerb" })];
+    expect(filterByHost(items, "__all")).toEqual(items);
   });
 });
 
