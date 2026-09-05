@@ -7,6 +7,15 @@
 
 import { isLoopbackHost } from "./remote-url.js";
 
+// Peer credentials are daemon-to-daemon and expected to sit unattended for
+// months — nothing here prompts for a fresh login the way an expired human
+// browser/CLI session does. Falling back to the human default (30 days,
+// see session-tokens.ts's DEFAULT_TTL_SEC) meant federation would silently
+// 401 until someone noticed and re-ran `hydra remote add` by hand. A year
+// gives real headroom; `hydra remote remove` (which revokes the token on
+// the peer) is the actual revocation lever here, not expiry.
+const PEER_DEFAULT_TTL_SEC = 60 * 60 * 24 * 365;
+
 export class PeerLoginError extends Error {
   // Suggested HTTP status for the route handler to report back to
   // *our own* caller (the `hydra remote add` CLI), distinct from
@@ -53,7 +62,7 @@ export async function loginToPeer(
       body: JSON.stringify({
         password: opts.password,
         label: opts.label,
-        ttlSec: opts.ttlSec,
+        ttlSec: opts.ttlSec ?? PEER_DEFAULT_TTL_SEC,
       }),
     });
   } catch (err) {
