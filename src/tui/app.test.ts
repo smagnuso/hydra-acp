@@ -265,6 +265,31 @@ describe("_buildToolsLines", () => {
     expect(result.rowOwners[1]).toBe("tc-aaa");
   });
 
+  // Guardian review (codex-acp) fires once per guarded action, so left in
+  // this would double the "N tools" count and interleave a review row
+  // after every real one. See core/tool-noise.ts.
+  it("excludes Guardian review calls from the count and the rendered rows", () => {
+    const order = ["guardian_assessment:xyz", "g2", "tc-real"];
+    const states = new Map([
+      ["guardian_assessment:xyz", makeState("guardian_assessment:xyz")],
+      ["g2", makeState("g2", { latestTitle: "Guardian Review" })],
+      ["tc-real", makeState("tc-real")],
+    ]);
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+    });
+    // Header + 1 real tool line = 2 lines; the header must also read
+    // "1 tool", not "3 tools".
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[0]!.body).toContain("1 tool");
+    expect(result.rowOwners).toEqual([null, "tc-real"]);
+  });
+
   it("caps a collapsed tool row's wrapped height, but not an expanded one", () => {
     const order = ["tc-aaa"];
     const states = new Map([["tc-aaa", makeState("tc-aaa")]]);

@@ -13,6 +13,7 @@
 // HistoryEntry has params required. Same field, different optionality
 // — accepting both lets callers pass either without casts.
 import { locationPaths } from "./tool-edit.js";
+import { isGuardianReviewToolCall } from "./tool-noise.js";
 
 type HistoryEntryLike = {
   method?: unknown;
@@ -129,6 +130,10 @@ export function countTurns(history: HistoryEntryLike[]): number {
 // A tool_call_update without a preceding tool_call (orphan status
 // update, e.g. a completed-only emission) is ignored: we don't
 // fabricate an unnamed tool call from a status notification.
+//
+// Guardian review calls (see tool-noise.ts) are skipped entirely: they're
+// scaffolding around the action they review, not an action of their own,
+// and counting them would roughly double every histogram.
 function collectToolCalls(
   history: HistoryEntryLike[],
 ): Map<string, AggregatedCall> {
@@ -147,10 +152,16 @@ function collectToolCalls(
       continue;
     }
     if (kind === "tool_call") {
-      const id =
+      const rawId =
         typeof update.toolCallId === "string" && update.toolCallId.length > 0
           ? update.toolCallId
-          : `__synth_${synthIdx++}`;
+          : undefined;
+      const title =
+        typeof update.title === "string" ? update.title : undefined;
+      if (isGuardianReviewToolCall(rawId, title)) {
+        continue;
+      }
+      const id = rawId ?? `__synth_${synthIdx++}`;
       let rec = calls.get(id);
       if (rec === undefined) {
         rec = { toolName: readToolName(update), paths: new Set<string>() };

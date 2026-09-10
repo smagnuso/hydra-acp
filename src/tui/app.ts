@@ -63,6 +63,7 @@ import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.j
 import { parseForeignSessionId } from "../core/foreign-session-id.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
+import { isGuardianReviewToolCall } from "../core/tool-noise.js";
 import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
@@ -1620,7 +1621,13 @@ export function _buildToolsLines(args: {
   perToolExpanded?: Set<string>;
   collapsedLimit?: number;
 }): { lines: FormattedLine[]; rowOwners: (string | null)[] } {
-  const { order, states, startedAt, endedAt, stopReason: stop, perToolExpanded, collapsedLimit = 20 } = args;
+  const { order: rawOrder, states, startedAt, endedAt, stopReason: stop, perToolExpanded, collapsedLimit = 20 } = args;
+  // Guardian review (codex-acp) fires once per guarded action as its own
+  // paired tool call, so left in this would double the "N tools" count and
+  // interleave a review row after every real one. See core/tool-noise.ts.
+  const order = rawOrder.filter(
+    (id) => !isGuardianReviewToolCall(id, states.get(id)?.latestTitle),
+  );
   const total = order.length;
   // limit <= 0 disables the cap — render every row regardless of
   // expanded so the ^O toggle is a no-op in unlimited mode.

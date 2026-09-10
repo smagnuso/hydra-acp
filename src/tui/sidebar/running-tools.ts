@@ -22,6 +22,7 @@
 
 import { resolve as resolvePath } from "node:path";
 import { firstLocationPath } from "../../core/tool-edit.js";
+import { isGuardianReviewToolCall } from "../../core/tool-noise.js";
 import type { ToolLineState } from "../format.js";
 import type { SidebarRunningTool } from "./types.js";
 
@@ -254,6 +255,12 @@ export function runningTools(
   for (const id of order) {
     const state = states.get(id);
     if (state === undefined) {
+      continue;
+    }
+    // Guardian review calls fire once per guarded action, so they'd
+    // otherwise crowd the capped list with review scaffolding instead of
+    // the actions actually in flight.
+    if (isGuardianReviewToolCall(id, state.latestTitle)) {
       continue;
     }
     const entry = runningToolFromState(state, cwd);

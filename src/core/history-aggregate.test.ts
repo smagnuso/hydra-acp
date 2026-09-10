@@ -183,6 +183,30 @@ describe("extractToolHistogram", () => {
       ]),
     ).toEqual([{ name: "(unnamed)", count: 1 }]);
   });
+
+  // Guardian review fires once per guarded action (codex-acp), so left
+  // uncounted it roughly doubles every histogram with review scaffolding
+  // rather than actions. See core/tool-noise.ts.
+  it("excludes Guardian review calls, by title or by toolCallId prefix", () => {
+    expect(
+      extractToolHistogram([
+        toolCall("Guardian Review"),
+        toolCall("Guardian Review"),
+        {
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "guardian_assessment:abc-123",
+              rawInput: {},
+            },
+          },
+          recordedAt: 1,
+        },
+        toolCall("Bash"),
+      ]),
+    ).toEqual([{ name: "Bash", count: 1 }]);
+  });
 });
 
 describe("extractToolsUsed", () => {

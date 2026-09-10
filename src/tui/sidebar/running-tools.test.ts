@@ -296,6 +296,22 @@ describe("runningTools", () => {
   it("ignores ids with no recorded state", () => {
     expect(runningTools(["ghost"], new Map(), null)).toEqual([]);
   });
+
+  // Guardian review fires once per guarded action (codex-acp) and would
+  // otherwise crowd the capped list with review scaffolding instead of
+  // the actions actually in flight. See core/tool-noise.ts.
+  it("excludes Guardian review calls, by title or by toolCallId prefix", () => {
+    const states = new Map([
+      ["guardian_assessment:xyz", state({ detail: "exec /bin/zsh -lc ls" })],
+      ["g2", state({ latestTitle: "Guardian Review", detail: "" })],
+      ["real", state({ detail: "one" })],
+    ]);
+    expect(
+      runningTools(["guardian_assessment:xyz", "g2", "real"], states, null).map(
+        (t) => t.detail,
+      ),
+    ).toEqual(["one"]);
+  });
 });
 
 describe("toolsGadget", () => {
