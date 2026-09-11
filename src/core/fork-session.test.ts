@@ -454,6 +454,89 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
   });
 });
 
+describe("forkSession — opts.prompt delivery (/hydra fork <prompt>)", () => {
+  it("resurrects the fork and delivers the prompt via a headless attach", async () => {
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: process.cwd() });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_resurrected" });
+        return m.agent;
+      },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_prompt_delivery",
+        history: [turnComplete("m_one")],
+      }),
+    );
+
+    const fork = await manager.forkSession(source.sessionId, {
+      mode: "verbatim",
+      prompt: "fix the login bug",
+    });
+
+    // Delivery is fire-and-forget — forkSession returns before the
+    // headless resurrect even starts, so wait for the spawner to fire.
+    for (let i = 0; i < 200 && mocks.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    // The resurrect also fires an automatic seedFromFork prompt ahead of
+    // ours (queued through the same Session, so it runs first) — poll for
+    // ours specifically rather than assuming it's the first/only call.
+    const findOurs = (): unknown[] | undefined =>
+      (requestMock.mock.calls as unknown[][]).find((c) => {
+        if (c[0] !== "session/prompt") return false;
+        const params = c[1] as { prompt?: Array<{ text?: string }> } | undefined;
+        return params?.prompt?.[0]?.text === "fix the login bug";
+      });
+    let ours = findOurs();
+    for (let i = 0; i < 200 && !ours; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+      ours = findOurs();
+    }
+    expect(ours).toBeDefined();
+    // sessionId in the call is the mock agent's own upstream id
+    // ("u_resurrected"), not the hydra sessionId — this is the request
+    // sent to the agent process, not the daemon's public API.
+    const [, params] = ours as [string, { sessionId: string }];
+    expect(params.sessionId).toBe("u_resurrected");
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+  });
+
+  it("does not resurrect or spawn an agent when no prompt is given", async () => {
+    const spawner = vi.fn(() => {
+      throw new Error("spawner should not be called from forkSession");
+    });
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      spawner,
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_no_prompt_delivery",
+        history: [turnComplete("m_one")],
+      }),
+    );
+
+    await manager.forkSession(source.sessionId, { mode: "verbatim" });
+
+    // No delivery is scheduled at all when prompt is omitted, so there is
+    // nothing async to wait on — a short tick is enough to prove the
+    // spawner was never reached.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(spawner).not.toHaveBeenCalled();
+  });
+});
+
 describe("seedFromFork — unit test", () => {
   beforeEach(() => {
     mockGenerate.mockReset();

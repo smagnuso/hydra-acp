@@ -64,9 +64,9 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
   {
     verb: "fork",
     name: "hydra fork",
-    argsHint: "[verbatim]",
+    argsHint: "[--verbatim] [prompt]",
     description:
-      "Fork this conversation into a new session (default: synthesis mode with a synopsis brief; pass 'verbatim' to slice at the last completed turn instead)",
+      "Fork this conversation into a new session (default: synthesis mode with a synopsis brief; pass --verbatim to slice at the last completed turn instead). A prompt is sent to the fork as its first turn once it's ready.",
   },
   {
     verb: "config",

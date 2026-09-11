@@ -115,7 +115,13 @@ import {
 import { collapseUsage } from "./usage-collapse.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
-import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
+import {
+  JsonRpcErrorCodes,
+  ACP_PROTOCOL_VERSION,
+  type JsonRpcMessage,
+} from "../acp/types.js";
+import { JsonRpcConnection } from "../acp/connection.js";
+import type { MessageStream } from "../acp/framing.js";
 import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
 
@@ -141,6 +147,50 @@ const SYNOPSISLESS_SWAP_TAIL_FLOOR = 12;
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const generateRawSessionId = customAlphabet(HYDRA_ID_ALPHABET, 16);
+
+// A MessageStream with no real peer, for attaching a headless client to a
+// session in-process (see SessionManager.deliverHeadlessPrompt). send()
+// drops notifications on the floor; an outgoing *request* (only
+// session/request_permission reaches a plain attached client) is looped
+// back as a synthetic MethodNotFound instead of hanging forever waiting
+// on a reply nobody will ever send.
+function createHeadlessLoopbackStream(): MessageStream {
+  let onMessage: ((m: JsonRpcMessage) => void) | undefined;
+  let onClose: ((err?: Error) => void) | undefined;
+  let closed = false;
+  return {
+    send(message) {
+      if (closed) {
+        return Promise.resolve();
+      }
+      if ("method" in message && "id" in message) {
+        const reply: JsonRpcMessage = {
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: JsonRpcErrorCodes.MethodNotFound,
+            message: `no handler for ${message.method} (headless fork-prompt client)`,
+          },
+        };
+        queueMicrotask(() => onMessage?.(reply));
+      }
+      return Promise.resolve();
+    },
+    onMessage(handler) {
+      onMessage = handler;
+    },
+    onClose(handler) {
+      onClose = handler;
+    },
+    close() {
+      if (!closed) {
+        closed = true;
+        onClose?.();
+      }
+      return Promise.resolve();
+    },
+  };
+}
 
 export interface CreateSessionParams {
   cwd: string;
@@ -6369,6 +6419,14 @@ export class SessionManager {
       // agent's default. Also used as the synopsis model in synthesis mode
       // so the brief is generated in the same idiom the fork will consume.
       model?: string;
+      // Optional prompt to send to the fork as its first real turn.
+      // Delivered in the background (fire-and-forget, after the synopsis
+      // phase 2 below finishes when mode is "synthesis" — sending it
+      // sooner would race a fresh agent against a fork whose recall
+      // index isn't ready yet) via a headless attached client so the
+      // fork does not require an interactive attach first. See
+      // deliverHeadlessPrompt.
+      prompt?: string;
     } = {},
   ): Promise<{
     sessionId: string;
@@ -6596,59 +6654,71 @@ export class SessionManager {
     // Phase 2 (background, fire-and-forget): generate synopsis for the
     // new session so it has a concise context brief on attach.  This runs
     // detached — the HTTP/ACP response already returned above.
-    if (synthesized) {
-      void (async () => {
-        try {
-          // Note: TARGET agent generates the synopsis (not source) — it's
-          // consumed by the fork's agent, so we want it in the target's
-          // idiom + model.  TODO: plumb an AbortSignal so a disconnected
-          // HTTP client can cancel synopsis generation (currently orphans
-          // the ephemeral agent run).
-          // planSpawn deferred into phase 2 — it can do an npm install on
-          // first run for a given agent/version, which would otherwise
-          // block the phase-1 HTTP response (and the TUI picker behind it)
-          // for seconds.
-          const spawnPlan = await planSpawn(pendingSynthAgentDef!, [], {
-            npmRegistry: this.npmRegistry,
-          });
-          const synopsisResult = await generateSynopsis({
-            agentId: targetAgentId,
-            cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
-            plan: spawnPlan,
-            history: slicedHistory,
-            // sourceModel deliberately — synopsis is a one-shot prep step,
-            // not the review work. Using opts.model here would burn premium
-            // tokens (and possibly rate-limit) on history summarization the
-            // user didn't ask for. The target agent still consumes the
-            // synopsis in its own idiom (agentId is targetAgentId above);
-            // the model-tier choice is what stays with the source.
-            modelId: sourceModel,
-            sessionId: sourceSessionId,
-            logger: this.logger,
-            timeoutMs: SYNOPSIS_TIMEOUT_MS,
-          });
-
-          if (synopsisResult && synopsisResult.synopsis) {
-            await this.mutateRecord(newId, { synopsis: synopsisResult.synopsis }, ["forkSynthesisState"]);
-          } else {
-            this.logger?.warn(
-              `forkSession(${sourceSessionId}): generateSynopsis returned no synopsis — fork usable via recall`,
-            );
-            await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
-          }
-        } catch (err) {
-          this.logger?.warn(
-            `forkSession(${sourceSessionId}): generateSynopsis failed — fork usable via recall: ${(err as Error).message}`,
-          );
+    const synthesisDone: Promise<void> = synthesized
+      ? (async () => {
           try {
-            await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
-          } catch (mutateErr) {
+            // Note: TARGET agent generates the synopsis (not source) — it's
+            // consumed by the fork's agent, so we want it in the target's
+            // idiom + model.  TODO: plumb an AbortSignal so a disconnected
+            // HTTP client can cancel synopsis generation (currently orphans
+            // the ephemeral agent run).
+            // planSpawn deferred into phase 2 — it can do an npm install on
+            // first run for a given agent/version, which would otherwise
+            // block the phase-1 HTTP response (and the TUI picker behind it)
+            // for seconds.
+            const spawnPlan = await planSpawn(pendingSynthAgentDef!, [], {
+              npmRegistry: this.npmRegistry,
+            });
+            const synopsisResult = await generateSynopsis({
+              agentId: targetAgentId,
+              cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
+              plan: spawnPlan,
+              history: slicedHistory,
+              // sourceModel deliberately — synopsis is a one-shot prep step,
+              // not the review work. Using opts.model here would burn premium
+              // tokens (and possibly rate-limit) on history summarization the
+              // user didn't ask for. The target agent still consumes the
+              // synopsis in its own idiom (agentId is targetAgentId above);
+              // the model-tier choice is what stays with the source.
+              modelId: sourceModel,
+              sessionId: sourceSessionId,
+              logger: this.logger,
+              timeoutMs: SYNOPSIS_TIMEOUT_MS,
+            });
+
+            if (synopsisResult && synopsisResult.synopsis) {
+              await this.mutateRecord(newId, { synopsis: synopsisResult.synopsis }, ["forkSynthesisState"]);
+            } else {
+              this.logger?.warn(
+                `forkSession(${sourceSessionId}): generateSynopsis returned no synopsis — fork usable via recall`,
+              );
+              await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
+            }
+          } catch (err) {
             this.logger?.warn(
-              `forkSession(${sourceSessionId}): mutateRecord to clear forkSynthesisState failed: ${(mutateErr as Error).message}`,
+              `forkSession(${sourceSessionId}): generateSynopsis failed — fork usable via recall: ${(err as Error).message}`,
             );
+            try {
+              await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
+            } catch (mutateErr) {
+              this.logger?.warn(
+                `forkSession(${sourceSessionId}): mutateRecord to clear forkSynthesisState failed: ${(mutateErr as Error).message}`,
+              );
+            }
           }
-        }
-      })();
+        })()
+      : Promise.resolve();
+
+    if (opts.prompt !== undefined && opts.prompt.trim() !== "") {
+      const promptText = opts.prompt;
+      void synthesisDone
+        .catch(() => undefined)
+        .then(() => this.deliverHeadlessPrompt(newId, promptText))
+        .catch((err) => {
+          this.logger?.warn(
+            `forkSession(${sourceSessionId}): headless prompt delivery to ${newId} failed: ${(err as Error).message}`,
+          );
+        });
     }
 
     return {
@@ -6656,6 +6726,50 @@ export class SessionManager {
       forkedFromSessionId: sourceSessionId,
       forkedAt,
     };
+  }
+
+  // Deliver `promptText` to a freshly forked (cold) session as its first
+  // real turn, without requiring any real client to attach first. Used by
+  // "/hydra fork <prompt>" so the fork is immediately promptable from any
+  // ACP client, not just ones willing to open a second connection.
+  //
+  // The attached "client" is headless: its connection is backed by a
+  // loopback MessageStream with no real peer. Outbound notifications
+  // (session/update broadcasts) go nowhere, which is fine — nobody is
+  // watching a fork nobody has attached to yet, and history is still
+  // persisted normally. Outbound *requests* (session/request_permission
+  // is the only one a plain attached client ever receives) are looped
+  // back as a synthetic MethodNotFound, i.e. this client always abstains
+  // — matching the permission-race abstention contract in AGENTS.md —
+  // instead of hanging the turn forever waiting on a reply nobody sends.
+  private async deliverHeadlessPrompt(
+    sessionId: string,
+    promptText: string,
+  ): Promise<void> {
+    const fromDisk = await this.loadFromDisk(sessionId);
+    if (!fromDisk) {
+      this.logger?.warn(
+        `deliverHeadlessPrompt: ${sessionId} vanished before its prompt could be sent`,
+      );
+      return;
+    }
+    const session = this.sessions.get(sessionId) ?? (await this.resurrect(fromDisk));
+    const stream = createHeadlessLoopbackStream();
+    const client = {
+      clientId: `fork-prompt-${generateRawSessionId().slice(0, 8)}`,
+      connection: new JsonRpcConnection(stream),
+      clientInfo: { name: "hydra-acp-fork", version: HYDRA_VERSION },
+    };
+    await session.attach(client, "none");
+    try {
+      await session.prompt(client.clientId, {
+        sessionId,
+        prompt: [{ type: "text", text: promptText }],
+      });
+    } finally {
+      session.detach(client.clientId);
+      void stream.close();
+    }
   }
 
   // Write the imported (or forked) bundle's history.jsonl, prompt-history

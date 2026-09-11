@@ -3306,6 +3306,127 @@ describe("Session", () => {
       expect(content.text).toContain("compaction scheduling not configured");
     });
 
+    it("/hydra fork (no arg) calls forkHook with no mode or prompt", async () => {
+      const forkHook = vi.fn().mockResolvedValue({
+        sessionId: "hydra_session_new",
+        forkedFromSessionId: "hydra_session_FK",
+        forkedAt: "",
+      });
+      const session = new Session({
+        sessionId: "hydra_session_FK",
+        cwd: "/work",
+        agentId: "mock",
+        agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
+        upstreamSessionId: "u_FK",
+        historyStore: new HistoryStore(),
+        forkHook,
+      });
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra fork" }],
+      });
+
+      expect(forkHook).toHaveBeenCalledTimes(1);
+      const opts = forkHook.mock.calls[0]?.[0] as
+        | { mode?: string; prompt?: string }
+        | undefined;
+      expect(opts?.mode).toBeUndefined();
+      expect(opts?.prompt).toBeUndefined();
+    });
+
+    it("/hydra fork --verbatim calls forkHook with mode verbatim and no prompt", async () => {
+      const forkHook = vi.fn().mockResolvedValue({
+        sessionId: "hydra_session_new",
+        forkedFromSessionId: "hydra_session_FV",
+        forkedAt: "",
+      });
+      const session = new Session({
+        sessionId: "hydra_session_FV",
+        cwd: "/work",
+        agentId: "mock",
+        agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
+        upstreamSessionId: "u_FV",
+        historyStore: new HistoryStore(),
+        forkHook,
+      });
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra fork --verbatim" }],
+      });
+
+      const opts = forkHook.mock.calls[0]?.[0] as
+        | { mode?: string; prompt?: string }
+        | undefined;
+      expect(opts?.mode).toBe("verbatim");
+      expect(opts?.prompt).toBeUndefined();
+    });
+
+    it("/hydra fork <prompt> calls forkHook with the prompt and default (synthesis) mode", async () => {
+      const forkHook = vi.fn().mockResolvedValue({
+        sessionId: "hydra_session_new",
+        forkedFromSessionId: "hydra_session_FP",
+        forkedAt: "",
+      });
+      const session = new Session({
+        sessionId: "hydra_session_FP",
+        cwd: "/work",
+        agentId: "mock",
+        agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
+        upstreamSessionId: "u_FP",
+        historyStore: new HistoryStore(),
+        forkHook,
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra fork fix the login bug" }],
+      });
+
+      const opts = forkHook.mock.calls[0]?.[0] as
+        | { mode?: string; prompt?: string }
+        | undefined;
+      expect(opts?.mode).toBeUndefined();
+      expect(opts?.prompt).toBe("fix the login bug");
+
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
+      expect(content.text).toContain("sent the prompt");
+    });
+
+    it("/hydra fork --verbatim <prompt> calls forkHook with both mode and prompt", async () => {
+      const forkHook = vi.fn().mockResolvedValue({
+        sessionId: "hydra_session_new",
+        forkedFromSessionId: "hydra_session_FB",
+        forkedAt: "",
+      });
+      const session = new Session({
+        sessionId: "hydra_session_FB",
+        cwd: "/work",
+        agentId: "mock",
+        agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
+        upstreamSessionId: "u_FB",
+        historyStore: new HistoryStore(),
+        forkHook,
+      });
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra fork --verbatim fix the login bug" }],
+      });
+
+      const opts = forkHook.mock.calls[0]?.[0] as
+        | { mode?: string; prompt?: string }
+        | undefined;
+      expect(opts?.mode).toBe("verbatim");
+      expect(opts?.prompt).toBe("fix the login bug");
+    });
+
     it("forceCancel kills the agent and closes the session (keeping the record) so it can resurrect", async () => {
       const { session, mock } = makeSession("hydra_session_FC", "u_old");
       const { client } = makeClient();

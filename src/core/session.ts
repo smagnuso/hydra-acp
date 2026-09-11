@@ -452,6 +452,10 @@ export interface SessionInit {
   forkHook?: (opts?: {
     mode?: "verbatim" | "synthesis";
     forkAt?: string;
+    // Sent to the fork as its first real turn once it's ready (see
+    // SessionManager.deliverHeadlessPrompt) — fire-and-forget from this
+    // session's perspective, so runForkCommandInline doesn't wait on it.
+    prompt?: string;
   }) => Promise<{ sessionId: string; forkedFromSessionId: string; forkedAt: string }>;
 }
 
@@ -8266,10 +8270,12 @@ export class Session {
     return { stopReason: "end_turn" };
   }
 
-  // "/hydra fork [verbatim]" — fork the current conversation into a new
-  // session. Default mode is synthesis (full history + generated brief);
-  // pass "verbatim" to slice at the last completed turn instead. Runs
-  // out of the prompt queue so it doesn't fight in-flight turns.
+  // "/hydra fork [--verbatim] [prompt]" — fork the current conversation
+  // into a new session. Default mode is synthesis (full history +
+  // generated brief); pass "--verbatim" to slice at the last completed
+  // turn instead. Anything after the (optional) flag is sent to the fork
+  // as its first prompt once it's ready. Runs out of the prompt queue so
+  // it doesn't fight in-flight turns.
   private runForkCommand(arg?: string): Promise<unknown> {
     return this.enqueuePrompt("fork", () => this.runForkCommandInline(arg, undefined));
   }
@@ -8309,25 +8315,21 @@ export class Session {
       this.emitExtensionReply("Fork not configured for this session.");
       return { stopReason: "end_turn" };
     }
-    const trimmed = (arg ?? "").trim();
-    let mode: "verbatim" | "synthesis" | undefined;
-    if (trimmed === "verbatim") {
-      mode = "verbatim";
-    } else if (trimmed === "synthesis" || trimmed === "") {
-      mode = undefined;
-    } else {
-      this.emitExtensionReply(
-        `Unknown fork argument: \`${trimmed}\`. Use \`/hydra fork\` or \`/hydra fork verbatim\`.`,
-      );
-      return { stopReason: "end_turn" };
-    }
+    const raw = (arg ?? "").trim();
+    const verbatimMatch = raw.match(/^--verbatim(?:\s+([\s\S]*))?$/);
+    const mode: "verbatim" | undefined = verbatimMatch ? "verbatim" : undefined;
+    const promptText = (verbatimMatch ? (verbatimMatch[1] ?? "") : raw).trim();
     try {
       const forkOpts: {
         mode?: "verbatim" | "synthesis";
         forkAt?: string;
+        prompt?: string;
       } = {};
       if (mode) {
         forkOpts.mode = mode;
+      }
+      if (promptText !== "") {
+        forkOpts.prompt = promptText;
       }
       // Anchor the fork just before the /hydra fork trigger turn so the
       // in-flight command doesn't render as a phantom open turn in the
@@ -8345,7 +8347,9 @@ export class Session {
       );
       const shortId = r.sessionId.replace(/^hydra_session_/, "");
       this.emitExtensionReply(
-        `Forked to [\`${shortId}\`](hydra://sessions/${shortId}).`,
+        promptText !== ""
+          ? `Forked to [\`${shortId}\`](hydra://sessions/${shortId}) and sent the prompt.`
+          : `Forked to [\`${shortId}\`](hydra://sessions/${shortId}).`,
       );
     } catch (err) {
       this.emitExtensionReply(
