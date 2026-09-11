@@ -1487,6 +1487,11 @@ export class SessionManager {
       // or never seeded) should re-derive from the next prompt rather
       // than stay stuck.
       firstPromptSeeded: !!params.title,
+      // This agent process is freshly spawned for a session that already
+      // exists — same gate a live in-process respawn gets via wireAgent's
+      // { respawn: true }, needed here too since resurrect constructs a
+      // brand-new Session instance instead of reusing one.
+      upstreamRespawned: true,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,
@@ -1626,6 +1631,11 @@ export class SessionManager {
       agentConfigOptions: restoredConfigOptions ?? fresh.initialConfigOptions,
       summarizedThroughEntry: params.summarizedThroughEntry,
       firstPromptSeeded: !!params.title,
+      // Import-reseed mints a brand-new upstream via session/new and
+      // replays history into it as a takeover transcript — the freshest
+      // possible upstream, and the one most likely to guess its own title
+      // off that replay. See doResurrect's identical flag for why.
+      upstreamRespawned: true,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,

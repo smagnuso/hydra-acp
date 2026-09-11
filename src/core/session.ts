@@ -303,6 +303,15 @@ export interface SessionInit {
   // a prior life's prompt seed, /hydra title, or background synopsis) —
   // without this, the next prompt would clobber the persisted title.
   firstPromptSeeded?: boolean;
+  // Set by SessionManager when constructing a session on top of an agent
+  // process that is not this session's original upstream (cold resurrect
+  // via session/load, or import-reseed via session/new). Gates
+  // maybeApplyAgentSessionInfo the same way swapUpstream/respawnAgent do
+  // for in-process respawns: the freshly loaded/reseeded agent may emit
+  // its own session_info_update guess for the replayed transcript, and
+  // that guess must not clobber the title this session already has. See
+  // `_upstreamRespawned` for the in-process half of this gate.
+  upstreamRespawned?: boolean;
   // Fire-and-forget callback used by `/hydra title` (no arg) to ask the
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
@@ -893,13 +902,16 @@ export class Session {
   // grounds for giving up on the session entirely.
   private _titleSeedPending = true;
   // True once the upstream agent process has been replaced at least once
-  // (compaction, /hydra agent, workspace move, rollback, or crash reload).
+  // (compaction, /hydra agent, workspace move, rollback, or crash reload —
+  // the last one via SessionManager passing SessionInit.upstreamRespawned
+  // into a cold resurrect/reseed, since that constructs a brand-new Session
+  // instance rather than flipping this flag on a live one).
   // Gates maybeApplyAgentSessionInfo: a freshly spawned upstream treats
   // itself as a brand-new conversation and may emit its own title for the
-  // compaction seed it was just handed, but by that point this session
-  // already has a real title from its actual first turn — the fresh
-  // agent's guess must not clobber it. Only the session's original,
-  // never-respawned upstream gets to win the startup title race.
+  // compaction seed (or replayed transcript) it was just handed, but by
+  // that point this session already has a real title from its actual first
+  // turn — the fresh agent's guess must not clobber it. Only the session's
+  // original, never-respawned upstream gets to win the startup title race.
   private _upstreamRespawned = false;
   // Wall-clock when the active prompt started, undefined when idle.
   // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
@@ -1509,6 +1521,9 @@ export class Session {
       // keeping" (see the field's doc on SessionInit), which is the title
       // gate, not the had-a-prompt gate.
       this._titleSeedPending = false;
+    }
+    if (init.upstreamRespawned) {
+      this._upstreamRespawned = true;
     }
     this._interactive = init.interactive;
     this._priority = init.priority;

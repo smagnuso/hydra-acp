@@ -528,6 +528,44 @@ describe("SessionManager.resurrect", () => {
     await titledMgr.flushHistoryWrites();
   });
 
+  it("does not let the resurrected agent's own session_info_update clobber the persisted title (regression: only the first-prompt heuristic was gated, not the agent-emitted one)", async () => {
+    const titledMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({});
+        return m.agent;
+      },
+    );
+    const session = await titledMgr.resurrect({
+      hydraSessionId: "sess_resurrect_agent_title",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: W_CWD,
+      title: "feature-X",
+    });
+
+    // The freshly loaded agent treats the replayed transcript as a new
+    // conversation and emits its own title guess, unprompted.
+    mocks[0]!.triggerNotification("session/update", {
+      sessionId: session.upstreamSessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        title: "agent-derived title for the replayed transcript",
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(session.title).toBe("feature-X");
+    await titledMgr.flushMetaWrites();
+    await titledMgr.flushHistoryWrites();
+  });
+
   it("re-seeds the title from the next prompt when the resurrected record had none (firstPromptSeeded gates on title)", async () => {
     const untitledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
