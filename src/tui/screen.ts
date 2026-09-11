@@ -1097,9 +1097,12 @@ export class Screen {
   private selectionAnchorLineId: number | null = null;
   // Composer-local mirror of the scrollback selection gesture: press,
   // drag, and release over the prompt's own rows select a run of the
-  // composer's buffer text (see resolveCellToPromptOffset). Char
-  // granularity only — the composer has no blocks/words/lines to snap
-  // double- or triple-click to like the scrollback does.
+  // composer's buffer text (see resolveCellToPromptOffset). Supports the
+  // same double-click-word / triple-click-line granularities as the
+  // scrollback (see promptSelectionGranularity), just against buffer
+  // rows/cols instead of source lines — the composer has no blocks to
+  // snap to, so there's no equivalent of the scrollback's link/file/
+  // session double-click dispatch.
   private promptSelectionAnchor: { row: number; col: number } | null = null;
   private promptSelectionDragStarted = false;
   private promptSelection: {
@@ -1107,6 +1110,36 @@ export class Screen {
     startCol: number;
     endRow: number;
     endCol: number;
+  } | null = null;
+  // Granularity a held-down composer drag extends by. Set on a double-
+  // click word-snap ("word") or triple-click line-select ("line") press,
+  // reset to "char" at the start of every press. Mirrors
+  // selectionGranularity for the scrollback gesture.
+  private promptSelectionGranularity: "char" | "word" | "line" = "char";
+  // Word bounds on the anchor row captured at double-click press time;
+  // the fixed end a word-granularity drag always keeps fully selected.
+  private promptSelectionAnchorWordBounds:
+    | { row: number; start: number; end: number }
+    | null = null;
+  // Buffer row captured at triple-click press time; the fixed end a
+  // line-granularity drag always keeps fully selected.
+  private promptSelectionAnchorLineRow: number | null = null;
+  // Set when a press is recognised as the second click of a double-click
+  // and the anchor lands on a word character, or as the third click
+  // (whole-line select). Causes release to finalize (copy) without
+  // requiring a drag. Mirrors doubleClickPending for the scrollback
+  // gesture.
+  private promptDoubleClickPending = false;
+  private promptPendingClickCount = 1;
+  // Chain state for the composer's multi-click gestures — mirrors
+  // lastLeftClick for the scrollback gesture, keyed by buffer row
+  // instead of source line id.
+  private promptLastLeftClick: {
+    x: number;
+    y: number;
+    t: number;
+    count: number;
+    row: number | null;
   } | null = null;
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
@@ -4302,7 +4335,7 @@ export class Screen {
       const press = this.pressCell;
       this.pressCell = null;
       if (this.promptSelectionAnchor !== null) {
-        this.handlePromptSelectionRelease();
+        this.handlePromptSelectionRelease(cell);
         return;
       }
       const selectionFinalize = this.inAppSelectionEnabled &&
@@ -7982,9 +8015,86 @@ export class Screen {
     return parts.join("\n");
   }
 
+  // ASCII word-boundary scan around the given buffer position. Walks
+  // left and right while ASCII_WORD_RE matches, returning the half-open
+  // range [start, end). Returns null when the row is empty or the
+  // character at the position isn't a word character — matching the
+  // scrollback's "double-click on whitespace/punctuation does nothing
+  // beyond a normal click" spec. Simpler than the scrollback's
+  // wordBoundsAt: composer text is always plain (no ANSI escapes, no
+  // URL-snap), so there's no clean/raw offset projection to do.
+  private promptWordBoundsAt(
+    pos: { row: number; col: number },
+  ): { start: number; end: number } | null {
+    const line = this.dispatcher.state().buffer[pos.row] ?? "";
+    if (line.length === 0) {
+      return null;
+    }
+    const idx = Math.max(0, Math.min(line.length - 1, pos.col));
+    if (!ASCII_WORD_RE.test(line[idx]!)) {
+      return null;
+    }
+    let start = idx;
+    while (start > 0 && ASCII_WORD_RE.test(line[start - 1]!)) {
+      start--;
+    }
+    let end = idx + 1;
+    while (end < line.length && ASCII_WORD_RE.test(line[end]!)) {
+      end++;
+    }
+    return { start, end };
+  }
+
+  private selectPromptWholeLine(row: number): void {
+    const line = this.dispatcher.state().buffer[row] ?? "";
+    this.setPromptSelection({ row, col: 0 }, { row, col: line.length });
+  }
+
+  // Word-granularity drag extension for a double-click-then-hold
+  // gesture. Mirrors extendWordSelectionToCell against buffer rows/cols.
+  private extendPromptWordSelectionTo(focus: { row: number; col: number }): void {
+    const bounds = this.promptSelectionAnchorWordBounds;
+    if (bounds === null) {
+      return;
+    }
+    const focusBeforeAnchor =
+      focus.row < bounds.row || (focus.row === bounds.row && focus.col < bounds.start);
+    const focusAfterAnchor =
+      focus.row > bounds.row || (focus.row === bounds.row && focus.col > bounds.end);
+    let start: { row: number; col: number } = { row: bounds.row, col: bounds.start };
+    let end: { row: number; col: number } = { row: bounds.row, col: bounds.end };
+    if (focusBeforeAnchor) {
+      const focusWord = this.promptWordBoundsAt(focus);
+      start = focusWord !== null ? { row: focus.row, col: focusWord.start } : focus;
+    } else if (focusAfterAnchor) {
+      const focusWord = this.promptWordBoundsAt(focus);
+      end = focusWord !== null ? { row: focus.row, col: focusWord.end } : focus;
+    }
+    this.setPromptSelection(start, end);
+  }
+
+  // Line-granularity drag extension for a triple-click-then-hold
+  // gesture. Mirrors extendLineSelectionToCell against buffer rows.
+  private extendPromptLineSelectionTo(focus: { row: number; col: number }): void {
+    const anchorRow = this.promptSelectionAnchorLineRow;
+    if (anchorRow === null) {
+      return;
+    }
+    const startRow = Math.min(anchorRow, focus.row);
+    const endRow = Math.max(anchorRow, focus.row);
+    const endLine = this.dispatcher.state().buffer[endRow] ?? "";
+    this.setPromptSelection(
+      { row: startRow, col: 0 },
+      { row: endRow, col: endLine.length },
+    );
+  }
+
   // Press half of the composer's selection gesture. Returns false when
   // the press didn't land on a composer row, so the caller falls through
-  // to the scrollback gesture instead.
+  // to the scrollback gesture instead. A second same-cell click within
+  // the double-click window snaps to the word under the pointer; a third
+  // selects the whole buffer row — same chain logic as
+  // handleSelectionPress, keyed by buffer row instead of source line id.
   private handlePromptSelectionPress(cell: { x: number; y: number }): boolean {
     if (!this.inAppSelectionEnabled) {
       return false;
@@ -7995,7 +8105,55 @@ export class Screen {
     }
     this.promptSelectionAnchor = anchor;
     this.promptSelectionDragStarted = false;
+    this.promptDoubleClickPending = false;
+    this.promptPendingClickCount = 1;
+    this.promptSelectionGranularity = "char";
+    this.promptSelectionAnchorWordBounds = null;
+    this.promptSelectionAnchorLineRow = null;
     this.clearPromptSelection();
+    const now = Date.now();
+    const last = this.promptLastLeftClick;
+    const isChainCandidate =
+      last !== null &&
+      now - last.t <= DOUBLE_CLICK_MAX_MS &&
+      Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
+      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST &&
+      last.row !== null &&
+      last.row === anchor.row;
+    const isTripleClickCandidate =
+      isChainCandidate &&
+      last!.count === 2 &&
+      cell.x === last!.x &&
+      cell.y === last!.y;
+    if (isTripleClickCandidate) {
+      this.promptPendingClickCount = 3;
+      this.selectPromptWholeLine(anchor.row);
+      this.promptSelectionGranularity = "line";
+      this.promptSelectionAnchorLineRow = anchor.row;
+      this.promptDoubleClickPending = true;
+      return true;
+    }
+    const isDoubleClickCandidate = isChainCandidate && last!.count === 1;
+    if (isDoubleClickCandidate) {
+      this.promptPendingClickCount = 2;
+      const word = this.promptWordBoundsAt(anchor);
+      if (word !== null) {
+        this.setPromptSelection(
+          { row: anchor.row, col: word.start },
+          { row: anchor.row, col: word.end },
+        );
+        this.promptDoubleClickPending = true;
+        this.promptSelectionGranularity = "word";
+        this.promptSelectionAnchorWordBounds = {
+          row: anchor.row,
+          start: word.start,
+          end: word.end,
+        };
+      }
+      // Fall through when the click landed on whitespace/punctuation —
+      // handlePromptSelectionRelease still records count=2 below so a
+      // third same-cell press upgrades to whole-line-select above.
+    }
     return true;
   }
 
@@ -8021,14 +8179,33 @@ export class Screen {
       return;
     }
     this.promptSelectionDragStarted = true;
-    this.setPromptSelection(this.promptSelectionAnchor, focus);
+    if (this.promptSelectionGranularity === "word") {
+      this.extendPromptWordSelectionTo(focus);
+    } else if (this.promptSelectionGranularity === "line") {
+      this.extendPromptLineSelectionTo(focus);
+    } else {
+      this.setPromptSelection(this.promptSelectionAnchor, focus);
+    }
   }
 
-  private handlePromptSelectionRelease(): void {
+  private handlePromptSelectionRelease(cell: { x: number; y: number } | null): void {
     const dragStarted = this.promptSelectionDragStarted;
+    const doubleClick = this.promptDoubleClickPending;
     this.promptSelectionAnchor = null;
     this.promptSelectionDragStarted = false;
-    if (dragStarted) {
+    this.promptDoubleClickPending = false;
+    if (cell !== null) {
+      const resolved = this.resolveCellToPromptOffset(cell.x, cell.y);
+      this.promptLastLeftClick = {
+        x: cell.x,
+        y: cell.y,
+        t: Date.now(),
+        count: this.promptPendingClickCount,
+        row: resolved?.row ?? null,
+      };
+    }
+    this.promptPendingClickCount = 1;
+    if (dragStarted || doubleClick) {
       this.finalizePromptSelection();
       return;
     }

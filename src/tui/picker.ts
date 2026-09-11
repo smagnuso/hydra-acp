@@ -718,9 +718,10 @@ export async function pickSession(
   const selectionClipboardTarget: ClipboardTarget =
     opts.config.tui.selectionClipboard;
   // Press/drag/release state for click-drag text selection over the
-  // composer's own rows. Char granularity only, extracted straight from
-  // the composer's buffer — mirrors Screen's promptSelection* fields for
-  // the live-session composer.
+  // composer's own rows, extracted straight from the composer's buffer —
+  // mirrors Screen's promptSelection* fields for the live-session
+  // composer, including double-click-word / triple-click-line
+  // granularity (see promptSelectionGranularity).
   let promptSelectionAnchor: { row: number; col: number } | null = null;
   let promptSelectionDragStarted = false;
   let promptSelection: {
@@ -729,6 +730,23 @@ export async function pickSession(
     endRow: number;
     endCol: number;
   } | null = null;
+  let promptSelectionGranularity: "char" | "word" | "line" = "char";
+  let promptSelectionAnchorWordBounds:
+    | { row: number; start: number; end: number }
+    | null = null;
+  let promptSelectionAnchorLineRow: number | null = null;
+  let promptDoubleClickPending = false;
+  let promptPendingClickCount = 1;
+  let promptLastLeftClick: {
+    x: number;
+    y: number;
+    t: number;
+    count: number;
+    row: number | null;
+  } | null = null;
+  const PROMPT_DOUBLE_CLICK_MAX_MS = 500;
+  const PROMPT_DOUBLE_CLICK_MAX_DIST = 1;
+  const PROMPT_ASCII_WORD_RE = /[A-Za-z0-9_:\-]/;
 
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
@@ -1431,8 +1449,78 @@ export async function pickSession(
     );
   };
 
+  // ASCII word-boundary scan around the given buffer position — mirrors
+  // Screen's promptWordBoundsAt. Returns null on an empty row or when the
+  // position isn't over a word character (double-click on whitespace/
+  // punctuation does nothing beyond a normal click).
+  const composerWordBoundsAt = (
+    pos: { row: number; col: number },
+  ): { start: number; end: number } | null => {
+    const line = composer.state().buffer[pos.row] ?? "";
+    if (line.length === 0) {
+      return null;
+    }
+    const idx = Math.max(0, Math.min(line.length - 1, pos.col));
+    if (!PROMPT_ASCII_WORD_RE.test(line[idx]!)) {
+      return null;
+    }
+    let start = idx;
+    while (start > 0 && PROMPT_ASCII_WORD_RE.test(line[start - 1]!)) {
+      start--;
+    }
+    let end = idx + 1;
+    while (end < line.length && PROMPT_ASCII_WORD_RE.test(line[end]!)) {
+      end++;
+    }
+    return { start, end };
+  };
+
+  const selectComposerWholeLine = (row: number): void => {
+    const line = composer.state().buffer[row] ?? "";
+    setComposerSelection({ row, col: 0 }, { row, col: line.length });
+  };
+
+  // Word-granularity drag extension for a double-click-then-hold
+  // gesture — mirrors Screen's extendPromptWordSelectionTo.
+  const extendComposerWordSelectionTo = (focus: { row: number; col: number }): void => {
+    const bounds = promptSelectionAnchorWordBounds;
+    if (bounds === null) {
+      return;
+    }
+    const focusBeforeAnchor =
+      focus.row < bounds.row || (focus.row === bounds.row && focus.col < bounds.start);
+    const focusAfterAnchor =
+      focus.row > bounds.row || (focus.row === bounds.row && focus.col > bounds.end);
+    let start: { row: number; col: number } = { row: bounds.row, col: bounds.start };
+    let end: { row: number; col: number } = { row: bounds.row, col: bounds.end };
+    if (focusBeforeAnchor) {
+      const focusWord = composerWordBoundsAt(focus);
+      start = focusWord !== null ? { row: focus.row, col: focusWord.start } : focus;
+    } else if (focusAfterAnchor) {
+      const focusWord = composerWordBoundsAt(focus);
+      end = focusWord !== null ? { row: focus.row, col: focusWord.end } : focus;
+    }
+    setComposerSelection(start, end);
+  };
+
+  // Line-granularity drag extension for a triple-click-then-hold
+  // gesture — mirrors Screen's extendPromptLineSelectionTo.
+  const extendComposerLineSelectionTo = (focus: { row: number; col: number }): void => {
+    const anchorRow = promptSelectionAnchorLineRow;
+    if (anchorRow === null) {
+      return;
+    }
+    const startRow = Math.min(anchorRow, focus.row);
+    const endRow = Math.max(anchorRow, focus.row);
+    const endLine = composer.state().buffer[endRow] ?? "";
+    setComposerSelection({ row: startRow, col: 0 }, { row: endRow, col: endLine.length });
+  };
+
   // Press half of the composer's selection gesture. No-op when the
-  // press didn't land on a composer row or the feature is off.
+  // press didn't land on a composer row or the feature is off. A second
+  // same-cell click within the double-click window snaps to the word
+  // under the pointer; a third selects the whole buffer row — mirrors
+  // Screen's handlePromptSelectionPress chain logic.
   const handleComposerSelectionPress = (cell: { x: number; y: number }): void => {
     if (!inAppSelectionEnabled) {
       return;
@@ -1443,7 +1531,55 @@ export async function pickSession(
     }
     promptSelectionAnchor = anchor;
     promptSelectionDragStarted = false;
+    promptDoubleClickPending = false;
+    promptPendingClickCount = 1;
+    promptSelectionGranularity = "char";
+    promptSelectionAnchorWordBounds = null;
+    promptSelectionAnchorLineRow = null;
     clearComposerSelection();
+    const now = Date.now();
+    const last = promptLastLeftClick;
+    const isChainCandidate =
+      last !== null &&
+      now - last.t <= PROMPT_DOUBLE_CLICK_MAX_MS &&
+      Math.abs(cell.x - last.x) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
+      Math.abs(cell.y - last.y) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
+      last.row !== null &&
+      last.row === anchor.row;
+    const isTripleClickCandidate =
+      isChainCandidate &&
+      last!.count === 2 &&
+      cell.x === last!.x &&
+      cell.y === last!.y;
+    if (isTripleClickCandidate) {
+      promptPendingClickCount = 3;
+      selectComposerWholeLine(anchor.row);
+      promptSelectionGranularity = "line";
+      promptSelectionAnchorLineRow = anchor.row;
+      promptDoubleClickPending = true;
+      return;
+    }
+    const isDoubleClickCandidate = isChainCandidate && last!.count === 1;
+    if (isDoubleClickCandidate) {
+      promptPendingClickCount = 2;
+      const word = composerWordBoundsAt(anchor);
+      if (word !== null) {
+        setComposerSelection(
+          { row: anchor.row, col: word.start },
+          { row: anchor.row, col: word.end },
+        );
+        promptDoubleClickPending = true;
+        promptSelectionGranularity = "word";
+        promptSelectionAnchorWordBounds = {
+          row: anchor.row,
+          start: word.start,
+          end: word.end,
+        };
+      }
+      // Fall through when the click landed on whitespace/punctuation —
+      // handleComposerSelectionRelease still records count=2 below so a
+      // third same-cell press upgrades to whole-line-select above.
+    }
   };
 
   // Drag half of the gesture. Clamps the cell into the composer body's
@@ -1464,14 +1600,33 @@ export async function pickSession(
       return;
     }
     promptSelectionDragStarted = true;
-    setComposerSelection(promptSelectionAnchor, focus);
+    if (promptSelectionGranularity === "word") {
+      extendComposerWordSelectionTo(focus);
+    } else if (promptSelectionGranularity === "line") {
+      extendComposerLineSelectionTo(focus);
+    } else {
+      setComposerSelection(promptSelectionAnchor, focus);
+    }
   };
 
-  const handleComposerSelectionRelease = (): void => {
+  const handleComposerSelectionRelease = (cell: { x: number; y: number } | null): void => {
     const dragStarted = promptSelectionDragStarted;
+    const doubleClick = promptDoubleClickPending;
     promptSelectionAnchor = null;
     promptSelectionDragStarted = false;
-    if (dragStarted) {
+    promptDoubleClickPending = false;
+    if (cell !== null) {
+      const resolved = resolveCellToComposerOffset(cell.x, cell.y);
+      promptLastLeftClick = {
+        x: cell.x,
+        y: cell.y,
+        t: Date.now(),
+        count: promptPendingClickCount,
+        row: resolved?.row ?? null,
+      };
+    }
+    promptPendingClickCount = 1;
+    if (dragStarted || doubleClick) {
       finalizeComposerSelection();
       return;
     }
@@ -4733,7 +4888,11 @@ export async function pickSession(
       if (isRelease && promptSelectionAnchor !== null) {
         pickerPressCell = null;
         pickerPressUnfocused = false;
-        handleComposerSelectionRelease();
+        const rx = data?.x;
+        const ry = data?.y;
+        handleComposerSelectionRelease(
+          typeof rx === "number" && typeof ry === "number" ? { x: rx, y: ry } : null,
+        );
         return;
       }
       if (isRelease) {

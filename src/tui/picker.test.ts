@@ -930,6 +930,46 @@ describe("pickSession composer", () => {
     await drv.resolveOnce;
   });
 
+  it("double-click on a word in the composer copies just that word", async () => {
+    writeClipboardCalls.length = 0;
+    const drv = makePicker({ sessions });
+    drv.type("alpha beta gamma");
+    // Click on the 'e' in "beta" (buffer offset 7 -> column 7 + 3 = 10).
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 10, 2);
+    // Second click within the double-click window.
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 10, 2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeClipboardCalls).toEqual([{ text: "beta", target: "both" }]);
+    drv.press("CTRL_C");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("triple-click in the composer copies the whole buffer row", async () => {
+    writeClipboardCalls.length = 0;
+    const drv = makePicker({ sessions });
+    drv.type("alpha beta gamma");
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 10, 2);
+    // Third same-cell click within the window upgrades to whole-line.
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 10, 2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeClipboardCalls).toEqual([
+      { text: "beta", target: "both" },
+      { text: "alpha beta gamma", target: "both" },
+    ]);
+    drv.press("CTRL_C");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
   it("Ctrl+C peels a non-empty composer buffer and only aborts once it's empty", async () => {
     const drv = makePicker({ sessions });
     drv.type("about to abort");

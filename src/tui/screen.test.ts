@@ -3296,6 +3296,63 @@ describe("Screen block-click routing", () => {
     expect(promptSelectionText(screen)).toBe("");
   });
 
+  it("double-click on a word in the composer snaps to its ASCII bounds", () => {
+    const screen = makeTallScreen({
+      width: 40,
+      height: 24,
+      mouse: true,
+      composerBuffer: ["alpha beta gamma"],
+    });
+    const y = 22;
+    // Click on the 'e' in "beta" (buffer offset 7 -> column 7 + 3 = 10).
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    // Second click within the double-click window.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    expect(promptSelectionText(screen)).toBe("beta");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    expect(promptSelectionText(screen)).toBe("beta");
+  });
+
+  it("triple-click in the composer selects the whole buffer row", () => {
+    const screen = makeTallScreen({
+      width: 40,
+      height: 24,
+      mouse: true,
+      composerBuffer: ["alpha beta gamma"],
+    });
+    const y = 22;
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    // Third same-cell click within the window upgrades to whole-line.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    expect(promptSelectionText(screen)).toBe("alpha beta gamma");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    expect(promptSelectionText(screen)).toBe("alpha beta gamma");
+  });
+
+  it("a held double-click-then-drag in the composer grows by whole words", () => {
+    const screen = makeTallScreen({
+      width: 40,
+      height: 24,
+      mouse: true,
+      composerBuffer: ["alpha beta gamma"],
+    });
+    const y = 22;
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 10, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 10, y });
+    expect(promptSelectionText(screen)).toBe("beta");
+    // Drag onto "gamma" without releasing — word granularity should grow
+    // the selection to cover both words, not just extend char-by-char.
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 18, y });
+    expect(promptSelectionText(screen)).toBe("beta gamma");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 18, y });
+    expect(promptSelectionText(screen)).toBe("beta gamma");
+  });
+
   it("opening a modal clears any active selection", () => {
     const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
     screen.appendLine({ body: "hello world" });
