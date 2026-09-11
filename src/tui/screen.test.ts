@@ -1941,6 +1941,7 @@ describe("Screen block-click routing", () => {
     openFileSource?: "config" | "env";
     openFileInTerminal?: boolean;
     runForeground?: ScreenOptions["runForeground"];
+    composerBuffer?: string[];
   }): Screen {
     const width = opts.width ?? 40;
     const height = opts.height ?? 24;
@@ -1959,7 +1960,7 @@ describe("Screen block-click routing", () => {
     ) as unknown as Terminal;
     const dispatcher = {
       state: () => ({
-        buffer: [""],
+        buffer: opts.composerBuffer ?? [""],
         row: 0,
         col: 0,
         planMode: false,
@@ -3249,6 +3250,50 @@ describe("Screen block-click routing", () => {
     }).handleKey("a", { isCharacter: true });
     expect(screen.hasSelection()).toBe(false);
     expect(seen.length).toBe(1);
+  });
+
+  function promptSelectionText(screen: Screen): string {
+    return (
+      screen as unknown as { getPromptSelectionText: () => string }
+    ).getPromptSelectionText();
+  }
+
+  it("press-drag-release over the composer selects buffer text", () => {
+    const screen = makeTallScreen({
+      width: 40,
+      height: 24,
+      mouse: true,
+      composerBuffer: ["hello world"],
+    });
+    // Single-line buffer at height 24 paints on row 22 (see
+    // promptVisualLayout's top formula); gutter is 2 cols wide, so
+    // column 3 is the first content column.
+    const y = 22;
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 8, y });
+    expect(promptSelectionText(screen)).toBe("hello");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    // Mirrors the transcript's press-drag-release behavior: the
+    // selection stays intact after release for the user to inspect.
+    expect(promptSelectionText(screen)).toBe("hello");
+  });
+
+  it("any keystroke clears an active composer selection", () => {
+    const screen = makeTallScreen({
+      width: 40,
+      height: 24,
+      mouse: true,
+      composerBuffer: ["hello world"],
+    });
+    const y = 22;
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    expect(promptSelectionText(screen)).toBe("hello");
+    (screen as unknown as {
+      handleKey: (n: string, d: { isCharacter?: boolean }) => void;
+    }).handleKey("a", { isCharacter: true });
+    expect(promptSelectionText(screen)).toBe("");
   });
 
   it("opening a modal clears any active selection", () => {

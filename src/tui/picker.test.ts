@@ -64,6 +64,19 @@ vi.mock("./agent-prompt.js", () => ({
       : { kind: "select" as const, agentId: nextAgentPick, persist: false },
 }));
 
+// Composer text-selection copies through writeClipboard (see
+// finalizeComposerSelection in picker.ts) — mocked so the spec doesn't
+// depend on a real pbcopy/xclip/wl-copy/OSC-52 write reaching a real
+// clipboard in CI.
+const writeClipboardCalls: Array<{ text: string; target: string }> = [];
+vi.mock("./clipboard.js", () => ({
+  readClipboard: async () => ({ ok: false, reason: "not mocked" }),
+  writeClipboard: async (text: string, opts: { target: string }) => {
+    writeClipboardCalls.push({ text, target: opts.target });
+    return { ok: true, method: "osc52" };
+  },
+}));
+
 // Views over the recorded calls, so the existing specs keep reading the way
 // they did before the two entry points became one discriminated union.
 const attachCalls = {
@@ -196,7 +209,15 @@ function makePicker(opts: {
   ) as unknown as Terminal;
 
   const config = {
-    tui: { cwdColumnMaxWidth: 40, hotkeys: opts.hotkeys ?? {} },
+    tui: {
+      cwdColumnMaxWidth: 40,
+      hotkeys: opts.hotkeys ?? {},
+      // Schema defaults (config.ts) — this fake config bypasses the zod
+      // parse that would normally supply them, so mouse-gated features
+      // (composer text selection) need them spelled out explicitly.
+      mouse: true,
+      selectionClipboard: "both" as const,
+    },
     ...(opts.sessionDefaults !== undefined
       ? { sessionDefaults: opts.sessionDefaults }
       : {}),
@@ -889,6 +910,24 @@ describe("pickSession composer", () => {
       cwd: "/home/me/work/project",
       prompt: "only choice",
     });
+  });
+
+  it("press-drag-release over the composer copies the selected text", async () => {
+    writeClipboardCalls.length = 0;
+    const drv = makePicker({ sessions });
+    drv.type("hello world");
+    // Composer body's first (only, for this short text) row is
+    // startRow + 1 = 2; column 3 is the first content column (1: left
+    // border, 2: inner pad) — see placeComposerCursor's comment.
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 3, 2);
+    drv.mouse("MOUSE_DRAG", 8, 2);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 8, 2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeClipboardCalls).toEqual([{ text: "hello", target: "both" }]);
+    drv.press("CTRL_C");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
   });
 
   it("Ctrl+C peels a non-empty composer buffer and only aborts once it's empty", async () => {

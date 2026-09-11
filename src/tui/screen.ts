@@ -1095,6 +1095,19 @@ export class Screen {
   // Source line captured at triple-click press time; the fixed end that
   // a line-granularity drag always keeps fully selected.
   private selectionAnchorLineId: number | null = null;
+  // Composer-local mirror of the scrollback selection gesture: press,
+  // drag, and release over the prompt's own rows select a run of the
+  // composer's buffer text (see resolveCellToPromptOffset). Char
+  // granularity only — the composer has no blocks/words/lines to snap
+  // double- or triple-click to like the scrollback does.
+  private promptSelectionAnchor: { row: number; col: number } | null = null;
+  private promptSelectionDragStarted = false;
+  private promptSelection: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  } | null = null;
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
   // Chain state for multi-click gestures. `count` reflects how many
@@ -1234,6 +1247,9 @@ export class Screen {
     this.onKey = (events) => {
       if (this.selection !== null && events.length > 0) {
         this.clearSelection();
+      }
+      if (this.promptSelection !== null && events.length > 0) {
+        this.clearPromptSelection();
       }
       hostOnKey(events);
     };
@@ -4220,6 +4236,14 @@ export class Screen {
         return;
       }
       this.pressCell = cell;
+      if (cell !== null && this.handlePromptSelectionPress(cell)) {
+        // Matches handleSelectionPress's own off-scrollback behavior:
+        // a click outside the transcript breaks any pending scrollback
+        // double/triple-click chain rather than leaving it to survive
+        // across an intervening composer click.
+        this.lastLeftClick = null;
+        return;
+      }
       this.handleSelectionPress(cell, mouseModifier(data, "shift"));
       return;
     }
@@ -4241,6 +4265,10 @@ export class Screen {
       }
     }
     if (name === "MOUSE_DRAG" && cell !== null) {
+      if (this.promptSelectionAnchor !== null) {
+        this.handlePromptSelectionDrag(cell);
+        return;
+      }
       this.handleSelectionDrag(cell);
       return;
     }
@@ -4273,6 +4301,10 @@ export class Screen {
       }
       const press = this.pressCell;
       this.pressCell = null;
+      if (this.promptSelectionAnchor !== null) {
+        this.handlePromptSelectionRelease();
+        return;
+      }
       const selectionFinalize = this.inAppSelectionEnabled &&
         (this.selectionDragStarted || this.doubleClickPending);
       if (
@@ -7824,6 +7856,209 @@ export class Screen {
     }
   }
 
+  // Recompute the composer's current visual-row layout and the terminal
+  // row its first visual row paints on. Mirrors the `top` calculation
+  // duplicated across drawPrompt/positionCursor/promptRows; kept as its
+  // own helper here so the selection gestures don't have to touch those
+  // paint-path methods. Returns null whenever the composer isn't what's
+  // occupying the prompt area (a modal is open, scrollback search is
+  // capturing keys, or the session is readonly) — none of those have
+  // composer text to select.
+  private promptVisualLayout(): {
+    top: number;
+    layout: PromptLayout;
+    visualRows: PromptVisualRow[];
+  } | null {
+    if (
+      this.permissionPrompt ||
+      this.formPrompt ||
+      this.confirmPrompt ||
+      this.compactionPrompt ||
+      this.helpPrompt ||
+      this.scrollbackSearch ||
+      this.readonly
+    ) {
+      return null;
+    }
+    const w = this.term.width;
+    const room = Math.max(1, w - 2);
+    const state = this.dispatcher.state();
+    const visualRows = computePromptVisualRows(state.buffer, room);
+    const layout = computePromptLayout(visualRows, state, MAX_PROMPT_ROWS);
+    const top =
+      this.term.height -
+      layout.rendered -
+      BANNER_ROWS -
+      BANNER_SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
+    return { top, layout, visualRows };
+  }
+
+  // Map a 1-based terminal cell to a position in the composer's buffer
+  // (bufferIdx + code-unit offset), or null when the cell isn't over a
+  // painted composer row. Unlike resolveCellToSource, composer columns
+  // are plain code-unit indices — computePromptVisualRows itself treats
+  // the buffer as one-column-per-char, so there's no wide-char/ANSI
+  // offset math to redo here.
+  private resolveCellToPromptOffset(
+    x: number,
+    y: number,
+  ): { row: number; col: number } | null {
+    const info = this.promptVisualLayout();
+    if (info === null) {
+      return null;
+    }
+    const { top, layout, visualRows } = info;
+    const rowIdx = y - top;
+    if (rowIdx < 0 || rowIdx >= layout.rendered || x < 1 || x > this.term.width) {
+      return null;
+    }
+    const vr = visualRows[layout.windowStart + rowIdx];
+    if (!vr) {
+      return null;
+    }
+    const gutterWidth = 2; // "> " / "· " / two blank columns
+    const colInSlice = Math.max(
+      0,
+      Math.min(vr.endCol - vr.startCol, x - 1 - gutterWidth),
+    );
+    return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
+  }
+
+  private setPromptSelection(
+    a: { row: number; col: number },
+    b: { row: number; col: number },
+  ): void {
+    const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
+    const start = before ? a : b;
+    const end = before ? b : a;
+    if (start.row === end.row && start.col === end.col) {
+      this.clearPromptSelection();
+      return;
+    }
+    const next = {
+      startRow: start.row,
+      startCol: start.col,
+      endRow: end.row,
+      endCol: end.col,
+    };
+    const cur = this.promptSelection;
+    if (
+      cur &&
+      cur.startRow === next.startRow &&
+      cur.startCol === next.startCol &&
+      cur.endRow === next.endRow &&
+      cur.endCol === next.endCol
+    ) {
+      return;
+    }
+    this.promptSelection = next;
+    this.syncedPartialRepaint(() => this.drawPrompt());
+  }
+
+  clearPromptSelection(): void {
+    if (this.promptSelection === null) {
+      return;
+    }
+    this.promptSelection = null;
+    this.syncedPartialRepaint(() => this.drawPrompt());
+  }
+
+  private getPromptSelectionText(): string {
+    if (this.promptSelection === null) {
+      return "";
+    }
+    const { startRow, startCol, endRow, endCol } = this.promptSelection;
+    const buffer = this.dispatcher.state().buffer;
+    if (startRow === endRow) {
+      return (buffer[startRow] ?? "").slice(startCol, endCol);
+    }
+    const parts: string[] = [(buffer[startRow] ?? "").slice(startCol)];
+    for (let r = startRow + 1; r < endRow; r++) {
+      parts.push(buffer[r] ?? "");
+    }
+    parts.push((buffer[endRow] ?? "").slice(0, endCol));
+    return parts.join("\n");
+  }
+
+  // Press half of the composer's selection gesture. Returns false when
+  // the press didn't land on a composer row, so the caller falls through
+  // to the scrollback gesture instead.
+  private handlePromptSelectionPress(cell: { x: number; y: number }): boolean {
+    if (!this.inAppSelectionEnabled) {
+      return false;
+    }
+    const anchor = this.resolveCellToPromptOffset(cell.x, cell.y);
+    if (anchor === null) {
+      return false;
+    }
+    this.promptSelectionAnchor = anchor;
+    this.promptSelectionDragStarted = false;
+    this.clearPromptSelection();
+    return true;
+  }
+
+  // Drag half of the gesture. Clamps the cell into the composer's own
+  // bounds so a drag that strays into the transcript or off the edge of
+  // the terminal still extends the selection to whichever composer row
+  // is nearest, rather than freezing or resolving to null.
+  private handlePromptSelectionDrag(cell: { x: number; y: number }): void {
+    if (this.promptSelectionAnchor === null) {
+      return;
+    }
+    const info = this.promptVisualLayout();
+    if (info === null) {
+      return;
+    }
+    const clampedX = Math.max(1, Math.min(this.term.width, cell.x));
+    const clampedY = Math.max(
+      info.top,
+      Math.min(info.top + info.layout.rendered - 1, cell.y),
+    );
+    const focus = this.resolveCellToPromptOffset(clampedX, clampedY);
+    if (focus === null) {
+      return;
+    }
+    this.promptSelectionDragStarted = true;
+    this.setPromptSelection(this.promptSelectionAnchor, focus);
+  }
+
+  private handlePromptSelectionRelease(): void {
+    const dragStarted = this.promptSelectionDragStarted;
+    this.promptSelectionAnchor = null;
+    this.promptSelectionDragStarted = false;
+    if (dragStarted) {
+      this.finalizePromptSelection();
+      return;
+    }
+    this.clearPromptSelection();
+  }
+
+  // Copy path for the composer selection — same clipboard target and
+  // notify() feedback as finalizeSelection uses for the transcript.
+  private finalizePromptSelection(): void {
+    const text = this.getPromptSelectionText();
+    if (text.length === 0) {
+      return;
+    }
+    void writeClipboard(text, { target: this.selectionClipboard }).then(
+      (result) => {
+        if (result.ok) {
+          const chars = text.length;
+          this.notify(
+            `copied ${chars} char${chars === 1 ? "" : "s"} to clipboard`,
+          );
+        } else {
+          this.notify(`clipboard copy failed: ${result.reason}`);
+        }
+      },
+      (err) => {
+        this.notify(`clipboard copy failed: ${(err as Error).message}`);
+      },
+    );
+  }
+
   private drawPrompt(): void {
     // A modal's click region is only live while it is the modal actually
     // on screen; a higher-precedence one stales it.
@@ -7895,8 +8130,27 @@ export class Screen {
         }
         slice = (state.buffer[vr.bufferIdx] ?? "").slice(vr.startCol, vr.endCol);
       }
+      // Overlap of the active composer selection with this visual row,
+      // as a [selStart, selEnd) range local to `slice`. -1 means no
+      // overlap. Folded into `sig` so toggling/moving the selection
+      // repaints the row even when its text hasn't changed.
+      let selStart = -1;
+      let selEnd = -1;
+      if (vr && this.promptSelection !== null) {
+        const sel = this.promptSelection;
+        if (vr.bufferIdx >= sel.startRow && vr.bufferIdx <= sel.endRow) {
+          const rowSelStart = vr.bufferIdx === sel.startRow ? sel.startCol : vr.startCol;
+          const rowSelEnd = vr.bufferIdx === sel.endRow ? sel.endCol : vr.endCol;
+          const s = Math.max(rowSelStart, vr.startCol);
+          const e = Math.min(rowSelEnd, vr.endCol);
+          if (e > s) {
+            selStart = s - vr.startCol;
+            selEnd = e - vr.startCol;
+          }
+        }
+      }
       const sig = vr
-        ? `prompt|${this.term.width}|${gutter}|${slice}`
+        ? `prompt|${this.term.width}|${gutter}|${slice}|${selStart}:${selEnd}`
         : `prompt|${this.term.width}|empty`;
       this.paintRow(row, sig, () => {
         if (!vr) {
@@ -7922,6 +8176,14 @@ export class Screen {
         // whenever an overlay held focus.
         if (overlayFocused) {
           paint(this.term, "composer-inactive", slice);
+        } else if (selStart >= 0 && selEnd > selStart) {
+          if (selStart > 0) {
+            paint(this.term, "content", slice.slice(0, selStart));
+          }
+          paint(this.term, "selection-highlight", slice.slice(selStart, selEnd));
+          if (selEnd < slice.length) {
+            paint(this.term, "content", slice.slice(selEnd));
+          }
         } else {
           paint(this.term, "content", slice);
         }

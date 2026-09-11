@@ -25,7 +25,11 @@ import { localMachines } from "../core/machine.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
-import { setDefaultAgent, type HydraConfig } from "../core/config.js";
+import {
+  resolveInAppSelection,
+  setDefaultAgent,
+  type HydraConfig,
+} from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import { terminalHost } from "./term-host/index.js";
 import { canOpenTab, canReveal, openInNewTab, revealOrOpen } from "./term-host/open.js";
@@ -46,7 +50,11 @@ import {
 } from "./discovery.js";
 import { promptForAgent } from "./agent-prompt.js";
 import { loadHistory } from "./history.js";
-import { readClipboard } from "./clipboard.js";
+import {
+  readClipboard,
+  writeClipboard,
+  type ClipboardTarget,
+} from "./clipboard.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -703,6 +711,25 @@ export async function pickSession(
   // so the next picker render emits a full frame.
   const painter = new RowPainter(term);
 
+  // Same feature flag and clipboard target the live-session composer's
+  // selection uses (Screen.inAppSelectionEnabled / selectionClipboard) —
+  // resolved once since config doesn't change mid-picker.
+  const inAppSelectionEnabled = resolveInAppSelection(opts.config);
+  const selectionClipboardTarget: ClipboardTarget =
+    opts.config.tui.selectionClipboard;
+  // Press/drag/release state for click-drag text selection over the
+  // composer's own rows. Char granularity only, extracted straight from
+  // the composer's buffer — mirrors Screen's promptSelection* fields for
+  // the live-session composer.
+  let promptSelectionAnchor: { row: number; col: number } | null = null;
+  let promptSelectionDragStarted = false;
+  let promptSelection: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  } | null = null;
+
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
   let termWidth = readTermWidth(term);
@@ -1029,6 +1056,33 @@ export async function pickSession(
     );
   };
 
+  // Overlap of the active composer selection with visual row `visualIdx`,
+  // as a [start, end) range local to that row's slice. Null when the
+  // selection doesn't touch this row.
+  const composerSelectionRangeFor = (
+    visualIdx: number,
+  ): { start: number; end: number } | null => {
+    if (promptSelection === null) {
+      return null;
+    }
+    const vr = composerVisualRows[visualIdx];
+    if (!vr) {
+      return null;
+    }
+    const sel = promptSelection;
+    if (vr.bufferIdx < sel.startRow || vr.bufferIdx > sel.endRow) {
+      return null;
+    }
+    const rowSelStart = vr.bufferIdx === sel.startRow ? sel.startCol : vr.startCol;
+    const rowSelEnd = vr.bufferIdx === sel.endRow ? sel.endCol : vr.endCol;
+    const s = Math.max(rowSelStart, vr.startCol);
+    const e = Math.min(rowSelEnd, vr.endCol);
+    if (e <= s) {
+      return null;
+    }
+    return { start: s - vr.startCol, end: e - vr.startCol };
+  };
+
   // One visual row of the composer body. Focused: border glyphs in
   // `box-border-focused`, content plain. Unfocused: plain borders.
   const paintComposerBodyRow = (visualIdx: number): void => {
@@ -1036,13 +1090,29 @@ export async function pickSession(
     const slice = composerSliceAt(visualIdx);
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
+    const selRange = composerSelectionRangeFor(visualIdx);
+    const paintBody = (): void => {
+      if (selRange === null) {
+        paint(term, "content", ` ${slice}${pad}`);
+        return;
+      }
+      paint(term, "content", " ");
+      if (selRange.start > 0) {
+        paint(term, "content", slice.slice(0, selRange.start));
+      }
+      paint(term, "selection-highlight", slice.slice(selRange.start, selRange.end));
+      if (selRange.end < slice.length) {
+        paint(term, "content", slice.slice(selRange.end));
+      }
+      paint(term, "content", pad);
+    };
     if ((selectedIdx === 0 || composerHover) && terminalFocused) {
       paint(term, "box-border-focused", "│");
-      paint(term, "content", ` ${slice}${pad}`);
+      paintBody();
       paint(term, "box-border-focused", "│");
     } else {
       paint(term, "box-border", "│");
-      paint(term, "content", ` ${slice}${pad}`);
+      paintBody();
       paint(term, "box-border", "│");
     }
   };
@@ -1259,6 +1329,155 @@ export async function pickSession(
     term.moveTo(col, composerBodyRow(visualOffset));
   };
 
+  // Map a 1-based terminal cell to a position in the composer's buffer
+  // (bufferIdx + code-unit offset), or null when the cell isn't over a
+  // painted composer body row. Same "column 1 is border, column 2 is
+  // pad, column 3 is first content column" convention placeComposerCursor
+  // uses; composePromptVisualRows treats the buffer as one-column-per-
+  // char, so there's no wide-char/ANSI offset math to redo here.
+  const resolveCellToComposerOffset = (
+    x: number,
+    y: number,
+  ): { row: number; col: number } | null => {
+    const rowOffset = y - (startRow + 1);
+    if (rowOffset < 0 || rowOffset >= composerRows) {
+      return null;
+    }
+    const vr = composerVisualRows[composerWindowStart + rowOffset];
+    if (!vr) {
+      return null;
+    }
+    const colInSlice = Math.max(0, Math.min(vr.endCol - vr.startCol, x - 3));
+    return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
+  };
+
+  const clearComposerSelection = (): void => {
+    if (promptSelection === null) {
+      return;
+    }
+    promptSelection = null;
+    repaintComposerBody();
+  };
+
+  const setComposerSelection = (
+    a: { row: number; col: number },
+    b: { row: number; col: number },
+  ): void => {
+    const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
+    const start = before ? a : b;
+    const end = before ? b : a;
+    if (start.row === end.row && start.col === end.col) {
+      clearComposerSelection();
+      return;
+    }
+    const next = {
+      startRow: start.row,
+      startCol: start.col,
+      endRow: end.row,
+      endCol: end.col,
+    };
+    const cur = promptSelection;
+    if (
+      cur &&
+      cur.startRow === next.startRow &&
+      cur.startCol === next.startCol &&
+      cur.endRow === next.endRow &&
+      cur.endCol === next.endCol
+    ) {
+      return;
+    }
+    promptSelection = next;
+    repaintComposerBody();
+  };
+
+  const getComposerSelectionText = (): string => {
+    if (promptSelection === null) {
+      return "";
+    }
+    const { startRow, startCol, endRow, endCol } = promptSelection;
+    const buffer = composer.state().buffer;
+    if (startRow === endRow) {
+      return (buffer[startRow] ?? "").slice(startCol, endCol);
+    }
+    const parts: string[] = [(buffer[startRow] ?? "").slice(startCol)];
+    for (let r = startRow + 1; r < endRow; r++) {
+      parts.push(buffer[r] ?? "");
+    }
+    parts.push((buffer[endRow] ?? "").slice(0, endCol));
+    return parts.join("\n");
+  };
+
+  // Copy path for the composer selection — same clipboard target as the
+  // live-session composer's selection, feedback surfaces through the
+  // same one-line composerHint status row completion hints use (and
+  // clears the same way, on the next composer keystroke).
+  const finalizeComposerSelection = (): void => {
+    const text = getComposerSelectionText();
+    if (text.length === 0) {
+      return;
+    }
+    void writeClipboard(text, { target: selectionClipboardTarget }).then(
+      (result) => {
+        const chars = text.length;
+        composerHint = result.ok
+          ? `copied ${chars} char${chars === 1 ? "" : "s"} to clipboard`
+          : `clipboard copy failed: ${result.reason}`;
+        repaintComposerStatus();
+      },
+      (err) => {
+        composerHint = `clipboard copy failed: ${(err as Error).message}`;
+        repaintComposerStatus();
+      },
+    );
+  };
+
+  // Press half of the composer's selection gesture. No-op when the
+  // press didn't land on a composer row or the feature is off.
+  const handleComposerSelectionPress = (cell: { x: number; y: number }): void => {
+    if (!inAppSelectionEnabled) {
+      return;
+    }
+    const anchor = resolveCellToComposerOffset(cell.x, cell.y);
+    if (anchor === null) {
+      return;
+    }
+    promptSelectionAnchor = anchor;
+    promptSelectionDragStarted = false;
+    clearComposerSelection();
+  };
+
+  // Drag half of the gesture. Clamps the cell into the composer body's
+  // own row/column bounds so a drag that strays outside the box still
+  // extends the selection to whichever composer row is nearest, rather
+  // than freezing or resolving to null.
+  const handleComposerSelectionDrag = (cell: { x: number; y: number }): void => {
+    if (promptSelectionAnchor === null) {
+      return;
+    }
+    const clampedX = Math.max(1, Math.min(termWidth, cell.x));
+    const clampedY = Math.max(
+      startRow + 1,
+      Math.min(startRow + composerRows, cell.y),
+    );
+    const focus = resolveCellToComposerOffset(clampedX, clampedY);
+    if (focus === null) {
+      return;
+    }
+    promptSelectionDragStarted = true;
+    setComposerSelection(promptSelectionAnchor, focus);
+  };
+
+  const handleComposerSelectionRelease = (): void => {
+    const dragStarted = promptSelectionDragStarted;
+    promptSelectionAnchor = null;
+    promptSelectionDragStarted = false;
+    if (dragStarted) {
+      finalizeComposerSelection();
+      return;
+    }
+    clearComposerSelection();
+  };
+
   // Sigs for the row-painter cache. Each must include every variable
   // input that affects the row's visible output; identical sig means
   // identical bytes so paintRow can short-circuit.
@@ -1282,8 +1501,11 @@ export async function pickSession(
     }
     return "blank";
   };
-  const composerBodySig = (visualIdx: number): string =>
-    `cbb|${composerFocusFlag()}|${composerBoxInner()}|${composerSliceAt(visualIdx)}`;
+  const composerBodySig = (visualIdx: number): string => {
+    const sel = composerSelectionRangeFor(visualIdx);
+    const selSig = sel === null ? "" : `${sel.start}:${sel.end}`;
+    return `cbb|${composerFocusFlag()}|${composerBoxInner()}|${composerSliceAt(visualIdx)}|${selSig}`;
+  };
   const headerSig = (): string => `h|${headerLine}`;
   const sessionRowSig = (sessionIdx: number): string => {
     const session = visible[sessionIdx];
@@ -2532,6 +2754,11 @@ export async function pickSession(
       data?: { isCharacter?: boolean },
     ): void => {
       resetAutoRefresh();
+      // Spec (matches Screen's live-session composer): any keystroke
+      // dismisses a lingering composer selection before it's acted on.
+      if (promptSelection !== null) {
+        clearComposerSelection();
+      }
       if (data?.isCharacter) {
         // A stray chord prefix must not eat the character typed right
         // after it.
@@ -4438,6 +4665,7 @@ export async function pickSession(
       }
       if (mode !== "normal") return;
       const isMotion = name === "MOUSE_MOTION";
+      const isDrag = name === "MOUSE_DRAG";
       const isPress = name === "MOUSE_LEFT_BUTTON_PRESSED";
       const isRelease = name === "MOUSE_LEFT_BUTTON_RELEASED";
       const isWheelUp = name === "MOUSE_WHEEL_UP";
@@ -4456,6 +4684,31 @@ export async function pickSession(
         // "select-only" (highlight + focus the list).
         pickerPressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
         pickerPressUnfocused = unfocused;
+        const px = data?.x;
+        const py = data?.y;
+        if (
+          !unfocused &&
+          typeof px === "number" &&
+          typeof py === "number" &&
+          py >= startRow &&
+          py <= composerBottomRow()
+        ) {
+          handleComposerSelectionPress({ x: px, y: py });
+        }
+        return;
+      }
+      // Terminal-kit reports button-held motion as MOUSE_DRAG, distinct
+      // from hover's MOUSE_MOTION. The picker has nothing else that
+      // drag-tracks (no scrollback to select in), so this only ever
+      // extends a composer selection already anchored by the press above.
+      if (isDrag) {
+        if (promptSelectionAnchor !== null) {
+          const dx = data?.x;
+          const dy = data?.y;
+          if (typeof dx === "number" && typeof dy === "number") {
+            handleComposerSelectionDrag({ x: dx, y: dy });
+          }
+        }
         return;
       }
       if (isMotion && unfocused) {
@@ -4472,6 +4725,17 @@ export async function pickSession(
       // doesn't attach.
       const isClick = sameCell && !pickerPressUnfocused;
       const isSelectOnlyRelease = sameCell && pickerPressUnfocused;
+      // A composer drag-select resolves entirely here, on release,
+      // whether or not it lands back on the press cell — unlike a plain
+      // click, the drag itself is the completed gesture (mirrors
+      // Screen's handleSelectionRelease gating block-click on
+      // selectionDragStarted for the same reason).
+      if (isRelease && promptSelectionAnchor !== null) {
+        pickerPressCell = null;
+        pickerPressUnfocused = false;
+        handleComposerSelectionRelease();
+        return;
+      }
       if (isRelease) {
         pickerPressCell = null;
         pickerPressUnfocused = false;
