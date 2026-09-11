@@ -651,7 +651,7 @@ const TuiConfig = z.object({
   // terminal.
   sidebar: z
     .object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().default(true),
       width: z.number().int().positive().optional(),
       // How the column is framed:
       //   "frame" (default) — a continuous left edge with a horizontal rule
