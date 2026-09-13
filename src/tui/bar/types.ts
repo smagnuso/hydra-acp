@@ -47,12 +47,46 @@ export interface SessionInfo {
   // Broader than ForeignSessionId's `name` (foreign-session-id.ts): that
   // one is strictly the local `hydra remote add` alias for a session
   // reached through this daemon's forwarding; this field also covers a
-  // TUI pointed at a foreign daemon directly via --target, where there
-  // is no forwarding and no alias, just a peer whose files are not ours
-  // to open locally. Display-oriented (a string, not a boolean) so the
-  // bar/gadgets can name the peer, which also makes a refused open
-  // self-explanatory instead of silently doing nothing.
+  // TUI pointed at a foreign daemon directly via --target (no forwarding,
+  // no alias, just a peer whose files aren't ours to open locally) and a
+  // dormant bundle import nobody has forked into a real local cwd yet
+  // (see foreignCwdOwner) — three independent ways `cwd` can point at
+  // another machine, one field naming whichever applies. Display-oriented
+  // (a string, not a boolean) so the bar/gadgets can name the machine,
+  // which also makes a refused open self-explanatory instead of silently
+  // doing nothing.
   remote?: string;
+}
+
+// Name of the machine whose files a session's cwd actually belongs to, or
+// undefined when the cwd is trustworthy as local. Deliberately folds two
+// fields cli's own design notes call out as distinct for OTHER purposes
+// (session-host-filter.ts's --host bucketing, picker labeling) — here
+// they produce the identical hazard, so they collapse to one answer.
+// A dormant import (importedFromMachine set, upstreamSessionId unset) has
+// never had a real local cwd chosen for it: importing a bundle only
+// copies the conversation record, not the project's files, so cwd is
+// still whatever the exporting machine had. Once the user forks it
+// locally (promptForImportCwd), upstreamSessionId gets set and cwd is a
+// freshly-chosen real local path — it correctly falls out of this check
+// from that point on. Takes the raw session/list-entry shape (not
+// SessionInfo) so both the picker's DiscoveredSession rows and the
+// resolved SessionContext can share this one decision.
+export function foreignCwdOwner(
+  s:
+    | { remote?: string; importedFromMachine?: string; upstreamSessionId?: string }
+    | undefined,
+): string | undefined {
+  if (s === undefined) {
+    return undefined;
+  }
+  if (s.remote !== undefined) {
+    return s.remote;
+  }
+  if (s.importedFromMachine !== undefined && !s.upstreamSessionId) {
+    return s.importedFromMachine;
+  }
+  return undefined;
 }
 
 // Single predicate for "does this session's cwd belong to another

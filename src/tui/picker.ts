@@ -31,7 +31,7 @@ import {
   type HydraConfig,
 } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
-import { isRemoteSession } from "./bar/types.js";
+import { foreignCwdOwner } from "./bar/types.js";
 import { terminalHost } from "./term-host/index.js";
 import { canOpenTab, canReveal, openInNewTab, revealOrOpen } from "./term-host/open.js";
 import {
@@ -3324,9 +3324,10 @@ export async function pickSession(
           kind: "attach",
           sessionId: session.sessionId,
           title: session.title,
-          // session.cwd belongs to the peer for a federated session — see
+          // session.cwd belongs to another machine for a federated session
+          // or a dormant import (foreignCwdOwner) — see
           // dispatchToTerminalHost's identical guard in app.ts.
-          cwd: isRemoteSession(session) ? undefined : session.cwd,
+          cwd: foreignCwdOwner(session) !== undefined ? undefined : session.cwd,
         });
         transientStatus =
           result.outcome === "revealed"

@@ -149,7 +149,7 @@ import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import { formatTokens } from "./bar/fields.js";
 import { collectScriptCommands, createScriptRunner } from "./bar/scripts.js";
 import { expandBarConfig } from "./bar/slots.js";
-import { isRemoteSession } from "./bar/types.js";
+import { foreignCwdOwner, isRemoteSession } from "./bar/types.js";
 import { mintScriptTokens, revokeScriptTokens } from "./shared/script-tokens.js";
 import { createProcessRunner } from "./shared/process-runner.js";
 import {
@@ -918,10 +918,14 @@ interface SessionContext {
   // resolveSession when the caller already has a DiscoveredSession in
   // hand, so runSession can pick a more accurate launch banner.
   resolved?: DiscoveredSession;
-  // Mirror of DiscoveredSession.remote (see there): set when this
-  // session was found via a federated peer's session list, so its cwd
-  // and every path/link derived from it belong to that peer, not this
-  // machine. runSession folds this into SessionInfo.remote (bar/types.ts)
+  // Name of the machine that actually owns this session's cwd, when it
+  // isn't this one. Covers two independent DiscoveredSession shapes —
+  // see foreignCwdOwner() — folded into one field because both produce
+  // the identical local-file hazard: a live federated peer (remote set),
+  // or a bundle import nobody has forked into a real local cwd yet
+  // (importedFromMachine set, upstreamSessionId unset — the dormant-
+  // mirror condition isDormantOnPeer/matchesHostFilter use elsewhere).
+  // runSession folds this into SessionInfo.remote (bar/types.ts)
   // alongside the separate !target.isLocal case (a TUI pointed straight
   // at a foreign daemon via --target).
   remote?: string;
@@ -1214,14 +1218,15 @@ async function dispatchToTerminalHost(
     kind: "attach",
     sessionId: choice.sessionId,
     title: source?.title,
-    // source.cwd names a directory on the peer for a federated session —
-    // handing it to the terminal-host backend as the new pane's spawn
-    // cwd would land that pane's shell in a same-named-but-unrelated
-    // local directory on a shared-username setup. Omit it and let the
-    // backend fall back to its own default (its usual "no cwd given"
-    // behavior); the hydra process the pane launches still reattaches to
-    // the real remote session on its own.
-    cwd: source && isRemoteSession(source) ? undefined : (source?.cwd ?? fallbackCwd),
+    // source.cwd names a directory on another machine for a federated
+    // session OR a dormant import (foreignCwdOwner) — handing it to the
+    // terminal-host backend as the new pane's spawn cwd would land that
+    // pane's shell in a same-named-but-unrelated local directory on a
+    // shared-username setup. Omit it and let the backend fall back to
+    // its own default (its usual "no cwd given" behavior); the hydra
+    // process the pane launches still reattaches to the real session on
+    // its own.
+    cwd: foreignCwdOwner(source) !== undefined ? undefined : (source?.cwd ?? fallbackCwd),
     jumpToRecordedAt: choice.jumpToRecordedAt,
   });
   switch (result.outcome) {
@@ -10751,8 +10756,9 @@ async function resolveSession(
     if (opts.resolved !== undefined) {
       ctx.resolved = opts.resolved;
     }
-    if (opts.resolved?.remote !== undefined) {
-      ctx.remote = opts.resolved.remote;
+    const foreignOwner = foreignCwdOwner(opts.resolved);
+    if (foreignOwner !== undefined) {
+      ctx.remote = foreignOwner;
     }
     if (opts.jumpToRecordedAt !== undefined) {
       ctx.jumpToRecordedAt = opts.jumpToRecordedAt;
@@ -11047,8 +11053,9 @@ async function resolveSession(
     if (chosen !== undefined) {
       ctx.resolved = chosen;
     }
-    if (chosen?.remote !== undefined) {
-      ctx.remote = chosen.remote;
+    const chosenForeignOwner = foreignCwdOwner(chosen);
+    if (chosenForeignOwner !== undefined) {
+      ctx.remote = chosenForeignOwner;
     }
     if (choice.jumpToRecordedAt !== undefined) {
       ctx.jumpToRecordedAt = choice.jumpToRecordedAt;
@@ -11096,6 +11103,15 @@ async function runImportedFirstLaunchFlow(
         agentId,
         cwd: chosen.cwd,
       };
+      // This flow only runs for a dormant import (see isImportedFirstLaunch's
+      // gate above), so chosen.cwd is still the exporting machine's raw
+      // path — never touched, since import only copies the conversation
+      // record, not the project's files. The "view" action skips the
+      // fork-cwd prompt entirely, so nothing else will mark it foreign.
+      const viewForeignOwner = foreignCwdOwner(chosen);
+      if (viewForeignOwner !== undefined) {
+        viewCtx.remote = viewForeignOwner;
+      }
       if (choice.jumpToRecordedAt !== undefined) {
         viewCtx.jumpToRecordedAt = choice.jumpToRecordedAt;
       }
