@@ -1,7 +1,8 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { writeHeapSnapshot } from "node:v8";
 import { nanoid } from "nanoid";
@@ -3337,6 +3338,26 @@ async function runSession(
   // even though most of app.ts otherwise works off separate resolvedX
   // locals rather than a struct.
   const sessionIsRemote = isRemoteSession(ctx);
+  // Unlike the git gadget or tryOpenPathString, a hotkey/script slot is
+  // supposed to still run for a remote session — refusing outright would
+  // disable a feature users configured on purpose. But spawning it in
+  // resolvedCwd risks the same silent-wrong-machine hit: same username on
+  // both machines means that path often exists locally too. Give it an
+  // empty, guaranteed-not-to-collide directory instead — a command that
+  // depends on cwd content fails or comes back empty (harmless; scripts
+  // that return nothing are already treated as inert, see
+  // sanitizeProcessOutput/createOutputBuilder), rather than silently
+  // acting on an unrelated local tree. Created lazily: most sessions
+  // never press a hotkey or configure a script slot, so most sessions
+  // never need one. Removed in teardown.
+  let remoteExecTmpDir: string | null = null;
+  const remoteExecCwd = (): string => {
+    if (remoteExecTmpDir === null) {
+      remoteExecTmpDir = mkdtempSync(path.join(tmpdir(), "hydra-remote-exec-"));
+    }
+    return remoteExecTmpDir;
+  };
+  const execCwd = (): string => (sessionIsRemote ? remoteExecCwd() : resolvedCwd);
   // Consumed once by the initial attach-replay drain below; a reconnect
   // later in this same runSession call must not re-jump the viewport.
   const jumpToRecordedAt = ctx.jumpToRecordedAt;
@@ -4424,14 +4445,14 @@ async function runSession(
       spec,
       {
         sessionId: resolvedSessionId,
-        cwd: resolvedCwd,
+        cwd: execCwd(),
         agentId: resolvedAgentId || agentInfoName || "",
         baseUrl: target.baseUrl,
         tokenFile: paths.authToken(),
       },
       {
         notify: (msg) => screen.notify(msg),
-        cwd: resolvedCwd,
+        cwd: execCwd(),
         emitLines: (out) => {
           screen.appendLines(
             out.map((line) => {
@@ -4528,7 +4549,7 @@ async function runSession(
   };
   if (scriptCommands.size > 0) {
     const scriptRunner = createScriptRunner({
-      cwd: () => resolvedCwd,
+      cwd: execCwd,
       envFor: scriptEnvFor,
       onOutput: (command, output) => screen.setScriptOutput(command, output),
     });
@@ -4581,7 +4602,7 @@ async function runSession(
   };
   if (sidebarProcessCommands.size > 0) {
     const sidebarProcessRunner = createProcessRunner({
-      cwd: () => resolvedCwd,
+      cwd: execCwd,
       envFor: scriptEnvFor,
       sanitize: sanitizeProcessOutput,
       onOutput: (command, output) => screen.setProcessOutput(command, output),
@@ -5973,6 +5994,10 @@ async function runSession(
     if (sidebarProcessTicker !== null) {
       clearInterval(sidebarProcessTicker);
       sidebarProcessTicker = null;
+    }
+    if (remoteExecTmpDir !== null) {
+      rmSync(remoteExecTmpDir, { recursive: true, force: true });
+      remoteExecTmpDir = null;
     }
     screen.clearWindowTitle();
     // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,
