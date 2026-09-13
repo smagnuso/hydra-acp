@@ -148,6 +148,7 @@ import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import { formatTokens } from "./bar/fields.js";
 import { collectScriptCommands, createScriptRunner } from "./bar/scripts.js";
 import { expandBarConfig } from "./bar/slots.js";
+import { isRemoteSession } from "./bar/types.js";
 import { mintScriptTokens, revokeScriptTokens } from "./shared/script-tokens.js";
 import { createProcessRunner } from "./shared/process-runner.js";
 import {
@@ -3331,6 +3332,11 @@ async function runSession(
   // it) actually belongs to, or undefined when they're ours. Mirrored
   // into sessionbar.remote below so screen.ts's guards can read it.
   const resolvedRemote = ctx.remote;
+  // Derived once from ctx via the same predicate screen.ts's guards use,
+  // so "what counts as remote" stays defined in one place (isRemoteSession)
+  // even though most of app.ts otherwise works off separate resolvedX
+  // locals rather than a struct.
+  const sessionIsRemote = isRemoteSession(ctx);
   // Consumed once by the initial attach-replay drain below; a reconnect
   // later in this same runSession call must not re-jump the viewport.
   const jumpToRecordedAt = ctx.jumpToRecordedAt;
@@ -8963,6 +8969,15 @@ async function runSession(
 
   const pollGitOnce = (): void => {
     if (gitPollInFlight || resolvedCwd === null) {
+      return;
+    }
+    if (sessionIsRemote) {
+      // resolvedCwd names a directory on the peer, not this machine —
+      // running git here would report on whatever (possibly unrelated)
+      // repo happens to sit at that path locally. Same-shaped hazard as
+      // tryOpenPathString's guard; git: null reports the gadget
+      // irrelevant rather than showing a confidently wrong status.
+      screen.setSidebarSnapshot({ git: null });
       return;
     }
     const cwd = resolvedCwd;
