@@ -2762,6 +2762,30 @@ describe("Screen block-click routing", () => {
     expect(open("does-not-exist-anywhere")).toBe(false);
   });
 
+  it("tryOpenPathString refuses and names the peer for a federated session, without spawning", async () => {
+    // The bug this guards: same username on both machines means a
+    // federated session's cwd usually exists locally too, so an
+    // unguarded open would silently edit the WRONG machine's file
+    // instead of just failing.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-remote-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const screen = makeTallScreen({ openFileCommand: ["true"] });
+    screen.setSessionbar({ cwd: dir, remote: "workbox" });
+    const open = (
+      screen as unknown as { tryOpenPathString: (raw: string) => boolean }
+    ).tryOpenPathString.bind(screen);
+    expect(open("Makefile")).toBe(true);
+    const r = (
+      screen as unknown as {
+        bannerRightContent: () => { text: string; kind: string } | null;
+      }
+    ).bannerRightContent();
+    expect(r?.text).toContain("workbox");
+  });
+
   it("routes a $VISUAL/$EDITOR command through the foreground runner", async () => {
     // openFileSource "env" means the command came from $VISUAL/$EDITOR,
     // whose contract is to block and own the terminal. A detached spawn
@@ -2974,6 +2998,51 @@ describe("Screen block-click routing", () => {
     const all = writes.join("");
     spy.mockRestore();
     expect(all).toContain("/repo/proj/src/a.ts#L7");
+  });
+
+  it("suppresses the OSC 8 hyperlink for a scheme-less path on a federated session", () => {
+    // The terminal resolves a file:// hyperlink itself on click — hydra
+    // never sees the gesture, so tryOpenPathString's guard can't stop
+    // it. The only lever is not emitting the hyperlink.
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const screen = makeTallScreen({ width: 200, height: 24 });
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSessionbar({ cwd: "/repo/proj", remote: "workbox" });
+    screen.appendLine({
+      body: "edit src/a.ts now",
+      links: [{ start: 5, end: 13, url: "src/a.ts#L7" }],
+    });
+    screen.repaintNow();
+    const all = writes.join("");
+    spy.mockRestore();
+    expect(all).not.toContain("\x1b]8;;");
+  });
+
+  it("leaves an http(s) link alone on a federated session", () => {
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const screen = makeTallScreen({ width: 200, height: 24 });
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSessionbar({ cwd: "/repo/proj", remote: "workbox" });
+    screen.appendLine({
+      body: "see docs now",
+      links: [{ start: 4, end: 8, url: "https://example.com" }],
+    });
+    screen.repaintNow();
+    const all = writes.join("");
+    spy.mockRestore();
+    expect(all).toContain("\x1b]8;;https://example.com\x1b\\");
   });
 
   it("expands a ~-prefixed prose link to an absolute file:// url", () => {

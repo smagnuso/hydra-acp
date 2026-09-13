@@ -916,6 +916,13 @@ interface SessionContext {
   // resolveSession when the caller already has a DiscoveredSession in
   // hand, so runSession can pick a more accurate launch banner.
   resolved?: DiscoveredSession;
+  // Mirror of DiscoveredSession.remote (see there): set when this
+  // session was found via a federated peer's session list, so its cwd
+  // and every path/link derived from it belong to that peer, not this
+  // machine. runSession folds this into SessionInfo.remote (bar/types.ts)
+  // alongside the separate !target.isLocal case (a TUI pointed straight
+  // at a foreign daemon via --target).
+  remote?: string;
 }
 
 // How long the upstream may be silent (no session/update arrivals)
@@ -3312,6 +3319,18 @@ async function runSession(
   let resolvedAgentId = ctx.agentId;
   let resolvedCwd = ctx.cwd;
   let resolvedTitle: string | undefined;
+  // Fold in the !target.isLocal case (this pane pointed straight at a
+  // foreign daemon, so every session it shows is remote) so ctx.remote
+  // becomes the fully resolved peer label — resolveSession already
+  // stamped the other case, a federated session forwarded through the
+  // local daemon, from the picker's session list.
+  if (!target.isLocal) {
+    ctx.remote = target.display;
+  }
+  // Peer name whose files resolvedCwd (and every path/link derived from
+  // it) actually belongs to, or undefined when they're ours. Mirrored
+  // into sessionbar.remote below so screen.ts's guards can read it.
+  const resolvedRemote = ctx.remote;
   // Consumed once by the initial attach-replay drain below; a reconnect
   // later in this same runSession call must not re-jump the viewport.
   const jumpToRecordedAt = ctx.jumpToRecordedAt;
@@ -4589,6 +4608,7 @@ async function runSession(
     // resolvedCwd is a hash directory under ~/.hydra-acp for an isolated
     // session, which names no project and so tells the reader nothing.
     cwd: resolvedCwd,
+    remote: resolvedRemote,
     ...(initialWorkspace === undefined
       ? {}
       : {
@@ -10666,6 +10686,9 @@ async function resolveSession(
     if (opts.resolved !== undefined) {
       ctx.resolved = opts.resolved;
     }
+    if (opts.resolved?.remote !== undefined) {
+      ctx.remote = opts.resolved.remote;
+    }
     if (opts.jumpToRecordedAt !== undefined) {
       ctx.jumpToRecordedAt = opts.jumpToRecordedAt;
     }
@@ -10958,6 +10981,9 @@ async function resolveSession(
     }
     if (chosen !== undefined) {
       ctx.resolved = chosen;
+    }
+    if (chosen?.remote !== undefined) {
+      ctx.remote = chosen.remote;
     }
     if (choice.jumpToRecordedAt !== undefined) {
       ctx.jumpToRecordedAt = choice.jumpToRecordedAt;

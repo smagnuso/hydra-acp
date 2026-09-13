@@ -20,7 +20,7 @@ import type {
 import { SLOT_STYLES, expandBarConfig, resolveSide } from "./bar/slots.js";
 import type { SlotName } from "./bar/slots.js";
 import { formatUsage, transientGroup } from "./bar/fields.js";
-import { DEFAULT_HINT_ITEMS } from "./bar/types.js";
+import { DEFAULT_HINT_ITEMS, isRemoteSession } from "./bar/types.js";
 import type {
   BarLayoutConfig,
   FieldContext,
@@ -5211,11 +5211,20 @@ export class Screen {
       return null;
     }
     if (url.startsWith("file://")) {
-      return url;
+      // The terminal resolves a file:// hyperlink itself on click — hydra
+      // never sees the gesture, so tryOpenPathString's guard can't help.
+      // The only lever is not emitting the hyperlink at all.
+      return isRemoteSession(this.sessionbar) ? null : url;
     }
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) {
       // http, https, ssh, mailto, … — hand over verbatim.
       return url;
+    }
+    if (isRemoteSession(this.sessionbar)) {
+      // Scheme-less path resolves against sessionbar.cwd, which belongs
+      // to the peer named by `remote` — same reasoning as the file://
+      // branch above.
+      return null;
     }
     // Scheme-less: a filesystem path. Split the #L42 fragment off before
     // resolving, then re-attach it. Relative paths resolve against the
@@ -5528,6 +5537,17 @@ export class Screen {
   }
 
   tryOpenPathString(raw: string): boolean {
+    // Single funnel for every path-opening gesture (tryOpenFileAt,
+    // dispatchLinkUrl, the cwd double-click). sessionbar.cwd belongs to
+    // this.sessionbar.remote when set, and same-username machines make a
+    // same-named path exist locally too — so a same-machine open here
+    // would silently edit the WRONG file instead of just missing. Claim
+    // the gesture (return true) so nothing downstream retries it as a
+    // plain-text token.
+    if (isRemoteSession(this.sessionbar)) {
+      this.notify(`can't open — this session's files are on ${this.sessionbar.remote}`, 4000);
+      return true;
+    }
     if (this.openFileCommand === null) {
       return false;
     }

@@ -42,6 +42,30 @@ export interface SessionInfo {
   // from `agent` so the TUI can update it independently when
   // current_model_update arrives mid-session.
   model?: string;
+  // Name of the machine whose files `cwd` (and every path/link derived
+  // from it) actually names, set only when that isn't this machine.
+  // Broader than ForeignSessionId's `name` (foreign-session-id.ts): that
+  // one is strictly the local `hydra remote add` alias for a session
+  // reached through this daemon's forwarding; this field also covers a
+  // TUI pointed at a foreign daemon directly via --target, where there
+  // is no forwarding and no alias, just a peer whose files are not ours
+  // to open locally. Display-oriented (a string, not a boolean) so the
+  // bar/gadgets can name the peer, which also makes a refused open
+  // self-explanatory instead of silently doing nothing.
+  remote?: string;
+}
+
+// Single predicate for "does this session's cwd belong to another
+// machine, not this one". Takes the session object rather than a bare
+// string so the decision lives in one place: every local-fs/spawn guard
+// calls this instead of testing a `remote` field inline, so a future
+// change to what counts as remote (weighing another field, a
+// placeholder value that shouldn't count, …) only has to happen here.
+// `Pick<SessionInfo, "remote">` rather than the full type so a
+// DiscoveredSession (discovery.ts), or a bare `{ remote }` literal
+// where no richer object is in scope, satisfies it too.
+export function isRemoteSession(session: Pick<SessionInfo, "remote">): boolean {
+  return session.remote !== undefined;
 }
 
 /**
