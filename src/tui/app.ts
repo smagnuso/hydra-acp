@@ -4198,6 +4198,15 @@ async function runSession(
   // the session cwd. Returns true when Tab was consumed (a path-like token
   // was found and the directory was readable), false to let Tab indent.
   const tryHandleFileCompletion = (): boolean => {
+    if (sessionIsRemote) {
+      // resolvedCwd names a directory on the peer, not this machine —
+      // listing it here would offer completions from whatever (possibly
+      // unrelated) local directory happens to sit at that path. Falling
+      // through to plain Tab-as-indent is a fine default; there's no local
+      // completion to fall back to that wouldn't risk the same silent
+      // wrong-machine hit as the guards above.
+      return false;
+    }
     const st = dispatcher.state();
     const line = st.buffer[st.row] ?? "";
     const tok = extractPathToken(line, st.col);
