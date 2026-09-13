@@ -1214,7 +1214,14 @@ async function dispatchToTerminalHost(
     kind: "attach",
     sessionId: choice.sessionId,
     title: source?.title,
-    cwd: source?.cwd ?? fallbackCwd,
+    // source.cwd names a directory on the peer for a federated session —
+    // handing it to the terminal-host backend as the new pane's spawn
+    // cwd would land that pane's shell in a same-named-but-unrelated
+    // local directory on a shared-username setup. Omit it and let the
+    // backend fall back to its own default (its usual "no cwd given"
+    // behavior); the hydra process the pane launches still reattaches to
+    // the real remote session on its own.
+    cwd: source && isRemoteSession(source) ? undefined : (source?.cwd ?? fallbackCwd),
     jumpToRecordedAt: choice.jumpToRecordedAt,
   });
   switch (result.outcome) {
