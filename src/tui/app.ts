@@ -9387,6 +9387,15 @@ async function runSession(
     if (!diff.path) {
       return null;
     }
+    if (sessionIsRemote) {
+      // diff.path resolves against resolvedCwd, which names a directory
+      // on the peer — reading it here risks the same silent
+      // wrong-machine hit as the guards above, for a file that (unlike
+      // the click-to-open path) nothing downstream will ever actually
+      // open. null is the same "anchor not found" outcome withHeaderLine
+      // already handles: the link keeps its plain path, no #L fragment.
+      return null;
+    }
     const oldLines = sanitizeWireText(diff.oldText).split("\n");
     const newLines = sanitizeWireText(diff.newText).split("\n");
     let start = 0;
