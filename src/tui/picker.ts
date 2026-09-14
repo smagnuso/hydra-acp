@@ -26,11 +26,12 @@ import { lookupInheritedAgentValue } from "../core/registry.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import {
+  loadConfig,
   resolveInAppSelection,
   setDefaultAgent,
   type HydraConfig,
 } from "../core/config.js";
-import type { RemoteTarget } from "../core/remote-target.js";
+import { resolveLocalTarget, type RemoteTarget } from "../core/remote-target.js";
 import { foreignCwdOwner } from "./bar/types.js";
 import { terminalHost } from "./term-host/index.js";
 import { canOpenTab, canReveal, openInNewTab, revealOrOpen } from "./term-host/open.js";
@@ -3130,11 +3131,46 @@ export async function pickSession(
       );
       sessionCursor = page.cursor;
     };
+    // Consecutive auto-refresh failures (reset to 0 on any success). Used
+    // to break the auto-refresh path's silence: a single silent failure
+    // stays silent (transient network hiccups shouldn't flash error
+    // text), but a daemon that's actually unreachable would otherwise
+    // fail every 3s forever with nothing on screen to explain it.
+    let consecutiveSilentFailures = 0;
+    // Re-reads baseUrl/wsUrl/token from the pidfile + token file and
+    // mutates opts.target in place, mirroring onReconnect's target
+    // refresh in app.ts. That refresh only fires from an attached
+    // session's WS reconnect handler, so it never runs while the picker
+    // itself is open — `daemon restart` landing on a new ephemeral port
+    // (or a rotated token) leaves the picker's captured target stale
+    // with no trigger to notice. Returns true if anything changed.
+    const refreshTargetFromDisk = async (): Promise<boolean> => {
+      if (!opts.target.isLocal) {
+        return false;
+      }
+      try {
+        const fresh = await resolveLocalTarget(await loadConfig());
+        if (
+          fresh.baseUrl === opts.target.baseUrl &&
+          fresh.wsUrl === opts.target.wsUrl &&
+          fresh.token === opts.target.token
+        ) {
+          return false;
+        }
+        opts.target.baseUrl = fresh.baseUrl;
+        opts.target.wsUrl = fresh.wsUrl;
+        opts.target.display = fresh.display;
+        opts.target.token = fresh.token;
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const refresh = async (
       preferredId?: string,
       refreshOpts: { silent?: boolean; signal?: AbortSignal } = {},
     ): Promise<void> => {
-      try {
+      const attempt = async (): Promise<void> => {
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const beforeTotal = total;
         const incremental = sessionCursor !== undefined;
@@ -3184,8 +3220,33 @@ export async function pickSession(
         } else {
           renderFromScratch();
         }
-      } catch (err) {
+      };
+      try {
+        await attempt();
+        consecutiveSilentFailures = 0;
+      } catch (firstErr) {
+        // The daemon may have restarted on a new ephemeral port or with
+        // a rotated token since opts.target was captured — retry once
+        // against a freshly-resolved target before giving up.
+        let err = firstErr;
+        if (await refreshTargetFromDisk()) {
+          try {
+            await attempt();
+            consecutiveSilentFailures = 0;
+            return;
+          } catch (retryErr) {
+            err = retryErr;
+          }
+        }
         if (refreshOpts.silent) {
+          consecutiveSilentFailures += 1;
+          // A few silent misses are normal noise; past this the daemon
+          // is genuinely unreachable and staying silent just looks like
+          // the picker froze with no explanation.
+          if (consecutiveSilentFailures >= 3) {
+            transientStatus = `refresh failing: ${(err as Error).message}`;
+            renderFromScratch();
+          }
           return;
         }
         transientStatus = `refresh failed: ${(err as Error).message}`;
