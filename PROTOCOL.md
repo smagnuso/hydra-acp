@@ -3398,12 +3398,22 @@ Create a child session whose `parentSessionId` is set.
   "interactive":     false,       // optional; defaults to false for transformer-spawned children
   "_meta": {
     "hydra-acp": {
-      "title": "<label>"        // optional; pre-seeds Session.title so the first user prompt doesn't clobber it
+      "title":     "<label>",   // optional; pre-seeds Session.title so the first user prompt doesn't clobber it
+      "model":     "<id>",      // optional; seeds the child on this model instead of the resolved default
+      "workspace": { "label": "feature-x" }   // optional; see Workspace isolation
     }
   }
 }
 // result
-{ "childSessionId": "<new id>" }
+{
+  "childSessionId": "<new id>",
+  "_meta": {
+    "hydra-acp": {
+      "workspaceInfo":  { /* WorkspaceInfoMeta */ },   // present when workspace isolation succeeded
+      "workspaceError": "<reason>"                     // present when isolation was requested but fell back
+    }
+  }
+}
 ```
 
 Children start with an empty transformer chain by default. When `cwd` is omitted, the daemon inherits the parent session's cwd — covers the common transformer pattern of "spawn this worker in the same place as my parent" without forcing a separate round-trip to look up the parent's cwd. An explicit `cwd` always wins. If both are missing (no `cwd`, and no `parentSessionId` pointing at a live session), the call rejects with `InvalidParams`.
@@ -3411,6 +3421,10 @@ Children start with an empty transformer chain by default. When `cwd` is omitted
 **Interactive default.** `interactive` defaults to `false` for transformer-spawned children — they exist to do automated work driven by the transformer, not to host a human at a composer, so the default keeps them out of the front-door `hydra-acp session` listing (visible only with `--all`). Pass `interactive: true` if the transformer wants the child to behave like a normal session.
 
 **Title seed.** `_meta["hydra-acp"].title`, when present, sets `Session.title` at create time using the same path as `session/new`. Marks `_firstPromptSeeded=true` so the first user prompt doesn't replace the label. Same shape as the `title` field on [`session/new` params](#on-sessionnew-params-_metahydra-acp) — transformers labelling their children (e.g. the planner naming workers after their tasks) avoid a post-spawn `session_info_update` round-trip.
+
+**Model seed.** `_meta["hydra-acp"].model`, when present, seeds the child on that model at create time instead of whatever `agentId`/directory config would otherwise resolve to. Same shape as the `model` field on `session/new` params.
+
+**Workspace isolation.** `_meta["hydra-acp"].workspace`, when present, requests the same isolated-workspace creation `session/new` supports (see [Workspace isolation](#workspace-isolation)) — `cwd` (explicit or parent-inherited, above) is treated as the *source* tree, and the session's effective cwd becomes the resolved workspace path. Parsed with the same field-by-field validation as `session/new` (a malformed block degrades to "no isolation requested" rather than reaching the provider as junk). The result echoes `workspaceInfo`/`workspaceError` the same way session-describing responses do (see `buildHydraSessionMeta`), but *only* those two fields under `_meta["hydra-acp"]` — none of the live-session extras (`queue`, `availableCommands`, `agentCapabilities`, ...) that `session/new`/`session/attach` responses carry, since a transformer-spawned child has no interactive client waiting on them. `_meta` is omitted entirely from the result when no workspace was requested.
 
 #### Request (transformer → daemon): `hydra-acp/child_session/await`
 

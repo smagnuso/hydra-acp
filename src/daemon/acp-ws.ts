@@ -901,34 +901,31 @@ export function registerAcpWsEndpoint(
         const parentSessionId = typeof params.parentSessionId === "string"
           ? params.parentSessionId
           : undefined;
+        // Parsed the same way session/new parses its _meta["hydra-acp"]
+        // block, so title/model/workspace all get the same validation
+        // (a malformed workspace block degrades to "no isolation
+        // requested" rather than reaching the provider as junk).
+        const hydraMeta = extractHydraMeta(
+          (params._meta ?? undefined) as Record<string, unknown> | undefined,
+        );
         // Optional title under _meta["hydra-acp"].title — mirrors the
         // shape used by session/new so transformers don't have to
         // post-spawn emit a session_info_update to label their
         // children. Pre-seeds Session.title before the first prompt
         // lands; the daemon's "first user prompt becomes the title"
         // heuristic respects this seed via _firstPromptSeeded.
-        const metaObj =
-          params._meta && typeof params._meta === "object"
-            ? (params._meta as Record<string, unknown>)
-            : undefined;
-        const hydraMeta =
-          metaObj && metaObj["hydra-acp"] && typeof metaObj["hydra-acp"] === "object"
-            ? (metaObj["hydra-acp"] as Record<string, unknown>)
-            : undefined;
-        const title =
-          hydraMeta && typeof hydraMeta.title === "string"
-            ? hydraMeta.title
-            : undefined;
+        const title = hydraMeta.title;
         // Optional starting model under _meta["hydra-acp"].model — mirrors
         // session/new so a transformer (e.g. the planner) can spawn a
         // worker directly on a configured floor model instead of the
         // agent's default. Avoids a post-spawn set_model round-trip and
         // closes the window where the session briefly exists on the
         // wrong model.
-        const explicitModel =
-          hydraMeta && typeof hydraMeta.model === "string"
-            ? hydraMeta.model
-            : undefined;
+        const explicitModel = hydraMeta.model;
+        // Optional isolation request under _meta["hydra-acp"].workspace —
+        // mirrors session/new so a transformer (e.g. the planner) can spawn
+        // a worker into its own workspace instead of the parent's cwd.
+        const workspaceRequest = hydraMeta.workspace;
 
         // Inherit cwd from the parent when omitted. The common transformer
         // pattern is "spawn a child in the same place as my parent"; the
@@ -981,8 +978,31 @@ export function registerAcpWsEndpoint(
           title,
           model,
           configDefaults: directoryConfig,
+          ...(workspaceRequest !== undefined ? { workspace: workspaceRequest } : {}),
         });
-        return { childSessionId: child.sessionId };
+        return {
+          childSessionId: child.sessionId,
+          // Echo workspace outcome the same way session/new does, so a
+          // transformer that requested isolation can observe the resolved
+          // path or fallback reason without a follow-up session/list call.
+          // Deliberately NOT routed through buildResponseMeta: that helper
+          // pulls in live-only extras (queue snapshot, modes, capabilities)
+          // that make no sense for a non-interactive spawned child.
+          ...(child.workspace !== undefined || child.workspaceError !== undefined
+            ? {
+                _meta: {
+                  [HYDRA_META_KEY]: {
+                    ...(child.workspace !== undefined
+                      ? { workspaceInfo: child.workspace }
+                      : {}),
+                    ...(child.workspaceError !== undefined
+                      ? { workspaceError: child.workspaceError }
+                      : {}),
+                  },
+                },
+              }
+            : {}),
+        };
       });
 
       // Branch a local session into a new one that shares context up to
