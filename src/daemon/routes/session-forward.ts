@@ -28,6 +28,7 @@ import {
 } from "../../core/foreign-session-id.js";
 import { HYDRA_SESSION_PREFIX } from "../../core/session.js";
 import type { PeerStore } from "../../core/peer-store.js";
+import type { SessionHits, SessionSearchResponse } from "../../core/history-search.js";
 
 export interface SessionForwardDeps {
   store: PeerStore;
@@ -458,6 +459,110 @@ export async function createOnRemote(
     };
   }
   return { status: upstream.status, body: parsed };
+}
+
+// POST /v1/sessions/search's own preHandler can't use the same forwarding
+// hook as everything else in this file: that hook keys off a route
+// pattern shaped "/v1/sessions/:id...", and search has no :id segment —
+// one query can span any number of sessions, local and federated alike.
+// So instead of forwarding the whole request, the local route handler
+// calls this to ALSO ask every relevant peer and merge the answers in,
+// the same "ask every peer, skip one that fails" shape ForeignSessionCache
+// already uses for GET /v1/sessions.
+//
+// Scoping: when the caller passed a `sessionIds` allowlist (the picker's
+// visible-rows filter), only the peers actually named in it are asked,
+// each given just its own subset of ids — a scoped find-in-session never
+// fans out further than the rows already on screen. When no allowlist
+// was given (an unscoped query, e.g. `hydra session changes`), every
+// registered peer is asked the same unscoped query, mirroring how the
+// local search has no scope either in that case.
+//
+// Each peer's own hits come back with *its* local sessionIds — rewrapped
+// to "<name>:<localId>" here, same as createOnRemote does for a plain
+// create, so the caller can act on a hit (open it, diff it, …) through
+// the normal forwarding hook without knowing it came from a fan-out.
+export async function searchAcrossPeers(
+  store: PeerStore,
+  body: { q: string; sessionIds?: string[]; snippetWidth?: number },
+  fetchImpl: typeof fetch = fetch,
+): Promise<SessionSearchResponse> {
+  let targets: Array<{ name: string; sessionIds?: string[] }>;
+  if (body.sessionIds === undefined) {
+    targets = store.list().map((p) => ({ name: p.name }));
+  } else {
+    const byPeer = new Map<string, string[]>();
+    for (const id of body.sessionIds) {
+      const foreign = parseForeignSessionId(id);
+      if (!foreign) {
+        continue;
+      }
+      const localIds = byPeer.get(foreign.name) ?? [];
+      localIds.push(foreign.localId);
+      byPeer.set(foreign.name, localIds);
+    }
+    targets = [...byPeer.entries()].map(([name, sessionIds]) => ({ name, sessionIds }));
+  }
+  if (targets.length === 0) {
+    return { query: body.q, truncated: false, results: [] };
+  }
+
+  const perPeer = await Promise.all(
+    targets.map(async (target): Promise<SessionSearchResponse | null> => {
+      const record = store.get(target.name);
+      if (!record) {
+        return null;
+      }
+      const scheme = isLoopbackHost(record.host) ? "http" : "https";
+      const url = `${scheme}://${record.host}:${record.port}/v1/sessions/search`;
+      let upstream: Response;
+      try {
+        upstream = await fetchImpl(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${record.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            q: body.q,
+            ...(target.sessionIds ? { sessionIds: target.sessionIds } : {}),
+            ...(body.snippetWidth !== undefined ? { snippetWidth: body.snippetWidth } : {}),
+          }),
+        });
+      } catch {
+        return null; // Unreachable peer: skip it, same as ForeignSessionCache.
+      }
+      if (!upstream.ok) {
+        return null;
+      }
+      let parsed: unknown;
+      try {
+        parsed = await upstream.json();
+      } catch {
+        return null;
+      }
+      const response = parsed as Partial<SessionSearchResponse> | null;
+      if (!response || !Array.isArray(response.results)) {
+        return null;
+      }
+      const results: SessionHits[] = response.results.map((hit) => ({
+        ...hit,
+        sessionId: formatForeignSessionId({ name: target.name, localId: hit.sessionId }),
+      }));
+      return { query: body.q, truncated: response.truncated === true, results };
+    }),
+  );
+
+  const results: SessionHits[] = [];
+  let truncated = false;
+  for (const r of perPeer) {
+    if (r === null) {
+      continue;
+    }
+    results.push(...r.results);
+    truncated = truncated || r.truncated;
+  }
+  return { query: body.q, truncated, results };
 }
 
 function isTruthy(v: unknown): boolean {

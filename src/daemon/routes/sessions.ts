@@ -35,7 +35,7 @@ import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
 } from "../extension-mcp-mint.js";
-import { createOnRemote, ForeignSessionCache } from "./session-forward.js";
+import { createOnRemote, ForeignSessionCache, searchAcrossPeers } from "./session-forward.js";
 import type { PeerStore } from "../../core/peer-store.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
@@ -199,6 +199,15 @@ export function registerSessionRoutes(
   // session id and that allowlist can run thousands of entries on
   // long-lived installs — well past the header size limit when
   // serialized in a query string (HTTP 431).
+  //
+  // Not covered by registerSessionForwardHook: that hook only fires for
+  // routes shaped "/v1/sessions/:id...", and one search can span any
+  // number of sessions across any number of peers — there's no single
+  // :id to key a forward off. searchAcrossPeers below is this route's
+  // own equivalent instead, fanning the same query out to every peer a
+  // scoped sessionIds allowlist names (or, unscoped, every registered
+  // peer) and merging their hits in, same "ask every peer, skip one
+  // that fails" shape ForeignSessionCache uses for GET /v1/sessions.
   app.post("/v1/sessions/search", async (request, reply) => {
     const body = (request.body ?? {}) as {
       q?: unknown;
@@ -219,8 +228,20 @@ export function registerSessionRoutes(
     if (typeof body.snippetWidth === "number") {
       opts.snippetWidth = body.snippetWidth;
     }
-    const out = await searchHistories(manager, q, opts);
-    return out;
+    const local = await searchHistories(manager, q, opts);
+    if (!peerStore) {
+      return local;
+    }
+    const peers = await searchAcrossPeers(peerStore, {
+      q,
+      ...(ids ? { sessionIds: ids } : {}),
+      ...(opts.snippetWidth !== undefined ? { snippetWidth: opts.snippetWidth } : {}),
+    });
+    return {
+      query: q,
+      truncated: local.truncated || peers.truncated,
+      results: [...local.results, ...peers.results],
+    };
   });
 
   app.post("/v1/sessions", async (request, reply) => {

@@ -415,6 +415,18 @@ Tool *output* is not indexed — only conversation text, tool inputs, and
 the failure text of tool calls that ended `failed` / `rejected` /
 `cancelled`.
 
+**Federation.** Unlike every other `/v1/sessions/...` route, this one has
+no `:id` to forward on — a single query can span any number of sessions,
+local and federated alike — so it isn't covered by the transparent
+per-id forwarding described under "Federated session ids" above. Instead
+the daemon fans the same query out to registered peers itself and merges
+their hits in, each rewrapped to `<name>:<localId>` the same way `GET
+/v1/sessions` stamps a merged entry. When `sessionIds` scopes the query,
+only the peers actually named in it (by their federated-id prefix) are
+asked, each given just its own subset of ids; an unscoped query asks
+every registered peer. An unreachable or misbehaving peer is skipped
+rather than failing the whole search.
+
 **Response — `200 OK`**
 
 ```jsonc

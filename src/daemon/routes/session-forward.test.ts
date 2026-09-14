@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { registerSessionRoutes } from "./sessions.js";
 import { ForeignSessionCache, registerSessionForwardHook } from "./session-forward.js";
 import { SessionManager } from "../../core/session-manager.js";
+import { HistoryStore } from "../../core/history-store.js";
 import { Registry, type RegistryAgent } from "../../core/registry.js";
 import { PeerStore } from "../../core/peer-store.js";
 import { makeMockAgent, type MockAgentControls } from "../../__tests__/test-utils.js";
@@ -293,6 +294,121 @@ describe("session forwarding", () => {
     const body = (await res.json()) as { sessionId: string };
     expect(body.sessionId).not.toContain(":");
     expect(a.manager.get(body.sessionId)).toBeDefined();
+  });
+
+  it("POST /v1/sessions/search fans an unscoped query out to every peer, rewrapping hits", async () => {
+    const onB = await b.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    await history.append(onB.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "alpha banana split" },
+        },
+      },
+      recordedAt: 1,
+    });
+
+    const res = await fetch(`${a.baseUrl}/v1/sessions/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "banana" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{ sessionId: string }>;
+    };
+    // toContain, not toEqual: both nodes share one on-disk HYDRA_ACP_HOME
+    // in this test fixture (minted fresh per test, not per node — see
+    // vitest.setup.ts), so A's own local scan also finds B's session
+    // directory as an (unprefixed) cold entry. That's a fixture artifact,
+    // not something a real two-machine setup would do; the property this
+    // test actually checks is that the fan-out reached B and rewrapped
+    // its hit the same way GET /v1/sessions does.
+    expect(body.results.map((r) => r.sessionId)).toContain(
+      `peerb:${onB.sessionId}`,
+    );
+  });
+
+  it("POST /v1/sessions/search scoped to a sessionIds allowlist only asks the peers named in it", async () => {
+    const onA = await a.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const onB = await b.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    await history.append(onA.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "banana on A" },
+        },
+      },
+      recordedAt: 1,
+    });
+    await history.append(onB.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "banana on B" },
+        },
+      },
+      recordedAt: 1,
+    });
+
+    // Scoped to the peer hit only — A's own matching session is outside
+    // the allowlist and must not appear.
+    const res = await fetch(`${a.baseUrl}/v1/sessions/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        q: "banana",
+        sessionIds: [`peerb:${onB.sessionId}`],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: Array<{ sessionId: string }>;
+    };
+    expect(body.results.map((r) => r.sessionId)).toEqual([
+      `peerb:${onB.sessionId}`,
+    ]);
+  });
+
+  it("POST /v1/sessions/search with no peerStore configured behaves as local-only", async () => {
+    const local = await buildNode();
+    try {
+      const onLocal = await local.manager.create({
+        cwd: "/w",
+        agentId: "claude-code",
+      });
+      const history = new HistoryStore();
+      await history.append(onLocal.sessionId, {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "banana solo" },
+          },
+        },
+        recordedAt: 1,
+      });
+      const res = await fetch(`${local.baseUrl}/v1/sessions/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: "banana" }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        results: Array<{ sessionId: string }>;
+      };
+      expect(body.results.map((r) => r.sessionId)).toEqual([
+        onLocal.sessionId,
+      ]);
+    } finally {
+      await local.manager.closeAll().catch(() => undefined);
+      await local.app.close();
+    }
   });
 });
 
