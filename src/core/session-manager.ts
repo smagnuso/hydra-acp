@@ -274,6 +274,12 @@ export interface WorkspaceRequest {
   required?: boolean;
   /** Provider kind. Defaults to git; see workspace/registry.ts. */
   provider?: string;
+  /**
+   * Bind to an existing workspace with this label instead of creating
+   * one. Requires `label`; never creates, never suffixes, and a miss is
+   * an error regardless of `required`. See WorkspaceRequestMeta.adopt.
+   */
+  adopt?: boolean;
 }
 
 /** Outcome of resolving a WorkspaceRequest, before the agent is spawned. */
@@ -964,6 +970,81 @@ export class SessionManager {
    * written first would only add the owning session id, which an
    * ownerless orphan does not need.
    */
+  /**
+   * Seat a NEW session in an workspace that already exists, instead of
+   * provisioning one.
+   *
+   * `start`'s join only seats a session beside a LIVE host and suffixes
+   * past a dormant workspace deliberately — a human typing `start` over
+   * an abandoned name does not mean "adopt what I walked away from."
+   * A caller that provisioned the workspace itself and is bringing a
+   * second session to it later does mean exactly that: a retried task
+   * resuming in its own tree, or a reviewer sent to the tree the work
+   * happened in.
+   *
+   * Three things the create path does are deliberately NOT done here:
+   * the landing anchor is left alone (it already points at the base
+   * commit from creation; rewriting it to the current state would make
+   * the next landing treat the earlier session's work as the anchor and
+   * exclude it from the replay — silently dropping it), and `carry` and
+   * `postCreate` already ran when the workspace was made.
+   */
+  private async adoptWorkspace(
+    provider: IsolationProvider,
+    request: WorkspaceRequest,
+    params: CreateSessionParams,
+  ): Promise<ResolvedWorkspace> {
+    const label = request.label;
+    if (label === undefined) {
+      throw new Error("workspace.adopt requires workspace.label");
+    }
+    // A live holder's own record is the better source: it carries
+    // `clean`, which the provider's view does not, and it matches on the
+    // requested label too (a workspace provisioned as `x` but seated at
+    // `x-2` is still the one the caller means).
+    const live = this.liveSessionsWithLabel(params.cwd, label)[0]?.workspace;
+    const existing: Workspace | undefined =
+      live !== undefined
+        ? this.asWorkspace(live)
+        : (await provider.listWorkspaces(params.cwd).catch(() => []))
+            .find((w) => w.label === label);
+    if (existing === undefined) {
+      // Never falls back to creating one, even under required:false: a
+      // fresh workspace would silently lack the work the caller asked to
+      // work in, which is the whole failure this flag prevents.
+      throw new Error(
+        `cannot adopt workspace "${label}": no workspace by that name derived from ` +
+          `${shortenHomePath(params.cwd)}`,
+      );
+    }
+    // Same queue `start`'s join uses, for the same reason: without it the
+    // last leaver can count zero live sessions and remove the directory
+    // while this binding is mid-flight.
+    return await this.enqueueKeyed(this.workspaceQueues, existing.path, async () => {
+      if (provider.capabilities().locking) {
+        await provider
+          .lock(existing, `session ${params.title ?? "live"}`)
+          .catch(() => undefined);
+      }
+      return {
+        cwd: existing.path,
+        workspace: {
+          path: existing.path,
+          sourceCwd: existing.sourceCwd,
+          label: existing.label,
+          provider: existing.provider,
+          ...(existing.snapshot !== undefined ? { snapshot: existing.snapshot } : {}),
+          ...(existing.line !== undefined ? { line: existing.line } : {}),
+          ...(existing.vcs !== undefined ? { vcs: { ...existing.vcs } } : {}),
+          // Only carried when a live holder's record supplied it. The
+          // provider's view has no `clean`, and guessing would change
+          // what a failed replay is reported to MEAN at landing time.
+          ...(live?.clean !== undefined ? { clean: live.clean } : {}),
+        },
+      };
+    });
+  }
+
   private async resolveWorkspace(params: CreateSessionParams): Promise<ResolvedWorkspace> {
     const request = params.workspace;
     if (request === undefined) {
@@ -977,6 +1058,10 @@ export class SessionManager {
       }
       this.logger?.warn?.(`session workspace: ${reason}; running in ${params.cwd}`);
       return { cwd: params.cwd, isolationError: reason };
+    }
+
+    if (request.adopt === true) {
+      return await this.adoptWorkspace(provider, request, params);
     }
 
     const label = request.label ?? `s-${generateRawSessionId().slice(0, 8)}`;
@@ -2306,7 +2391,38 @@ export class SessionManager {
       }
     }
 
-    // Drop every anchor regardless of what happens to the directory.
+    const status = await provider
+      .status(asWorkspace)
+      .catch(() => ({ clean: false, changedPaths: ["<unknown>"], hasRecordedWork: false }));
+    if (status.changedPaths.length > 0) {
+      // The directory survives, so the three anchors are NOT equivalent
+      // here and cannot be swept as one:
+      //
+      //   - `start` and `baseline` are what a landing measures the
+      //     source's divergence against. Dropping them while the
+      //     checkout survives strands it — landing into a merely-dirty
+      //     source refuses outright rather than falling back to HEAD, so
+      //     anything that comes back to this workspace later (a
+      //     resurrect, or a session adopting it by label) finds it
+      //     unlandable. They are written once, so they do not churn.
+      //   - `autosave` is the per-turn snapshot, and it is the one that
+      //     actually grows. Its only job is recovering uncommitted work,
+      //     which the surviving directory already holds, so it is
+      //     redundant the moment we decide to keep the checkout.
+      //
+      // Drop the redundant one, keep the two a future landing needs.
+      await provider
+        .dropSnapshotRef(asWorkspace, workspaceAnchorRefs(workspace.label).autosave)
+        .catch(() => undefined);
+      this.logger?.warn?.(
+        `session workspace: keeping ${workspace.path} — it has ${status.changedPaths.length} ` +
+          `uncommitted change(s) that removal would destroy. Remove it by hand once you have ` +
+          `salvaged or discarded them.`,
+      );
+      return;
+    }
+
+    // Drop every anchor now that the directory is actually going away.
     // Each is a GC root, so leaving one behind pins its objects forever
     // and `git gc` can never reclaim them: the repository would grow
     // without bound across sessions. The autosave is the per-turn
@@ -2315,18 +2431,6 @@ export class SessionManager {
     // going away leaves all three with no reader.
     for (const ref of allAnchorRefs(workspace.label)) {
       await provider.dropSnapshotRef(asWorkspace, ref).catch(() => undefined);
-    }
-
-    const status = await provider
-      .status(asWorkspace)
-      .catch(() => ({ clean: false, changedPaths: ["<unknown>"], hasRecordedWork: false }));
-    if (status.changedPaths.length > 0) {
-      this.logger?.warn?.(
-        `session workspace: keeping ${workspace.path} — it has ${status.changedPaths.length} ` +
-          `uncommitted change(s) that removal would destroy. Remove it by hand once you have ` +
-          `salvaged or discarded them.`,
-      );
-      return;
     }
 
     // Force here is safe and necessary: we just established there is

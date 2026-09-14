@@ -112,6 +112,24 @@ export interface WorkspaceRequestMeta {
   required?: boolean;
   /** Provider kind. Defaults to git. */
   provider?: string;
+  /**
+   * Bind to an EXISTING workspace with this label instead of creating one.
+   * Requires `label`. Never creates and never suffixes.
+   *
+   * Distinct from what `/hydra workspace start <name>` does: that joins a
+   * workspace only while a LIVE session is still in it, and suffixes past
+   * a dormant one on purpose, because a human who types `start` over an
+   * abandoned name does not mean "adopt whatever I walked away from."
+   * A caller that provisioned the workspace itself and is bringing a
+   * second session to it later — a retried task, a reviewer sent to look
+   * at the tree the work happened in — means exactly that.
+   *
+   * A miss is an error even under `required: false`: falling back to a
+   * fresh workspace would hand back a tree that silently lacks the work
+   * the caller asked to work in, which is the failure this flag exists to
+   * prevent.
+   */
+  adopt?: boolean;
 }
 
 /** `_meta["hydra-acp"].workspaceInfo` on session-describing RESPONSES. */
@@ -389,6 +407,11 @@ export function extractHydraMeta(
     }
     if (w.required === true) {
       req.required = true;
+    }
+    // Same posture as `required`: only an exact `true` enables it, so a
+    // truthy-ish value cannot accidentally turn a create into an adopt.
+    if (w.adopt === true) {
+      req.adopt = true;
     }
     if (typeof w.provider === "string") {
       req.provider = w.provider;

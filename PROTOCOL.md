@@ -1597,9 +1597,27 @@ top-level field, per the no-non-spec-fields rule above):
   "label":    "feature-x",  // optional; generated when omitted
   "from":     "<snapshot>", // optional; OPAQUE provider token, never constructed by hand
   "required": false,        // optional; see below
+  "adopt":    false,        // optional; bind to an EXISTING workspace — see below
   "provider": "git"         // optional; defaults to git
 }
 ```
+
+**`adopt`** binds the new session to an **existing** workspace with that label
+instead of provisioning one. Requires `label`; never creates, never suffixes.
+
+This is not the same as `/hydra workspace start <name>`, which joins only while
+a **live** session is still in the workspace and deliberately suffixes past a
+dormant one — a human typing `start` over an abandoned name does not mean "adopt
+whatever I walked away from." A caller that provisioned the workspace itself and
+brings a second session to it later does mean exactly that: a retried task
+resuming in its own tree, or a reviewer sent to look at the tree the work
+happened in. Adopting a workspace a live session is still in is allowed, and is
+ordinary co-tenancy.
+
+A miss is an error **even under `required: false`**. Fail-open exists so a
+broken setup does not stop you working; falling back here would instead hand
+back a tree that silently lacks the work the caller asked to work in, which is
+the failure this flag exists to prevent.
 
 **The session's effective `cwd` becomes the workspace path.** `cwd` in the
 request names the tree to derive *from*; `cwd` in every response and in
