@@ -426,7 +426,7 @@ describe("toRow cwd column — workspace isolation", () => {
     expect(toRow(base).cwd).toBe("/home/u/proj");
   });
 
-  it("shows the PROJECT plus a marker for an isolated session", () => {
+  it("shows the PROJECT for an isolated session", () => {
     // The literal cwd here is a hash directory under ~/.hydra-acp, which
     // tells a reader nothing about which repo the session is working on.
     const row = toRow({
@@ -434,8 +434,7 @@ describe("toRow cwd column — workspace isolation", () => {
       cwd: "/home/u/.hydra-acp/workspaces/ab12cd34/feature-x",
       workspace: { sourceCwd: "/home/u/proj", label: "feature-x" },
     });
-    expect(row.cwd).toContain("/home/u/proj");
-    expect(row.cwd).toContain("feature-x");
+    expect(row.cwd).toBe("/home/u/proj");
     expect(row.cwd).not.toContain("ab12cd34");
   });
 
@@ -455,7 +454,7 @@ describe("toRow cwd column — workspace isolation", () => {
       workspace: { sourceCwd: "/home/u/proj", label: "ok" },
       workspaceError: "setup hiccup",
     });
-    expect(row.cwd).toContain("[ok]");
+    expect(row.cwd).toBe("/home/u/proj");
     expect(row.cwd).not.toContain("not-isolated");
   });
 });

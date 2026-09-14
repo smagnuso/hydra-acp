@@ -209,7 +209,7 @@ export function parseColumns(raw: string): ColumnKey[] {
  * For an isolated session those differ: the literal cwd is a hash
  * directory under ~/.hydra-acp that says nothing about the project, so a
  * column full of them would hide exactly the grouping the reader wants.
- * Render the source tree plus a workspace marker instead.
+ * Render the source tree instead.
  *
  * The `!` case matters most. Isolation fails open by default, so a
  * caller can ask for a workspace, not get one, and be editing the real
@@ -218,7 +218,7 @@ export function parseColumns(raw: string): ColumnKey[] {
  */
 export function formatCwdCell(s: SessionSummary): string {
   if (s.workspace !== undefined) {
-    return `${shortenHomePath(s.workspace.sourceCwd)} [${s.workspace.label}]`;
+    return shortenHomePath(s.workspace.sourceCwd);
   }
   if (s.workspaceError !== undefined) {
     return `${shortenHomePath(s.cwd)} !not-isolated`;
