@@ -29,6 +29,7 @@ import {
 } from "../shim/resilient-ws.js";
 import {
   loadConfig,
+  loadGlobalConfig,
   expandHome,
   setTuiConfigValue,
   setTuiSidebarEnabled,
@@ -6105,6 +6106,12 @@ async function runSession(
       // Picker abort exits the loop and resumes the warm session.
       let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
       let attachOverrides: { readonly?: boolean; cwd?: string; resumeHint?: { agentId: string; cwd: string; upstreamSessionId: string } } | null = null;
+      // The composer's configDefaultAgent fallback must be the true
+      // global default, not `config` (which already carries whatever
+      // `.hydra-acp.json` overlay applied at launch cwd) — otherwise ^O
+      // to a directory with no override of its own silently keeps
+      // showing the launch directory's agent instead of re-evaluating.
+      const globalConfig = await loadGlobalConfig();
       while (resolvedChoice === null) {
         // Picker manages its own interactive-only filter; ask the daemon
         // for everything and let prefs.filters.includeNonInteractive decide
@@ -6126,7 +6133,7 @@ async function runSession(
         ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
           composerAgentForCwd({
             cwd: forCwd,
-            config,
+            config: globalConfig,
             prefs: viewPrefs,
             ...(opts.explicitAgentId !== undefined
               ? { explicitAgentId: opts.explicitAgentId }
@@ -6145,7 +6152,7 @@ async function runSession(
         ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
           composerAgentForCwd({
             cwd: forCwd,
-            config,
+            config: globalConfig,
             prefs: viewPrefs,
             ...(opts.explicitAgentId !== undefined
               ? { explicitAgentId: opts.explicitAgentId }
@@ -10814,6 +10821,12 @@ async function resolveSession(
   // Outer loop: the action dialog's Esc returns "back" to re-show the
   // picker so the user isn't trapped after pressing Enter on the wrong
   // imported row. Every other picker exit path resolves the function.
+  // The composer's configDefaultAgent fallback must be the true global
+  // default, not `config` (which already carries whatever
+  // `.hydra-acp.json` overlay applied at launch cwd) — otherwise ^O to a
+  // directory with no override of its own silently keeps showing the
+  // launch directory's agent instead of re-evaluating.
+  const globalConfig = await loadGlobalConfig();
   while (true) {
     // Picker manages its own interactive-only filter; ask for everything.
     const sessions = await listSessions(target, { includeNonInteractive: true });
@@ -10835,7 +10848,7 @@ async function resolveSession(
     ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
       composerAgentForCwd({
         cwd: forCwd,
-        config,
+        config: globalConfig,
         prefs: viewPrefs,
         ...(opts.explicitAgentId !== undefined
           ? { explicitAgentId: opts.explicitAgentId }
@@ -10848,7 +10861,7 @@ async function resolveSession(
     ): Promise<{ agentId?: string; model?: string; notice?: string }> =>
       composerAgentForCwd({
         cwd: forCwd,
-        config,
+        config: globalConfig,
         prefs: viewPrefs,
         ...(opts.explicitAgentId !== undefined
           ? { explicitAgentId: opts.explicitAgentId }
