@@ -62,6 +62,22 @@ describe("workspace reply contract (consumed by hydra-acp-planner)", () => {
     expect(status).toContain("in sync with");
   });
 
+  it("a status reply head-lines 'Isolated in ', which is how a reply is told from a push", async () => {
+    // planner: sendWorkspaceCommand/isReplyTo. The planner matches
+    // synthetic agent text against this prefix to decide whether a chunk
+    // is the answer to the `status` it just sent. It has to, because the
+    // daemon ALSO pushes unsolicited synthetic text onto the same
+    // session (see the drift test below); without a prefix to match on,
+    // the planner consumed that push as the reply and paused projects
+    // over work that had landed.
+    const repo = await makeGitRepo();
+    const s = await isolatedSession(repo, "header-probe");
+
+    const status = await manager.runWorkspaceAction(s.sessionId, "status");
+
+    expect(status.trim().startsWith("Isolated in ")).toBe(true);
+  });
+
   it("a dirty workspace reports counts as '<n> staged/unstaged/untracked'", async () => {
     // planner: classifyWorkspaceStatusReply -> "uncommitted", which is
     // what triggers a commit reminder rather than a landing.

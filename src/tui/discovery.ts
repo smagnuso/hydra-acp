@@ -80,6 +80,11 @@ export interface DiscoveredSession {
   sessionId: string;
   upstreamSessionId?: string;
   cwd: string;
+  // Present when this session runs in an isolated workspace. The picker's
+  // CWD cell renders `workspace.sourceCwd` in that case, since `cwd` above
+  // is the workspace path, not the project the session was opened for.
+  workspace?: { sourceCwd: string; label: string };
+  workspaceError?: string;
   agentId?: string;
   currentModel?: string;
   currentUsage?: DiscoveredUsage;
@@ -224,6 +229,8 @@ export async function listSessionsPage(
     ? body.sessions.map((s) => ({
         sessionId: s.sessionId,
         cwd: s.cwd,
+        workspace: s.workspace,
+        workspaceError: s.workspaceError,
         updatedAt: s.updatedAt,
         attachedClients: s.attachedClients ?? 0,
         status: s.status ?? "warm",
