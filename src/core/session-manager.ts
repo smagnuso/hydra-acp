@@ -6031,6 +6031,7 @@ export class SessionManager {
       attachedClients: session.attachedCount,
       status: "warm",
       busy: session.turnStartedAt !== undefined,
+      turnStartedAt: session.turnStartedAt,
       armedTasks: session.armedBackgroundTasks.length,
       ...(session.armedSince !== undefined
         ? { armedSince: session.armedSince }
@@ -6079,6 +6080,7 @@ export class SessionManager {
         status: "warm",
         agentPid: live.agentPid,
         busy: live.turnStartedAt !== undefined,
+        turnStartedAt: live.turnStartedAt,
         armedTasks: live.armedBackgroundTasks.length,
         ...(live.armedSince !== undefined ? { armedSince: live.armedSince } : {}),
         awaitingInput: live.awaitingInput,
@@ -6297,6 +6299,7 @@ export class SessionManager {
         status: "warm",
         agentPid: session.agentPid,
         busy: session.turnStartedAt !== undefined,
+        turnStartedAt: session.turnStartedAt,
         armedTasks: session.armedBackgroundTasks.length,
         ...(session.armedSince !== undefined
           ? { armedSince: session.armedSince }

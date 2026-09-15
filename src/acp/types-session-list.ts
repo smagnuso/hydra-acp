@@ -114,6 +114,14 @@ export const SessionListEntry = z.object({
   // questions). Always false for cold sessions. Lets pickers render a
   // distinct "waiting on you" glyph instead of the busy dot.
   awaitingInput: z.boolean().default(false),
+  // Epoch ms when the in-flight turn began. Present only while `busy` is
+  // true; absent once the turn ends (not carried forward as a "last
+  // turn" timestamp). Mirrors WarmSessionMetaExtras.turnStartedAt so
+  // list/get consumers can order concurrently-busy sessions by when
+  // each one actually started, instead of by `updatedAt`'s history
+  // mtime, which advances on every streamed delta of a turn already in
+  // flight and reshuffles a busy list on every poll.
+  turnStartedAt: z.number().optional(),
   // Count of background tasks the agent has armed (a Monitor, or a Bash
   // with run_in_background) and not yet been seen to wake up for. Nonzero
   // with busy=false is a third state, distinct from both "working" and
