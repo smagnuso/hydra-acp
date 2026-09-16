@@ -2762,18 +2762,37 @@ async function runSession(
   // surfaces it here. Tell the user the cancel didn't take and why.
   conn.onNotification("hydra-acp/cancel_failed", (params) => {
     if (teardownStarted) return;
-    const p = (params ?? {}) as { code?: unknown; message?: unknown };
+    const p = (params ?? {}) as {
+      code?: unknown;
+      message?: unknown;
+      reason?: unknown;
+    };
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (!screenReady) return;
     // Suppress the runPrompt timeout backstop — we have the precise reason.
     lastCancelFailedAt = Date.now();
-    // Arm escalation: the next cancel keypress force-stops the agent.
-    forceStopArmed = true;
-    const code = typeof p.code === "number" ? ` (${p.code})` : "";
     const detail =
       typeof p.message === "string" && p.message.length > 0
         ? `: ${p.message}`
         : "";
+    // The daemon already tore the agent down itself (escalateUnresponsiveCancel
+    // in session.ts) after several cancels in a row reopened the turn instead
+    // of stopping it — unlike the rejection case below, there's no second
+    // cancel for the user to send, so don't arm forceStopArmed for one.
+    if (p.reason === "unresponsive") {
+      screenRef!.appendLines([
+        {
+          prefix: "⚠ ",
+          prefixStyle: "tool-status-fail",
+          body: `agent kept resuming after repeated cancels${detail} — hydra restarted it automatically.`,
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
+      return;
+    }
+    // Arm escalation: the next cancel keypress force-stops the agent.
+    forceStopArmed = true;
+    const code = typeof p.code === "number" ? ` (${p.code})` : "";
     screenRef!.appendLines([
       {
         prefix: "⚠ ",

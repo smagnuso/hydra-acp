@@ -877,6 +877,23 @@ export class Session {
   // unrelated later error isn't mislabeled.
   private lastCancelAt = 0;
   private static readonly CANCEL_ERROR_WINDOW_MS = 2000;
+  // Epoch ms of the most recent unsolicited turn closed specifically by
+  // session/cancel — as opposed to the agent's own terminal, a supersede, or
+  // a session close. Consumed by the next openUnsolicitedTurn to tell "a
+  // background task happened to report in right after cancel" (normal) from
+  // "the agent is still generating and cancel isn't reaching its actual
+  // loop" (not normal). Reset to 0 once read.
+  private lastUnsolicitedCancelAt = 0;
+  // Consecutive times an unsolicited turn has reopened within
+  // UNSOLICITED_REOPEN_WINDOW_MS of one that session/cancel closed. Reset by
+  // any close that isn't "cancelled", since that's what a real background
+  // task finishing looks like — indistinguishable from a reopen by timing
+  // alone, but not evidence of anything wrong. Only a *streak* of rapid
+  // cancel-then-reopen means cancel isn't stopping the agent's generation —
+  // one such pairing is ordinary (see openUnsolicitedTurn).
+  private cancelReopenStreak = 0;
+  private static readonly UNSOLICITED_REOPEN_WINDOW_MS = 10_000;
+  private static readonly UNSOLICITED_REOPEN_LIMIT = 3;
   // Set by forceCancel() so the in-flight turn's agent-kill rejection is
   // reported to the originator as a clean "cancelled" stopReason instead of
   // a raw "connection closed" error.
@@ -4456,6 +4473,28 @@ export class Session {
   // render-update's default branch, so unaware clients are unaffected.
   private openUnsolicitedTurn(): void {
     const startedAt = Date.now();
+    // A single quick reopen after a cancel is ordinary: cancel closes
+    // hydra's tracking of the turn, not necessarily the real background work
+    // underneath, which can report trailing output moments later. Only a
+    // streak of these — cancel, instant reopen, cancel, instant reopen —
+    // means the agent's actual generation loop never stopped, the same
+    // failure class forceCancel exists for (see its comment). Escalate
+    // there instead of opening a turn hydra already knows it can't close by
+    // asking nicely.
+    if (
+      this.lastUnsolicitedCancelAt !== 0 &&
+      startedAt - this.lastUnsolicitedCancelAt <=
+        Session.UNSOLICITED_REOPEN_WINDOW_MS
+    ) {
+      this.cancelReopenStreak += 1;
+    } else {
+      this.cancelReopenStreak = 0;
+    }
+    this.lastUnsolicitedCancelAt = 0;
+    if (this.cancelReopenStreak >= Session.UNSOLICITED_REOPEN_LIMIT) {
+      this.escalateUnresponsiveCancel();
+      return;
+    }
     const cause = this.lastBackgroundTask;
     // Clear every ONE-SHOT task armed since the last turn boundary, not just
     // the one we can name — but leave repeating watches alone.
@@ -4637,6 +4676,15 @@ export class Session {
     const durationMs = Date.now() - turn.startedAt;
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
+    // Feeds openUnsolicitedTurn's rapid-reopen streak. Any other reason is
+    // what a legitimately finishing background task looks like, not a sign
+    // cancel failed to stop anything.
+    if (reason === "cancelled") {
+      this.lastUnsolicitedCancelAt = Date.now();
+    } else {
+      this.lastUnsolicitedCancelAt = 0;
+      this.cancelReopenStreak = 0;
+    }
     this.logger?.info(
       `session ${this.sessionId} unsolicited turn ${turn.messageId} closed ` +
         `reason=${reason} durationMs=${durationMs}` +
@@ -8357,6 +8405,36 @@ export class Session {
       );
     }
     return { stopReason: "end_turn" };
+  }
+
+  // Automatic counterpart to forceCancel below, for the case nobody is at
+  // the keyboard to send a second cancel: openUnsolicitedTurn saw the agent
+  // reopen a turn right after session/cancel closed one, UNSOLICITED_REOPEN_LIMIT
+  // times running. That streak means cancel is reaching the agent process
+  // but not its actual generation loop — indistinguishable from opencode's
+  // UnsupportedOperation case except that this agent doesn't even error, it
+  // just keeps talking. Fire-and-forget: called from inside openUnsolicitedTurn,
+  // which cannot await it without becoming async and reordering the turn_started
+  // broadcast it guards.
+  private escalateUnresponsiveCancel(): void {
+    this.cancelReopenStreak = 0;
+    this.logger?.warn(
+      `session ${this.sessionId} agent ${this.agentId} reopened an ` +
+        `unsolicited turn right after cancel ${Session.UNSOLICITED_REOPEN_LIMIT} ` +
+        `times in a row; forcing a restart`,
+    );
+    this.broadcastQueueNotification("hydra-acp/cancel_failed", {
+      sessionId: this.sessionId,
+      reason: "unresponsive",
+      message:
+        `${this.agentId} kept resuming after repeated cancels; restarting the agent`,
+    });
+    this.forceCancel().catch((err) => {
+      this.logger?.warn(
+        `session ${this.sessionId} forceCancel after unresponsive-cancel ` +
+          `escalation failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   // Last-resort cancellation. When an agent ignores session/cancel (current

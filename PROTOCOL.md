@@ -2287,9 +2287,49 @@ starts turns without reporting their end leaves the turn open until it is
 cancelled, which is the honest outcome; inventing a duration for it is what
 produced the "random turn end/starts" this section used to describe.
 
-Empirically this path is `claude-acp`-only: across 1291 recorded sessions,
-agent-initiated turns appear in 6, all of them `claude-acp`. `opencode` has
-produced none in 615 sessions.
+Empirically this path was long thought `claude-acp`-only: across 1291 recorded
+sessions, agent-initiated turns appeared in 6, all of them `claude-acp`.
+`opencode` had produced none in 615 sessions. That held only because no other
+agent tripped it via the *legitimate* route (a real background task reporting
+in late). `codex-acp-dev` has since been observed tripping it continuously via
+a different route entirely — see the cancel-doesn't-stick escalation below.
+
+**Escalation: when cancel doesn't stick.** `session/cancel` closes hydra's
+*tracking* of an unsolicited turn, not necessarily whatever the agent process
+is actually doing. A single quick reopen right after a cancel is ordinary — a
+background task can report trailing output moments after cancel closed
+hydra's synthetic turn around it, indistinguishable at that instant from the
+agent having ignored the cancel outright. Only a **streak** of these —
+cancel, instant reopen, cancel, instant reopen, several times running with no
+legitimate completion between them — means cancel is reaching the agent
+process but not its actual generation loop. That's the same failure class
+`forceCancel` (tear down the subprocess, respawn via `session/load`) already
+exists for opencode's explicit `UnsupportedOperationError` rejection; the
+difference is this agent never errors, it just keeps talking.
+
+Observed live: a `codex-acp-dev` session kept reopening an unsolicited turn
+every 1-8 seconds for most of a day, each cycle acknowledged and closed by
+`session/cancel` and immediately reopened by the next chunk of agent output.
+After three such cancel-then-instant-reopen cycles in a row, hydra now calls
+`forceCancel` on its own rather than opening a fourth turn it already knows
+it can't close by asking nicely, and broadcasts:
+
+```jsonc
+// hydra-acp/cancel_failed
+{
+  "sessionId": "hydra_session_…",
+  "reason": "unresponsive",
+  "message": "codex-acp-dev kept resuming after repeated cancels; restarting the agent"
+}
+```
+
+This reuses the `hydra-acp/cancel_failed` notification the opencode-rejection
+case already sends (previously carrying `code`/`message` from the agent's
+error frame), distinguished by `reason: "unresponsive"` — no `code`, since no
+error frame was ever involved. A client that already handles `cancel_failed`
+by arming a second cancel keypress for the user to force-stop should treat
+this reason differently: hydra has *already* forced the restart, so there is
+no second cancel left to send.
 
 **Salvage: when the terminal arrives for a turn that was superseded.** If a
 prompt takes over an agent-initiated turn that is still running, the agent

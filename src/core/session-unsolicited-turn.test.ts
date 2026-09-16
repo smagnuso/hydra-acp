@@ -315,6 +315,80 @@ describe("unsolicited turn lifecycle", () => {
     expect(hydraMeta(ended[0]!).reason).toBe("cancelled");
   });
 
+});
+
+// Some agents (observed: codex-acp-dev) accept session/cancel but keep
+// generating anyway — the turn closes in hydra's own bookkeeping and reopens
+// moments later when the agent's next chunk arrives, indistinguishable at
+// that point from a background task legitimately reporting in late. Only a
+// streak of these in a row means cancel isn't reaching the agent's actual
+// generation loop.
+describe("escalation when cancel doesn't stick", () => {
+  it("does not escalate on a single quick reopen after cancel", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    const kill = mock.agent.kill as ReturnType<typeof vi.fn>;
+
+    agentChunk(mock);
+    await session.cancel(client.clientId);
+    // A background task can report trailing output moments after cancel
+    // closed hydra's tracking of it — this alone must never look like a
+    // stuck agent.
+    agentChunk(mock, "trailing background output");
+
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("force-restarts the agent after repeated cancel-then-instant-reopen cycles", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    const kill = mock.agent.kill as ReturnType<typeof vi.fn>;
+    const notify = vi.spyOn(client.connection, "notify");
+
+    agentChunk(mock);
+    for (let i = 0; i < 2; i++) {
+      await session.cancel(client.clientId);
+      agentChunk(mock, `reopen ${i}`);
+      expect(session.inUnsolicitedTurn).toBe(true);
+    }
+    // Third cancel in a row immediately followed by another reopen: cancel
+    // is reaching the agent process but not stopping its generation.
+    await session.cancel(client.clientId);
+    agentChunk(mock, "final reopen");
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    await settleDrain();
+    expect(kill).toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(
+      "hydra-acp/cancel_failed",
+      expect.objectContaining({ reason: "unresponsive" }),
+    );
+  });
+
+  it("resets the streak once a turn closes for a reason other than cancel", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    const kill = mock.agent.kill as ReturnType<typeof vi.fn>;
+
+    agentChunk(mock);
+    await session.cancel(client.clientId);
+    agentChunk(mock, "reopen 1");
+    await session.cancel(client.clientId);
+    agentChunk(mock, "reopen 2");
+    // Ends naturally rather than via cancel — must not carry the streak
+    // into whatever wakes the agent next.
+    autonomousTerminal(mock);
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    agentChunk(mock, "unrelated later resumption");
+    await session.cancel(client.clientId);
+    agentChunk(mock, "one more reopen");
+
+    // Only one rapid reopen since the reset — nowhere near the limit.
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("unsolicited turn lifecycle continued", () => {
   it("orders turn_ended before the prompt that was waiting on it", async () => {
     const { session, mock, client, sent } = await makeSessionAfterOneTurn();
 
