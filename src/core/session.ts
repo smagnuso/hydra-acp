@@ -7033,10 +7033,13 @@ export class Session {
           ...(m.description !== undefined ? { description: m.description } : {}),
         }),
       );
-      const currentValue =
-        this.currentModel && options.some((o) => o.value === this.currentModel)
-          ? this.currentModel
-          : options[0]!.value;
+      if (
+        this.currentModel &&
+        !options.some((o) => o.value === this.currentModel)
+      ) {
+        options.unshift({ value: this.currentModel, name: this.currentModel });
+      }
+      const currentValue = this.currentModel || options[0]!.value;
       out.push({
         id: "model",
         name: "Model",
@@ -7054,10 +7057,13 @@ export class Session {
           ...(m.description !== undefined ? { description: m.description } : {}),
         }),
       );
-      const currentValue =
-        this.currentMode && options.some((o) => o.value === this.currentMode)
-          ? this.currentMode
-          : options[0]!.value;
+      if (
+        this.currentMode &&
+        !options.some((o) => o.value === this.currentMode)
+      ) {
+        options.unshift({ value: this.currentMode, name: this.currentMode });
+      }
+      const currentValue = this.currentMode || options[0]!.value;
       out.push({
         id: "mode",
         name: "Session Mode",

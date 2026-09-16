@@ -6930,6 +6930,32 @@ describe("Session", () => {
       expect(agent.options.map((o) => o.value)).toContain("custom-local");
     });
 
+    it("buildConfigOptions injects the live model and mode when the advertised list omits them", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co4",
+        cwd: "/work",
+        agentId: "claude-acp",
+        agent: mock.agent,
+        upstreamSessionId: "u4",
+        historyStore: new HistoryStore(),
+        currentModel: "claude-fable-5-1[1m]",
+        currentMode: "auto",
+        agentModels: [
+          { modelId: "default", name: "Default (recommended)" },
+          { modelId: "claude-fable-5-1", name: "Fable" },
+        ],
+        agentModes: [{ id: "plan", name: "Plan" }],
+      });
+      const opts = session.buildConfigOptions();
+      const model = opts.find((o) => o.id === "model")!;
+      expect(model.currentValue).toBe("claude-fable-5-1[1m]");
+      expect(model.options.map((o) => o.value)).toContain("claude-fable-5-1[1m]");
+      const mode = opts.find((o) => o.id === "mode")!;
+      expect(mode.currentValue).toBe("auto");
+      expect(mode.options.map((o) => o.value)).toContain("auto");
+    });
+
     it("applyModelChange also broadcasts a config_option_update snapshot", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const session = new Session({
