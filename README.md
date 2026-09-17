@@ -1000,47 +1000,6 @@ key pair to pin, not a CA-signed one:
 openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes -keyout key.pem -out cert.pem -subj "/CN=$(hostname)"
 ```
 
-## Registry entry mockup
-
-If accepted, `hydra-acp` could land in the [ACP Registry](https://github.com/agentclientprotocol/registry):
-
-```json
-{
-  "id": "hydra-acp",
-  "name": "Hydra ACP",
-  "version": "0.1.0",
-  "description": "Multi-client session daemon. Spawn agents, attach over WSS, multiplex sessions across editors.",
-  "authors": ["Sam Magnuson"],
-  "license": "MIT",
-  "icon": "icon.svg",
-  "repository": "https://github.com/smagnuso/hydra-acp",
-  "website": "https://github.com/smagnuso/hydra-acp",
-  "distribution": {
-    "npx": {
-      "package": "@hydra-acp/cli",
-      "args": ["shim"]
-    }
-  },
-  "capabilities": {
-    "session": {
-      "attach": {},
-      "list": true,
-      "proxy": true
-    },
-    "transport": {
-      "stdio": true,
-      "websocket": true
-    }
-  }
-}
-```
-
-The accompanying icon lives at [`assets/icon.svg`](assets/icon.svg) — a single `currentColor`-filled `<path>` rendering the three-headed hydra silhouette. The `viewBox` is 32×32 (so the path supersamples cleanly at the registry's 16×16 display size); the SVG declares `width="16" height="16"` per the [registry rules](https://github.com/agentclientprotocol/registry/blob/main/CONTRIBUTING.md). Source PNG at [`assets/hydra-source.png`](assets/hydra-source.png) is what the silhouette and the README's top-of-page Braille art are both derived from.
-
-## Status
-
-This is an early experiment.
-
 ## License
 
 MIT.
