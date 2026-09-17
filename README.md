@@ -220,6 +220,35 @@ and setting `daemon.publicHost` to the name the URL should carry. See
 [Security](#security). Without that, `share` still prints a URL and warns you
 that it's loopback-only.
 
+### Linking machines
+
+`session share` is a one-off: it hands out a URL for a single session.
+`hydra-acp remote add` is the persistent version, git-remote style — it
+federates your daemon with a peer's under a local name, so the peer's
+sessions show up in `session list --host=<name>` (or `--host=all`) and can be
+attached with `--session <name>:<localId>`, as well as showing up in hydra
+session lists in TUI:
+
+```sh
+hydra-acp remote add box peer.local
+hydra-acp session list --host=box
+hydra-acp --session box:hydra_session_abc123
+```
+
+The host arg is `host[:port]`; the port defaults to the daemon's usual
+`55514` when omitted. Two things have to be true on the peer (`peer.local`)
+before this works:
+
+- It has a master password set — `hydra-acp auth password` on that machine.
+  `remote add` prompts you for it once, exchanges it for a long-lived token,
+  and stores that token.
+- If it's not loopback, it needs TLS configured as in [Security](#security).
+  `remote add` does a TOFU handshake first.
+
+The exchanged token expires; `remote list` shows when. Re-run `remote add`
+with the same name before then to refresh it. `remote remove` un-federates
+and revokes the token on the peer.
+
 ## Compaction and recall
 
 Long sessions run into the model's context window. When a session's history
@@ -963,7 +992,13 @@ For remote access (binding to a non-loopback address), enable TLS via:
 }
 ```
 
-The daemon refuses to bind to non-loopback hosts without TLS configured.
+The daemon refuses to bind to non-loopback hosts without TLS configured. A
+self-signed cert is enough, since `remote add`'s TOFU handshake only needs a
+key pair to pin, not a CA-signed one:
+
+```sh
+openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes -keyout key.pem -out cert.pem -subj "/CN=$(hostname)"
+```
 
 ## Registry entry mockup
 
