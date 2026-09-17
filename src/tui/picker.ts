@@ -176,6 +176,15 @@ export type PickerResult =
       // composer's agent picker, model updates to
       // config.sessionDefaults[newAgent]?.model (undefined if none).
       model?: string;
+      // True only when the user actually opened the composer's agent
+      // picker and chose something (composerAgentExplicit). agentId is
+      // populated either way — a fresh session still needs to know what
+      // to spawn with — but the caller must not treat an auto-resolved
+      // label (directory default, config default, or a re-attached
+      // session's own agent) as a durable choice. Conflating the two is
+      // how ^O once carried an unrelated directory's agent forward as if
+      // the user had picked it for the new one.
+      agentExplicit?: boolean;
     }
   | { kind: "abort" }
   | { kind: "exit" };
@@ -2743,6 +2752,7 @@ export async function pickSession(
       installStatus?: InstallStatusLine;
       agentId?: string;
       model?: string;
+      agentExplicit?: boolean;
     } => {
       const out: {
         kind: "new";
@@ -2752,6 +2762,7 @@ export async function pickSession(
         installStatus?: InstallStatusLine;
         agentId?: string;
         model?: string;
+        agentExplicit?: boolean;
       } = { kind: "new", cwd: currentCwd };
       const attached = composer.state().attachments;
       if (attached.length > 0) {
@@ -2762,6 +2773,9 @@ export async function pickSession(
       }
       if (composerModel) {
         out.model = composerModel;
+      }
+      if (composerAgentExplicit) {
+        out.agentExplicit = true;
       }
       return out;
     };

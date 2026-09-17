@@ -912,6 +912,38 @@ describe("pickSession composer", () => {
     });
   });
 
+  it("omits agentExplicit when the label was only ever auto-resolved", async () => {
+    // Regression: app.ts's rememberComposerAgent must not treat a
+    // fallback/directory/config-resolved label as if the user had picked
+    // it — otherwise creating a session anywhere silently promotes
+    // whatever agent happened to be showing into durable stickiness that
+    // then leaks into unrelated directories on the next ^O.
+    const drv = makePicker({ sessions, composerAgentId: "claude-acp" });
+    drv.press("ENTER");
+    const result = await drv.resolveOnce;
+    expect(result).toMatchObject({ kind: "new", agentId: "claude-acp" });
+    expect((result as { agentExplicit?: boolean }).agentExplicit).toBeFalsy();
+  });
+
+  it("sets agentExplicit when the user picked the agent from the composer label", async () => {
+    const drv = makePicker({
+      sessions,
+      composerAgentId: "opencode",
+      availableAgents: [{ id: "opencode" }, { id: "claude-acp" }],
+    });
+    nextAgentPick = "claude-acp";
+    drv.mouse("MOUSE_MOTION", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 75, 1);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 75, 1);
+    await new Promise((r) => setTimeout(r, 0));
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toMatchObject({
+      kind: "new",
+      agentId: "claude-acp",
+      agentExplicit: true,
+    });
+  });
+
   it("press-drag-release over the composer copies the selected text", async () => {
     writeClipboardCalls.length = 0;
     const drv = makePicker({ sessions });

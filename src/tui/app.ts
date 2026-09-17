@@ -6401,7 +6401,9 @@ async function runSession(
         // would let ensureAgentForNew re-prompt.
         if (choice.agentId !== undefined) {
           nextOpts.agentId = choice.agentId;
-          rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
+          if (choice.agentExplicit) {
+            rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
+          }
         }
         if (choice.model !== undefined) {
           nextOpts.model = choice.model;
@@ -10921,7 +10923,9 @@ async function resolveSession(
       // (below) short-circuits, and downstream session/new uses it.
       if (choice.agentId !== undefined) {
         opts.agentId = choice.agentId;
-        rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
+        if (choice.agentExplicit) {
+          rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
+        }
       }
       if (choice.model !== undefined) {
         opts.model = choice.model;
