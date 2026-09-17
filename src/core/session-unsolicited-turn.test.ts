@@ -216,6 +216,50 @@ describe("unsolicited turn detection", () => {
     expect(session.turnStartedAt).toBeUndefined();
   });
 
+  // codex-acp's exec tool is backed by a live PTY: a long-lived foreground
+  // process (observed: an nbpd console app) keeps streaming its stdout as
+  // tool_call_update over the same toolCallId for as long as it runs,
+  // independent of the agent's own turn. Seen live: this reopened an
+  // unsolicited turn once a second, forever, with nothing to ever close it
+  // (see autonomousTurnTerminal — codex-acp emits no origin stamp), so
+  // every prompt typed while the process kept logging got stuck behind it.
+  it("ignores a still-open terminal tool call's trailing output", async () => {
+    const { session, mock } = await makeSessionAfterOneTurn();
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u_agent",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "exec-1",
+        _meta: { terminal_output_delta: { data: "some log line\n" } },
+      },
+    });
+
+    expect(session.inUnsolicitedTurn).toBe(false);
+    expect(session.turnStartedAt).toBeUndefined();
+  });
+
+  // The same toolCallId, but carrying a real status change — e.g. the
+  // process actually exiting. Scoped by payload shape, not toolCallId
+  // identity, so this still counts: a genuine resumption that happens to
+  // land on an already-open tool call must not be swallowed along with the
+  // trailing-output noise above.
+  it("still opens one for a tool_call_update that changes status", async () => {
+    const { session, mock } = await makeSessionAfterOneTurn();
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u_agent",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "exec-1",
+        status: "completed",
+        _meta: { terminal_output_delta: { data: "final line\n" } },
+      },
+    });
+
+    expect(session.inUnsolicitedTurn).toBe(true);
+  });
+
   it("reports itself non-quiesced while one is open", async () => {
     const { session, mock } = await makeSessionAfterOneTurn();
     expect(session.isQuiescedSync()).toBe(true);
