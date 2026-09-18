@@ -2829,10 +2829,13 @@ export async function pickSession(
       }
       if (result.kind === "ok" && result.path !== currentCwd) {
         currentCwd = result.path;
+        const keepId =
+          selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
         // Re-sort so the cwd-priority bump in sortSessions follows the new
         // cwd, then re-run filters (cwd-only depends on currentCwd too).
         allSessions = sortSessions(allSessions, currentCwd);
         applyFilter();
+        restoreCursorAfterFilter(keepId);
         await refreshComposerAgentForCwd();
       }
       if (!resolved) {
@@ -4599,11 +4602,7 @@ export async function pickSession(
           return;
         }
         if (name === "c" || name === "C") {
-          const highlighted =
-            selectedIdx > 0 ? visible[selectedIdx - 1] : undefined;
           const result = makeNewResult();
-          if (highlighted?.cwd)
-            result.cwd = highlighted.cwd;
           result.installStatus = makePickerInstallStatus();
           resolve(result);
           return;
