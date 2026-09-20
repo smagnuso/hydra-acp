@@ -93,6 +93,7 @@ import {
   filterByHost,
   matchesSearch,
   nextHostFilter,
+  resolveDefaultHost,
   pickSession,
   sortSessions,
   type PickerPrefs,
@@ -342,6 +343,82 @@ describe("matchesSearch", () => {
   });
 });
 
+describe("resolveDefaultHost", () => {
+  const none = new Set<string>();
+
+  it("maps a name to the live remote registered under it", () => {
+    expect(resolveDefaultHost("peerb", [{ remote: "peerb" }], none)).toBe(
+      "remote:peerb",
+    );
+  });
+
+  it("prefers a remote over an imported machine of the same name", () => {
+    const items = [{ importedFromMachine: "mrclean" }, { remote: "mrclean" }];
+    expect(resolveDefaultHost("mrclean", items, none)).toBe("remote:mrclean");
+  });
+
+  it("maps a name to an imported machine with passive mirrors", () => {
+    const items = [{ importedFromMachine: "machine-a" }];
+    expect(resolveDefaultHost("machine-a", items, none)).toBe("host:machine-a");
+  });
+
+  it("falls back to local when nothing backs the name", () => {
+    const attached = [
+      { importedFromMachine: "machine-a", upstreamSessionId: "u" },
+    ];
+    expect(resolveDefaultHost("machine-a", attached, none)).toBe("__local");
+    expect(resolveDefaultHost("ghost", [], none)).toBe("__local");
+  });
+
+  it("maps all regardless of the session list", () => {
+    expect(resolveDefaultHost("all", [], none)).toBe("__all");
+  });
+
+  it("remote:all maps to local plus remotes once a remote is live", () => {
+    expect(resolveDefaultHost("remote:all", [{ remote: "peerb" }], none)).toBe(
+      "__remotes",
+    );
+    expect(
+      resolveDefaultHost("remote:all", [{ importedFromMachine: "m" }], none),
+    ).toBe("__local");
+  });
+
+  it("an explicit prefix only looks in its own namespace", () => {
+    const items = [{ remote: "mrclean" }, { importedFromMachine: "mrclean" }];
+    expect(resolveDefaultHost("remote:mrclean", items, none)).toBe(
+      "remote:mrclean",
+    );
+    expect(resolveDefaultHost("host:mrclean", items, none)).toBe(
+      "host:mrclean",
+    );
+    expect(
+      resolveDefaultHost("host:mrclean", [{ remote: "mrclean" }], none),
+    ).toBe("__local");
+    expect(
+      resolveDefaultHost(
+        "remote:mrclean",
+        [{ importedFromMachine: "mrclean" }],
+        none,
+      ),
+    ).toBe("__local");
+  });
+});
+
+describe("createPickerPrefs defaultHost", () => {
+  it("seeds local and all directly", () => {
+    expect(createPickerPrefs().filters.hostFilter).toBe("__local");
+    expect(createPickerPrefs("local").filters.hostFilter).toBe("__local");
+    expect(createPickerPrefs("all").filters.hostFilter).toBe("__all");
+    expect(createPickerPrefs("all").pendingDefaultHost).toBeUndefined();
+  });
+
+  it("holds a named host until the picker can resolve it", () => {
+    const prefs = createPickerPrefs("peerb");
+    expect(prefs.filters.hostFilter).toBe("__local");
+    expect(prefs.pendingDefaultHost).toBe("peerb");
+  });
+});
+
 describe("nextHostFilter", () => {
   const sessions = [
     { importedFromMachine: undefined },
@@ -397,7 +474,8 @@ describe("nextHostFilter", () => {
       { importedFromMachine: "machine-a" },
       { remote: "peerb" },
     ];
-    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+    expect(nextHostFilter("__local", items)).toBe("__remotes");
+    expect(nextHostFilter("__remotes", items)).toBe("remote:peerb");
     expect(nextHostFilter("remote:peerb", items)).toBe("host:machine-a");
     expect(nextHostFilter("host:machine-a", items)).toBe("__all");
   });
@@ -407,7 +485,7 @@ describe("nextHostFilter", () => {
     // upstreamSessionId), a federated session always stays live on the
     // peer — there's no local-graduation escape hatch for it.
     const items = [{ remote: "peerb", upstreamSessionId: "u_on_peer" }];
-    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+    expect(nextHostFilter("__remotes", items)).toBe("remote:peerb");
   });
 
   it("a remote and an imported machine sharing a name get distinct cycle entries", () => {
@@ -418,7 +496,7 @@ describe("nextHostFilter", () => {
       { remote: "mrclean" },
       { importedFromMachine: "mrclean" },
     ];
-    expect(nextHostFilter("__local", items)).toBe("remote:mrclean");
+    expect(nextHostFilter("__remotes", items)).toBe("remote:mrclean");
     expect(nextHostFilter("remote:mrclean", items)).toBe("host:mrclean");
     expect(nextHostFilter("host:mrclean", items)).toBe("__all");
   });
@@ -438,13 +516,24 @@ describe("nextHostFilter", () => {
       { remote: "peerb", importedFromMachine: "somewhere-else" },
       { remote: "peerb" },
     ];
-    expect(nextHostFilter("__local", items)).toBe("remote:peerb");
+    expect(nextHostFilter("__remotes", items)).toBe("remote:peerb");
+  });
+
+  it("local+remotes sits right after local and drops out when no remote is live", () => {
+    expect(nextHostFilter("__local", [{ remote: "peerb" }])).toBe("__remotes");
+    expect(nextHostFilter("__remotes", [{ remote: "peerb" }])).toBe(
+      "remote:peerb",
+    );
+    const noRemotes = [{ importedFromMachine: "machine-a" }];
+    expect(nextHostFilter("__local", noRemotes)).toBe("host:machine-a");
+    expect(nextHostFilter("__remotes", noRemotes)).toBe("__local");
   });
 });
 
 describe("describeHostFilter", () => {
   it("formats each namespace for display, stripping the prefix", () => {
     expect(describeHostFilter("__local")).toBe("host: local");
+    expect(describeHostFilter("__remotes")).toBe("host: local + remotes");
     expect(describeHostFilter("remote:mrclean")).toBe("remote: mrclean");
     expect(describeHostFilter("host:mrclean")).toBe("host: mrclean");
   });
@@ -509,6 +598,24 @@ describe("filterByHost", () => {
   it("a bare (pre-namespacing) value is treated as host:<m> for backward compat", () => {
     const passive = session({ importedFromMachine: "broom" });
     expect(filterByHost([passive], "broom", locals)).toEqual([passive]);
+  });
+
+  it("__remotes: local plus live remote sessions, without imported mirrors", () => {
+    const local = session({});
+    const onPeerB = session({ remote: "peerb" });
+    const onPeerC = session({ remote: "peerc", upstreamSessionId: "u_peer" });
+    const dormantOnPeer = session({
+      remote: "peerb",
+      importedFromMachine: "somewhere-else",
+    });
+    const mirror = session({ importedFromMachine: "broom" });
+    expect(
+      filterByHost(
+        [local, onPeerB, onPeerC, dormantOnPeer, mirror],
+        "__remotes",
+        locals,
+      ),
+    ).toEqual([local, onPeerB, onPeerC]);
   });
 
   it("__all: includes everything", () => {

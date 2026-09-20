@@ -1445,7 +1445,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // picker so re-opening via ^p restores the same filtered view the
   // user had set when they entered the session. Scope is per
   // TUI-process; nothing on disk.
-  const pickerPrefs = createPickerPrefs();
+  const pickerPrefs = createPickerPrefs(config.tui.defaultHost);
   // Enter the alternate screen here, BEFORE the picker can paint, so
   // every TUI surface — picker included — lives in the alt buffer. On
   // exit (CSI ? 1049 l) the host terminal restores its main buffer and

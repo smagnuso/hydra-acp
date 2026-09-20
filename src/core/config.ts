@@ -730,6 +730,18 @@ const TuiConfig = z.object({
     )
     .nonempty()
     .optional(),
+  // Which host bucket the session picker starts on, before `h` cycles it.
+  //   "local" (default) — sessions created or bound on this machine.
+  //   "all"             — every session, no host filter.
+  //   "remote:all"      — local plus every `hydra remote`'s live sessions,
+  //                       without imported-machine mirrors.
+  //   "remote:<name>"   — only the `hydra remote` registered under <name>.
+  //   "host:<name>"     — only mirrors imported from machine <name>.
+  //   <name>            — bare: a remote of that name, else an imported
+  //                       machine of that name.
+  // A value nothing backs at picker-open time falls back to "local".
+  // TUI only: `hydra session list --host` keeps its own "local" default.
+  defaultHost: z.string().min(1).default("local"),
   // User-defined key bindings that spawn an external command. Keyed by
   // the KeyName from src/tui/input.ts (e.g. "ctrl-x", "ctrl-underscore").
   // Checked both in the live session composer (app.ts) and the session

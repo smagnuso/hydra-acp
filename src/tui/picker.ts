@@ -265,7 +265,7 @@ export interface PickOptions {
 // without churning the filter call sites.
 export interface PickerFilters {
   cwdOnly: boolean;
-  // "__local" | "__all" | "remote:<name>" | "host:<machine>". See
+  // "__local" | "__remotes" | "__all" | "remote:<name>" | "host:<machine>". See
   // filterByHost/nextHostFilter for the cycle order and meaning.
   hostFilter: string;
   // When false (default), the picker only renders rows the daemon
@@ -288,6 +288,10 @@ export interface PickerPrefs {
   // closure. Never cleared implicitly; to forget a search, empty the
   // query box (^U) and Esc out.
   lastFind?: FindState;
+  // A named tui.defaultHost, held until the first picker open when the
+  // session list is available to say whether it is a remote or an
+  // imported machine. Consumed (cleared) there.
+  pendingDefaultHost?: string;
 }
 
 export interface FindState {
@@ -299,14 +303,18 @@ export interface FindState {
   scrollOffset: number;
 }
 
-export function createPickerPrefs(): PickerPrefs {
-  return {
+export function createPickerPrefs(defaultHost = "local"): PickerPrefs {
+  const prefs: PickerPrefs = {
     filters: {
       cwdOnly: false,
-      hostFilter: "__local",
+      hostFilter: defaultHost === "all" ? "__all" : "__local",
       includeNonInteractive: false,
     },
   };
+  if (defaultHost !== "local" && defaultHost !== "all") {
+    prefs.pendingDefaultHost = defaultHost;
+  }
+  return prefs;
 }
 
 // Each row is prefixed with "<p> " (2 columns wide): col 0 is the
@@ -456,8 +464,9 @@ export async function pickSession(
   //   matches the current cwd. Composes with search (both AND'd).
   //   `h` cycles host filter. "__local" (default) hides every imported
   //   session; "__all" hides nothing; any other value matches the row's
-  //   importedFromMachine literally. Cycle order is local → each unique
-  //   peer host (alphabetical) → all → back to local.
+  //   importedFromMachine literally. Cycle order is local → local+remotes
+  //   (when any remote exists) → each remote → each unique peer host
+  //   (alphabetical) → all → back to local.
   //
   // Imported-current-session auto-bump: when the picker was opened from
   // inside an imported session (^p) AND the user hasn't explicitly
@@ -472,6 +481,13 @@ export async function pickSession(
     if (current?.importedFromMachine || current?.remote) {
       prefs.filters.hostFilter = "__all";
     }
+  }
+  if (prefs.pendingDefaultHost !== undefined) {
+    prefs.filters.hostFilter = resolveDefaultHost(
+      prefs.pendingDefaultHost,
+      opts.sessions,
+    );
+    prefs.pendingDefaultHost = undefined;
   }
 
   // sorted/rows/widths are rebuilt whenever the underlying session list
@@ -5437,6 +5453,9 @@ const HOST_FILTER_PREFIX = "host:";
 //                  agent (upstreamSessionId set). The "I'm working on this
 //                  here" bucket. Federated (remote-set) sessions never land
 //                  here — see below.
+//   "__remotes"  — "__local" plus every federated remote's live sessions
+//                  (each remote:<n> bucket), leaving out imported host:<m>
+//                  mirrors. "Everything I'm actually working on".
 //   "host:<m>"   — passive mirrors imported from machine <m> that haven't
 //                  been attached locally yet. Once you attach, the session
 //                  graduates to "__local" and stops appearing here.
@@ -5461,12 +5480,16 @@ export function filterByHost(
   if (hostFilter === "__all") {
     return sessions;
   }
+  const isLocal = (s: DiscoveredSession): boolean =>
+    !s.remote &&
+    (isFromThisMachine(s.importedFromMachine, hostnames) ||
+      !!s.upstreamSessionId);
   if (hostFilter === "__local") {
-    return sessions.filter(
-      (s) =>
-        !s.remote &&
-        (isFromThisMachine(s.importedFromMachine, hostnames) ||
-          !!s.upstreamSessionId),
+    return sessions.filter(isLocal);
+  }
+  if (hostFilter === "__remotes") {
+    return sessions.filter((s) =>
+      s.remote ? !isDormantOnPeer(s) : isLocal(s),
     );
   }
   if (hostFilter.startsWith(REMOTE_FILTER_PREFIX)) {
@@ -5484,7 +5507,9 @@ export function filterByHost(
   );
 }
 
-// Cycle the host filter through "__local" → each federated remote with
+// Cycle the host filter through "__local" → "__remotes" (only when at
+// least one remote has a non-dormant session, else it would duplicate
+// "__local") → each federated remote with
 // at least one non-dormant session (alphabetical) → each peer host with
 // at least one passive mirror (alphabetical) → "__all" → back to
 // "__local". A peer host whose sessions have all been attached locally
@@ -5500,13 +5525,27 @@ export function filterByHost(
 // can drive the transitions.
 export function nextHostFilter(
   current: string,
-  sessions: ReadonlyArray<{
-    importedFromMachine?: string;
-    upstreamSessionId?: string;
-    remote?: string;
-  }>,
+  sessions: ReadonlyArray<HostFilterSession>,
   hostnames: Set<string> = localMachines(),
 ): string {
+  const ordered = hostFilterCycle(sessions, hostnames);
+  const idx = ordered.indexOf(current);
+  if (idx === -1) {
+    return "__local";
+  }
+  return ordered[(idx + 1) % ordered.length] ?? "__local";
+}
+
+type HostFilterSession = {
+  importedFromMachine?: string;
+  upstreamSessionId?: string;
+  remote?: string;
+};
+
+function hostFilterCycle(
+  sessions: ReadonlyArray<HostFilterSession>,
+  hostnames: Set<string>,
+): string[] {
   const remotes = new Set<string>();
   const hosts = new Set<string>();
   for (const s of sessions) {
@@ -5527,17 +5566,45 @@ export function nextHostFilter(
       hosts.add(s.importedFromMachine);
     }
   }
-  const ordered = [
+  return [
     "__local",
+    ...(remotes.size > 0 ? ["__remotes"] : []),
     ...[...remotes].sort().map((n) => `${REMOTE_FILTER_PREFIX}${n}`),
     ...[...hosts].sort().map((m) => `${HOST_FILTER_PREFIX}${m}`),
     "__all",
   ];
-  const idx = ordered.indexOf(current);
-  if (idx === -1) {
-    return "__local";
+}
+
+// Map a tui.defaultHost name to a picker host filter. Accepted forms:
+// "all", "remote:all" (local plus every remote), "remote:<n>", "host:<m>",
+// or a bare name, where a live remote wins over an imported machine of
+// the same name (matchesHostFilter's precedence in the CLI). A value no
+// session backs would open on an empty list, so it falls back to
+// "__local". Exported for picker.test.ts.
+export function resolveDefaultHost(
+  name: string,
+  sessions: ReadonlyArray<HostFilterSession>,
+  hostnames: Set<string> = localMachines(),
+): string {
+  if (name === "all") {
+    return "__all";
   }
-  return ordered[(idx + 1) % ordered.length] ?? "__local";
+  const cycle = hostFilterCycle(sessions, hostnames);
+  let candidates: string[];
+  if (name === `${REMOTE_FILTER_PREFIX}all`) {
+    candidates = ["__remotes"];
+  } else if (
+    name.startsWith(REMOTE_FILTER_PREFIX) ||
+    name.startsWith(HOST_FILTER_PREFIX)
+  ) {
+    candidates = [name];
+  } else {
+    candidates = [
+      `${REMOTE_FILTER_PREFIX}${name}`,
+      `${HOST_FILTER_PREFIX}${name}`,
+    ];
+  }
+  return candidates.find((c) => cycle.includes(c)) ?? "__local";
 }
 
 // Strips the namespace prefix for display — the status line shows
@@ -5546,6 +5613,9 @@ export function nextHostFilter(
 export function describeHostFilter(hostFilter: string): string {
   if (hostFilter === "__local") {
     return "host: local";
+  }
+  if (hostFilter === "__remotes") {
+    return "host: local + remotes";
   }
   if (hostFilter.startsWith(REMOTE_FILTER_PREFIX)) {
     return `remote: ${hostFilter.slice(REMOTE_FILTER_PREFIX.length)}`;

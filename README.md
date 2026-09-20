@@ -611,6 +611,8 @@ one is to sit on that row and walk through them. Eighteen ship built in, and
 
 `tui.defaultEnterAction` (default `"amend"`) controls what the unmodified Enter key does in the prompt composer. With `"amend"` (the default), Enter amends the in-flight turn and `Shift+Enter` enqueues a new prompt; with no turn in flight either key just enqueues, since there's nothing to amend. Set to `"enqueue"` to flip the two: Enter enqueues (sends immediately when idle, queues behind an in-flight turn) and `Shift+Enter` amends.
 
+`tui.defaultHost` (default `"local"`) sets which host bucket the session picker opens on, before `h` cycles it. `"local"` is sessions created or bound on this machine, `"all"` drops the host filter, and `"remote:all"` is local plus every `hydra remote`'s live sessions without imported-machine mirrors. `"remote:<name>"` and `"host:<name>"` pick one remote or one imported machine; a bare name is a remote of that name, else an imported machine. A value that nothing backs at picker-open time falls back to `"local"`. TUI-only: `hydra session list --host` keeps its own `"local"` default.
+
 `tui.skipPermissions` (default `false`) makes `--dangerously-skip-permissions` the standing default for the TUI: every tool permission request is auto-approved (with `allow_once`, so nothing is written to the agent's persisted permission rules) and the modal never appears. The startup banner names the config key so it isn't silent. TUI-only on purpose: `shim`, `launch`, and `cat` are spawned by editors and scripts with their own argv, and an ambient config key there would disarm paths you aren't watching. Pass `--no-dangerously-skip-permissions` to get the prompts back for a single run.
 
 ## Extensions

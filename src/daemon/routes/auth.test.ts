@@ -58,6 +58,7 @@ function testConfig(): HydraConfig {
       launcherModeWhenHosted: false,
       skipPermissions: false,
       defaultEnterAction: "amend" as const,
+      defaultHost: "local",
       showThoughts: true,
       ambiguousWidth: "narrow",
       toolContent: "inline",
