@@ -855,6 +855,16 @@ describe("pickSession composer", () => {
     });
   });
 
+  it("^N from the composer moves focus to the first session row", async () => {
+    const drv = makePicker({ sessions });
+    drv.press("CTRL_N");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toMatchObject({
+      kind: "attach",
+      sessionId: "hydra-aaa",
+    });
+  });
+
   it("Up from first session row returns focus to composer", async () => {
     const drv = makePicker({ sessions });
     drv.press("DOWN");

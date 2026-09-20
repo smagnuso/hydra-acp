@@ -4410,10 +4410,12 @@ export async function pickSession(
             return;
           }
         }
-        // ^P from the composer drops focus into the session list (same
-        // chord the live composer would interpret as "switch session",
-        // which is meaningless here).
-        if (name === "CTRL_P") {
+        // ^P / ^N from the composer drop focus into the session list
+        // (same chords the live composer would interpret as "switch
+        // session" / "next", which are meaningless here). ^N mirrors the
+        // list's own ^n "next" in reverse: from the composer it lands on
+        // the first session below.
+        if (name === "CTRL_P" || name === "CTRL_N") {
           if (visible.length > 0) {
             move(1);
           }
