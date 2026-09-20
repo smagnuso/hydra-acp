@@ -239,12 +239,11 @@ describe("unsolicited turn detection", () => {
     expect(session.turnStartedAt).toBeUndefined();
   });
 
-  // The same toolCallId, but carrying a real status change — e.g. the
-  // process actually exiting. Scoped by payload shape, not toolCallId
-  // identity, so this still counts: a genuine resumption that happens to
-  // land on an already-open tool call must not be swallowed along with the
-  // trailing-output noise above.
-  it("still opens one for a tool_call_update that changes status", async () => {
+  // A process finishing after the turn ended reports a completed status.
+  // Live, half of these were followed by real agent content and half by
+  // nothing at all, and codex-acp has no terminal signal to close the
+  // latter, so the update alone must not open a turn.
+  it("ignores a tool call completing after the turn ended", async () => {
     const { session, mock } = await makeSessionAfterOneTurn();
 
     mock.triggerNotification("session/update", {
@@ -253,10 +252,28 @@ describe("unsolicited turn detection", () => {
         sessionUpdate: "tool_call_update",
         toolCallId: "exec-1",
         status: "completed",
-        _meta: { terminal_output_delta: { data: "final line\n" } },
+        rawOutput: { exit_code: 0 },
       },
     });
 
+    expect(session.inUnsolicitedTurn).toBe(false);
+    expect(session.turnStartedAt).toBeUndefined();
+  });
+
+  it("still opens one once real content follows such an update", async () => {
+    const { session, mock } = await makeSessionAfterOneTurn();
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u_agent",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "exec-1",
+        status: "completed",
+      },
+    });
+    expect(session.inUnsolicitedTurn).toBe(false);
+
+    agentChunk(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
   });
 

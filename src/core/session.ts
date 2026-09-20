@@ -564,40 +564,27 @@ function isUsageUpdate(params: unknown): boolean {
     update.sessionUpdate === "usage_update";
 }
 
-// True for a tool_call_update that carries nothing but a raw
-// terminal_output_delta byte relay: no status transition, no content
-// change. codex-acp's exec tool is backed by a live PTY, and keeps
-// streaming these for as long as the underlying process is alive —
-// independent of whether the agent's own turn is running. A long-lived
-// foreground app launched via that tool (observed: an nbpd console app
-// logging once a second) reopens an unsolicited turn on every line
-// forever, and since nothing about the stream is turn-shaped there is no
-// terminal signal to ever close it with: measured live, every "agent
-// resumed with no prompt in flight" in one such session was triggered by
-// this exact shape, and the held prompt behind it never got dispatched.
+// True for a tool_call_update. On its own this is never evidence the agent
+// started something: it only reports on a tool call opened earlier, which
+// the agent's own turn may already have ended without. codex-acp's exec
+// tool is backed by a live PTY, so a long-lived process (observed: an nbpd
+// console app logging once a second) streams terminal_output_delta updates
+// forever, and a process that exits after the turn ends reports a
+// completed status. Both used to open an unsolicited turn that nothing
+// could close, because codex-acp sends no origin stamp (see
+// autonomousTurnTerminal); every prompt typed afterwards was held behind
+// it. Measured across codex sessions, a status-bearing update opened a turn
+// that real content followed only half the time.
 //
-// Scoped to payload shape, not toolCallId identity: a status or content
-// change on the very same toolCallId still counts below, so a genuine
-// resumption that happens to update an already-open tool call (rather
-// than start a new one) is not swallowed along with the noise. Verified
-// against history.jsonl across many claude-acp and codex-acp sessions —
-// claude-acp's own unsolicited-turn triggers are never tool_call_update
-// at all, so this condition is unreachable for it.
-function isBareTerminalOutputDelta(params: unknown): boolean {
+// A genuine resumption is recognized by the content it generates: a
+// message or thought chunk, a new tool_call, a plan. Those still open the
+// turn. claude-acp's own triggers are never tool_call_update, so this is
+// unreachable for it.
+function isToolCallUpdate(params: unknown): boolean {
   const update = (params as { update?: Record<string, unknown> } | undefined)
     ?.update;
-  if (!update || typeof update !== "object") {
-    return false;
-  }
-  if (update.sessionUpdate !== "tool_call_update") {
-    return false;
-  }
-  if ("status" in update || "content" in update) {
-    return false;
-  }
-  const meta = update._meta;
-  return !!meta && typeof meta === "object" &&
-    "terminal_output_delta" in (meta as Record<string, unknown>);
+  return !!update && typeof update === "object" &&
+    update.sessionUpdate === "tool_call_update";
 }
 
 // Whether a session/set_config_option reply is reporting the agent's whole
@@ -4041,10 +4028,7 @@ export class Session {
     if (this.promptInFlight || !this.sawTurnComplete) {
       return;
     }
-    if (isBareTerminalOutputDelta(envelope)) {
-      // A still-open exec/terminal tool call streaming its subprocess's
-      // stdout is not evidence the agent did anything new. See
-      // isBareTerminalOutputDelta.
+    if (isToolCallUpdate(envelope)) {
       return;
     }
     this.openUnsolicitedTurn();
