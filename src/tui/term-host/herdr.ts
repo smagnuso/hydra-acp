@@ -602,7 +602,10 @@ class HerdrHost implements TerminalHost {
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
-    const body = reply as { error?: { code?: string; message?: string } };
+    const body = reply as {
+      result?: { layout?: { tab_id?: string } };
+      error?: { code?: string; message?: string };
+    };
     if (body?.error) {
       return {
         ok: false,
@@ -611,6 +614,18 @@ class HerdrHost implements TerminalHost {
           body.error.code ||
           "herdr rejected the request",
       };
+    }
+    // layout.apply focuses the tab in server state only; the connected GUI
+    // client keeps its own view and does not follow. A following tab.focus
+    // on the tab layout.apply just created moves the client (verified live:
+    // create alone leaves the client in place, create + tab.focus pulls it
+    // over, in the same workspace and across workspaces). Best-effort: the
+    // tab is open either way.
+    const createdTabId = body?.result?.layout?.tab_id;
+    if (createdTabId) {
+      await request(this.socketPath, "tab.focus", { tab_id: createdTabId }).catch(
+        () => undefined,
+      );
     }
     return { ok: true };
   }

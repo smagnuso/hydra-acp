@@ -75,7 +75,12 @@ function fakeSocket(): unknown {
       if (line.length > 0) {
         frames.push(JSON.parse(line) as Frame);
       }
-      queueMicrotask(() => onData?.('{"result":{"type":"ok"}}'));
+      const req = JSON.parse(line) as Frame;
+      const reply =
+        req.method === "layout.apply"
+          ? { result: { type: "layout_apply", layout: { tab_id: "w3:t7" } } }
+          : { result: { type: "ok" } };
+      queueMicrotask(() => onData?.(JSON.stringify(reply)));
     },
     setTimeout() {
       return sock;
@@ -1032,7 +1037,15 @@ describe("openTab", () => {
     // tab.create and pane.split take only cwd/env/focus/label — no argv — so
     // neither can start hydra.
     await openTab();
-    expect(frames.map((f) => f.method)).toEqual(["layout.apply"]);
+    expect(frames.map((f) => f.method)).toEqual(["layout.apply", "tab.focus"]);
+  });
+
+  it("re-focuses the tab it just created, since herdr's client view follows tab.focus", async () => {
+    await openTab();
+    const focus = lastOf("tab.focus");
+    expect(focus?.params).toEqual({ tab_id: "w3:t7" });
+    // Ordered: the follow-up must land only once the layout exists.
+    expect(frames[0]!.method).toBe("layout.apply");
   });
 
   it("omits tab_id so the current tab is never replaced", async () => {
@@ -1088,9 +1101,21 @@ describe("openTab", () => {
     expect(params().workspace_id).toBeUndefined();
   });
 
-  it("uses exactly one connection, since herdr serves one request per socket", async () => {
+  it("follows creation with its own connection, since herdr serves one request per socket", async () => {
+    // layout.apply creates and server-focuses the tab but the attached
+    // client keeps its own view; the tab.focus follow-up is what moves it.
     await openTab();
-    expect(connectCalls).toBe(1);
+    expect(connectCalls).toBe(2);
+  });
+
+  it("treats a failed follow-up focus as success, since the tab is open either way", async () => {
+    let calls = 0;
+    connectImpl = () => {
+      calls++;
+      return calls === 1 ? fakeSocket() : errorSocket({ code: "tab_not_found" });
+    };
+    const r = await openTab();
+    expect(r).toEqual({ ok: true });
   });
 
   it("surfaces a herdr error body as a failed result", async () => {
