@@ -2856,8 +2856,8 @@ export class Session {
       ? history.slice(-maxEntries)
       : history;
 
-    // Track toolCallIds seen in tool_call (pending) and tool_call_update
-    // with terminal status (resolved).
+    // Track toolCallIds seen in tool_call (pending) and any tool_call or
+    // tool_call_update with terminal status (resolved).
     const pending = new Set<string>();
     const resolved = new Set<string>();
 
@@ -2872,13 +2872,15 @@ export class Session {
       if (!toolCallId) {
         continue;
       }
+      const status = update.status as string | undefined;
       if (kind === "tool_call") {
         pending.add(toolCallId);
-      } else if (kind === "tool_call_update") {
-        const status = update.status as string | undefined;
-        if (status === "completed" || status === "failed") {
-          resolved.add(toolCallId);
-        }
+      }
+      if (
+        (kind === "tool_call" || kind === "tool_call_update") &&
+        (status === "completed" || status === "failed")
+      ) {
+        resolved.add(toolCallId);
       }
     }
 
@@ -9505,7 +9507,11 @@ export class Session {
     }
     if (update.sessionUpdate === "tool_call") {
       this.turnRanTool = true;
-      this.openToolCalls.add(id);
+      // Some agents announce a call already terminal (codex "View Image")
+      // and never send an update, so it must not be tracked as open.
+      if (update.status !== "completed" && update.status !== "failed") {
+        this.openToolCalls.add(id);
+      }
       return;
     }
     if (update.sessionUpdate !== "tool_call_update") {

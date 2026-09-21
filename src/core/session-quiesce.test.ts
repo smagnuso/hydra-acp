@@ -193,6 +193,24 @@ describe("Session.isQuiescedForSwap", () => {
     expect(result).toBe(false);
   });
 
+  it("returns true when a tool_call arrives already completed with no update", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_q5b",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-q5b",
+      historyStore: store,
+    });
+
+    await triggerUpdate(mock, promptReceivedEntry());
+    await triggerUpdate(mock, { ...toolCallEntry("tc-img", "View Image"), status: "completed" });
+
+    expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+
   it("returns false when history has an in_progress tool_call_update but no terminal status", async () => {
     const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
     const store = new HistoryStore();
@@ -578,6 +596,49 @@ describe("cancelled turns close their own tool chain", () => {
     });
     expect(terminal).toHaveLength(1);
     expect(await session.isQuiescedForSwap()).toBe(true);
+  });
+
+  it("does not fail a tool call that arrived already completed", async () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_session_qc3",
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u-qc3",
+      historyStore: store,
+    });
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async (method: string) => {
+        if (method !== "session/prompt") {
+          return undefined;
+        }
+        mock.triggerNotification("session/update", {
+          sessionId: "agent-sess",
+          update: { ...toolCallEntry("tc-img", "View Image"), status: "completed" },
+        });
+        await new Promise((r) => setImmediate(r));
+        return { stopReason: "cancelled" };
+      },
+    );
+
+    await session.prompt(client.clientId, {
+      sessionId: "hydra_session_qc3",
+      prompt: [{ type: "text", text: "look at the screenshot" }],
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const history = await store.load("hydra_session_qc3");
+    const synthetic = history.filter((e) => {
+      const u = (e.params as { update?: { sessionUpdate?: string; toolCallId?: string } }).update;
+      return u?.sessionUpdate === "tool_call_update" && u.toolCallId === "tc-img";
+    });
+    expect(synthetic).toHaveLength(0);
   });
 
   it("lets ^C close a chain already stranded by an earlier turn", async () => {
