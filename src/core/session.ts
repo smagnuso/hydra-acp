@@ -619,6 +619,13 @@ function isFullConfigOptionSnapshot(
 // Renders as a single header line, so anything longer is already unreadable.
 const BACKGROUND_TASK_LABEL_MAX = 120;
 
+// A shell tool's title is the whole script, and the line that says what it
+// is doing is the last one; the leading lines are setup.
+function lastLine(text: string): string {
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  return lines.length === 0 ? "" : lines[lines.length - 1]!;
+}
+
 // Cap on the per-tool-call label cache. Only needs to span the gap between
 // a tool call's descriptive update and the later sparse one that carries
 // its background-task arming, which is milliseconds in practice; the cap
@@ -1054,6 +1061,10 @@ export class Session {
       // stays live afterwards. See isRepeatingArming.
       repeating: boolean;
       armedAt: number;
+      // Promoted from a tool call still open when its turn ended (see
+      // armOpenToolCalls). A resumption proves nothing about it, so it
+      // leaves only on the call's own terminal update.
+      openToolCall?: true;
     }
   >();
   // Last {count, since} pushed to clients, so a mutation that doesn't move
@@ -1271,8 +1282,9 @@ export class Session {
   // openToolCallIdsInHistory reads back off disk. Exists so a turn that
   // ends without settling its tools can close them itself
   // (closeOpenToolCalls) rather than leaving an orphan that reads as
-  // "still working" to every quiesce-gated verb.
-  private openToolCalls = new Set<string>();
+  // "still working" to every quiesce-gated verb. The value is what
+  // armOpenToolCalls needs to surface one that outlives its turn.
+  private openToolCalls = new Map<string, { startedAt: number; title?: string }>();
   private agentChangeHandlers: Array<
     (info: {
       agentId: string;
@@ -3925,6 +3937,8 @@ export class Session {
       stopReason === "refusal"
     ) {
       this.closeOpenToolCalls(stopReason);
+    } else {
+      this.armOpenToolCalls();
     }
     this.recordCurrentUsageSnapshot();
     this.recordAndBroadcast(
@@ -4388,6 +4402,13 @@ export class Session {
       return [];
     }
     const labels = [...this.armedTasks.values()].map((t) => t.label);
+    // The retired agent owned these calls, so leaving them open would have
+    // the next turn end arm them again.
+    for (const [id, task] of this.armedTasks) {
+      if (task.openToolCall === true) {
+        this.openToolCalls.delete(id);
+      }
+    }
     this.armedTasks.clear();
     this.logger?.info(
       `session ${this.sessionId} discarded ${labels.length} armed task(s) on ${reason}: ${labels.join(", ")}`,
@@ -4554,7 +4575,7 @@ export class Session {
     // existed, whereas a stale entry actively claims a wakeup is coming.
     let discharged = false;
     for (const [id, task] of this.armedTasks) {
-      if (task.repeating) {
+      if (task.repeating || task.openToolCall === true) {
         continue;
       }
       this.armedTasks.delete(id);
@@ -4745,6 +4766,8 @@ export class Session {
     // tools itself.
     if (reason === "cancelled") {
       this.closeOpenToolCalls("cancelled");
+    } else if (reason === "completed") {
+      this.armOpenToolCalls();
     }
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
@@ -9495,7 +9518,12 @@ export class Session {
     }
     const update = (
       params as {
-        update?: { sessionUpdate?: unknown; toolCallId?: unknown; status?: unknown };
+        update?: {
+          sessionUpdate?: unknown;
+          toolCallId?: unknown;
+          status?: unknown;
+          title?: unknown;
+        };
       } | undefined
     )?.update;
     if (update === undefined) {
@@ -9505,12 +9533,18 @@ export class Session {
     if (id.length === 0) {
       return;
     }
+    const title = typeof update.title === "string" && update.title !== ""
+      ? update.title
+      : undefined;
     if (update.sessionUpdate === "tool_call") {
       this.turnRanTool = true;
       // Some agents announce a call already terminal (codex "View Image")
       // and never send an update, so it must not be tracked as open.
       if (update.status !== "completed" && update.status !== "failed") {
-        this.openToolCalls.add(id);
+        this.openToolCalls.set(id, {
+          startedAt: Date.now(),
+          ...(title !== undefined ? { title } : {}),
+        });
       }
       return;
     }
@@ -9519,7 +9553,63 @@ export class Session {
     }
     if (update.status === "completed" || update.status === "failed") {
       this.openToolCalls.delete(id);
+      this.disarmOpenToolCall(id);
+      return;
     }
+    const open = this.openToolCalls.get(id);
+    if (open !== undefined && title !== undefined) {
+      open.title = title;
+    }
+  }
+
+  /**
+   * Surface tool calls that outlive their turn as armed tasks.
+   *
+   * A turn can end cleanly while a call it started is still running: codex
+   * answers a steer and stops while its shell command carries on. The
+   * call's transcript row belongs to the turn that started it, and both
+   * clients scope "running" to the current turn, so from then on the work
+   * is invisible and the session reads as stuck. The armed-task set is the
+   * cross-turn "something is still going" signal, so promote them into it.
+   *
+   * Only reached for a turn that ended without cancel, error or refusal;
+   * those close their open calls instead (closeOpenToolCalls). Entries
+   * leave via disarmOpenToolCall when the call reports a terminal status.
+   * Like every edge-sourced entry this overstates when an agent abandons a
+   * call without ever settling it; ^C closes those.
+   */
+  private armOpenToolCalls(): void {
+    let changed = false;
+    for (const [toolCallId, tool] of this.openToolCalls) {
+      if (this.armedTasks.has(toolCallId)) {
+        continue;
+      }
+      const described = this.toolLabels.get(toolCallId);
+      const label = described?.fromDescription === true
+        ? described.label
+        : lastLine(tool.title ?? described?.label ?? "").slice(
+          0,
+          BACKGROUND_TASK_LABEL_MAX,
+        );
+      this.armedTasks.set(toolCallId, {
+        label: label === "" ? "running tool" : label,
+        repeating: false,
+        armedAt: tool.startedAt,
+        openToolCall: true,
+      });
+      changed = true;
+    }
+    if (changed) {
+      this.onArmedTasksChanged();
+    }
+  }
+
+  private disarmOpenToolCall(toolCallId: string): void {
+    if (this.armedTasks.get(toolCallId)?.openToolCall !== true) {
+      return;
+    }
+    this.armedTasks.delete(toolCallId);
+    this.onArmedTasksChanged();
   }
 
   /**
@@ -9554,7 +9644,7 @@ export class Session {
     }
     // Snapshot first: each emit below feeds noteRecordedToolCall, which
     // mutates the set we would otherwise be iterating.
-    const ids = [...this.openToolCalls];
+    const ids = [...this.openToolCalls.keys()];
     this.openToolCalls.clear();
     for (const toolCallId of ids) {
       this.recordAndBroadcast("session/update", {

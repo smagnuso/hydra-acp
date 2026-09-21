@@ -1350,6 +1350,7 @@ describe("armed background tasks", () => {
       sessionUpdate: "tool_call",
       toolCallId: "toolu_fg",
       title: "Terminal",
+      status: "completed",
       rawInput: { command: "ls" },
     });
     expect(session.armedBackgroundTasks).toEqual([]);
@@ -1548,5 +1549,107 @@ describe("the steer detach flag outliving the turn it was armed for", () => {
     // "does not end on a user-lane terminal" rests on.
     humanTerminal(mock);
     expect(session.inUnsolicitedTurn).toBe(true);
+  });
+});
+
+describe("tool calls that outlive their turn", () => {
+  const SCRIPT = "mv a.new a\nmv b.new b\nBUILD_DIR=out ./run.sh all > /tmp/suite.log 2>&1";
+
+  async function runTurn(
+    session: Session,
+    mock: ReturnType<typeof makeMockAgent>,
+    client: AttachedClient,
+    updates: Array<Record<string, unknown>>,
+    stopReason = "end_turn",
+  ): Promise<void> {
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        for (const update of updates) {
+          mock.triggerNotification("session/update", {
+            sessionId: "u_agent",
+            update,
+          });
+        }
+        return { stopReason };
+      },
+    );
+    await session.prompt(client.clientId, {
+      sessionId: "sess_u",
+      prompt: [{ type: "text", text: "go" }],
+    });
+    await settleDrain();
+  }
+
+  const openExec = {
+    sessionUpdate: "tool_call",
+    toolCallId: "exec-1",
+    kind: "execute",
+    title: SCRIPT,
+    status: "in_progress",
+  };
+
+  it("arms a call still running when the turn ends cleanly", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [openExec]);
+    expect(session.armedBackgroundTasks).toMatchObject([
+      { toolCallId: "exec-1", label: "BUILD_DIR=out ./run.sh all > /tmp/suite.log 2>&1" },
+    ]);
+  });
+
+  it("stops counting it when the call reports a result, and pushes both edges", async () => {
+    const { session, mock } = makeSession();
+    const stream = makeControlledStream();
+    const client: AttachedClient = {
+      clientId: "c_open_tool",
+      connection: new JsonRpcConnection(stream),
+    };
+    await session.attach(client, "none");
+    await runTurn(session, mock, client, [openExec]);
+    await runTurn(session, mock, client, [
+      { sessionUpdate: "tool_call_update", toolCallId: "exec-1", status: "completed" },
+    ]);
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+    const pushes = stream.sent
+      .filter((m) => "method" in m && m.method === "hydra-acp/session/armed_tasks_updated")
+      .map((m) => (m as { params: { count: number } }).params);
+    expect(pushes.map((p) => p.count)).toEqual([1, 0]);
+  });
+
+  it("does not arm a call that finished inside its turn", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [
+      openExec,
+      { sessionUpdate: "tool_call_update", toolCallId: "exec-1", status: "completed" },
+    ]);
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  it("does not arm a call that arrived already completed", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [{ ...openExec, status: "completed" }]);
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  it("does not arm a call abandoned by a cancelled turn", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [openExec], "cancelled");
+    expect(session.armedBackgroundTasks).toHaveLength(0);
+  });
+
+  it("stays armed across a resumption, which proves nothing about it", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [openExec]);
+    agentChunk(mock, "woke up");
+    expect(session.inUnsolicitedTurn).toBe(true);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  it("keeps the label a later update refines", async () => {
+    const { session, mock, client } = await makeSessionAfterOneTurn();
+    await runTurn(session, mock, client, [
+      { ...openExec, title: "Terminal" },
+      { sessionUpdate: "tool_call_update", toolCallId: "exec-1", title: "npm test" },
+    ]);
+    expect(session.armedBackgroundTasks).toMatchObject([{ label: "npm test" }]);
   });
 });

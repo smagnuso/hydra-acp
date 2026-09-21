@@ -2511,6 +2511,29 @@ unknown rather than guessing:
 In both cases the entry stays counted. That is the deliberate cost of not
 inventing an expiry, and it is the same best-effort caveat as above.
 
+**Tool calls that outlive their turn.** A turn can end cleanly while a tool
+call it started is still running: an agent answers a steer and stops while
+its shell command carries on. Clients scope "running" to the turn that began
+the call, so from the next turn on the work would be invisible and the
+session would read as stuck. When a turn ends with any reason other than
+`cancelled`, `error` or `refusal` (those close their open calls as `failed`
+instead), every tool call still without a terminal status is armed as an
+entry of its own:
+
+- `toolCallId` is the call, `since` is when the call started, and `label` is
+  the last non-empty line of its title (a shell tool's title is the whole
+  script and its last line is what it is doing), or its `description` when
+  the agent supplied one.
+- It leaves the set when the call reports `completed` or `failed`, including
+  the synthetic `failed` that `^C` writes, or when the agent process is
+  retired. A resumption does **not** clear it: the agent waking up says
+  nothing about a command it is still waiting on.
+- It counts as a one-shot for `isQuiescedForSwap`, so a swap that would kill
+  the agent under it is refused with the running task named.
+- Same best-effort caveat as every edge-sourced entry: an agent that abandons
+  a call without ever settling it leaves the entry counted until `^C`. It is
+  moot for an agent that publishes the level, which replaces this list.
+
 #### Notification: `hydra-acp/session/armed_tasks_updated`
 
 Daemon to every attached client, whenever the armed set changes: a task is
