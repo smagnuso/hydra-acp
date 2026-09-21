@@ -419,6 +419,43 @@ describe("createPickerPrefs defaultHost", () => {
   });
 });
 
+describe("pickSession pending defaultHost", () => {
+  const local = session({ sessionId: "hydra_session_local" });
+  const onPeer = session({ sessionId: "hydra_session_peer", remote: "peerb" });
+
+  it("keeps retrying while nothing backs the name, then resolves and clears it", async () => {
+    const prefs = createPickerPrefs("remote:all");
+
+    const first = makePicker({ sessions: [local], prefs });
+    expect(prefs.filters.hostFilter).toBe("__local");
+    expect(prefs.pendingDefaultHost).toBe("remote:all");
+    first.press("CTRL_C");
+    await first.resolveOnce;
+
+    const second = makePicker({ sessions: [local, onPeer], prefs });
+    expect(prefs.filters.hostFilter).toBe("__remotes");
+    expect(prefs.pendingDefaultHost).toBeUndefined();
+    second.press("CTRL_C");
+    await second.resolveOnce;
+  });
+
+  it("stops retrying once the user cycles the host filter by hand", async () => {
+    const prefs = createPickerPrefs("remote:all");
+    const first = makePicker({ sessions: [local], prefs });
+    first.press("DOWN");
+    first.press("h", { isCharacter: true });
+    expect(prefs.filters.hostFilter).toBe("__all");
+    expect(prefs.pendingDefaultHost).toBeUndefined();
+    first.press("CTRL_C");
+    await first.resolveOnce;
+
+    const second = makePicker({ sessions: [local, onPeer], prefs });
+    expect(prefs.filters.hostFilter).toBe("__all");
+    second.press("CTRL_C");
+    await second.resolveOnce;
+  });
+});
+
 describe("nextHostFilter", () => {
   const sessions = [
     { importedFromMachine: undefined },

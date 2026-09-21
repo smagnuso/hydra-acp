@@ -288,9 +288,9 @@ export interface PickerPrefs {
   // closure. Never cleared implicitly; to forget a search, empty the
   // query box (^U) and Esc out.
   lastFind?: FindState;
-  // A named tui.defaultHost, held until the first picker open when the
-  // session list is available to say whether it is a remote or an
-  // imported machine. Consumed (cleared) there.
+  // A named tui.defaultHost, held until a picker open whose session list
+  // can say whether it is a remote or an imported machine. Cleared once
+  // it resolves, or as soon as the user cycles the host filter by hand.
   pendingDefaultHost?: string;
 }
 
@@ -483,11 +483,17 @@ export async function pickSession(
     }
   }
   if (prefs.pendingDefaultHost !== undefined) {
-    prefs.filters.hostFilter = resolveDefaultHost(
+    const resolved = resolveDefaultHost(
       prefs.pendingDefaultHost,
       opts.sessions,
     );
-    prefs.pendingDefaultHost = undefined;
+    prefs.filters.hostFilter = resolved;
+    // "__local" is only ever the fallback here, and remote sessions come
+    // from a cache that can still be empty on the first open, so keep
+    // retrying until something real backs the name or `h` overrides it.
+    if (resolved !== "__local") {
+      prefs.pendingDefaultHost = undefined;
+    }
   }
 
   // sorted/rows/widths are rebuilt whenever the underlying session list
@@ -4645,6 +4651,7 @@ export async function pickSession(
             prefs.filters.hostFilter,
             allSessions,
           );
+          prefs.pendingDefaultHost = undefined;
           applyFilter();
           restoreCursorAfterFilter(keepId);
           renderFromScratch();
@@ -5080,6 +5087,7 @@ export async function pickSession(
             prefs.filters.hostFilter,
             allSessions,
           );
+          prefs.pendingDefaultHost = undefined;
           applyFilter();
           restoreCursorAfterFilter(keepId);
           renderFromScratch();
