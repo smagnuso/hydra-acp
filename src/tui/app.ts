@@ -5775,18 +5775,29 @@ async function runSession(
         return;
       }
       case "save": {
+        // `s` both remembers the value as the default for future sessions
+        // AND applies it to this one right now — saving alone was easy to
+        // mistake for "done" and left the live session on its old value
+        // until a later restart (with nothing to restore) surfaced it.
         if (target.kind === "values") {
           const value = idAt(result.row);
           if (value !== undefined) {
             saveConfigDefault(target.configId, value);
+            closeForm("chooser");
+            applyConfigOption(target.configId, value);
           }
           return;
         }
-        // On the index, save the dimension's shown value: the pending pick
-        // if there is one, so `s` persists what the row displays.
+        // On the index, save+apply the dimension's shown value: the
+        // pending pick if there is one, so `s` persists what the row
+        // displays.
         const opt = optionAt(result.row);
         if (opt) {
-          saveConfigDefault(opt.id, shownValue(opt));
+          const value = shownValue(opt);
+          saveConfigDefault(opt.id, value);
+          if (value !== opt.currentValue) {
+            applyConfigOption(opt.id, value);
+          }
         }
         return;
       }

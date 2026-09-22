@@ -56,7 +56,7 @@ export function buildChooserForm(opt: ConfigOption): FormState {
     hints: [
       { label: "↑/↓ choose" },
       { label: "⏎ switch", action: "commit" },
-      { label: "s save default", action: "save" },
+      { label: "s save & apply", action: "save" },
       { label: "Esc close", action: "close" },
     ],
     maxRows: CHOOSER_MAX_ROWS,
@@ -77,7 +77,8 @@ export function buildConfigIndexForm(
       value: valueLabel(o, pending.get(o.id) ?? o.currentValue),
     })),
     cursor: 0,
-    // Enter is the ONLY thing that applies. Esc (and ^C) discard, matching
+    // Enter applies every row's pending pick; `s` applies just the current
+    // row (and saves it as the default). Esc (and ^C) discard, matching
     // every other dialog here, since ←/→ already does the choosing and a
     // door that silently commits is a trap.
     //
@@ -92,7 +93,7 @@ export function buildConfigIndexForm(
     hints: [
       { label: "↑/↓ row" },
       { label: "←/→ choose" },
-      { label: "s save default", action: "save" },
+      { label: "s save & apply", action: "save" },
       { label: "⏎ apply", action: "commit" },
       // Esc discards, which is what Esc means everywhere else in the TUI.
       // ^C does the same and is left off the row for space.
