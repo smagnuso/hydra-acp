@@ -78,6 +78,7 @@ import {
 } from "./model-verb.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
+import { isSelfCompactionUpdate } from "./context-compaction-signal.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
 import {
@@ -1886,6 +1887,23 @@ export class Session {
     // stops reporting itself idle while the agent works. Runs ahead of the
     // broadcast so clients receive turn_started before its first content.
     this.noteAgentActivity(envelope);
+    // The agent self-reporting it already compacted its own context on
+    // its own terms (codex's native auto-compact, claude's manual
+    // /compact) — arm recall in place so recall_* stops answering
+    // "nothing compacted yet". Side effect only; the update itself still
+    // falls through to the normal record/broadcast below so it stays
+    // visible in history.
+    if (
+      isSelfCompactionUpdate(
+        (envelope as { update?: Record<string, unknown> }).update,
+      )
+    ) {
+      void this.armRecallInPlace().catch((err) => {
+        this.logger?.warn(
+          `armRecallInPlace failed: ${(err as Error).message}`,
+        );
+      });
+    }
     // Snapshot interceptors and broadcast run on the post-chain envelope.
     const agentCmds = extractAdvertisedCommands(envelope);
     if (agentCmds !== null) {
@@ -1931,6 +1949,43 @@ export class Session {
     }
     this.maybeApplyAgentSessionInfo(envelope);
     this.recordAndBroadcast("session/update", envelope);
+  }
+
+  // Arms recall in place when another agent reports it already compacted
+  // its own context on its own terms (context-compaction-signal.ts).
+  // Unlike swapUpstream, this never touches this.agent / upstreamSessionId
+  // — the agent already relieved its own context pressure, so there's
+  // nothing for hydra to add there. It only advances the watermark
+  // recall-server.ts's call-time gate reads, so the next
+  // search/range/tool_calls call returns real results instead of
+  // "nothing compacted yet". No synopsis, no LLM call, no swap, no
+  // respawn.
+  private async armRecallInPlace(): Promise<void> {
+    if (!this.historyStore) {
+      return;
+    }
+    const through = await this.historyStore
+      .getRecallTotalCount(this.sessionId)
+      .catch(() => 0);
+    // Mirrors the coordinator's own idempotency rule
+    // (synopsis-coordinator.ts): nothing to arm over if the watermark is
+    // already at or past this point.
+    if (through <= (this._summarizedThroughEntry ?? 0)) {
+      return;
+    }
+    this._summarizedThroughEntry = through;
+    if (this.persistWatermarkHook) {
+      try {
+        this.persistWatermarkHook(through);
+      } catch (err) {
+        this.logger?.warn(
+          `armRecallInPlace: persistWatermarkHook failed: ${(err as Error).message}`,
+        );
+      }
+    }
+    this.broadcastQueueNotification("hydra-acp/context_self_compacted", {
+      sessionId: this.sessionId,
+    });
   }
 
   onAgentChange(

@@ -2779,6 +2779,41 @@ These fields exist because nothing else retains the numbers: `currentUsage`
 is a single snapshot of the live generation and is overwritten at each
 rotation, and the `usage_update` rows in `history.jsonl` are a ring buffer.
 
+#### Notification: `hydra-acp/context_self_compacted`
+
+Fired when the *underlying agent* (not hydra) reports that it already compacted
+its own context window on its own terms — codex-acp's native auto-compact, or
+claude-agent-acp's manual `/compact`. Distinct from the compaction lifecycle
+above: no synopsis is generated, no upstream swap happens, and the live agent
+process is never touched. The only effect is that `Session.summarizedThroughEntry`
+advances to the session's current entry count, which arms the
+`hydra-acp-recall` MCP tools' call-time gate (they otherwise answer "no
+compacted history yet") without anything else changing. See
+`context-compaction-signal.ts` for the per-agent detection and
+`Session.armRecallInPlace` for the arming logic.
+
+```jsonc
+{ "sessionId": "hydra_session_abc123" }
+```
+
+Purely informational — nothing to correlate against `compactionState`, no
+indicator to clear, and `/hydra uncompact` has nothing to roll back (no swap
+occurred, so no rollback breadcrumb is written).
+
+Detection is agent-specific and does not generalize to every agent hydra
+supports:
+
+- **codex-acp** advertises it structurally: a `tool_call`/`tool_call_update`
+  with `kind:"think"`, `title:"Compact conversation"`, `_meta.contextCompaction`,
+  `status:"completed"`. Fires for both its manual and automatic triggers alike.
+- **claude-agent-acp** only distinguishes the manual `/compact` path: the SDK's
+  `compact_result:"success"` status is relayed as a fixed-string
+  `agent_message_chunk` (`"\n\nCompacting completed."`). A self-triggered
+  compaction there surfaces only as a `usage_update` discontinuity — no text,
+  no structured marker — and is deliberately not detected here.
+- **opencode** advertises nothing over ACP at all; its internal
+  `session.compacted` event never crosses its ACP bridge.
+
 ### session/update — workspace lifecycle
 
 Emitted while a session moves into or out of an isolated workspace, or has its

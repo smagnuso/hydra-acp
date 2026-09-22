@@ -2840,6 +2840,15 @@ async function runSession(
     }
   });
 
+  // The agent self-reported it already compacted its own context on its
+  // own terms (context-compaction-signal.ts) — Session.armRecallInPlace
+  // armed recall_* without a hydra-side swap. Purely informational; no
+  // indicator to clear since nothing was in flight.
+  conn.onNotification("hydra-acp/context_self_compacted", () => {
+    if (teardownStarted) return;
+    screen.notify("agent compacted its own context — recall armed", 4000);
+  });
+
   const handleCompactionUpdate = (update: unknown): void => {
     const u = (update ?? {}) as {
       phase?: unknown;
