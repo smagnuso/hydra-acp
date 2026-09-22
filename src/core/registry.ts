@@ -547,6 +547,14 @@ export interface SpawnPlan {
   installId?: string;
 }
 
+// Expand `~/...` and `$HOME/...` in each env value, e.g. so
+// CLAUDE_CODE_EXECUTABLE can point at a script under the home dir.
+function expandEnvHome(
+  env: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  return env && Object.fromEntries(Object.entries(env).map(([k, v]) => [k, expandHome(v)]));
+}
+
 // A config.agents entry that defines its own command, as a RegistryAgent.
 // `~/...` and `$HOME/...` are expanded so users can write portable entries
 // pointing at scripts under their home dir.
@@ -565,7 +573,7 @@ function synthesizeLocalAgent(
         // theirs to the extension name) — resolved off PATH at spawn.
         command: expandHome(def.command ?? id),
         args: def.args?.map(expandHome),
-        env: def.env,
+        env: expandEnvHome(def.env),
       },
     },
   };
@@ -580,12 +588,13 @@ function mergeIntoDistribution(
   def: LocalAgentConfig,
 ): RegistryAgent["distribution"] {
   const args = def.args?.map(expandHome);
+  const env = expandEnvHome(def.env);
   const overlay = <T extends { args?: string[]; env?: Record<string, string> }>(
     target: T,
   ): T => ({
     ...target,
     ...(args ? { args } : {}),
-    ...(def.env ? { env: { ...target.env, ...def.env } } : {}),
+    ...(env ? { env: { ...target.env, ...env } } : {}),
   });
   return {
     ...(base.npx ? { npx: overlay(base.npx) } : {}),

@@ -544,6 +544,25 @@ describe("local agents and pin overrides", () => {
     expect(agent?.version).toBe("local");
   });
 
+  it("expands ~ and $HOME in a config-defined local agent's env values", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agents: {
+        "my-claude": {
+          command: "~/.local/bin/claude",
+          env: { CLAUDE_HOME: "$HOME/.claude" },
+        },
+      },
+    };
+    const registry = new Registry(config);
+    const agent = await registry.getAgent("my-claude");
+    expect(agent?.distribution.exec).toEqual({
+      command: `${homedir()}/.local/bin/claude`,
+      args: undefined,
+      env: { CLAUDE_HOME: `${homedir()}/.claude` },
+    });
+  });
+
   it("defaults a local agent's command to the agent id when omitted", async () => {
     const config: HydraConfig = {
       ...fakeConfig(),
@@ -698,6 +717,38 @@ describe("local agents and pin overrides", () => {
     // env alone must not disturb the install identity.
     expect(agent?.version).toBeUndefined();
     expect(agent?.installId).toBeUndefined();
+  });
+
+  it("expands ~ and $HOME in agentOverrides env values", async () => {
+    const doc: { agents: RegistryAgent[] } = {
+      agents: [
+        {
+          id: "claude-acp",
+          name: "Claude",
+          distribution: {
+            npx: { package: "@agentclientprotocol/claude-agent-acp@0.33.1" },
+          },
+        },
+      ],
+    };
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agentOverrides: {
+        "claude-acp": {
+          env: {
+            CLAUDE_CODE_EXECUTABLE: "~/.local/bin/claude",
+            OTHER: "$HOME/bin/tool",
+          },
+        },
+      },
+    };
+    const registry = new Registry(config);
+    seedCache(registry, doc as typeof FIXTURE);
+    const agent = await registry.getAgent("claude-acp");
+    expect(agent?.distribution.npx?.env).toEqual({
+      CLAUDE_CODE_EXECUTABLE: `${homedir()}/.local/bin/claude`,
+      OTHER: `${homedir()}/bin/tool`,
+    });
   });
 
   it("applies agentOverrides env to every platform of a binary distribution", async () => {
