@@ -201,6 +201,7 @@ import {
 import {
   computeAttachReconcile,
   parseReattachResponse,
+  shouldAnchorToolsBlock,
   shouldDriftSnap,
   type ReattachResponseFields,
 } from "./reconnect-state.js";
@@ -8592,6 +8593,7 @@ async function runSession(
     rawUpdate?: unknown,
     rawKind?: string,
     recordedAt?: number,
+    isStart = false,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -8718,14 +8720,30 @@ async function runSession(
       // per-turn key too (like startToolsBlock) — otherwise this turn's
       // tools splice into the previous turn's frozen-but-still-keyed block,
       // and the eventual startToolsBlock then renders a second block.
-      if (toolsBlockStartedAt === null) {
+      //
+      // Only a genuine tool_call (isStart) anchors a fresh block, though.
+      // A tool_call_update for an id we've never seen start is not a new
+      // call, it's the tail of one whose start fell outside the replay
+      // window (still-armed background exec on reattach, most often) —
+      // treating it as "a turn just began" wedges the block open forever,
+      // since no turn boundary anchored at the real start will ever arrive
+      // to freeze it. Still recorded below so the tool's own state
+      // resolves; just not given a block to live in.
+      if (
+        shouldAnchorToolsBlock({
+          blockOpen: toolsBlockStartedAt !== null,
+          isStart,
+        })
+      ) {
         toolsBlockSeq += 1;
         currentToolsKey = `tools:${toolsBlockSeq}`;
         toolsBlockStartedAt = Date.now();
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
       }
-      toolCallOrder.push(id);
+      if (toolsBlockStartedAt !== null) {
+        toolCallOrder.push(id);
+      }
       // A tool just STARTED: the running gadget should show it now, not up
       // to a second later when the ticker next fires. Deliberately not
       // onSidebarRelevantChange() — that also kicks a git poll, and a tool
@@ -9854,6 +9872,7 @@ async function runSession(
         rawUpdate,
         event.rawKind,
         recordedAt,
+        true,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);

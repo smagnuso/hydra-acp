@@ -133,6 +133,22 @@ export interface AttachReconcile {
   busySince?: number;
 }
 
+// True when a wasNew tool call should anchor a fresh live tools block.
+//
+// Only a genuine tool_call start may do this. A tool_call_update for an id
+// the client has never seen is not a new call, it's the tail of one whose
+// own tool_call fell outside the replay window — most often a still-armed
+// background exec surviving a reattach. Anchoring on it wedges the block
+// open forever: it stamps "started" at the moment this update happened
+// rather than the real start, and since the real start already came and
+// went, no turn boundary keyed to it will ever arrive to freeze the block.
+export function shouldAnchorToolsBlock(args: {
+  blockOpen: boolean;
+  isStart: boolean;
+}): boolean {
+  return !args.blockOpen && args.isStart;
+}
+
 export function computeAttachReconcile(args: {
   daemonTurnStartedAt: number | undefined;
   pendingTurns: number;

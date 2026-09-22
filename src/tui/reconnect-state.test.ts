@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computeAttachReconcile,
   parseReattachResponse,
+  shouldAnchorToolsBlock,
   shouldDriftSnap,
 } from "./reconnect-state.js";
 
@@ -182,6 +183,36 @@ describe("shouldDriftSnap", () => {
         replayDraining: false,
         amended: true,
       }),
+    ).toBe(false);
+  });
+});
+
+describe("shouldAnchorToolsBlock", () => {
+  it("anchors on a genuine tool_call start when no block is open", () => {
+    expect(
+      shouldAnchorToolsBlock({ blockOpen: false, isStart: true }),
+    ).toBe(true);
+  });
+
+  // The replay-desync case: reattach missed the tool_call and only sees
+  // the still-armed background exec's trailing tool_call_update. Without
+  // this, that update wedges a tools block open with no turn boundary
+  // ever coming to freeze it — the failure this predicate exists to catch.
+  it("does not anchor on a tool_call_update for an unseen id", () => {
+    expect(
+      shouldAnchorToolsBlock({ blockOpen: false, isStart: false }),
+    ).toBe(false);
+  });
+
+  it("does not re-anchor a tool_call while a block is already open", () => {
+    expect(
+      shouldAnchorToolsBlock({ blockOpen: true, isStart: true }),
+    ).toBe(false);
+  });
+
+  it("does not anchor a tool_call_update while a block is already open", () => {
+    expect(
+      shouldAnchorToolsBlock({ blockOpen: true, isStart: false }),
     ).toBe(false);
   });
 });
