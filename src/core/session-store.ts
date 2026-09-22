@@ -341,6 +341,12 @@ export const SessionRecord = z.object({
   agentCommands: z.array(PersistedAgentCommand).optional(),
   agentModes: z.array(PersistedAgentMode).optional(),
   agentModels: z.array(PersistedAgentModel).optional(),
+  // Current value of every agent-defined config option that isn't
+  // model/mode (e.g. "effort"), keyed by configId. Those two have
+  // dedicated fields above with restore-on-resurrect logic in
+  // session-manager.ts; this is the generic equivalent for everything
+  // else the agent advertises via config_option_update.
+  configOptionValues: z.record(z.string(), z.string()).optional(),
   // One-shot flag set when `hydra agent sync` mints a row from an
   // agent-side session/list entry: signals that the first resurrect
   // should *keep* the agent's session/load replay (instead of draining
@@ -723,6 +729,7 @@ export function recordFromMemorySession(args: {
   agentCommands?: PersistedAgentCommand[];
   agentModes?: PersistedAgentMode[];
   agentModels?: PersistedAgentModel[];
+  configOptionValues?: Record<string, string>;
   pendingHistorySync?: boolean;
   pendingAgentSwap?: string;
   parentSessionId?: string;
@@ -796,6 +803,7 @@ export function recordFromMemorySession(args: {
     agentCommands: args.agentCommands,
     agentModes: args.agentModes,
     agentModels: args.agentModels,
+    configOptionValues: args.configOptionValues,
     pendingHistorySync: args.pendingHistorySync,
     pendingAgentSwap: args.pendingAgentSwap,
     parentSessionId: args.parentSessionId,

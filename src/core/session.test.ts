@@ -1186,6 +1186,26 @@ describe("Session", () => {
       expect(ids).toContain("fast");
     });
 
+    it("fires onConfigOptionsChange when the agent renotifies effort on its own initiative (regression: persist hook only fired from broadcastConfigOptions, missing the raw-notification path)", async () => {
+      const { session, mock } = makeSession("sess_eff_hook", "u_eff_hook");
+      const seen: string[][] = [];
+      session.onConfigOptionsChange((options) => {
+        seen.push(options.map((o) => `${o.id}=${o.currentValue}`));
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff_hook",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "effort", currentValue: "xhigh", options: [{ value: "low" }, { value: "xhigh" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+      expect(seen).toContainEqual(["effort=xhigh"]);
+      expect(session.extraConfigOptionValues()).toEqual({ effort: "xhigh" });
+    });
+
     it("applyAgentConfigOptionResponse upserts without pruning ids missing from the reply", async () => {
       const { session, mock } = makeSession("sess_eff_reply", "u_eff_reply");
       const warm = makeClient();

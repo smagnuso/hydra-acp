@@ -1578,6 +1578,96 @@ describe("SessionManager: history persistence", () => {
       expect(setModeCall).toBeUndefined();
     });
 
+    it("persists a non-model/mode config option (e.g. effort) and pushes it back via session/set_config_option on resurrect (regression: effort silently reverted to the agent's default on daemon restart)", async () => {
+      // Resurrect agent's session/load advertises "effort" (needed to
+      // resolve/validate the persisted value against) but reports it
+      // currently on "low" — the persisted "xhigh" from the prior life
+      // should get pushed back.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-code")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<
+            typeof vi.fn
+          >;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_effort_restore" });
+          } else {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({
+                sessionId: "u_effort_restore",
+                configOptions: [
+                  {
+                    id: "effort",
+                    currentValue: "low",
+                    options: [{ value: "low" }, { value: "xhigh" }],
+                  },
+                ],
+              });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({
+        cwd: W_CWD,
+        agentId: "claude-code",
+      });
+      const sessionId = live.sessionId;
+      // Mirrors the daemon's session/set_config_option WS handler for a
+      // non-model/mode configId (acp-ws.ts): apply the agent's reply, then
+      // broadcast — that broadcast is what fires the persist hook. A raw
+      // agent-emitted config_option_update notification does NOT do this
+      // (maybeApplyAgentConfigOption relies on the original frame being
+      // relayed as-is), so triggerNotification would not exercise it.
+      live.applyAgentConfigOptionResponse(
+        {
+          configOptions: [
+            {
+              id: "effort",
+              currentValue: "xhigh",
+              options: [{ value: "low" }, { value: "xhigh" }],
+            },
+          ],
+        },
+        "effort",
+      );
+      live.broadcastConfigOptions();
+      const settled = await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.configOptionValues?.effort === "xhigh",
+      );
+      expect(settled?.configOptionValues?.effort).toBe("xhigh");
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      expect(
+        revived.buildConfigOptions().find((o) => o.id === "effort")
+          ?.currentValue,
+      ).toBe("xhigh");
+
+      const requestMock = localMocks[1]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const setConfigCall = requestMock.mock.calls.find(
+        (c) => c[0] === "session/set_config_option",
+      );
+      expect(setConfigCall).toBeDefined();
+      expect(setConfigCall?.[1]).toMatchObject({
+        sessionId: "u_effort_restore",
+        configId: "effort",
+        value: "xhigh",
+      });
+    });
+
     it("requests summarized thinking and the background-task level on both session/new and session/load", async () => {
       // Without an explicit --thinking-display the CLI forces "omitted" for a
       // non-interactive session, so claude streams signature-only thinking

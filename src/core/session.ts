@@ -1369,6 +1369,7 @@ export class Session {
   > = [];
   private agentModesHandlers: Array<(modes: AdvertisedMode[]) => void> = [];
   private agentModelsHandlers: Array<(models: AdvertisedModel[]) => void> = [];
+  private configOptionsHandlers: Array<(options: ConfigOption[]) => void> = [];
   private availableAgentsFn?: () => Array<{
     id: string;
     name?: string;
@@ -6410,6 +6411,13 @@ export class Session {
     this.agentAdvertisedConfigOptions = this.agentAdvertisedConfigOptions.filter(
       (o) => seenIds.has(o.id),
     );
+    // No recordAndBroadcast here — the original frame is relayed as-is by
+    // the caller. But the persist hook (SessionManager mirrors this into
+    // meta.json) has no other trigger for a value the agent changed on its
+    // own initiative (e.g. rebuilding effort after an internal model
+    // swap), so fire it directly rather than waiting for some later,
+    // unrelated broadcastConfigOptions call to catch it up.
+    this.fireConfigOptionsHandlers();
     return true;
   }
 
@@ -6991,6 +6999,25 @@ export class Session {
     this.agentModelsHandlers.push(handler);
   }
 
+  // Extra, non-standard config options advertised by the agent (e.g.
+  // "effort"). Unlike model/mode, these have no dedicated currentX field —
+  // this is the only persist hook for them, fired from broadcastConfigOptions
+  // whenever the snapshot is sent to clients.
+  onConfigOptionsChange(handler: (options: ConfigOption[]) => void): void {
+    this.configOptionsHandlers.push(handler);
+  }
+
+  // Snapshot of agent-defined config-option ids to their current value
+  // (e.g. { effort: "xhigh" }), for persisting alongside currentModel/
+  // currentMode so a resurrect can push them back to the freshly loaded
+  // agent. Excludes model/mode/agent — those are hydra-owned dimensions
+  // with their own persisted fields.
+  extraConfigOptionValues(): Record<string, string> {
+    return Object.fromEntries(
+      this.agentAdvertisedConfigOptions.map((o) => [o.id, o.currentValue]),
+    );
+  }
+
   onModelChange(handler: (model: string) => void): void {
     this.modelHandlers.push(handler);
   }
@@ -7221,6 +7248,17 @@ export class Session {
         configOptions: this.buildConfigOptions(),
       },
     });
+    this.fireConfigOptionsHandlers();
+  }
+
+  private fireConfigOptionsHandlers(): void {
+    for (const handler of this.configOptionsHandlers) {
+      try {
+        handler(this.agentAdvertisedConfigOptions);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   // Return a shallow clone of an agent-emitted config_option_update

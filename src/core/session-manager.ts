@@ -319,6 +319,12 @@ export interface ResurrectParams {
   agentCommands?: AdvertisedCommand[];
   agentModes?: AdvertisedMode[];
   agentModels?: AdvertisedModel[];
+  // Current value of every agent-defined config option that isn't
+  // model/mode (e.g. "effort"), keyed by configId. doResurrect /
+  // doResurrectFromImport push these back to the freshly loaded/spawned
+  // agent the same way model/mode are restored — the agent otherwise
+  // boots on its own default and silently drops the prior choice.
+  configOptionValues?: Record<string, string>;
   // Original create time, preserved across resurrect so `sessions list`
   // shows when the conversation actually began rather than the latest
   // wakeup.
@@ -1551,11 +1557,22 @@ export class SessionManager {
     // the agent came up on rather than the one it is now on. The drain
     // below makes this the only chance — a config_option_update prompted
     // by the restore is dropped, not applied.
-    const advertisedConfigOptions = nonEmptyOrUndefined(
+    let advertisedConfigOptions = nonEmptyOrUndefined(
       extractInitialConfigOptions(
         hasConfigOptions(restoredModel.result)
           ? restoredModel.result
           : (loadResult ?? {}),
+      ),
+    );
+    // Push persisted non-model/mode dimensions (e.g. "effort") back the
+    // same way, resolving against the freshest snapshot above — same
+    // reasoning as the model restore's comment just above.
+    advertisedConfigOptions = nonEmptyOrUndefined(
+      await this.restoreConfigOptionValues(
+        agent,
+        params.upstreamSessionId,
+        params.configOptionValues,
+        advertisedConfigOptions ?? [],
       ),
     );
     if (params.pendingHistorySync !== true) {
@@ -1710,9 +1727,19 @@ export class SessionManager {
     // and already seeded it, so the call above short-circuits. It only
     // fires when that seed was rejected, and then the same rule applies:
     // the reply describes the model the session ended up on.
-    const restoredConfigOptions = hasConfigOptions(restoredModel.result)
+    let restoredConfigOptions = hasConfigOptions(restoredModel.result)
       ? nonEmptyOrUndefined(extractInitialConfigOptions(restoredModel.result))
       : undefined;
+    // Push persisted non-model/mode dimensions (e.g. "effort") back the
+    // same way — see doResurrect's identical step for why.
+    restoredConfigOptions = nonEmptyOrUndefined(
+      await this.restoreConfigOptionValues(
+        fresh.agent,
+        fresh.upstreamSessionId,
+        params.configOptionValues,
+        restoredConfigOptions ?? fresh.initialConfigOptions ?? [],
+      ),
+    );
     // Drop any buffered session/update notifications that arrived during
     // the restore calls — same race as doResurrect.
     fresh.agent.connection.drainBuffered("session/update");
@@ -4995,6 +5022,66 @@ export class SessionManager {
     }
   }
 
+  // Push persisted non-model/mode config-option values (e.g. "effort")
+  // back to a freshly loaded/spawned agent on resurrect, mirroring
+  // restoreCurrentMode/restoreCurrentModel: the agent boots on its own
+  // default after session/load and would otherwise silently drop a value
+  // the user picked in a previous life. Applied in Object.entries order;
+  // an accepted call's fresh snapshot is used to resolve the next entry,
+  // since setting one dimension can reshape another (claude-acp rebuilds
+  // effort per model).
+  private async restoreConfigOptionValues(
+    agent: AgentInstance,
+    upstreamSessionId: string,
+    persistedValues: Record<string, string> | undefined,
+    currentOptions: ConfigOption[],
+  ): Promise<ConfigOption[]> {
+    if (!persistedValues || Object.keys(persistedValues).length === 0) {
+      return currentOptions;
+    }
+    let options = currentOptions;
+    for (const [configId, value] of Object.entries(persistedValues)) {
+      const where = `resurrect: persisted configOptionValues.${configId}=${JSON.stringify(value)}`;
+      const option = options.find((o) => o.id === configId);
+      if (!option) {
+        this.logger?.warn(
+          `${where}: agent does not currently advertise configId=${configId}; skipping session/set_config_option`,
+        );
+        continue;
+      }
+      if (value === option.currentValue) {
+        continue;
+      }
+      const resolution = resolveCandidate(value, option.options.map((o) => o.value));
+      if (resolution.kind !== "exact" && resolution.kind !== "resolved") {
+        this.logger?.warn(`${where} ${resolution.kind}; skipping session/set_config_option`);
+        continue;
+      }
+      const resolvedValue = resolution.kind === "resolved" ? resolution.modelId : value;
+      try {
+        const reply = await agent.connection.request<Record<string, unknown>>(
+          "session/set_config_option",
+          { sessionId: upstreamSessionId, configId, value: resolvedValue },
+        );
+        this.logger?.info(`${where}: session/set_config_option accepted`);
+        // The reply is the only word on the applied state (agents answering
+        // this call emit no separate notification), but not every agent's
+        // reply carries a fresh snapshot — fall back to patching the one id
+        // we just set so an accepted call is never silently discarded.
+        options = hasConfigOptions(reply)
+          ? extractInitialConfigOptions(reply)
+          : options.map((o) =>
+              o.id === configId ? { ...o, currentValue: resolvedValue } : o,
+            );
+      } catch (err) {
+        this.logger?.warn(
+          `${where}: session/set_config_option rejected by agent (${(err as Error).message})`,
+        );
+      }
+    }
+    return options;
+  }
+
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
   // → session/new. Shared by create() and the /hydra agent path so both
   // go through the same env / capabilities / error-handling.
@@ -5710,6 +5797,13 @@ export class SessionManager {
         })),
       }).catch(() => undefined);
     });
+    session.onConfigOptionsChange((options) => {
+      void this.persistSnapshot(session.sessionId, {
+        configOptionValues: Object.fromEntries(
+          options.map((o) => [o.id, o.currentValue]),
+        ),
+      }).catch(() => undefined);
+    });
     session.onAttentionFlagsChange((flags) => {
       void this.mutateRecord(session.sessionId, { attentionFlags: flags }).catch(
         () => undefined,
@@ -5814,6 +5908,7 @@ export class SessionManager {
       agentCommands: record.agentCommands,
       agentModes: record.agentModes,
       agentModels: record.agentModels,
+      configOptionValues: record.configOptionValues,
       createdAt: record.createdAt,
       pendingHistorySync: record.pendingHistorySync,
       originatingClient: record.originatingClient,
@@ -7417,6 +7512,7 @@ export class SessionManager {
       agentCommands?: PersistedAgentCommand[];
       agentModes?: PersistedAgentMode[];
       agentModels?: PersistedAgentModel[];
+      configOptionValues?: Record<string, string>;
       interactive?: boolean;
       cwd?: string;
     },
@@ -7428,6 +7524,7 @@ export class SessionManager {
     if (update.agentCommands !== undefined) fields.agentCommands = update.agentCommands;
     if (update.agentModes !== undefined) fields.agentModes = update.agentModes;
     if (update.agentModels !== undefined) fields.agentModels = update.agentModels;
+    if (update.configOptionValues !== undefined) fields.configOptionValues = update.configOptionValues;
     if (update.interactive !== undefined) fields.interactive = update.interactive;
     if (update.cwd !== undefined) fields.cwd = update.cwd;
     await this.mutateRecord(sessionId, fields);
@@ -8150,6 +8247,11 @@ export function mergeForPersistence(
         })
       : undefined;
   const agentModels = persistedModels ?? existing?.agentModels;
+  const extraConfigOptionValues = session.extraConfigOptionValues();
+  const configOptionValues =
+    Object.keys(extraConfigOptionValues).length > 0
+      ? extraConfigOptionValues
+      : existing?.configOptionValues;
   return recordFromMemorySession({
     sessionId: session.sessionId,
     lineageId: existing?.lineageId ?? generateLineageId(),
@@ -8178,6 +8280,7 @@ export function mergeForPersistence(
     agentCommands,
     agentModes,
     agentModels,
+    configOptionValues,
     parentSessionId: session.parentSessionId ?? existing?.parentSessionId,
     forkedFromSessionId:
       session.forkedFromSessionId ?? existing?.forkedFromSessionId,
