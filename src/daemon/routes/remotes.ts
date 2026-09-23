@@ -8,6 +8,7 @@ import {
   logoutFromPeer,
 } from "../../core/peer-login.js";
 import { clearPin, setPin } from "../../core/tls-trust.js";
+import { isLoopbackHost } from "../../core/remote-url.js";
 import type { PeerHealthTracker } from "../peer-health.js";
 
 const AddBody = z.object({
@@ -121,6 +122,52 @@ export function registerRemoteRoutes(
     });
     return reply.code(200).send({ remotes });
   });
+
+  // The peer's own agent list plus its defaults, so a client choosing where
+  // to create a session offers agents that host actually has and starts on
+  // that host's default agent/model rather than this machine's.
+  app.get<{ Params: { name: string } }>(
+    "/v1/remotes/:name/agents",
+    async (request, reply) => {
+      const record = deps.store.get(request.params.name);
+      if (!record) {
+        return reply.code(404).send({ error: "Not found" });
+      }
+      const scheme = isLoopbackHost(record.host) ? "http" : "https";
+      const base = `${scheme}://${record.host}:${record.port}`;
+      const headers = { Authorization: `Bearer ${record.token}` };
+      try {
+        const [agentsRes, configRes] = await Promise.all([
+          fetch(`${base}/v1/agents`, { headers }),
+          fetch(`${base}/v1/config`, { headers }).catch(() => null),
+        ]);
+        if (!agentsRes.ok) {
+          return reply
+            .code(agentsRes.status)
+            .header("content-type", "application/json")
+            .send(await agentsRes.text());
+        }
+        const agents = (await agentsRes.json()) as Record<string, unknown>;
+        // An older peer without /v1/config still yields its agent list.
+        let defaults: Record<string, unknown> = {};
+        if (configRes?.ok) {
+          const cfg = (await configRes.json()) as {
+            defaultAgent?: unknown;
+            sessionDefaults?: unknown;
+          };
+          defaults = {
+            defaultAgent: cfg.defaultAgent,
+            sessionDefaults: cfg.sessionDefaults,
+          };
+        }
+        return reply.code(200).send({ ...agents, ...defaults });
+      } catch (err) {
+        return reply.code(502).send({
+          error: `Could not reach remote "${record.name}": ${(err as Error).message}`,
+        });
+      }
+    },
+  );
 
   app.delete<{ Params: { name: string } }>(
     "/v1/remotes/:name",

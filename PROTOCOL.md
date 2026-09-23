@@ -266,6 +266,14 @@ This is visibility only: forwarding a REST or ACP call to a peer always makes it
 }
 ```
 
+#### `GET /v1/remotes/:name/agents`
+
+The peer's own `GET /v1/agents` response, fetched with this daemon's stored credential for `name`, plus the peer's `defaultAgent` and `sessionDefaults` from its `GET /v1/config` (omitted if the peer predates that route or it fails). Lets a client that is choosing where to create a session (`POST /v1/sessions` with `remote`) offer only agents that host has, and start from that host's default agent and model.
+
+- `404` — no remote with that name.
+- `502` — the remote is registered but unreachable.
+- Any other status from the peer's `/v1/agents` is passed through.
+
 #### `DELETE /v1/remotes/:name`
 
 Un-federate a peer: best-effort revokes this daemon's token on the peer (`POST /v1/auth/logout`, failures ignored so an already-unreachable peer doesn't block cleanup) and forgets the local record. Also unpins the peer's cert (`clearPin`) — but only if no *other* remote name still points at the same host:port (two names can share one peer; see `core/peer-store.ts`), so removing one alias never yanks trust out from under another that's still using it.

@@ -91,9 +91,13 @@ import {
   killSession,
   listSessions,
   listAgents,
+  listRemoteNames,
+  fetchRemoteInfo,
+  createSessionOnRemote,
   pickMostRecent,
   renameSession,
   type DiscoveredSession,
+  type HostInfo,
 } from "./discovery.js";
 import {
   buildChooserForm,
@@ -706,6 +710,9 @@ export interface TuiOptions {
   workspace?: boolean;
   resume?: boolean;
   forceNew?: boolean;
+  // Federated remote to create the new session on (chosen in the picker
+  // composer popup). Absent means this daemon.
+  newHost?: string;
   // First-prompt seed for a freshly-created session. The picker's
   // composer pane returns the typed text here; runSession fires it via
   // enqueuePrompt once, immediately after the daemon attaches the
@@ -904,6 +911,10 @@ interface SessionContext {
   // status line so the user sees "Forking session…" instead of the
   // generic "Resuming session…" while the daemon's synopsis pass runs.
   isFreshFork?: boolean;
+  // Minted by creating the session on a federated peer: sessionId is
+  // already the peer's `name:localId`, but the composer's first prompt
+  // still needs firing as it does for `__new__`.
+  freshOnRemote?: boolean;
   // When the picker resolved with a "new" selection AND ensureAgentForNew
   // was a no-op (no interactive agent-picker dialog), the picker leaves
   // its rendered frame on screen and hands back a sink that paints the
@@ -6163,6 +6174,8 @@ async function runSession(
         } catch {
           // ignore
         }
+        const availableHosts = await listRemoteNames(target);
+        const hostInfo = await fetchHostInfo(target, availableHosts);
         // The composer's top-right "agent•model" reflects what a fresh
         // session from this composer would use. opts.agentId (the
         // attached session's agent) only seeds the initial label — it is
@@ -6211,6 +6224,9 @@ async function runSession(
           ...(composerAgentId ? { composerAgentId } : {}),
           ...(composerModel ? { composerModel } : {}),
           ...(availableAgents.length > 0 ? { availableAgents } : {}),
+          ...(availableHosts.length > 0 ? { availableHosts } : {}),
+          ...(availableHosts.length > 0 ? { hostInfo } : {}),
+          ...(opts.newHost !== undefined ? { composerHost: opts.newHost } : {}),
           onComposerAgentChange: (agentId, model) => {
             rememberComposerAgent(viewPrefs, agentId, model);
           },
@@ -6428,6 +6444,11 @@ async function runSession(
         }
         if (choice.model !== undefined) {
           nextOpts.model = choice.model;
+        }
+        if (choice.host !== undefined) {
+          nextOpts.newHost = choice.host;
+        } else {
+          delete nextOpts.newHost;
         }
         // Hand the still-live picker frame to the next runSession so
         // "Starting new session…" + agent-install progress paint into
@@ -10792,7 +10813,7 @@ async function runSession(
   // up. Guarded by sessionId === "__new__" so a resume/restart that
   // accidentally inherits opts.initialPrompt is a no-op.
   if (
-    ctx.sessionId === "__new__" &&
+    (ctx.sessionId === "__new__" || ctx.freshOnRemote === true) &&
     (opts.initialPrompt ||
       (opts.initialAttachments && opts.initialAttachments.length > 0))
   ) {
@@ -10839,7 +10860,7 @@ async function resolveSession(
     if (agentStep !== "ok") {
       return null;
     }
-    return newCtx(opts, cwd, config);
+    return await newCtxForHost(target, opts, cwd, config);
   }
   if (opts.resume) {
     // If this pane has a sticky per-tty pointer at a session the
@@ -10899,6 +10920,8 @@ async function resolveSession(
     } catch {
       // ignore
     }
+    const availableHosts = await listRemoteNames(target);
+    const hostInfo = await fetchHostInfo(target, availableHosts);
     // opts.agentId (the attached session's agent) only seeds the initial
     // label. ^O moving the picker to a different directory must resolve
     // strictly from that directory's own config, never from the session
@@ -10942,6 +10965,9 @@ async function resolveSession(
       ...(composerAgentId ? { composerAgentId } : {}),
       ...(composerModel ? { composerModel } : {}),
       ...(availableAgents.length > 0 ? { availableAgents } : {}),
+      ...(availableHosts.length > 0 ? { availableHosts } : {}),
+      ...(availableHosts.length > 0 ? { hostInfo } : {}),
+      ...(opts.newHost !== undefined ? { composerHost: opts.newHost } : {}),
       onComposerAgentChange: (agentId, model) => {
         rememberComposerAgent(viewPrefs, agentId, model);
       },
@@ -10968,6 +10994,11 @@ async function resolveSession(
       }
       if (choice.model !== undefined) {
         opts.model = choice.model;
+      }
+      if (choice.host !== undefined) {
+        opts.newHost = choice.host;
+      } else {
+        delete opts.newHost;
       }
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
@@ -11009,7 +11040,7 @@ async function resolveSession(
         }
         continue;
       }
-      const ctx = newCtx(opts, cwd, config);
+      const ctx = await newCtxForHost(target, opts, cwd, config);
       if (installStatus) {
         ctx.installStatus = installStatus;
       }
@@ -11344,6 +11375,47 @@ async function runForkFlow(
           }
         : {}),
     },
+  };
+}
+
+async function fetchHostInfo(
+  target: RemoteTarget,
+  hosts: string[],
+): Promise<Record<string, HostInfo>> {
+  const infos = await Promise.all(hosts.map((h) => fetchRemoteInfo(target, h)));
+  const out: Record<string, HostInfo> = {};
+  hosts.forEach((h, i) => {
+    const info = infos[i];
+    if (info) {
+      out[h] = info;
+    }
+  });
+  return out;
+}
+
+// A new session on a federated peer is created up front over REST (the
+// ACP session/new path is local-only) and entered as an attach.
+async function newCtxForHost(
+  target: RemoteTarget,
+  opts: TuiOptions,
+  cwd: string,
+  config: HydraConfig,
+): Promise<SessionContext> {
+  const local = newCtx(opts, cwd, config);
+  if (opts.newHost === undefined) {
+    return local;
+  }
+  const created = await createSessionOnRemote(target, {
+    remote: opts.newHost,
+    // The picker's cwd is a path on this machine; the peer resolves its own.
+    ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
+  });
+  return {
+    ...local,
+    sessionId: created.sessionId,
+    agentId: created.agentId ?? local.agentId,
+    remote: opts.newHost,
+    freshOnRemote: true,
   };
 }
 

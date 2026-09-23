@@ -50,7 +50,9 @@ import {
   type DiscoveredSession,
   type SessionHits,
 } from "./discovery.js";
-import { promptForAgent } from "./agent-prompt.js";
+import { promptForComposerConfig } from "./composer-config-prompt.js";
+import type { ComposerConfigRow } from "./composer-config.js";
+import type { HostInfo } from "./discovery.js";
 import { loadHistory } from "./history.js";
 import {
   readClipboard,
@@ -185,6 +187,9 @@ export type PickerResult =
       // how ^O once carried an unrelated directory's agent forward as if
       // the user had picked it for the new one.
       agentExplicit?: boolean;
+      // Federated remote the user chose in the composer popup. Absent
+      // means create locally.
+      host?: string;
     }
   | { kind: "abort" }
   | { kind: "exit" };
@@ -236,6 +241,12 @@ export interface PickOptions {
   // list through. When absent or empty, the click is a no-op — nothing
   // to switch to.
   availableAgents?: DiscoveredAgent[];
+  // Federated remote names. When non-empty the composer border grows a
+  // clickable host label, and the popup a Host row.
+  availableHosts?: string[];
+  // Each host's own agents and defaults (see fetchRemoteInfo).
+  hostInfo?: Record<string, HostInfo>;
+  composerHost?: string;
   // Called the moment the user commits a different agent in the
   // click-to-switch modal, with the agent and the model that now tracks
   // it. Fires independently of how the picker eventually resolves, so a
@@ -975,6 +986,7 @@ export async function pickSession(
   // the caller launches with the picked agent.
   let composerAgentId = opts.composerAgentId;
   let composerModel = opts.composerModel;
+  let composerHost = opts.composerHost;
   // True once the user has committed an agent in the click-to-switch
   // modal. An explicit pick outranks a directory default, so ^O stops
   // re-resolving the label after one.
@@ -996,11 +1008,12 @@ export async function pickSession(
   // through to the default composer-focus behavior.
   let cwdClickRange: { start: number; end: number } | null = null;
   let agentClickRange: { start: number; end: number } | null = null;
+  let hostClickRange: { start: number; end: number } | null = null;
   // Which top-border click zone the mouse is currently hovering. Drives
   // the bold affordance on that fragment so it's obvious it's clickable
   // — plain text otherwise, matching the rest of the border. Cleared
   // when the mouse leaves the top border (or the composer entirely).
-  let composerTopHover: "cwd" | "agent" | null = null;
+  let composerTopHover: "cwd" | "agent" | "host" | null = null;
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
     const titleFragment = `─ ${composerTitle} `;
@@ -1017,7 +1030,20 @@ export async function pickSession(
         rightFragment = candidate;
       }
     }
-    const dashCount = Math.max(1, inner - titleFragment.length - rightFragment.length);
+    let hostFragment = "";
+    if ((opts.availableHosts?.length ?? 0) > 0) {
+      const candidate = `─ ${composerHost ?? "local"} `;
+      if (
+        candidate.length + rightFragment.length + titleFragment.length + 1 <=
+        inner
+      ) {
+        hostFragment = candidate;
+      }
+    }
+    const dashCount = Math.max(
+      1,
+      inner - titleFragment.length - hostFragment.length - rightFragment.length,
+    );
     const dashes = "─".repeat(dashCount);
     const focused = (selectedIdx === 0 || composerHover) && terminalFocused;
     // Column layout of the row we're about to paint (1-indexed screen
@@ -1032,11 +1058,21 @@ export async function pickSession(
       titleFragment.length > 0
         ? { start: 2, end: 1 + titleFragment.length }
         : null;
+    if (hostFragment.length > 0) {
+      const hostStart = 1 + titleFragment.length + dashCount + 1;
+      hostClickRange = {
+        start: hostStart,
+        end: hostStart + hostFragment.length - 1,
+      };
+    } else {
+      hostClickRange = null;
+    }
     if (rightFragment.length > 0) {
       // rightFragment sits between the trailing dashes and the "╮"
       // corner. Its start column = 1 (corner) + titleFragment.length +
       // dashCount + 1 (first char of rightFragment).
-      const rightStart = 1 + titleFragment.length + dashCount + 1;
+      const rightStart =
+        1 + titleFragment.length + dashCount + hostFragment.length + 1;
       agentClickRange = {
         start: rightStart,
         end: rightStart + rightFragment.length - 1,
@@ -1059,6 +1095,9 @@ export async function pickSession(
     paint(term, borderToken, "╭");
     emitFragment(titleFragment, composerTopHover === "cwd");
     paint(term, borderToken, dashes);
+    if (hostFragment) {
+      emitFragment(hostFragment, composerTopHover === "host");
+    }
     if (rightFragment) {
       emitFragment(rightFragment, composerTopHover === "agent");
     }
@@ -1674,7 +1713,7 @@ export async function pickSession(
     return selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
   };
   const composerTopSig = (): string =>
-    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}|${composerAgentModelLabel()}|${composerTopHover ?? ""}`;
+    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}|${composerAgentModelLabel()}|${composerHost ?? ""}|${composerTopHover ?? ""}`;
   const composerBotSig = (): string =>
     `cb|${composerFocusFlag()}|${composerBoxInner()}`;
   const composerStatusSig = (): string => {
@@ -2784,6 +2823,7 @@ export async function pickSession(
         installStatus?: InstallStatusLine;
         agentId?: string;
         model?: string;
+        host?: string;
         agentExplicit?: boolean;
       } = { kind: "new", cwd: currentCwd };
       const attached = composer.state().attachments;
@@ -2795,6 +2835,9 @@ export async function pickSession(
       }
       if (composerModel) {
         out.model = composerModel;
+      }
+      if (composerHost) {
+        out.host = composerHost;
       }
       if (composerAgentExplicit) {
         out.agentExplicit = true;
@@ -2864,57 +2907,91 @@ export async function pickSession(
         renderFromScratch();
       }
     };
-    // Sibling to openCwdPrompt: opened by clicking the composer's
-    // top-right "agent•model" label. Runs the standard promptForAgent
-    // modal, updates composerAgentId + composerModel on select, and
-    // re-renders. No-op if the caller didn't pass availableAgents (no
-    // list → no modal to show).
-    const openAgentPrompt = async (): Promise<void> => {
-      const agents = opts.availableAgents;
-      if (!agents || agents.length === 0) {
+    // Sibling to openCwdPrompt: opened by clicking the composer's top-right
+    // "agent•model" label or the host label beside it. One popup covers
+    // agent, model and host; ←/→ cycles the focused row. No-op when there
+    // is nothing to choose between.
+    const openAgentPrompt = async (
+      focus: ComposerConfigRow = "agent",
+    ): Promise<void> => {
+      const agents = opts.availableAgents ?? [];
+      const hosts = opts.availableHosts ?? [];
+      if (agents.length === 0 && hosts.length === 0) {
         return;
       }
+      const models = [
+        ...new Set(
+          [
+            opts.config.sessionDefaults ?? {},
+            ...Object.values(opts.hostInfo ?? {}).map(
+              (h) => h.sessionDefaults ?? {},
+            ),
+          ]
+            .flatMap((d) => Object.values(d))
+            .map((d) => d.model)
+            .filter((m): m is string => typeof m === "string"),
+        ),
+      ];
       uninstallGrab();
       painter.clearCache();
       const agentLayer: FocusLayer = { onKey: () => {}, onResize: () => {} };
       pushLayer(agentLayer);
       let result;
       try {
-        result = await promptForAgent(term, agents, composerAgentId, {
-          title: "Switch agent",
-          intro: "Agent used when the composer creates a new session:",
-          overlay: true,
-        });
+        result = await promptForComposerConfig(
+          term,
+          {
+            ...(composerAgentId ? { agentId: composerAgentId } : {}),
+            ...(composerModel ? { model: composerModel } : {}),
+            ...(composerHost ? { host: composerHost } : {}),
+          },
+          {
+            agents,
+            hosts,
+            ...(opts.hostInfo ? { hostInfo: opts.hostInfo } : {}),
+            ...(opts.config.defaultAgent
+              ? { localDefaultAgent: opts.config.defaultAgent }
+              : {}),
+            models,
+            // Inheritance-aware: a derived agent (`extends: "claude-acp"`)
+            // with no default of its own falls back to its base's,
+            // mirroring ensureAgentForNew's lookup in app.ts.
+            defaultModelFor: (agent, host) =>
+              agent === undefined
+                ? undefined
+                : lookupInheritedAgentValue(
+                    (host !== undefined
+                      ? opts.hostInfo?.[host]?.sessionDefaults
+                      : undefined) ?? opts.config.sessionDefaults,
+                    { id: agent.id, extendsChain: agent.extendsChain },
+                  )?.value.model,
+          },
+          focus,
+        );
       } finally {
         popLayer();
         installGrab();
       }
-      if (result.kind === "select") {
-        composerAgentId = result.agentId;
-        // Deliberate, in-picker choice: from here on ^O leaves the label
-        // alone rather than replacing it with a directory default.
-        composerAgentExplicit = true;
-        // When the agent changes, the model tracks whatever's configured
-        // as the default for the new agent (or clears if none). If the
-        // user wants a specific model, `hydra agent set <id> <model>`
-        // still owns that persistence. Inheritance-aware: a derived agent
-        // (`extends: "claude-acp"`) with no default of its own falls back
-        // to its base's, mirroring ensureAgentForNew's lookup in app.ts.
-        const chosenAgentEntry = agents.find((a) => a.id === result.agentId);
-        composerModel = lookupInheritedAgentValue(opts.config.sessionDefaults, {
-          id: result.agentId,
-          extendsChain: chosenAgentEntry?.extendsChain,
-        })?.value.model;
-        opts.onComposerAgentChange?.(composerAgentId, composerModel);
-        if (result.persist) {
-          // Mirror ensureAgentForNew's persistence behavior: the `s`
-          // affordance in promptForAgent records the user's choice as
-          // config.defaultAgent. Best-effort — the picker still resolves
-          // with the chosen agent even if the config write fails.
+      if (result.kind === "apply") {
+        const chosen = result.config;
+        const changed =
+          chosen.agentId !== composerAgentId || chosen.model !== composerModel;
+        composerAgentId = chosen.agentId;
+        composerModel = chosen.model;
+        composerHost = chosen.host;
+        if (changed) {
+          // Deliberate, in-picker choice: from here on ^O leaves the label
+          // alone rather than replacing it with a directory default.
+          composerAgentExplicit = true;
+          if (composerAgentId !== undefined) {
+            opts.onComposerAgentChange?.(composerAgentId, composerModel);
+          }
+        }
+        if (result.persist && composerAgentId !== undefined) {
           try {
-            await setDefaultAgent(result.agentId);
+            await setDefaultAgent(composerAgentId);
           } catch {
-            // ignore
+            // best-effort, like ensureAgentForNew's persistence
           }
         }
       }
@@ -5111,11 +5188,17 @@ export async function pickSession(
         // Cleared as soon as the cursor leaves row=startRow (still over
         // composer body) so the affordance goes away when the pointer
         // moves off the clickable region.
-        let nextTopHover: "cwd" | "agent" | null = null;
+        let nextTopHover: "cwd" | "agent" | "host" | null = null;
         if (y === startRow) {
           const px = data?.x;
           if (typeof px === "number") {
             if (
+              hostClickRange !== null &&
+              px >= hostClickRange.start &&
+              px <= hostClickRange.end
+            ) {
+              nextTopHover = "host";
+            } else if (
               agentClickRange !== null &&
               px >= agentClickRange.start &&
               px <= agentClickRange.end
@@ -5141,7 +5224,11 @@ export async function pickSession(
         // hijack an actual click.
         if (isClick && y === startRow) {
           if (composerTopHover === "agent") {
-            void openAgentPrompt();
+            void openAgentPrompt("agent");
+            return;
+          }
+          if (composerTopHover === "host") {
+            void openAgentPrompt("host");
             return;
           }
           if (composerTopHover === "cwd") {

@@ -675,3 +675,116 @@ export function pickMostRecent(
   });
   return sorted[0] ?? null;
 }
+
+// Names of the federated peers registered on the daemon. Best-effort: a
+// daemon that predates federation or is unreachable simply has none.
+export async function listRemoteNames(
+  target: RemoteTarget,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string[]> {
+  try {
+    const response = await fetchWithTimeout(
+      `${target.baseUrl}/v1/remotes`,
+      { headers: { Authorization: `Bearer ${target.token}` } },
+      DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+      fetchImpl,
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as { remotes?: Array<{ name?: string }> };
+    return (body.remotes ?? [])
+      .map((r) => r.name)
+      .filter((n): n is string => typeof n === "string");
+  } catch {
+    return [];
+  }
+}
+
+// Create a session directly on a federated peer (POST /v1/sessions with
+// `remote`). The returned sessionId is already the `name:localId` form.
+export async function createSessionOnRemote(
+  target: RemoteTarget,
+  params: { remote: string; cwd?: string; agentId?: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ sessionId: string; agentId?: string }> {
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(params),
+    },
+    60_000,
+    fetchImpl,
+  );
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const err = (await response.json()) as { error?: string };
+      if (typeof err.error === "string") {
+        detail = err.error.split("\n")[0]!;
+      }
+    } catch {
+      // keep the status-only detail
+    }
+    throw new Error(`creating a session on ${params.remote} failed: ${detail}`);
+  }
+  const body = (await response.json()) as { sessionId?: string; agentId?: string };
+  if (typeof body.sessionId !== "string") {
+    throw new Error(`peer ${params.remote} returned no sessionId`);
+  }
+  return {
+    sessionId: body.sessionId,
+    ...(typeof body.agentId === "string" ? { agentId: body.agentId } : {}),
+  };
+}
+
+export interface HostInfo {
+  agents: DiscoveredAgent[];
+  defaultAgent?: string;
+  sessionDefaults?: Record<string, Record<string, string>>;
+}
+
+// What a federated peer offers (agents plus its defaults), via the local
+// daemon's proxy. Undefined on any failure so the caller can fall back to
+// the local list.
+export async function fetchRemoteInfo(
+  target: RemoteTarget,
+  name: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<HostInfo | undefined> {
+  try {
+    const response = await fetchWithTimeout(
+      `${target.baseUrl}/v1/remotes/${encodeURIComponent(name)}/agents`,
+      { headers: { Authorization: `Bearer ${target.token}` } },
+      DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+      fetchImpl,
+    );
+    if (!response.ok) {
+      return undefined;
+    }
+    const body = (await response.json()) as {
+      agents?: Array<{ id: string; name: string; description?: string; extendsChain?: string[] }>;
+      defaultAgent?: unknown;
+      sessionDefaults?: Record<string, Record<string, string>>;
+    };
+    return {
+      agents: (body.agents ?? []).map((a) => ({
+        id: a.id,
+        name: a.name,
+        ...(a.description !== undefined ? { description: a.description } : {}),
+        ...(a.extendsChain !== undefined ? { extendsChain: a.extendsChain } : {}),
+      })),
+      ...(typeof body.defaultAgent === "string" && body.defaultAgent !== ""
+        ? { defaultAgent: body.defaultAgent }
+        : {}),
+      ...(body.sessionDefaults ? { sessionDefaults: body.sessionDefaults } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}

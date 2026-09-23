@@ -57,11 +57,27 @@ vi.mock("./import-cwd-prompt.js", () => ({
       : { kind: "ok" as const, path: nextCwdPick },
 }));
 let nextAgentPick: string | null = null;
-vi.mock("./agent-prompt.js", () => ({
-  promptForAgent: async () =>
-    nextAgentPick === null
-      ? { kind: "cancel" as const }
-      : { kind: "select" as const, agentId: nextAgentPick, persist: false },
+vi.mock("./composer-config-prompt.js", () => ({
+  promptForComposerConfig: async (
+    _term: unknown,
+    _initial: unknown,
+    choices: {
+      agents: Array<{ id: string }>;
+      defaultModelFor: (a: unknown) => string | undefined;
+    },
+  ) => {
+    if (nextAgentPick === null) {
+      return { kind: "cancel" as const };
+    }
+    const model = choices.defaultModelFor(
+      choices.agents.find((a) => a.id === nextAgentPick),
+    );
+    return {
+      kind: "apply" as const,
+      config: { agentId: nextAgentPick, ...(model ? { model } : {}) },
+      persist: false,
+    };
+  },
 }));
 
 // Composer text-selection copies through writeClipboard (see
