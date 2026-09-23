@@ -141,6 +141,14 @@ export function registerSessionForwardHook(
       return;
     }
 
+    if (
+      request.method === "DELETE" &&
+      pattern === "/v1/sessions/:id" &&
+      (upstream.ok || upstream.status === 404)
+    ) {
+      deps.localMiss?.cache.evict(foreign.name, foreign.localId);
+    }
+
     if (upstream.status === 204) {
       reply.code(204).send();
       return;
@@ -346,6 +354,14 @@ export class ForeignSessionCache {
       }
       return true;
     });
+  }
+
+  // Drops a row right after a forwarded delete so the caller's
+  // immediate refetch doesn't see it until the next background refresh.
+  evict(name: string, localId: string): void {
+    this.perPeer
+      .get(name)
+      ?.sessions.delete(formatForeignSessionId({ name, localId }));
   }
 
   // Reverse lookup for the "bare id, local miss" fallback: which
