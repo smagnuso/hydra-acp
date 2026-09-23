@@ -1730,7 +1730,11 @@ export function registerAcpWsEndpoint(
             `session ${params.sessionId} not found`,
           );
         }
-        const history = await deps.manager.loadHistory(lookupId);
+        const history = await deps.manager.loadHistory(lookupId, {
+          ...(hydraAttach.historyLimit !== undefined
+            ? { maxEntries: hydraAttach.historyLimit }
+            : {}),
+        });
         const viewerClientId = params.clientId ?? `cli_${nanoid(8)}`;
         state.attached.set(fromDisk.hydraSessionId, {
           sessionId: fromDisk.hydraSessionId,
