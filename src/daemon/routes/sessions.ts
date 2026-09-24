@@ -359,6 +359,42 @@ export function registerSessionRoutes(
     }
   });
 
+  // Deleted-session tombstones, newest first. Filters: `agent` (store
+  // key), `since` (ISO timestamp), `grep` (substring of title, cwd or ids).
+  app.get("/v1/sessions/tombstones", async (request, reply) => {
+    const q = request.query as { agent?: string; since?: string; grep?: string };
+    if (q.since !== undefined && Number.isNaN(Date.parse(q.since))) {
+      reply.code(400).send({ error: "since must be an ISO timestamp" });
+      return;
+    }
+    const tombstones = await manager.listTombstones({
+      ...(q.agent ? { agentId: q.agent } : {}),
+      ...(q.since ? { since: q.since } : {}),
+      ...(q.grep ? { grep: q.grep } : {}),
+    });
+    reply.code(200).send({ tombstones });
+  });
+
+  // Reverse deletes by hydra session id or upstream id. Drops each
+  // tombstone and re-syncs the owning agent so the row returns; ids that
+  // cannot be restored come back in `failed` with the tombstone intact.
+  app.post("/v1/sessions/undelete", async (request, reply) => {
+    const body = (request.body ?? {}) as { ids?: unknown };
+    if (
+      !Array.isArray(body.ids) ||
+      body.ids.length === 0 ||
+      !body.ids.every((i) => typeof i === "string" && i.length > 0)
+    ) {
+      reply.code(400).send({ error: "ids must be a non-empty array of strings" });
+      return;
+    }
+    try {
+      reply.code(200).send(await manager.undeleteSessions(body.ids as string[]));
+    } catch (err) {
+      reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
   // Demote a warm session to cold: close the in-memory session but keep
   // the on-disk record so it can be resurrected later. Idempotent — a
   // session that's already cold returns 204 without touching disk. Use

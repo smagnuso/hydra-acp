@@ -603,6 +603,43 @@ Remove a session entirely (live or cold). Live sessions are closed and the recor
 - `204` — deleted.
 - `404` — session unknown.
 
+#### `GET /v1/sessions/tombstones`
+
+List deleted sessions, newest first. A delete leaves a tombstone so the periodic agent sync does not re-import the session.
+
+**Query parameters** (all optional)
+
+- `agent` — tombstone agent key (the agent's store root).
+- `since` — ISO timestamp; only tombstones deleted at or after it. `400` if unparseable.
+- `grep` — case-insensitive substring of title, cwd, hydra session id or upstream id.
+
+**Response — `200 OK`**
+
+```jsonc
+{ "tombstones": [
+  { "version": 1, "agentId": "claude-acp", "upstreamSessionId": "…",
+    "sessionId": "hydra_session_…",       // absent on older tombstones
+    "deletedAt": "2026-09-24T18:00:00.000Z",
+    "reason": "user",                     // or "expired"
+    "cwd": "…", "title": "…" }
+] }
+```
+
+#### `POST /v1/sessions/undelete`
+
+Restore deleted sessions. Body `{ "ids": ["<hydra session id or upstream id>", …] }`. For each id the tombstone is dropped and the owning agent is re-synced, so the session returns from the agent's own store under a **new** hydra session id (history is replayed on first resurrect, as with any synced session).
+
+An id that matches several tombstones (a hydra session that retired upstream generations) is reported as ambiguous with its candidate upstream ids; pass one of those. An id the agent no longer lists is left deleted: its tombstone is restored.
+
+**Response — `200 OK`**
+
+```jsonc
+{ "restored": [{ "id": "<as given>", "sessionId": "hydra_session_…", "upstreamSessionId": "…" }],
+  "failed":   [{ "id": "<as given>", "reason": "…", "candidates": ["…"] }] }
+```
+
+`400` if `ids` is not a non-empty array of strings.
+
 #### `GET /v1/sessions/:id/export`
 
 Download a session bundle (`*.hydra` JSON: meta + history + optional prompt history). The bundle's `lineageId` is resolved/persisted on first export so subsequent re-exports stay consistent.

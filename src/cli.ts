@@ -31,6 +31,7 @@ import {
   runSessionsRemove,
   runSessionsShare,
   runSessionsTranscript,
+  runSessionsUndelete,
   parseSinceToEpochMs,
 } from "./cli/commands/sessions.js";
 import {
@@ -631,6 +632,21 @@ async function main(): Promise<void> {
       }
       if (sub === "remove") {
         await runSessionsRemove(positional[2]);
+        return;
+      }
+      if (sub === "undelete") {
+        await runSessionsUndelete(positional.slice(2), {
+          ...(resolveOption(flags, "agent") !== undefined
+            ? { agent: resolveOption(flags, "agent") as string }
+            : {}),
+          ...(resolveOption(flags, "grep") !== undefined
+            ? { grep: resolveOption(flags, "grep") as string }
+            : {}),
+          ...(resolveOption(flags, "since") !== undefined
+            ? { since: resolveOption(flags, "since") as string }
+            : {}),
+          json: flags.json === true,
+        });
         return;
       }
       if (sub === "collect") {
@@ -1408,6 +1424,8 @@ function printHelp(subcommand?: string): void {
     [SESSION, "  hydra-acp session remove <id>      Remove a session entirely (live or cold)"],
     [SESSION, "  hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--keep-undecided] [--json]"],
     [SESSION, "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger."],
+    [SESSION, "  hydra-acp session undelete [<id>...] [--agent <a>] [--grep <s>] [--since <7d|iso>] [--json]"],
+    [SESSION, "                                     With no ids, list deleted sessions (tombstones). With ids (the old hydra session id or the upstream id), restore them: the tombstone is dropped and the agent is re-synced so the row comes back under a new id. Only works while the agent still remembers the session; one that it no longer lists stays deleted. A hydra id with several tombstones is ambiguous, so pass an upstream id."],
     [SESSION, "  hydra-acp session export <id> [--out <file>|.]"],
     [SESSION, "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout"],
     [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.] [--tools] [--thoughts] [--last <n>] [--from <n>] [--to <n>] [--since <dur>]"],

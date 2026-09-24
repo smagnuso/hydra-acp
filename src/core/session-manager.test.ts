@@ -4110,6 +4110,115 @@ describe("SessionManager.syncFromAgent", () => {
     expect(skipped).toBe(1);
   });
 
+  describe("undeleteSessions", () => {
+    async function tombstone(
+      over: { upstreamSessionId: string; sessionId?: string },
+    ): Promise<InstanceType<typeof import("./tombstone-store.js").TombstoneStore>> {
+      const { TombstoneStore } = await import("./tombstone-store.js");
+      const tombstones = new TombstoneStore();
+      await tombstones.add({
+        agentId: "claude-code",
+        deletedAt: "2026-09-24T00:00:00.000Z",
+        upstreamUpdatedAt: "2026-09-23T00:00:00.000Z",
+        reason: "user",
+        cwd: "/projects/a",
+        title: "old work",
+        ...over,
+      });
+      return tombstones;
+    }
+
+    it("drops the tombstone and re-imports the row, by upstream or hydra id", async () => {
+      const tombstones = await tombstone({
+        upstreamSessionId: "u_gone",
+        sessionId: "hydra_session_gone",
+      });
+      const { manager } = makeSyncManager({
+        capability: {},
+        pages: [
+          {
+            sessions: [
+              {
+                sessionId: "u_gone",
+                cwd: "/projects/a",
+                updatedAt: "2026-09-25T00:00:00.000Z",
+              },
+            ],
+          },
+        ],
+      });
+      const { restored, failed } = await manager.undeleteSessions(["gone"]);
+      expect(failed).toEqual([]);
+      expect(restored).toHaveLength(1);
+      expect(restored[0]?.upstreamSessionId).toBe("u_gone");
+      expect(restored[0]?.sessionId).not.toBe("hydra_session_gone");
+      expect(await tombstones.has("claude-code", "u_gone")).toBe(false);
+    });
+
+    it("keeps the tombstone when the agent no longer lists the session", async () => {
+      const tombstones = await tombstone({ upstreamSessionId: "u_forgotten" });
+      const { manager } = makeSyncManager({
+        capability: {},
+        pages: [{ sessions: [] }],
+      });
+      const { restored, failed } = await manager.undeleteSessions(["u_forgotten"]);
+      expect(restored).toEqual([]);
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.reason).toContain("no longer lists");
+      expect(await tombstones.has("claude-code", "u_forgotten")).toBe(true);
+    });
+
+    it("refuses an ambiguous hydra id and reports the candidates", async () => {
+      await tombstone({ upstreamSessionId: "u_gen1", sessionId: "hydra_session_multi" });
+      const tombstones = await tombstone({
+        upstreamSessionId: "u_gen2",
+        sessionId: "hydra_session_multi",
+      });
+      const { manager } = makeSyncManager({ capability: {}, pages: [] });
+      const { restored, failed } = await manager.undeleteSessions(["hydra_session_multi"]);
+      expect(restored).toEqual([]);
+      expect(failed[0]?.candidates?.sort()).toEqual(["u_gen1", "u_gen2"]);
+      expect(await tombstones.has("claude-code", "u_gen1")).toBe(true);
+    });
+
+    it("reports an unknown id without touching anything", async () => {
+      const { manager } = makeSyncManager({ capability: {}, pages: [] });
+      const { restored, failed } = await manager.undeleteSessions(["nope"]);
+      expect(restored).toEqual([]);
+      expect(failed[0]?.reason).toBe("no tombstone found");
+    });
+  });
+
+  it("lists tombstones newest first with filters", async () => {
+    const { TombstoneStore } = await import("./tombstone-store.js");
+    const tombstones = new TombstoneStore();
+    for (const [id, at, title] of [
+      ["u_a", "2026-09-01T00:00:00.000Z", "alpha"],
+      ["u_b", "2026-09-10T00:00:00.000Z", "beta"],
+    ] as const) {
+      await tombstones.add({
+        agentId: "claude-code",
+        upstreamSessionId: id,
+        deletedAt: at,
+        reason: "user",
+        title,
+      });
+    }
+    const { manager } = makeSyncManager({ capability: {}, pages: [] });
+    expect((await manager.listTombstones()).map((t) => t.upstreamSessionId)).toEqual([
+      "u_b",
+      "u_a",
+    ]);
+    expect(
+      (await manager.listTombstones({ since: "2026-09-05T00:00:00.000Z" })).map(
+        (t) => t.upstreamSessionId,
+      ),
+    ).toEqual(["u_b"]);
+    expect(
+      (await manager.listTombstones({ grep: "ALPHA" })).map((t) => t.upstreamSessionId),
+    ).toEqual(["u_a"]);
+  });
+
   it("skips entries that match a tombstone with an unchanged upstreamUpdatedAt", async () => {
     const { TombstoneStore } = await import("./tombstone-store.js");
     const tombstones = new TombstoneStore();

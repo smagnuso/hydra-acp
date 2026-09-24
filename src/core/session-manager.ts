@@ -82,6 +82,7 @@ import {
 import {
   TombstoneStore,
   shouldResurrectFromUpstream,
+  type Tombstone,
 } from "./tombstone-store.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator, type HydraCompactionPayload } from "./synopsis-coordinator.js";
@@ -4890,6 +4891,107 @@ export class SessionManager {
       synced.push({ version: 1, ...record });
     }
     return { synced, skipped };
+  }
+
+  // Tombstones for sessions deleted from hydra, newest first. `agentId`
+  // is the store key (the chain root), matching how they are written.
+  async listTombstones(
+    filter: { agentId?: string; since?: string; grep?: string } = {},
+  ): Promise<Tombstone[]> {
+    const needle = filter.grep?.toLowerCase();
+    const all = await this.tombstones.list(filter.agentId);
+    return all
+      .filter((t) => filter.since === undefined || t.deletedAt >= filter.since)
+      .filter(
+        (t) =>
+          needle === undefined ||
+          [t.title, t.cwd, t.sessionId, t.upstreamSessionId].some((v) =>
+            v?.toLowerCase().includes(needle),
+          ),
+      )
+      .sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+  }
+
+  // Reverse deletes: drop the tombstone, then re-run the agent sync so
+  // the row comes back from the agent's own store. Each id may be the
+  // old hydra session id or the upstream id. A hydra id that owns several
+  // tombstones (one per retired generation) is ambiguous, since importing
+  // all of them would mint a phantom row per generation; the caller must
+  // name an upstream id. A tombstone the agent no longer lists is put
+  // back so the session is never left neither restored nor suppressed.
+  async undeleteSessions(ids: string[]): Promise<{
+    restored: Array<{ id: string; sessionId: string; upstreamSessionId: string }>;
+    failed: Array<{ id: string; reason: string; candidates?: string[] }>;
+  }> {
+    const all = await this.tombstones.list();
+    const restored: Array<{ id: string; sessionId: string; upstreamSessionId: string }> = [];
+    const failed: Array<{ id: string; reason: string; candidates?: string[] }> = [];
+    const picked: Array<{ id: string; tombstone: Tombstone }> = [];
+    for (const id of ids) {
+      const byUpstream = all.filter((t) => t.upstreamSessionId === id);
+      const matches =
+        byUpstream.length > 0 ? byUpstream : all.filter(
+              (t) => t.sessionId === id || t.sessionId === `${HYDRA_SESSION_PREFIX}${id}`,
+            );
+      if (matches.length === 0) {
+        failed.push({ id, reason: "no tombstone found" });
+        continue;
+      }
+      if (matches.length > 1) {
+        failed.push({
+          id,
+          reason: "ambiguous: several tombstones match; pass an upstream id",
+          candidates: matches.map((t) => t.upstreamSessionId),
+        });
+        continue;
+      }
+      picked.push({ id, tombstone: matches[0]! });
+    }
+
+    const byAgent = new Map<string, typeof picked>();
+    for (const p of picked) {
+      const list = byAgent.get(p.tombstone.agentId) ?? [];
+      list.push(p);
+      byAgent.set(p.tombstone.agentId, list);
+    }
+    for (const [agentId, group] of byAgent) {
+      const restoreTombstone = (t: Tombstone): Promise<void> => {
+        const { version: _version, ...rest } = t;
+        return this.tombstones.add(rest).catch(() => undefined);
+      };
+      for (const p of group) {
+        await this.tombstones.remove(agentId, p.tombstone.upstreamSessionId);
+      }
+      let synced: SessionRecord[];
+      try {
+        synced = (await this.syncFromAgent(agentId)).synced;
+      } catch (err) {
+        for (const p of group) {
+          await restoreTombstone(p.tombstone);
+          failed.push({ id: p.id, reason: `agent sync failed: ${(err as Error).message}` });
+        }
+        continue;
+      }
+      for (const p of group) {
+        const rec = synced.find(
+          (r) => r.upstreamSessionId === p.tombstone.upstreamSessionId,
+        );
+        if (!rec) {
+          await restoreTombstone(p.tombstone);
+          failed.push({
+            id: p.id,
+            reason: `agent ${agentId} no longer lists this session`,
+          });
+          continue;
+        }
+        restored.push({
+          id: p.id,
+          sessionId: rec.sessionId,
+          upstreamSessionId: p.tombstone.upstreamSessionId,
+        });
+      }
+    }
+    return { restored, failed };
   }
 
   // Paginate the agent's session/list, threading nextCursor until the

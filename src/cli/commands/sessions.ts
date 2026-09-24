@@ -287,6 +287,115 @@ export async function runSessionsCollect(opts: {
   }
 }
 
+const CWD_MAX = 40;
+
+// ~-relative, and cut from the left so the leaf directory stays visible.
+function shortenCwd(cwd: string): string {
+  const home = os.homedir();
+  const rel = cwd === home || cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+  return rel.length > CWD_MAX ? `…${rel.slice(rel.length - (CWD_MAX - 1))}` : rel;
+}
+
+// `hydra session undelete` — with no ids, list deleted-session tombstones;
+// with ids (hydra session id or upstream id), restore them.
+export async function runSessionsUndelete(
+  ids: string[],
+  opts: { agent?: string; grep?: string; since?: string; json?: boolean },
+): Promise<void> {
+  if (ids.length > 0) {
+    const res = await daemonFetch("/v1/sessions/undelete", {
+      method: "POST",
+      body: { ids },
+      expectStatus: 200,
+    });
+    const result = res.body as {
+      restored: Array<{ id: string; sessionId: string; upstreamSessionId: string }>;
+      failed: Array<{ id: string; reason: string; candidates?: string[] }>;
+    };
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      for (const r of result.restored) {
+        process.stdout.write(`Restored ${r.id} as ${stripHydraSessionPrefix(r.sessionId)}\n`);
+      }
+      for (const f of result.failed) {
+        process.stderr.write(`Could not restore ${f.id}: ${f.reason}\n`);
+        for (const c of f.candidates ?? []) {
+          process.stderr.write(`  ${c}\n`);
+        }
+      }
+    }
+    if (result.failed.length > 0) {
+      process.exit(1);
+    }
+    return;
+  }
+
+  const params = new URLSearchParams();
+  if (opts.agent !== undefined) {
+    params.set("agent", opts.agent);
+  }
+  if (opts.grep !== undefined) {
+    params.set("grep", opts.grep);
+  }
+  if (opts.since !== undefined) {
+    const ms =
+      parseSinceToEpochMs(opts.since) ?? Date.parse(opts.since);
+    if (!Number.isFinite(ms)) {
+      process.stderr.write("--since must be a duration (7d, 2h) or an ISO timestamp\n");
+      process.exit(2);
+      return;
+    }
+    params.set("since", new Date(ms).toISOString());
+  }
+  const qs = params.toString();
+  const res = await daemonFetch(`/v1/sessions/tombstones${qs ? `?${qs}` : ""}`, {
+    expectStatus: 200,
+  });
+  const { tombstones } = res.body as {
+    tombstones: Array<{
+      agentId: string;
+      upstreamSessionId: string;
+      sessionId?: string;
+      deletedAt: string;
+      reason?: string;
+      cwd?: string;
+      title?: string;
+    }>;
+  };
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(tombstones, null, 2)}\n`);
+    return;
+  }
+  if (tombstones.length === 0) {
+    process.stdout.write("No deleted sessions.\n");
+    return;
+  }
+  const header = ["DELETED", "AGENT", "SESSION", "UPSTREAM", "CWD", "TITLE"];
+  const rows = tombstones.map((t) => [
+    t.deletedAt.slice(0, 16).replace("T", " "),
+    t.agentId,
+    t.sessionId !== undefined ? stripHydraSessionPrefix(t.sessionId) : "-",
+    t.upstreamSessionId,
+    shortenCwd(t.cwd ?? ""),
+    (t.title ?? "").replace(/\s+/g, " ").slice(0, 70),
+  ]);
+  const widths = header.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => r[i]!.length)),
+  );
+  const fmt = (cells: string[]): string =>
+    cells
+      .map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i]!)))
+      .join("  ");
+  process.stdout.write(`${fmt(header)}\n`);
+  for (const r of rows) {
+    process.stdout.write(`${fmt(r)}\n`);
+  }
+  process.stdout.write(
+    `\n${tombstones.length} deleted session(s). Restore with: hydra session undelete <id>...\n`,
+  );
+}
+
 export async function runSessionsExport(
   id: string | undefined,
   outPath: string | undefined,
