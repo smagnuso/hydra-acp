@@ -690,7 +690,7 @@ export const sessionInfoGadget: Gadget = {
   relevant: (s) =>
     s.agent !== null || s.model !== null || s.sessionId !== null || s.workspace !== null,
   versionKey: (s, ctx) =>
-    `${ctx.width}|${s.agent}|${s.model}|${s.mode}|${s.sessionId}|${s.host}|${s.workspace?.label ?? ""}`,
+    `${ctx.width}|${s.agent}|${s.model}|${s.mode}|${s.configOptions.map((o) => `${o.id}=${o.value}`).join(",")}|${s.sessionId}|${s.host}|${s.workspace?.label ?? ""}`,
   render: (s, ctx) => {
     const { cellWidth } = ctx.metrics;
     const lines: SidebarLine[] = [];
@@ -708,15 +708,28 @@ export const sessionInfoGadget: Gadget = {
       const row = fieldRow(label, fitIdentifier(value, budget, ctx), ctx);
       lines.push(target === undefined ? row : { ...row, doubleAction: target });
     };
+    // The scalar wins when set (it also covers agents that never advertise
+    // configOptions); the option's label fills in when it isn't.
+    const optionValue = (id: string): string | null =>
+      s.configOptions.find((o) => o.id === id)?.value ?? null;
     // All five are identity strings, so none of them takes a colour.
-    if (s.agent !== null) {
-      field("agent", s.agent, { action: "choose-agent", value: "agent" });
+    const agent = s.agent ?? optionValue("agent");
+    if (agent !== null) {
+      field("agent", agent, { action: "choose-agent", value: "agent" });
     }
-    if (s.model !== null) {
-      field("model", s.model, { action: "choose-model", value: "model" });
+    const model = s.model ?? optionValue("model");
+    if (model !== null) {
+      field("model", model, { action: "choose-model", value: "model" });
     }
-    if (s.mode !== null) {
-      field("mode", s.mode, { action: "choose-mode", value: "mode" });
+    const mode = s.mode ?? optionValue("mode");
+    if (mode !== null) {
+      field("session mode", mode, { action: "choose-mode", value: "mode" });
+    }
+    for (const opt of s.configOptions) {
+      if (opt.id === "agent" || opt.id === "model" || opt.id === "mode") {
+        continue;
+      }
+      field(opt.name.toLowerCase(), opt.value, { action: "choose-config", value: opt.id });
     }
     if (s.host !== null) {
       // Not a chooser: which peer owns this session isn't something you

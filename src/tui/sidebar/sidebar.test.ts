@@ -956,7 +956,7 @@ describe("info gadget", () => {
     const rows = sessionInfoGadget.render(s, ctx(26)).map(rowText);
     expect(rows.some((b) => b.startsWith("agent"))).toBe(true);
     expect(rows.some((b) => b.startsWith("model"))).toBe(true);
-    expect(rows.some((b) => b.startsWith("mode"))).toBe(true);
+    expect(rows.some((b) => b.startsWith("session mode"))).toBe(true);
     expect(rows.some((b) => b.startsWith("id"))).toBe(true);
   });
 

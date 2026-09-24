@@ -31,6 +31,7 @@ export type ChromeAction =
   | "choose-model"
   | "choose-agent"
   | "choose-mode"
+  | "choose-config"
   | "copy"
   | "open"
   | "open-session"
@@ -46,6 +47,7 @@ export const CHROME_ACTIONS: readonly ChromeAction[] = [
   "choose-model",
   "choose-agent",
   "choose-mode",
+  "choose-config",
   "copy",
   "open",
   "open-session",

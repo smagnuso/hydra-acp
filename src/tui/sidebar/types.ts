@@ -155,6 +155,9 @@ export interface SidebarSnapshot {
   agent: string | null;
   model: string | null;
   mode: string | null;
+  // Every config option the agent advertises (agent, model, mode, effort,
+  // thought level, ...), display-ready.
+  configOptions: SidebarConfigOption[];
   // Set while the session is running in an isolated workspace. Worth a
   // permanent line rather than only the transient bar text: "which tree
   // am I actually editing" is the question isolation makes ambiguous, and
@@ -168,6 +171,12 @@ export interface SidebarSnapshot {
   // output rather than storing "", so the two aren't distinguished. A
   // process gadget treats absence as "not relevant" (see process-gadget.ts).
   processOutputs: ReadonlyMap<string, string>;
+}
+
+export interface SidebarConfigOption {
+  id: string;
+  name: string;
+  value: string;
 }
 
 export interface SidebarTextMetrics {
@@ -368,6 +377,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     agent: null,
     model: null,
     mode: null,
+    configOptions: [],
     workspace: null,
     processOutputs: new Map(),
   };

@@ -299,6 +299,7 @@ import {
 import { probeAmbiguousWidth } from "./width-probe.js";
 import type {
   SidebarArmedTask,
+  SidebarConfigOption,
   SidebarEditedFile,
   SidebarLiveSession,
   SidebarProcUsage,
@@ -656,6 +657,13 @@ export function mapFormResultToQuestions(
     default:
       return { type: "noop" };
   }
+}
+
+// Display-ready config options for the sidebar.
+function sidebarConfigOptions(options: ConfigOption[]): SidebarConfigOption[] {
+  return options
+    .filter((o) => o.options.length > 0)
+    .map((o) => ({ id: o.id, name: o.name, value: o.currentValue }));
 }
 
 // Parse the top-level `configOptions` field off a session/new or
@@ -3967,6 +3975,10 @@ async function runSession(
         openConfigChooser("mode");
         return;
       }
+      if (action === "choose-config") {
+        openConfigChooser(value);
+        return;
+      }
       const effect: InputEffect =
         action === "switch-session"
           ? { type: "switch-session" }
@@ -4676,6 +4688,7 @@ async function runSession(
     usage: { ...usage },
     model: initialModel ?? null,
     mode: initialMode ?? null,
+    configOptions: sidebarConfigOptions(agentConfigOptions),
     // Strip the hydra_session_ prefix the way every other display of a
     // session id does (picker, exit hint, session info). Without this the
     // sidebar's id row was showing the prefix itself.
@@ -9667,6 +9680,9 @@ async function runSession(
       // it into the sessionbar the same way the session_info_update path
       // does (the two arrive together today, so this is belt-and-braces).
       agentConfigOptions = event.options;
+      screen.setSidebarSnapshot({
+        configOptions: sidebarConfigOptions(event.options),
+      });
       const agentOpt = event.options.find((o) => o.id === "agent");
       if (
         agentOpt &&
