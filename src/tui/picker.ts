@@ -913,8 +913,13 @@ export async function pickSession(
   // should call this after applyFilter so the cursor lands somewhere
   // sensible — without it, the cursor stays at whatever row index it
   // happened to occupy, which after a host cycle can be any random
-  // session.
-  const restoreCursorAfterFilter = (keepId: string | undefined): void => {
+  // session. A null keepId means the composer was focused and stays so.
+  const restoreCursorAfterFilter = (keepId: string | null | undefined): void => {
+    if (keepId === null) {
+      selectedIdx = 0;
+      scrollOffset = 0;
+      return;
+    }
     if (keepId !== undefined) {
       const idx = visible.findIndex((s) => s.sessionId === keepId);
       if (idx >= 0) {
@@ -2895,7 +2900,7 @@ export async function pickSession(
       if (result.kind === "ok" && result.path !== currentCwd) {
         currentCwd = result.path;
         const keepId =
-          selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
         // Re-sort so the cwd-priority bump in sortSessions follows the new
         // cwd, then re-run filters (cwd-only depends on currentCwd too).
         allSessions = sortSessions(allSessions, currentCwd);
@@ -4686,7 +4691,7 @@ export async function pickSession(
           // otherwise jerk the selection to the top row before the user
           // has typed a single character.
           const keepId =
-            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
           searchActive = true;
           searchTerm = "";
           applyFilter();
@@ -4714,7 +4719,7 @@ export async function pickSession(
         }
         if (name === "o" || name === "O") {
           const keepId =
-            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
           prefs.filters.cwdOnly = !prefs.filters.cwdOnly;
           applyFilter();
           restoreCursorAfterFilter(keepId);
@@ -4723,7 +4728,7 @@ export async function pickSession(
         }
         if (name === "h" || name === "H") {
           const keepId =
-            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
           prefs.filters.hostFilter = nextHostFilter(
             prefs.filters.hostFilter,
             allSessions,
@@ -4744,7 +4749,7 @@ export async function pickSession(
         }
         if (name === "I") {
           const keepId =
-            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
           prefs.filters.includeNonInteractive =
             !prefs.filters.includeNonInteractive;
           applyFilter();
@@ -5159,7 +5164,7 @@ export async function pickSession(
           x <= hostHitCols.end
         ) {
           const keepId =
-            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : null;
           prefs.filters.hostFilter = nextHostFilter(
             prefs.filters.hostFilter,
             allSessions,
