@@ -3894,6 +3894,39 @@ describe("SessionManager.syncFromAgent", () => {
     expect(requestMock.mock.calls[1]?.[0]).toBe("session/list");
   });
 
+  it("imports hook-payload titles as non-interactive and real ones as interactive", async () => {
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            {
+              sessionId: "u_hook",
+              cwd: "/projects/a",
+              title:
+                '{"session_id":"ses_abc","transcript_path":"/home/u/.claude/transcripts/ses_abc.jsonl","cwd":"/projects/a","permission_mode"…',
+            },
+            {
+              sessionId: "u_hook2",
+              cwd: "/projects/a",
+              title:
+                '{"session_id":"ses_abc","cwd":"/projects/a","permission_mode":"bypassPermissions","hook_event_name":"PreToolUse","tool_name":"Bash"…',
+            },
+            { sessionId: "u_real", cwd: "/projects/a", title: "fix the build" },
+            { sessionId: "u_untitled", cwd: "/projects/a" },
+          ],
+        },
+      ],
+    });
+    const { synced } = await manager.syncFromAgent("claude-code");
+    const interactiveOf = (id: string) =>
+      synced.find((r) => r.upstreamSessionId === id)?.interactive;
+    expect(interactiveOf("u_hook")).toBe(false);
+    expect(interactiveOf("u_hook2")).toBe(false);
+    expect(interactiveOf("u_real")).toBe(true);
+    expect(interactiveOf("u_untitled")).toBe(true);
+  });
+
   it("skips entries whose (agentId, upstreamSessionId) is already tracked locally", async () => {
     const { SessionStore } = await import("./session-store.js");
     const store = new SessionStore();

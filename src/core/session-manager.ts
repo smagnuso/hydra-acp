@@ -4876,7 +4876,9 @@ export class SessionManager {
         // `hydra agent sync` is a user-explicit "show me agent-side
         // sessions" action; the rows are meant to be visible immediately
         // even before the first resurrect populates history.jsonl.
-        interactive: true,
+        // Hook-payload sessions are imported hidden so they dedupe on the
+        // next sync; the first real prompt promotes one to interactive.
+        interactive: !isHookPayloadTitle(entry.title),
         createdAt: ts,
         updatedAt: ts,
       };
@@ -8145,6 +8147,17 @@ function isSynopsisSession(cwd: string, sandboxDir: string): boolean {
   const resolved = path.resolve(cwd);
   const base = path.resolve(sandboxDir);
   return resolved === base || resolved.startsWith(base + path.sep);
+}
+
+// True when an agent-side session title is a Claude Code hook payload
+// (stdin JSON) that a hook runner fed to the agent as a prompt. Matches
+// the leading `session_id` plus one of its usual next keys rather than parsing,
+// because titles are truncated and rarely valid JSON.
+export function isHookPayloadTitle(title: string | undefined): boolean {
+  return (
+    title !== undefined &&
+    /^\{\s*"session_id"\s*:\s*"[^"]*"\s*,\s*"(?:transcript_path|cwd|permission_mode|hook_event_name)"\s*:/.test(title)
+  );
 }
 
 // Build the record we'll persist to meta.json. Read-modify-write style:
