@@ -155,6 +155,14 @@ function rejectContradictorySkipFlags(
 }
 
 async function main(): Promise<void> {
+  // Quitting a pager early (`hydra session list | less`, then q) closes our
+  // stdout; exit quietly like any unix tool instead of an unhandled EPIPE.
+  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") {
+      process.exit(0);
+    }
+    throw err;
+  });
   // Install our pin-aware undici dispatcher up front so every fetch()
   // — local daemon probes, `hydra extension`, remote attach, etc. —
   // benefits from loopback-bypass and TOFU pin verification without
