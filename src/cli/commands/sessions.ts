@@ -204,7 +204,7 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
 
 export async function runSessionsRemove(id: string | undefined): Promise<void> {
   if (!id) {
-    process.stderr.write("Usage: hydra-acp sessions remove <session-id>\n");
+    process.stderr.write("Usage: hydra-acp session delete <session-id>\n");
     process.exit(2);
   }
   const res = await daemonFetch(`/v1/sessions/${id}`, { method: "DELETE" });

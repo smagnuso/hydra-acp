@@ -345,7 +345,9 @@ hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]
                                             # --fold collapses sequential hunks that rewrite the
                                             # same region (agent thrash) into one net-effect hunk.
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
-hydra-acp session remove <id>               # remove a session entirely (live or cold)
+hydra-acp session delete <id>               # delete a session entirely (live or cold)
+hydra-acp session undelete [<id>...]        # no ids: list deleted sessions; with ids (hydra or upstream id): restore them
+                                            # by re-syncing the agent, under a new hydra id. Needs the agent to still remember them.
 hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--json]
                                             # delete cold sessions that never became a real
                                             # conversation (cat one-shots, editor panels with
