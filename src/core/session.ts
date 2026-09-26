@@ -10837,7 +10837,7 @@ function extractClaudeCodeMeta(
   return out;
 }
 
-function isStateUpdate(method: string, params: unknown): boolean {
+export function isStateUpdate(method: string, params: unknown): boolean {
   if (method !== "session/update") {
     return false;
   }

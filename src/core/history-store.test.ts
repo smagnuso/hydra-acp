@@ -388,6 +388,36 @@ describe("HistoryStore", () => {
     expect(openedArchive).toBe(false);
   });
 
+  it("pageBefore pages backwards across archives on turn boundaries", async () => {
+    const store = new HistoryStore({ archiveMaxBytes: 200, archiveTiers: 10 });
+    const sid = "hydra_session_page";
+    let seq = 0;
+    const add = async (kind: string): Promise<void> => {
+      seq += 1;
+      await store.append(sid, {
+        method: "session/update",
+        params: { update: { sessionUpdate: kind, n: seq } },
+        recordedAt: seq,
+        seq,
+      });
+    };
+    for (let t = 0; t < 6; t++) {
+      await add("prompt_received");
+      await add("agent_message_chunk");
+      await add("agent_message_chunk");
+    }
+    await store.compact(sid, 6);
+    const kinds = (es: { params: unknown }[]): string[] =>
+      es.map((e) => (e.params as { update: { sessionUpdate: string } }).update.sessionUpdate);
+    const first = await store.pageBefore(sid, { beforeSeq: 13, turns: 2 });
+    expect(first.entries.map((e) => e.seq)).toEqual([7, 8, 9, 10, 11, 12]);
+    expect(kinds(first.entries)[0]).toBe("prompt_received");
+    expect(first.hasMore).toBe(true);
+    const second = await store.pageBefore(sid, { beforeSeq: 7, turns: 5 });
+    expect(second.entries.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(second.hasMore).toBe(false);
+  });
+
   it("rangeSlice reads only the archives that overlap the requested range", async () => {
     const store = new HistoryStore({ archiveMaxBytes: 200, archiveTiers: 10 });
     const sid = "hydra_session_range";

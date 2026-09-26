@@ -814,6 +814,36 @@ Tail a session's recorded conversation as NDJSON. One-shot by default; `?follow=
 
 - `404` — session unknown.
 
+#### `GET /v1/sessions/:id/history/page`
+
+Read one page of history older than a cursor, for clients that want to scroll back past what `session/attach` replays. Attach replays only the live `history.jsonl`, tailed to `sessionHistoryMaxEntries`; everything spilled to `history.jsonl.N` archives is unreachable through it. This route reads across the live file and all archives, live or cold session alike.
+
+The cursor is a `seq`, the same one carried on replayed frames (see `afterSeq` on `session/attach`). Pass the `seq` of the oldest frame you already hold; the page contains only frames strictly older. Repeat with the new oldest `seq` while `hasMore` is true.
+
+**Query**
+
+- `beforeSeq` — required, number. Return only frames with a lower `seq`.
+- `turns` — optional positive integer, default `10`, capped at `100`. Page size in turns (each opened by a `prompt_received`).
+
+**Response — `200 OK`**
+
+```jsonc
+{
+  "entries": [ /* history entries, oldest first, coalesced like an attach replay */ ],
+  "hasMore": true
+}
+```
+
+- A page starts at a `prompt_received` so a turn is never split, unless the history begins mid-turn. State updates (model/mode/usage/info/commands) are omitted, as in replay.
+- `entries` are coalesced with the same rules as an attach replay (chunk runs merged, one `tool_call_update` per call, last `plan` per turn). A message run that straddles the boundary with frames you already hold arrives as two pieces.
+- Legacy entries written without a `seq` can't be used as a cursor.
+- Each call walks history newest-first down to the cursor, so deep pages cost more than shallow ones.
+
+**Errors**
+
+- `400` — `beforeSeq` missing or not a number, or `turns` not a positive integer.
+- `404` — session unknown.
+
 ### Attention
 
 The daemon maintains a per-session set of **attention flags** — entries that mean "the user owes this session a response." A flag carries an opaque, raiser-defined payload that holds the state needed to render the attention UI. The daemon ORs the presence of any flag (alongside an in-flight `session/request_permission`) into [`awaitingInput`](#on-sessionlist-entries-_metahydra-acp) so the picker (and any other client) lights up regardless of which mechanism flagged the session.

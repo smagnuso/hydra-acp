@@ -23,6 +23,7 @@ import {
   findMessageIdIndex,
   firstLine,
   parseConfigOptionValues,
+  isStateUpdate,
   parseModelsList,
   parseModesList,
   stripHydraSessionPrefix,
@@ -5953,6 +5954,21 @@ export class SessionManager {
       return undefined;
     }
     return this.histories.load(sessionId).catch(() => []);
+  }
+
+  // One older page of a session's recorded history, live or cold. See
+  // HistoryStore.pageBefore. Undefined when the session doesn't exist.
+  async pageHistory(
+    sessionId: string,
+    opts: { beforeSeq: number; turns: number },
+  ): Promise<{ entries: HistoryStoreEntry[]; hasMore: boolean } | undefined> {
+    if (!this.sessions.has(sessionId) && !(await this.store.read(sessionId))) {
+      return undefined;
+    }
+    return this.histories.pageBefore(sessionId, {
+      ...opts,
+      skip: (e) => isStateUpdate(e.method, e.params),
+    });
   }
 
   // Read the on-disk history.jsonl for a session without constructing a

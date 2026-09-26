@@ -23,6 +23,7 @@ import {
   applyToolContentMode,
   parseToolContentMode,
 } from "../../core/tool-content.js";
+import { coalesceReplay } from "../../core/coalesce-replay.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
@@ -1140,6 +1141,39 @@ export function registerSessionRoutes(
     } catch (err) {
       reply.code(409).send({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // One page of history older than ?beforeSeq, up to ?turns turns
+  // (default 10, max 100), oldest-first and coalesced like an attach
+  // replay. Reaches into archived history that attach never replays.
+  // Pass the seq of the oldest frame already held; follow `hasMore` until
+  // it is false.
+  app.get("/v1/sessions/:id/history/page", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const q = request.query as { beforeSeq?: string; turns?: string } | undefined;
+    const beforeSeq = Number(q?.beforeSeq);
+    if (q?.beforeSeq === undefined || q.beforeSeq === "" || !Number.isFinite(beforeSeq)) {
+      reply.code(400).send({ error: "beforeSeq must be a number" });
+      return;
+    }
+    const turnsRaw = q.turns === undefined || q.turns === "" ? 10 : Number(q.turns);
+    if (!Number.isInteger(turnsRaw) || turnsRaw < 1) {
+      reply.code(400).send({ error: "turns must be a positive integer" });
+      return;
+    }
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const page = await manager.pageHistory(id, {
+      beforeSeq,
+      turns: Math.min(turnsRaw, 100),
+    });
+    if (!page) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    reply.code(200).send({
+      entries: coalesceReplay(page.entries),
+      hasMore: page.hasMore,
+    });
   });
 
   // Tail a session's recorded conversation as NDJSON (one entry per

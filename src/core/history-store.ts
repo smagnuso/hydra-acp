@@ -702,6 +702,50 @@ export class HistoryStore {
     }
   }
 
+  // One page of history strictly older than `beforeSeq`, spanning up to
+  // `turns` turns (each opened by a prompt_received), across archives and
+  // the live file. Entries come back oldest-first. `hasMore` says whether
+  // anything older than the page exists. `skip` drops entries the caller
+  // never replays (state updates) so they don't count toward or split a
+  // page. Entries with no seq can't be compared to the cursor, so they are
+  // treated as newer than it until the first seq'd entry below it is seen.
+  async pageBefore(
+    sessionId: string,
+    opts: {
+      beforeSeq: number;
+      turns: number;
+      skip?: (entry: HistoryEntry) => boolean;
+    },
+  ): Promise<{ entries: HistoryEntry[]; hasMore: boolean }> {
+    const collected: HistoryEntry[] = [];
+    let turnsSeen = 0;
+    let below = false;
+    let hasMore = false;
+    for await (const { entry } of this.iterRecallNewestFirst(sessionId)) {
+      if (!below) {
+        if (entry.seq === undefined || entry.seq >= opts.beforeSeq) {
+          continue;
+        }
+        below = true;
+      }
+      if (opts.skip?.(entry)) {
+        continue;
+      }
+      if (turnsSeen >= opts.turns) {
+        hasMore = true;
+        break;
+      }
+      const update = (entry.params as { update?: { sessionUpdate?: unknown } })
+        ?.update;
+      collected.push(entry);
+      if (update?.sessionUpdate === "prompt_received") {
+        turnsSeen += 1;
+      }
+    }
+    collected.reverse();
+    return { entries: collected, hasMore };
+  }
+
   // Read a specific slice [fromEntryId, toEntryId] out of the recall
   // view without materializing everything. Uses the archive line-count
   // cache to figure out which file(s) actually contain the requested
