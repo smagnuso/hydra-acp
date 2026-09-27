@@ -96,6 +96,7 @@ describe("runSessionsShare", () => {
     await runSessionsShare("hydra_session_abcDEF1234567890");
     expect(stdio.out().trim()).toBe("hydra://127.0.0.1/abcDEF1234567890");
     expect(stdio.err()).toMatch(/loopback/);
+    expect(stdio.err()).toMatch(/hydra-acp daemon listen tailnet/);
   });
 
   it("strips the prefix when the user passes the wire form", async () => {

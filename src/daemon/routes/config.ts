@@ -7,6 +7,16 @@ export interface DaemonConfigView {
   synopsisAgent?: string;
   synopsisModel?: string;
   defaultTransformers: string[];
+  // Restart-tier, so taken from the boot config. Lets a co-resident
+  // extension (the browser) serve with the daemon's cert instead of
+  // needing its own. Paths only, never key material; tls is absent on a
+  // loopback-only daemon.
+  listen: {
+    host: string;
+    port: number;
+    publicHost?: string;
+    tls?: { cert: string; key: string };
+  };
 }
 
 // `view` is a getter, not a snapshot: tier-"live" keys (defaultAgent,

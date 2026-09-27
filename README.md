@@ -213,12 +213,40 @@ hydra-acp session share                      # most-recent session for this cwd
 hydra-acp --session hydra://box:55514/hydra_session_abc123
 ```
 
-This only reaches past your own machine if the daemon is listening past it, and
-the daemon refuses to bind to a non-loopback address without TLS. So sharing
-means setting `daemon.host`, pointing `daemon.tls.cert`/`key` at a certificate,
-and setting `daemon.publicHost` to the name the URL should carry. See
-[Security](#security). Without that, `share` still prints a URL and warns you
-that it's loopback-only.
+This only reaches past your own machine if the daemon is listening past it.
+See [Accepting remote clients](#accepting-remote-clients). Without that,
+`share` still prints a URL and warns you that it's loopback-only.
+
+### Accepting remote clients
+
+By default the daemon only listens on loopback. `hydra-acp daemon listen`
+opens it up and handles the certificate, the master password and the restart:
+
+```sh
+hydra-acp daemon listen tailnet   # tailnet IP only, CA-signed cert from `tailscale cert`
+hydra-acp daemon listen all       # every interface, self-signed cert
+hydra-acp daemon listen local     # back to loopback, no TLS (the default)
+hydra-acp daemon listen           # show scope, cert, fingerprint and expiry
+```
+
+`tailnet` is the one to reach for: nothing outside your tailnet can connect,
+and the cert is valid for browsers and phones as well as hydra clients. It
+needs HTTPS certificates enabled for the tailnet, and `tailscale cert` needs
+either sudo or `sudo tailscale set --operator=$(whoami)` once. Tailscale certs
+last about 90 days; re-run `daemon listen tailnet` to renew, and plain
+`daemon listen` warns when fewer than 14 days are left.
+
+`all` binds `0.0.0.0` behind a self-signed cert, which hydra clients pin on
+first use. It prints the cert's fingerprint so you can check it against the
+one `remote add` shows you. Re-running it keeps the existing cert, so pinned
+clients keep working.
+
+Both print the `remote add` line to run on the other machine. On a tailnet,
+use the MagicDNS name it prints rather than the IP: the cert is only valid for
+the name, and a cert added by IP gets pinned and breaks at the next renewal.
+
+The [browser extension](#extensions) serves with the daemon's cert unless its
+own `BROWSER_TLS_CERT`/`BROWSER_TLS_KEY` are set.
 
 ### Linking machines
 
@@ -230,20 +258,22 @@ attached with `--session <name>:<localId>`, as well as showing up in hydra
 session lists in TUI:
 
 ```sh
-hydra-acp remote add box peer.local
+# on the peer, once: accept remote clients (sets up TLS and a master password)
+hydra-acp daemon listen tailnet
+
+# on your machine
+hydra-acp remote add box box.tail1234.ts.net
 hydra-acp session list --host=box
 hydra-acp --session box:hydra_session_abc123
 ```
 
-The host arg is `host[:port]`; the port defaults to the daemon's usual
-`55514` when omitted. Two things have to be true on the peer (`peer.local`)
-before this works:
-
-- It has a master password set — `hydra-acp auth password` on that machine.
-  `remote add` prompts you for it once, exchanges it for a long-lived token,
-  and stores that token.
-- If it's not loopback, it needs TLS configured as in [Security](#security).
-  `remote add` does a TOFU handshake first.
+`daemon listen` prints the exact `remote add` line to run; see
+[Accepting remote clients](#accepting-remote-clients) for the scopes. The host
+arg is `host[:port]`; the port defaults to the daemon's usual `55514` when
+omitted. `remote add` checks the peer's cert first (a self-signed one asks you
+to confirm its fingerprint), then prompts for the peer's master password once,
+exchanges it for a long-lived token, and stores that token. `hydra-acp auth
+password` on the peer changes the password later.
 
 The exchanged token expires; `remote list` shows when. Re-run `remote add`
 with the same name before then to refresh it. `remote remove` un-federates
@@ -320,6 +350,8 @@ hydra-acp daemon start [--foreground]       # detached by default; --foreground 
 hydra-acp daemon stop                       # stop running daemon
 hydra-acp daemon restart                    # stop then start the daemon
 hydra-acp daemon log [-f] [-n N]            # tail (default 50) or follow the daemon log
+hydra-acp daemon listen [local|tailnet|all] [--public-host <name>] [--yes] [--no-restart]
+                                            # accept remote clients; sets up TLS. No scope: status
 
 hydra-acp session [list] [--all] [--json] [--host <h>] [--columns <list>]
                                             # list sessions (live + 20 most-recent cold).
@@ -996,7 +1028,9 @@ For remote access (binding to a non-loopback address), enable TLS via:
 }
 ```
 
-The daemon refuses to bind to non-loopback hosts without TLS configured. A
+The daemon refuses to bind to non-loopback hosts without TLS configured.
+`hydra-acp daemon listen` writes all of this for you (see
+[Accepting remote clients](#accepting-remote-clients)). To do it by hand, a
 self-signed cert is enough, since `remote add`'s TOFU handshake only needs a
 key pair to pin, not a CA-signed one:
 

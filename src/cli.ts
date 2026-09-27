@@ -22,6 +22,7 @@ import {
   runDaemonStatus,
   runDaemonStop,
 } from "./cli/commands/daemon.js";
+import { runDaemonListen } from "./cli/commands/daemon-listen.js";
 import {
   runSessionsCollect,
   runSessionsExport,
@@ -478,6 +479,10 @@ async function main(): Promise<void> {
       }
       if (sub === "log" || sub === "logs") {
         await runDaemonLogs(tail.slice(1));
+        return;
+      }
+      if (sub === "listen") {
+        await runDaemonListen(positional[2], flags);
         return;
       }
       process.stderr.write(`Unknown daemon subcommand: ${sub}\n`);
@@ -1413,6 +1418,8 @@ function printHelp(subcommand?: string): void {
     [DAEMON, "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)"],
     [DAEMON, "  hydra-acp daemon stop|restart"],
     [DAEMON, "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log"],
+    [DAEMON, "  hydra-acp daemon listen [local|tailnet|all] [--public-host <name>] [--yes] [--no-restart]"],
+    [DAEMON, "                                     Where the daemon accepts remote clients; sets up the cert. No scope shows status."],
     [VERSION, "  hydra-acp version [--json]         Print CLI, daemon, and extension/transformer versions"],
     [SESSION, "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--dir[=<path>]] [--include-non-interactive] [--columns=<list>]"],
     [SESSION, "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts)."],

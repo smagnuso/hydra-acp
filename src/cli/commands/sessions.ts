@@ -797,7 +797,8 @@ export async function runSessionsShare(
   if (isFallback) {
     process.stderr.write(
       "Note: this URL points at loopback (127.0.0.1) and only works from the same machine. " +
-        "Set daemon.publicHost in config.json or pass --host <name> to advertise an externally-reachable hostname.\n",
+        "To accept remote clients, run `hydra-acp daemon listen tailnet` (or `all`), or pass --host <name> " +
+        "to advertise an externally-reachable hostname.\n",
     );
   }
 }

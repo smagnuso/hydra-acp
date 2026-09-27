@@ -298,9 +298,18 @@ Read-only snapshot of the daemon's effective config. Mutations go through `~/.hy
   "sessionDefaults":      { "claude-acp": { "model": "claude-opus-4-7", "mode": "plan" } },
   "synopsisAgent":        "claude-acp",                       // optional
   "synopsisModel":        "claude-haiku-4-5-20251001",        // optional
-  "defaultTransformers":  []
+  "defaultTransformers":  [],
+  "listen": {
+    "host":       "100.97.66.30",
+    "port":       55514,
+    "publicHost": "box.tail1234.ts.net",                             // optional
+    "tls":        { "cert": "/home/u/.hydra-acp/tls/cert.pem",       // optional
+                    "key":  "/home/u/.hydra-acp/tls/key.pem" }
+  }
 }
 ```
+
+`listen` is where the daemon accepts clients, as written by `hydra-acp daemon listen`. It reflects the config the daemon booted with, since all four keys only take effect on restart. `tls` is absent on a loopback-only daemon; its paths are already `~`-expanded, and it carries paths only, never key material. A co-resident extension can serve with the same cert: the browser extension does this unless its own `BROWSER_TLS_*` are set. Federated peers can read this too; the paths mean nothing off-box, and a peer credential already grants far more than a filesystem path.
 
 ### Sessions
 

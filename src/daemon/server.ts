@@ -351,6 +351,21 @@ export async function startDaemon(
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
   registerTransformerRoutes(app, transformers);
+  const listenView = {
+    host: config.daemon.host,
+    port: config.daemon.port,
+    ...(config.daemon.publicHost !== undefined
+      ? { publicHost: config.daemon.publicHost }
+      : {}),
+    ...(config.daemon.tls
+      ? {
+          tls: {
+            cert: expandHome(config.daemon.tls.cert),
+            key: expandHome(config.daemon.tls.key),
+          },
+        }
+      : {}),
+  };
   // Reads liveConfig so the reported defaults track what the daemon would
   // actually use, rather than what it booted with.
   registerConfigRoutes(app, () => ({
@@ -364,6 +379,7 @@ export async function startDaemon(
       ? { synopsisModel: liveConfig.synopsisModel }
       : {}),
     defaultTransformers: [...liveConfig.defaultTransformers],
+    listen: listenView,
   }));
   registerAuthRoutes(app, {
     store: sessionTokenStore,
@@ -421,7 +437,7 @@ export async function startDaemon(
   let publicHost = config.daemon.host;
   let publicPort = plainBoundPort;
   if (tlsConfigured && tlsKey && tlsCert) {
-    tlsTerminator = startTlsTerminator({
+    tlsTerminator = await startTlsTerminator({
       listenHost: config.daemon.host,
       listenPort: config.daemon.port,
       upstreamHost: "127.0.0.1",
@@ -717,7 +733,10 @@ interface TlsTerminatorOptions {
   logger: { warn: (msg: string) => void };
 }
 
-function startTlsTerminator(opts: TlsTerminatorOptions): tls.Server {
+// Resolves once bound, so the caller can read the real port and a bind
+// failure (tailnet IP not up yet, port taken) fails startup instead of
+// surfacing later as an unhandled 'error' event.
+async function startTlsTerminator(opts: TlsTerminatorOptions): Promise<tls.Server> {
   const server = tls.createServer(opts.tlsOptions, (clientSocket) => {
     const upstream = net.connect({
       host: opts.upstreamHost,
@@ -755,7 +774,23 @@ function startTlsTerminator(opts: TlsTerminatorOptions): tls.Server {
   server.on("tlsClientError", (err) => {
     opts.logger.warn(`tls handshake error: ${err.message}`);
   });
-  server.listen({ host: opts.listenHost, port: opts.listenPort });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error): void => {
+      reject(
+        new Error(
+          `TLS listener could not bind ${opts.listenHost}:${opts.listenPort}: ${err.message}`,
+        ),
+      );
+    };
+    server.once("error", onError);
+    server.listen({ host: opts.listenHost, port: opts.listenPort }, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  server.on("error", (err) => {
+    opts.logger.warn(`tls terminator error: ${err.message}`);
+  });
   return server;
 }
 

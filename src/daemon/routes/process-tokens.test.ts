@@ -154,6 +154,17 @@ describe("process-token routes", () => {
     expect(cfg.status).toBe(200);
   });
 
+  it("an extension token can read the daemon's listen settings", async () => {
+    // The browser extension serves with the daemon's cert by reading this.
+    const token = handle!.processRegistry.mint("hydra-acp-browser", "extension");
+    const r = await fetch(`${baseUrl}/v1/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { listen: Record<string, unknown> };
+    expect(body.listen).toEqual({ host: "127.0.0.1", port: 0 });
+  });
+
   it("a minted script token is denied outside the allowlist", async () => {
     const mint = await fetch(`${baseUrl}/v1/process-tokens`, {
       method: "POST",

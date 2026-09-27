@@ -31,6 +31,8 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "no-dangerously-skip-permissions",
   "no-from-note",
   "no-pager",
+  // `daemon listen`: write config without restarting a running daemon.
+  "no-restart",
   "no-terminal-host-launcher",
   "no-wait",
   "tools",
@@ -47,6 +49,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   // workspaces. Boolean rather than taking a name, because it governs
   // every session the client creates rather than naming one of them.
   "workspace",
+  "yes",
 ]);
 
 // Flags that take a value. Together with KNOWN_BOOLEAN_FLAGS this is the
@@ -87,6 +90,8 @@ const KNOWN_VALUE_FLAGS = new Set([
   "name",
   "out",
   "prompt",
+  // `daemon listen`: the name advertised in share URLs and remote-add hints.
+  "public-host",
   "session",
   "since",
   "stream-bytes",

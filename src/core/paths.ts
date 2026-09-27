@@ -143,6 +143,8 @@ export const paths = {
   // this one is credentials this *daemon* uses to act as a client of
   // its peers (see `hydra remote add`).
   peers: () => path.join(hydraHome(), "peers.json"),
+  // Cert and key written by `hydra-acp daemon listen`. Dir 0700, files 0600.
+  tlsDir: () => path.join(hydraHome(), "tls"),
   pidFile: () => path.join(hydraHome(), "daemon.pid"),
   logFile: () => path.join(hydraHome(), "daemon.log"),
   // Startup failures only. spawnDaemonDetached wires the daemon's stderr

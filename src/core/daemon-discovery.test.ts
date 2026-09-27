@@ -13,7 +13,11 @@
 // actually dialable. A mock of any of those three would assert the bug
 // away.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
+import { mintSelfSignedCert } from "./self-signed.js";
+import { hasBin } from "./tailscale.js";
 import { startDaemon, type DaemonHandle } from "../daemon/server.js";
 import { probeDaemon, waitForDaemonReady } from "./daemon-bootstrap.js";
 import {
@@ -130,6 +134,24 @@ describe("daemon discovery", () => {
     expect(isProcessAlive(info!.pid)).toBe(true);
 
     expect(await probeDaemon(testConfig())).toBe("match");
+  });
+
+  it.skipIf(!hasBin("openssl"))("records the TLS listener's port, not the loopback one", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hydra-tls-"));
+    const tls = { cert: path.join(dir, "cert.pem"), key: path.join(dir, "key.pem") };
+    expect(
+      mintSelfSignedCert({ commonName: "localhost", altNames: ["IP:127.0.0.1"], certPath: tls.cert, keyPath: tls.key }).kind,
+    ).toBe("ok");
+    const config = testConfig();
+    config.daemon.tls = tls;
+    try {
+      handle = await startDaemon(config, TEST_TOKEN);
+      const info = await readDaemonPidFile();
+      expect(info!.port).toBeGreaterThan(0);
+      expect(info!.port).not.toBe(info!.loopbackPort);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reports a healthy daemon ready without waiting", async () => {
