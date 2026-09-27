@@ -164,6 +164,7 @@ const SCRIPT_ALLOWED_ROUTES = new Set([
   "GET /v1/sessions",
   "GET /v1/sessions/:id",
   "GET /v1/config",
+  "GET /v1/system",
 ]);
 
 export function isScriptTokenRouteAllowed(

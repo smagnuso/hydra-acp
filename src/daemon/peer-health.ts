@@ -18,6 +18,7 @@
 
 import { isLoopbackHost } from "../core/remote-url.js";
 import type { PeerStore } from "../core/peer-store.js";
+import { fetchPeerSystem, type SystemInfo } from "../core/system-info.js";
 
 export type PeerStatus = "ok" | "unauthorized" | "unreachable" | "unknown";
 
@@ -25,6 +26,8 @@ export interface PeerHealthSnapshot {
   status: PeerStatus;
   checkedAt: string;
   error?: string;
+  // Absent for a peer that predates GET /v1/system.
+  system?: SystemInfo;
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
@@ -69,8 +72,12 @@ export class PeerHealthTracker {
   // `POST /v1/remotes` login, so `remote list` doesn't show "unknown"
   // for up to a full poll interval after adding a peer we just proved
   // works.
-  markOk(name: string): void {
-    this.snapshots.set(name, { status: "ok", checkedAt: new Date().toISOString() });
+  markOk(name: string, system?: SystemInfo): void {
+    this.snapshots.set(name, {
+      status: "ok",
+      checkedAt: new Date().toISOString(),
+      ...(system ? { system } : {}),
+    });
   }
 
   forget(name: string): void {
@@ -85,11 +92,38 @@ export class PeerHealthTracker {
         if (!record) {
           return;
         }
-        const scheme = isLoopbackHost(record.host) ? "http" : "https";
-        const url = `${scheme}://${record.host}:${record.port}/v1/auth/verify`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
         try {
+          // /v1/system answers the auth question and carries the peer's
+          // version and OS; an older peer without it falls back to verify.
+          const probe = await fetchPeerSystem({
+            host: record.host,
+            port: record.port,
+            token: record.token,
+            fetchImpl,
+            signal: controller.signal,
+          });
+          if (probe.kind === "ok") {
+            this.snapshots.set(summary.name, {
+              status: "ok",
+              checkedAt: new Date().toISOString(),
+              ...(probe.system ? { system: probe.system } : {}),
+            });
+            return;
+          }
+          if (probe.kind === "unauthorized") {
+            this.snapshots.set(summary.name, {
+              status: "unauthorized",
+              checkedAt: new Date().toISOString(),
+            });
+            return;
+          }
+          if (probe.kind === "error") {
+            throw new Error(probe.message);
+          }
+          const scheme = isLoopbackHost(record.host) ? "http" : "https";
+          const url = `${scheme}://${record.host}:${record.port}/v1/auth/verify`;
           const res = await fetchImpl(url, {
             headers: { Authorization: `Bearer ${record.token}` },
             signal: controller.signal,

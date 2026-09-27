@@ -198,7 +198,7 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 
 ```jsonc
 {
-  "name":              "foo",           // local alias; see PEER_NAME_PATTERN above
+  "name":              "foo",           // optional local alias; see PEER_NAME_PATTERN above
   "host":              "foo.example.com",
   "port":              55514,          // optional, defaults to the daemon's default port
   "password":          "<peer's master password>",
@@ -209,6 +209,8 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 ```
 
 `pinnedFingerprint` is how a self-signed peer cert gets trusted: the *caller* (`hydra remote add`) does its own TLS handshake probe before this request, and if the peer's cert doesn't validate against the system trust store, shows the fingerprint to a human and asks them to confirm — the same TOFU flow `hydra session attach hydra://...` already does for a human login (`core/remote-target.ts`'s `defaultTlsHandshake`). Once confirmed, the fingerprint is sent here, pinned (`setPin`) *before* this route attempts its own login to the peer, and persisted on the stored record so it survives a daemon restart (`daemon/peer-health.ts`'s sibling, `loadPinsFromPeerStore`, reloads every stored pin at startup). Omit it entirely for a peer with a CA-signed cert — normal validation applies, nothing to pin.
+
+With `name` omitted, the remote is named after the peer's `machine` from its `GET /v1/system` (read with the token this login just obtained), so a live remote and that machine's imported sessions (`importedFromMachine`) share one name. If `machine` is missing (a peer that predates `/v1/system`) or doesn't match `PEER_NAME_PATTERN`, the host's first DNS label is used; a bare IP yields no name. Unlike an explicit `name`, a derived one never replaces a record pointing at a different host:port; re-adding the same host:port refreshes it as usual. On either failure the just-issued peer token is revoked before responding.
 
 **Response — `201 Created`**
 
@@ -227,7 +229,8 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 
 **Errors**
 
-- `400` — invalid request body (including a `name` that doesn't match `PEER_NAME_PATTERN`).
+- `400`: invalid request body (including a `name` that doesn't match `PEER_NAME_PATTERN`), or `name` omitted and none could be derived.
+- `409`: `name` omitted and the derived name already belongs to a remote at a different host:port.
 - `401` — wrong password for the peer.
 - `429` — the peer rate-limited the login attempt; back off.
 - `502` — the peer was unreachable, has no password configured, or returned a malformed response.
@@ -236,7 +239,7 @@ Log into a peer daemon and store the resulting session token under `name`. The p
 
 List configured peers. Metadata only — the token is never returned. A peer past its `expiresAt` is still listed (staleness is surfaced to the operator, not hidden); re-run `POST /v1/remotes` under the same name to refresh it.
 
-`status` reflects the daemon's own periodic liveness poll (`daemon/peer-health.ts`, every 30s, hitting the peer's `GET /v1/auth/verify` with the stored token) — not a real-time check made by this call. One of:
+`status` reflects the daemon's own periodic liveness poll (`daemon/peer-health.ts`, every 30s, hitting the peer's `GET /v1/system` with the stored token, or `GET /v1/auth/verify` for a peer that predates it). It is not a real-time check made by this call. The same poll fills `system` with the peer's `GET /v1/system` body; it is absent until a poll succeeds and for peers without that route. One of:
 
 - `"ok"` — last poll reached the peer and the token verified.
 - `"unauthorized"` — the peer answered but rejected the token (expired/revoked — re-run `POST /v1/remotes`).
@@ -259,7 +262,8 @@ This is visibility only: forwarding a REST or ACP call to a peer always makes it
       "addedAt":       "<ISO-8601>",
       "status":        "ok",              // "ok" | "unauthorized" | "unreachable" | "unknown"
       "lastCheckedAt": "<ISO-8601>",       // absent if status is "unknown"
-      "pinnedFingerprint": "<optional>"
+      "pinnedFingerprint": "<optional>",
+      "system":        { "machine": "foo", "hydraVersion": "0.1.195", … }   // optional, see GET /v1/system
     },
     …
   ]
@@ -310,6 +314,24 @@ Read-only snapshot of the daemon's effective config. Mutations go through `~/.hy
 ```
 
 `listen` is where the daemon accepts clients, as written by `hydra-acp daemon listen`. It reflects the config the daemon booted with, since all four keys only take effect on restart. `tls` is absent on a loopback-only daemon; its paths are already `~`-expanded, and it carries paths only, never key material. A co-resident extension can serve with the same cert: the browser extension does this unless its own `BROWSER_TLS_*` are set. Federated peers can read this too; the paths mean nothing off-box, and a peer credential already grants far more than a filesystem path.
+
+#### `GET /v1/system`
+
+Facts about the running daemon and its machine, as opposed to `GET /v1/config`, which describes configuration. Requires auth like every route except `/v1/health`; script-kind tokens may read it.
+
+**Response: `200 OK`**
+
+```jsonc
+{
+  "machine":      "blackbox",          // os.hostname(); the name stamped on exported bundles (importedFromMachine on import)
+  "hydraVersion": "0.1.195",
+  "startedAt":    "2026-09-26T19:57:02.188Z",
+  "os":           { "platform": "linux", "release": "6.17.0-35-generic", "arch": "x64" },
+  "node":         "v24.18.0"
+}
+```
+
+`hydraVersion` repeats `/v1/health`'s `version`, which stays for the CLI's unauthenticated version check.
 
 ### Sessions
 

@@ -9,10 +9,13 @@ import {
 } from "../../core/peer-login.js";
 import { clearPin, setPin } from "../../core/tls-trust.js";
 import { isLoopbackHost } from "../../core/remote-url.js";
+import { deriveRemoteName, fetchPeerSystem, type SystemInfo } from "../../core/system-info.js";
 import type { PeerHealthTracker } from "../peer-health.js";
 
 const AddBody = z.object({
-  name: z.string().min(1).max(64).regex(PEER_NAME_PATTERN),
+  // Omitted: named after the peer's own machine name (GET /v1/system),
+  // falling back to the host's first DNS label.
+  name: z.string().min(1).max(64).regex(PEER_NAME_PATTERN).optional(),
   host: z.string().min(1),
   port: z.number().int().positive().optional(),
   password: z.string().min(1),
@@ -78,13 +81,34 @@ export function registerRemoteRoutes(
       throw err;
     }
 
+    const probe = await fetchPeerSystem({ host: body.host, port, token: issued.token });
+    const system: SystemInfo | undefined = probe.kind === "ok" ? probe.system : undefined;
+    let name = body.name;
+    if (name === undefined) {
+      name = deriveRemoteName(system?.machine, body.host);
+      // A derived name must not silently replace a different peer the way
+      // an explicit one does; refreshing the same peer is still an upsert.
+      const existing = name !== undefined ? deps.store.get(name) : undefined;
+      const clash = existing !== undefined && (existing.host !== body.host || existing.port !== port);
+      if (name === undefined || clash) {
+        await logoutFromPeer({ host: body.host, port, token: issued.token });
+        const why =
+          name === undefined
+            ? `Couldn't derive a remote name for ${body.host}`
+            : `A remote named ${name} already points at ${existing!.host}:${existing!.port}`;
+        return reply.code(name === undefined ? 400 : 409).send({
+          error: `${why}. Pass a name: hydra-acp remote add <name> ${body.host}`,
+        });
+      }
+    }
+
     // Upsert, not create-or-409: re-running `remote add` under the
     // same name is the documented way to refresh a token before it
     // expires (see peer-store.ts). Diverges from `git remote add`,
     // which errors on a name collision — a deliberate choice here.
     const addedAt = new Date().toISOString();
     const record = {
-      name: body.name,
+      name,
       host: body.host,
       port,
       token: issued.token,
@@ -98,7 +122,7 @@ export function registerRemoteRoutes(
     await deps.store.set(record);
     // We just logged in successfully — seed the health snapshot rather
     // than leaving it "unknown" until the next poll tick.
-    deps.health?.markOk(record.name);
+    deps.health?.markOk(record.name, system);
     return reply.code(201).send({
       name: record.name,
       host: record.host,
@@ -118,6 +142,7 @@ export function registerRemoteRoutes(
         ...summary,
         status: snapshot?.status ?? "unknown",
         ...(snapshot?.checkedAt ? { lastCheckedAt: snapshot.checkedAt } : {}),
+        ...(snapshot?.system ? { system: snapshot.system } : {}),
       };
     });
     return reply.code(200).send({ remotes });

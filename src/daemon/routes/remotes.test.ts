@@ -5,6 +5,7 @@ import { startDaemon, type DaemonHandle } from "../server.js";
 import type { HydraConfig } from "../../core/config.js";
 import { setPassword } from "../../core/password.js";
 import { _resetForTests, getPin } from "../../core/tls-trust.js";
+import { deriveRemoteName } from "../../core/system-info.js";
 
 const A_TOKEN = "hydra_token_" + "a".repeat(52);
 const B_TOKEN = "hydra_token_" + "b".repeat(52);
@@ -281,6 +282,49 @@ describe("remote routes", () => {
     });
     const bSessionsAfter = (await listOnBAfter.json()) as { sessions: unknown[] };
     expect(bSessionsAfter.sessions).toHaveLength(0);
+  });
+
+  async function addRemote(body: Record<string, unknown>): Promise<Response> {
+    return fetch(`${aUrl}/v1/remotes`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${A_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ host: "127.0.0.1", port: bPort, password: PEER_PASSWORD, ...body }),
+    });
+  }
+
+  async function peerSessionCount(): Promise<number> {
+    const r = await fetch(`http://127.0.0.1:${bPort}/v1/auth/sessions`, {
+      headers: { Authorization: `Bearer ${B_TOKEN}` },
+    });
+    return ((await r.json()) as { sessions: unknown[] }).sessions.length;
+  }
+
+  // Both daemons run in this process, so the peer's machine name is ours.
+  const derived = deriveRemoteName(os.hostname(), "127.0.0.1");
+
+  it.skipIf(derived === undefined)("POST /v1/remotes without a name uses the peer's machine name", async () => {
+    const res = await addRemote({});
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { name: string }).name).toBe(derived);
+
+    const list = await fetch(`${aUrl}/v1/remotes`, { headers: { Authorization: `Bearer ${A_TOKEN}` } });
+    const [entry] = ((await list.json()) as { remotes: Array<{ system?: { machine: string; hydraVersion: string } }> }).remotes;
+    expect(entry?.system?.machine).toBe(os.hostname());
+    expect(typeof entry?.system?.hydraVersion).toBe("string");
+
+    // Re-adding the same host:port refreshes rather than clashing.
+    expect((await addRemote({})).status).toBe(201);
+  });
+
+  it.skipIf(derived === undefined)("POST /v1/remotes without a name refuses to replace a different peer and revokes its token", async () => {
+    const explicit = await addRemote({ name: derived, port: port(a!) });
+    expect(explicit.status).toBe(201);
+    const before = await peerSessionCount();
+
+    const res = await addRemote({});
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Pass a name/);
+    expect(await peerSessionCount()).toBe(before);
   });
 
   it("DELETE /v1/remotes/:name returns 404 for a name that was never added", async () => {

@@ -49,6 +49,7 @@ import { AuthRateLimiter } from "./rate-limit.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerSystemRoutes } from "./routes/system.js";
 import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
@@ -299,6 +300,8 @@ export async function startDaemon(
     computeConfigDigest(config),
     () => driftedKeys,
   );
+  const startedAt = new Date().toISOString();
+  registerSystemRoutes(app, startedAt);
   const mcpTokenRegistry = new McpTokenRegistry();
   const extensionMcp = new ExtensionMcpRegistry();
   // Captured lazily by handlers that need to mint MCP descriptors.
@@ -457,7 +460,7 @@ export async function startDaemon(
     host: publicHost,
     port: publicPort,
     loopbackPort: plainBoundPort,
-    startedAt: new Date().toISOString(),
+    startedAt,
   });
 
   // Children always dial plain HTTP on loopback — no TLS trust story

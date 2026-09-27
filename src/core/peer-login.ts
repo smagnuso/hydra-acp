@@ -42,7 +42,7 @@ export interface PeerLoginOptions {
   fetchImpl?: typeof fetch;
 }
 
-function baseUrlFor(host: string, port: number): string {
+export function baseUrlFor(host: string, port: number): string {
   const scheme = isLoopbackHost(host) ? "http" : "https";
   return `${scheme}://${host}:${port}`;
 }

@@ -12,6 +12,7 @@ import {
   summarizeCert,
 } from "./listen-scope.js";
 import { mintSelfSignedCert } from "./self-signed.js";
+import { deriveRemoteName } from "./system-info.js";
 import { hasBin, isCertsUnavailableError, isPermissionError, parseTailscaleStatus } from "./tailscale.js";
 
 const TLS = { cert: "/h/.hydra-acp/tls/cert.pem", key: "/h/.hydra-acp/tls/key.pem" };
@@ -156,5 +157,21 @@ describe.skipIf(!hasBin("openssl"))("self-signed cert", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("deriveRemoteName", () => {
+  it("prefers the peer's machine name", () => {
+    expect(deriveRemoteName("blackbox", "box.tail1.ts.net")).toBe("blackbox");
+  });
+
+  it("falls back to the host's first label for a missing or invalid machine name", () => {
+    expect(deriveRemoteName(undefined, "box.tail1.ts.net")).toBe("box");
+    expect(deriveRemoteName("my box", "box.tail1.ts.net")).toBe("box");
+  });
+
+  it("yields nothing for an IP address with no usable machine name", () => {
+    expect(deriveRemoteName(undefined, "100.64.0.5")).toBeUndefined();
+    expect(deriveRemoteName(undefined, "fd7a:115c::5")).toBeUndefined();
   });
 });

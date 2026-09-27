@@ -19,6 +19,10 @@ interface PeerSummary {
   status?: "ok" | "unauthorized" | "unreachable" | "unknown";
   lastCheckedAt?: string;
   pinnedFingerprint?: string;
+  system?: {
+    hydraVersion?: string;
+    os?: { platform?: string; arch?: string };
+  };
 }
 
 // Accepts a bare "host", "host:port", or a full "hydra://host[:port]/"
@@ -30,15 +34,19 @@ function parseHostArg(input: string): { host: string; port: number } {
   return { host: parsed.host, port: parsed.port };
 }
 
+// `remote add <host>` lets the daemon name the remote after the peer's own
+// machine name; `remote add <name> <host>` names it explicitly.
 export async function runRemoteAdd(
-  name: string | undefined,
-  hostArg: string | undefined,
+  first: string | undefined,
+  second: string | undefined,
   flags: Record<string, string | boolean>,
 ): Promise<void> {
-  if (!name || !hostArg) {
-    process.stderr.write("Usage: hydra remote add <name> <host[:port]>\n");
+  if (!first) {
+    process.stderr.write("Usage: hydra remote add [<name>] <host[:port]>\n");
     process.exit(2);
   }
+  const name = second === undefined ? undefined : first;
+  const hostArg = second ?? first;
   let target: { host: string; port: number };
   try {
     target = parseHostArg(hostArg);
@@ -61,8 +69,11 @@ export async function runRemoteAdd(
     // new or has genuinely CHANGED needs a human to look at it again.
     const existing = await daemonFetch("/v1/remotes", { expectStatus: 200 });
     const existingBody = existing.body as { remotes: PeerSummary[] };
-    const previousPin = existingBody.remotes.find((r) => r.name === name)
-      ?.pinnedFingerprint;
+    const previousPin = existingBody.remotes.find((r) =>
+      name !== undefined
+        ? r.name === name
+        : r.host === target.host && r.port === target.port,
+    )?.pinnedFingerprint;
 
     const probe = await defaultTlsHandshake(target.host, target.port);
     if (probe.kind === "error") {
@@ -123,7 +134,7 @@ export async function runRemoteAdd(
   const res = await daemonFetch("/v1/remotes", {
     method: "POST",
     body: {
-      name,
+      ...(name !== undefined ? { name } : {}),
       host: target.host,
       port: target.port,
       password,
@@ -154,6 +165,8 @@ export async function runRemoteList(): Promise<void> {
     name: "NAME",
     host: "HOST",
     status: "STATUS",
+    version: "VERSION",
+    os: "OS",
     label: "LABEL",
     addedAt: "ADDED",
     expiresAt: "EXPIRES",
@@ -162,6 +175,10 @@ export async function runRemoteList(): Promise<void> {
     name: r.name,
     host: `${r.host}:${r.port}`,
     status: r.status ?? "unknown",
+    version: r.system?.hydraVersion ?? "-",
+    os: r.system?.os?.platform
+      ? `${r.system.os.platform}${r.system.os.arch ? `/${r.system.os.arch}` : ""}`
+      : "-",
     label: r.label ?? "-",
     addedAt: r.addedAt,
     expiresAt: r.expiresAt,
@@ -170,6 +187,8 @@ export async function runRemoteList(): Promise<void> {
     name: maxLen(header.name, rows.map((r) => r.name)),
     host: maxLen(header.host, rows.map((r) => r.host)),
     status: maxLen(header.status, rows.map((r) => r.status)),
+    version: maxLen(header.version, rows.map((r) => r.version)),
+    os: maxLen(header.os, rows.map((r) => r.os)),
     label: maxLen(header.label, rows.map((r) => r.label)),
     addedAt: maxLen(header.addedAt, rows.map((r) => r.addedAt)),
   };
@@ -178,6 +197,8 @@ export async function runRemoteList(): Promise<void> {
       r.name.padEnd(widths.name),
       r.host.padEnd(widths.host),
       r.status.padEnd(widths.status),
+      r.version.padEnd(widths.version),
+      r.os.padEnd(widths.os),
       r.label.padEnd(widths.label),
       r.addedAt.padEnd(widths.addedAt),
       r.expiresAt,

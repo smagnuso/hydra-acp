@@ -234,7 +234,7 @@ async function printNextSteps(scope: ListenScope, settings: ScopeSettings | unde
   const name = settings.publicHost ?? `${os.hostname().split(".")[0]}.local`;
   const target = port === DEFAULT_DAEMON_PORT ? name : `${name}:${port}`;
   process.stdout.write("\nOn another machine:\n");
-  process.stdout.write(`  hydra-acp remote add ${remoteName(name)} ${target}\n`);
+  process.stdout.write(`  hydra-acp remote add ${target}\n`);
   if (scope === "tailnet") {
     // A CA-signed tailscale cert is only valid for the MagicDNS name. Added
     // by IP it would be pinned as untrusted, and the pin breaks at renewal.
@@ -246,10 +246,6 @@ async function printNextSteps(scope: ListenScope, settings: ScopeSettings | unde
     "`remote add` will ask you to trust this self-signed cert. Check the fingerprint matches:\n" +
       `  sha256: ${formatFingerprint(cert.fingerprint)}\n`,
   );
-}
-
-function remoteName(host: string): string {
-  return host.split(".")[0] || "box";
 }
 
 async function printListenStatus(): Promise<void> {

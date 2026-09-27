@@ -165,6 +165,23 @@ describe("process-token routes", () => {
     expect(body.listen).toEqual({ host: "127.0.0.1", port: 0 });
   });
 
+  it("a script token can read /v1/system", async () => {
+    const token = handle!.processRegistry.mint("status-script", "script");
+    const r = await fetch(`${baseUrl}/v1/system`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as Record<string, unknown>;
+    expect(body.machine).toBe(os.hostname());
+    expect(typeof body.hydraVersion).toBe("string");
+    expect(body.os).toEqual({ platform: process.platform, release: os.release(), arch: process.arch });
+    expect(body.node).toBe(process.version);
+  });
+
+  it("/v1/system requires auth", async () => {
+    expect((await fetch(`${baseUrl}/v1/system`)).status).toBe(401);
+  });
+
   it("a minted script token is denied outside the allowlist", async () => {
     const mint = await fetch(`${baseUrl}/v1/process-tokens`, {
       method: "POST",

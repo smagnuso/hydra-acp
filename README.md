@@ -262,7 +262,7 @@ session lists in TUI:
 hydra-acp daemon listen tailnet
 
 # on your machine
-hydra-acp remote add box box.tail1234.ts.net
+hydra-acp remote add box.tail1234.ts.net
 hydra-acp session list --host=box
 hydra-acp --session box:hydra_session_abc123
 ```
@@ -270,7 +270,10 @@ hydra-acp --session box:hydra_session_abc123
 `daemon listen` prints the exact `remote add` line to run; see
 [Accepting remote clients](#accepting-remote-clients) for the scopes. The host
 arg is `host[:port]`; the port defaults to the daemon's usual `55514` when
-omitted. `remote add` checks the peer's cert first (a self-signed one asks you
+omitted. With no name, the remote takes the peer's own machine name (its
+hostname), the same name its exported sessions carry once imported here, so
+the picker files both under one name. `remote add <name> <host>` picks the
+name yourself, which you'll need when two peers share a hostname. `remote add` checks the peer's cert first (a self-signed one asks you
 to confirm its fingerprint), then prompts for the peer's master password once,
 exchanges it for a long-lived token, and stores that token. `hydra-acp auth
 password` on the peer changes the password later.
@@ -474,13 +477,15 @@ hydra-acp agent log <id> [-f] [-n N]       # tail or follow an agent's spawn/std
 hydra-acp registry pin | unpin             # freeze the daemon on its cached registry, or
                                            # resume normal TTL fetching
 
-hydra-acp remote add <name> <host[:port]> [--label <text>]
+hydra-acp remote add [<name>] <host[:port]> [--label <text>]
                                            # federate with a peer daemon under a local name
                                            # (prompts for its password; matches `git remote add`).
+                                           # Without <name>, uses the peer's machine name.
                                            # TOFU-pins the peer's TLS cert on first trust; re-running
                                            # this before the token expires refreshes it without
                                            # re-prompting for the cert
-hydra-acp remote [list]                    # list federated peer daemons
+hydra-acp remote [list]                    # list federated peer daemons with their status,
+                                           # hydra version and OS
 hydra-acp remote remove <name>             # un-federate a peer daemon and revoke its token
 
 hydra-acp config [list] [<dotted.key>]     # print effective config (or one subtree) as JSON

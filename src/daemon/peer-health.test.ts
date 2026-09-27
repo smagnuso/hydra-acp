@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { PeerHealthTracker } from "./peer-health.js";
 import { PeerStore } from "../core/peer-store.js";
 
@@ -101,6 +101,46 @@ describe("PeerHealthTracker", () => {
     expect(tracker.get("foo")).toBeUndefined();
   });
 
+  it("records the peer's system info from /v1/system", async () => {
+    const store = await storeWithPeers(["foo"]);
+    const system = {
+      machine: "foo",
+      hydraVersion: "0.1.200",
+      startedAt: new Date().toISOString(),
+      os: { platform: "linux", release: "6.1", arch: "x64" },
+      node: "v24.0.0",
+    };
+    const urls: string[] = [];
+    tracker = new PeerHealthTracker(store, {
+      fetchImpl: async (input) => {
+        urls.push(String(input));
+        return Response.json(system);
+      },
+    });
+    await tracker.checkAll();
+    expect(tracker.get("foo")?.status).toBe("ok");
+    expect(tracker.get("foo")?.system).toEqual(system);
+    expect(urls).toEqual(["https://foo.example.com:55514/v1/system"]);
+  });
+
+  it("falls back to /v1/auth/verify for a peer without /v1/system", async () => {
+    const store = await storeWithPeers(["foo"]);
+    const urls: string[] = [];
+    tracker = new PeerHealthTracker(store, {
+      fetchImpl: async (input) => {
+        urls.push(String(input));
+        return new Response(null, { status: String(input).endsWith("/v1/system") ? 404 : 401 });
+      },
+    });
+    await tracker.checkAll();
+    expect(tracker.get("foo")?.status).toBe("unauthorized");
+    expect(tracker.get("foo")?.system).toBeUndefined();
+    expect(urls).toEqual([
+      "https://foo.example.com:55514/v1/system",
+      "https://foo.example.com:55514/v1/auth/verify",
+    ]);
+  });
+
   it("start() runs a check immediately rather than waiting a full interval", async () => {
     const store = await storeWithPeers(["foo"]);
     tracker = new PeerHealthTracker(store, {
@@ -108,10 +148,8 @@ describe("PeerHealthTracker", () => {
       fetchImpl: async () => new Response(null, { status: 200 }),
     });
     tracker.start();
-    // The immediate check is fire-and-forget; flush microtasks for it
-    // to land without waiting anywhere near the (long) interval.
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(tracker.get("foo")?.status).toBe("ok");
+    // The immediate check is fire-and-forget; poll briefly for it to land,
+    // far short of the 60s interval a deferred first check would need.
+    await vi.waitFor(() => expect(tracker!.get("foo")?.status).toBe("ok"), { timeout: 1_000 });
   });
 });
