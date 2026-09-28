@@ -17,6 +17,7 @@ import {
   toRow,
   truncateMiddle,
   DEFAULT_COLUMNS,
+  type ColumnKey,
   type Row,
   type Widths,
   type FormatOptions,
@@ -547,12 +548,14 @@ export async function pickSession(
   // Column selection + cwd cap, shared by computeWidths and formatRow so
   // widths and rendering agree on the same set/order. Honors the user's
   // tui.sessionColumns (which also controls order); falls back to the
-  // built-in default (UPSTREAM hidden).
+  // built-in default (UPSTREAM hidden), with HOST auto-shown/hidden by
+  // effectiveColumns below.
   const formatOpts: FormatOptions = {
-    columns: opts.config.tui.sessionColumns ?? DEFAULT_COLUMNS,
+    columns: DEFAULT_COLUMNS,
     cwdMaxWidth: opts.config.tui.cwdColumnMaxWidth,
   };
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
+  formatOpts.columns = effectiveColumns(rows, opts.config.tui.sessionColumns);
   let widths: Widths = computeWidths(rows, formatOpts);
 
   // selectedIdx 0 = "New session"; 1..N = visible sessions in order.
@@ -875,6 +878,7 @@ export async function pickSession(
   // cursor placement and trigger the actual repaint themselves.
   const rebuildRows = (): void => {
     rows = visible.map((s) => toRow(s, Date.now()));
+    formatOpts.columns = effectiveColumns(rows, opts.config.tui.sessionColumns);
     widths = computeWidths(rows, formatOpts);
     total = 1 + visible.length;
     computeLayout();
@@ -5543,6 +5547,33 @@ function isDormantOnPeer(s: { importedFromMachine?: string; upstreamSessionId?: 
 // share a name with a years-old bundle import from the same box.
 const REMOTE_FILTER_PREFIX = "remote:";
 const HOST_FILTER_PREFIX = "host:";
+
+// HOST is constant across every row until the picker's view actually spans
+// more than one origin (federated remote / imported machine) — showing it
+// any earlier is a column of "-" that tells the reader nothing. Auto-show
+// it once the current rows disagree on host, auto-hide it again once they
+// don't, comparing the exact cell toRow() would render so this can never
+// drift from what's on screen. Skipped when the user pinned columns
+// explicitly via tui.sessionColumns — that's a deliberate override, not a
+// default we get to second-guess.
+export function effectiveColumns(
+  rows: Row[],
+  explicit: ColumnKey[] | undefined,
+): ColumnKey[] {
+  if (explicit) {
+    return explicit;
+  }
+  const hosts = new Set(rows.map((r) => r.host));
+  if (hosts.size <= 1) {
+    return DEFAULT_COLUMNS;
+  }
+  const idx = DEFAULT_COLUMNS.indexOf("agent");
+  return [
+    ...DEFAULT_COLUMNS.slice(0, idx),
+    "host",
+    ...DEFAULT_COLUMNS.slice(idx),
+  ];
+}
 
 // Apply the picker's host filter to a session list. Sentinel/namespaced
 // values:

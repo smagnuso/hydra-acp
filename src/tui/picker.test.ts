@@ -106,6 +106,7 @@ const attachCalls = {
 import {
   createPickerPrefs,
   describeHostFilter,
+  effectiveColumns,
   filterByHost,
   matchesSearch,
   nextHostFilter,
@@ -115,6 +116,7 @@ import {
   type PickerPrefs,
   type PickerResult,
 } from "./picker.js";
+import { DEFAULT_COLUMNS, toRow } from "../cli/session-row.js";
 import type { DiscoveredSession } from "./discovery.js";
 import type { HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
@@ -593,6 +595,35 @@ describe("describeHostFilter", () => {
 
   it("treats a pre-namespacing persisted value as an imported host", () => {
     expect(describeHostFilter("mrclean")).toBe("host: mrclean");
+  });
+});
+
+describe("effectiveColumns", () => {
+  it("omits host when every row shares one origin", () => {
+    const rows = [session({}), session({})].map((s) => toRow(s));
+    expect(effectiveColumns(rows, undefined)).toEqual(DEFAULT_COLUMNS);
+  });
+
+  it("inserts host, left of agent, once rows span more than one origin", () => {
+    const rows = [session({}), session({ remote: "mrclean" })].map((s) =>
+      toRow(s),
+    );
+    const idx = DEFAULT_COLUMNS.indexOf("agent");
+    expect(effectiveColumns(rows, undefined)).toEqual([
+      ...DEFAULT_COLUMNS.slice(0, idx),
+      "host",
+      ...DEFAULT_COLUMNS.slice(idx),
+    ]);
+  });
+
+  it("honors an explicit column list even when hosts differ", () => {
+    const rows = [session({}), session({ remote: "mrclean" })].map((s) =>
+      toRow(s),
+    );
+    expect(effectiveColumns(rows, ["session", "cost"])).toEqual([
+      "session",
+      "cost",
+    ]);
   });
 });
 
