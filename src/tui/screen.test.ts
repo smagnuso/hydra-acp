@@ -1904,6 +1904,114 @@ describe("Screen btw overlay", () => {
     expect(screen.btwOverlayScrollState().offset).toBe(5);
   });
 
+  // Text in the pane has to be selectable the same way transcript text
+  // is. The overlay's rows are deducted from scrollbackVisibleRows(), so
+  // without its own resolver branch every cell in it resolves to null and
+  // the whole press/drag/copy chain dies at the anchor.
+  function resolveCell(
+    screen: Screen,
+    x: number,
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    return (
+      screen as unknown as {
+        resolveCellToSource: (
+          x: number,
+          y: number,
+        ) => { sourceLineId: number; offset: number } | null;
+      }
+    ).resolveCellToSource(x, y);
+  }
+
+  it("cells inside the overlay resolve to overlay source positions", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    screen.setBtwOverlayContent(
+      ["alpha line", "bravo line", "charlie line", "delta line"].map(plain),
+    );
+    paint(screen);
+    const region = overlayRegion(screen)!;
+    // Bottom content row is the tail line; column 7 lands on its 7th char.
+    const hit = resolveCell(screen, 7, region.bottom);
+    expect(hit).not.toBeNull();
+    expect(hit!.offset).toBe(6);
+    const above = resolveCell(screen, 1, region.bottom - 1);
+    expect(above).not.toBeNull();
+    expect(above!.sourceLineId).not.toBe(hit!.sourceLineId);
+    // The header is a bar hit region, not selectable text.
+    expect(resolveCell(screen, 1, region.top)).toBeNull();
+  });
+
+  it("selecting overlay text copies the overlay's body, not transcript", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "transcript line" });
+    screen.openBtwOverlay({ height: 5 });
+    screen.setBtwOverlayContent(["first aside", "second aside"].map(plain));
+    paint(screen);
+    const region = overlayRegion(screen)!;
+    const from = resolveCell(screen, 1, region.bottom - 1)!;
+    const to = resolveCell(screen, 7, region.bottom)!;
+    screen.setSelection(from, to);
+    expect(screen.getSelectionText()).toBe("first aside\nsecond");
+  });
+
+  it("closing the overlay drops a selection anchored inside it", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    screen.setBtwOverlayContent(["first aside", "second aside"].map(plain));
+    paint(screen);
+    const region = overlayRegion(screen)!;
+    screen.setSelection(
+      resolveCell(screen, 1, region.bottom)!,
+      resolveCell(screen, 7, region.bottom)!,
+    );
+    expect(screen.getSelectionText()).toBe("second");
+    screen.closeBtwOverlay();
+    expect(screen.getSelectionText()).toBe("");
+  });
+
+  it("a streaming re-render of the selected lines drops the selection", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    screen.setBtwOverlayContent([plain("partial text")]);
+    paint(screen);
+    const region = overlayRegion(screen)!;
+    screen.setSelection(
+      resolveCell(screen, 1, region.bottom)!,
+      resolveCell(screen, 8, region.bottom)!,
+    );
+    expect(screen.getSelectionText()).toBe("partial");
+    // Re-parse replaces the line object, exactly as the overlay buffer does.
+    screen.setBtwOverlayContent([plain("partial text, now longer")]);
+    expect(screen.getSelectionText()).toBe("");
+  });
+
+  it("dragging inside the pane doesn't autoscroll the transcript", () => {
+    const { screen, region } = scrolledOverlay();
+    // Autoscroll only arms when there's somewhere to scroll to, so the
+    // transcript needs content and a non-zero offset.
+    for (let i = 0; i < 60; i++) {
+      screen.appendLine({ body: `transcript-${i}` });
+    }
+    screen.scrollBy(3);
+    expect(
+      (screen as unknown as { scrollOffset: number }).scrollOffset,
+    ).toBeGreaterThan(0);
+    const s = screen as unknown as {
+      inAppSelectionEnabled: boolean;
+      selectionAnchor: { sourceLineId: number; offset: number } | null;
+      handleSelectionDrag: (cell: { x: number; y: number }) => void;
+      autoscrollTimer: NodeJS.Timeout | null;
+    };
+    s.inAppSelectionEnabled = true;
+    s.selectionAnchor = resolveCell(screen, 1, region.bottom - 1);
+    expect(s.selectionAnchor).not.toBeNull();
+    // Bottom overlay row: the transcript's "pointer on the bottom edge"
+    // test would match it on row number alone.
+    s.handleSelectionDrag({ x: 5, y: region.bottom });
+    expect(s.autoscrollTimer).toBeNull();
+  });
+
   it("a fresh /btw resets the scroll to the tail", () => {
     const { screen, region } = scrolledOverlay();
     wheel(screen, "UP", region.top + 1);

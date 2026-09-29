@@ -712,6 +712,14 @@ export class Screen {
   private lineIds = new WeakMap<FormattedLine, number>();
   private wrapCache = new Map<number, FormattedLine[]>();
   private wrapCacheWidth = 0;
+  // Lines that get an id (so their wrapped chunks land in wrapOrigin and
+  // are therefore selectable) but must NOT enter wrapCache. The btw
+  // overlay wraps at term.width while the transcript wraps at
+  // contentWidth(); wrapCache is keyed by id at a single wrapCacheWidth,
+  // so sharing it across the two widths would either serve stale chunks
+  // or flush the whole transcript cache on every paint. The overlay is
+  // bounded by btwOverlayMaxHeight, so re-wrapping it each paint is cheap.
+  private uncachedWrap = new WeakSet<FormattedLine>();
   // For each wrapped chunk (produced by wrapOne), record the source
   // line's id and the col offset where this chunk starts in the source
   // body. Used by the active-match highlight in scrollback search to
@@ -2961,7 +2969,7 @@ export class Screen {
     // block sits at a low index but carries high ids, so an id-range scan
     // would pull in unrelated lines and miss selected ones.
     for (let i = ext.loIdx; i <= ext.hiIdx; i++) {
-      const line = this.lines[i];
+      const line = this.displayLineAt(i);
       if (!line) {
         continue;
       }
@@ -3033,15 +3041,15 @@ export class Screen {
     // against the last row actually painted, not the last array slot.
     let lastVisible = -1;
     for (let i = hiIdx; i >= loIdx; i--) {
-      const line = this.lines[i];
-      if (line && !this.isHiddenLine(line)) {
+      const line = this.displayLineAt(i);
+      if (line && !this.isHiddenDisplayLine(i, line)) {
         lastVisible = i;
         break;
       }
     }
     for (let i = loIdx; i <= hiIdx; i++) {
-      const line = this.lines[i];
-      if (!line || this.isHiddenLine(line)) {
+      const line = this.displayLineAt(i);
+      if (!line || this.isHiddenDisplayLine(i, line)) {
         continue;
       }
       const id = this.lineIds.get(line);
@@ -3138,7 +3146,7 @@ export class Screen {
     if (idx === -1) {
       return null;
     }
-    return this.lines[idx]?.body ?? null;
+    return this.displayLineAt(idx)?.body ?? null;
   }
 
   // Pushed by the app each onKey tick to reflect prompt-history
@@ -3642,6 +3650,7 @@ export class Screen {
     this.btwOverlayOpen = true;
     this.btwOverlayMaxHeight = maxHeight;
     this.focusedPane = "btw";
+    this.invalidateSelectionIfTouches(this.btwOverlayLines);
     this.btwOverlayLines = [];
     this.btwOverlayScroll = 0;
     this.btwOverlaySessionId = null;
@@ -3698,7 +3707,25 @@ export class Screen {
       }
     }
     const prevLen = this.btwOverlayLines.length;
+    const prev = this.btwOverlayLines;
     this.btwOverlayLines = [...lines];
+    // Overlay lines join the same id space as the transcript so their
+    // wrapped chunks get wrapOrigin entries — which is what makes them
+    // resolvable by the selection gesture. Ids are per-object and the
+    // overlay buffer always splices in FRESH FormattedLines (it never
+    // mutates one in place), so an id never outlives the body it was
+    // assigned to. Lines that survive the splice keep their id, and with
+    // it any selection anchored on them.
+    for (const line of this.btwOverlayLines) {
+      if (this.lineIds.get(line) === undefined) {
+        this.trackLine(line);
+        this.uncachedWrap.add(line);
+      }
+    }
+    // A streaming re-parse replaces the lines the selection pointed at;
+    // same rule as the transcript's in-place rewrites.
+    const kept = new Set(this.btwOverlayLines);
+    this.invalidateSelectionIfTouches(prev.filter((l) => !kept.has(l)));
     // Scrolled away from the tail: shift the window by the rows the append
     // added so the user keeps looking at the same content while the fork
     // streams, mirroring adjustScrollForRowChange on the transcript. Only
@@ -3742,6 +3769,10 @@ export class Screen {
       return;
     }
     this.btwOverlayOpen = false;
+    // Content survives the close, but the rows don't: a selection anchored
+    // in the pane would otherwise sit in a surface nobody can see (and
+    // still copy on the next finalize).
+    this.invalidateSelectionIfTouches(this.btwOverlayLines);
     // Stale until the next paint proves otherwise — a wheel notch landing
     // in the gap before that repaint must not still find the pane here.
     this.btwOverlayRegion = null;
@@ -4561,6 +4592,13 @@ export class Screen {
     // the last row reveals newer content. If the drag is between the
     // edges, cancel any in-flight ticker.
     const visibleRows = this.scrollbackVisibleRows();
+    // Every overlay row sits past visibleRows, so without this a drag
+    // anywhere in the pane reads as "pointer parked on the bottom edge"
+    // and scrolls the transcript out from under the selection.
+    if (this.isBtwOverlayCell(cell.y)) {
+      this.stopAutoscroll();
+      return;
+    }
     if (cell.y <= 1 && this.scrollOffset < this.maxScrollOffset()) {
       this.startAutoscroll(cell, 1);
     } else if (
@@ -5705,13 +5743,47 @@ export class Screen {
     }
   }
 
+  // The virtual sequence the selection model orders itself against:
+  // scrollback first, then the btw overlay's lines. That IS their
+  // on-screen order (the overlay pane sits below the transcript band),
+  // so a drag that crosses from one into the other stays monotonic and
+  // needs no special case. The overlay contributes nothing while closed
+  // — its buffer is retained across close/reopen, and lines nobody can
+  // see must not be selectable or land in the clipboard.
+  private displayLineCount(): number {
+    return this.lines.length + this.displayOverlayCount();
+  }
+
+  private displayOverlayCount(): number {
+    return this.btwOverlayOpen ? this.btwOverlayLines.length : 0;
+  }
+
+  private displayLineAt(i: number): FormattedLine | undefined {
+    if (i < this.lines.length) {
+      return this.lines[i];
+    }
+    if (!this.btwOverlayOpen) {
+      return undefined;
+    }
+    return this.btwOverlayLines[i - this.lines.length];
+  }
+
+  // isHiddenLine encodes scrollback-only rules (hideThoughts, folded
+  // runs). The overlay paints its buffer verbatim — wrapBtwWindow has no
+  // thought filter — so an overlay line is always on screen.
+  private isHiddenDisplayLine(i: number, line: FormattedLine): boolean {
+    return i < this.lines.length && this.isHiddenLine(line);
+  }
+
   // Reverse lookup: source line id → FormattedLine. O(n) over the
-  // scrollback array; only used by infrequent gesture paths (double-
+  // display sequence; only used by infrequent gesture paths (double-
   // click word snap, selection-text extraction), so a Set/Map mirror
   // would be overkill here.
   private lineById(sourceLineId: number): FormattedLine | null {
-    for (const line of this.lines) {
-      if (this.lineIds.get(line) === sourceLineId) {
+    const n = this.displayLineCount();
+    for (let i = 0; i < n; i++) {
+      const line = this.displayLineAt(i);
+      if (line && this.lineIds.get(line) === sourceLineId) {
         return line;
       }
     }
@@ -5722,8 +5794,9 @@ export class Screen {
   // to order/bound the selection by on-screen position rather than by raw
   // id (ids are reassigned on re-render and aren't monotonic with order).
   private lineIndexById(sourceLineId: number): number {
-    for (let i = 0; i < this.lines.length; i++) {
-      const line = this.lines[i];
+    const n = this.displayLineCount();
+    for (let i = 0; i < n; i++) {
+      const line = this.displayLineAt(i);
       if (line && this.lineIds.get(line) === sourceLineId) {
         return i;
       }
@@ -5959,6 +6032,14 @@ export class Screen {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       return null;
     }
+    // The overlay's rows are deducted from scrollbackVisibleRows(), so
+    // they fall outside the band the transcript walk below considers.
+    // Resolve them against the overlay's own wrapped window first —
+    // otherwise every gesture over the pane dies on a null anchor.
+    const overlayHit = this.resolveBtwOverlayCell(x, y);
+    if (overlayHit !== null) {
+      return overlayHit;
+    }
     const w = this.contentWidth();
     const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
@@ -5989,6 +6070,18 @@ export class Screen {
     if (!chunk) {
       return null;
     }
+    return this.resolveChunkColumn(chunk, x);
+  }
+
+  // Column half of cell→source resolution, shared by the transcript and
+  // the btw overlay: given the wrapped chunk painted on the clicked row
+  // and the 1-based column, walk back to a {sourceLineId, offset} in the
+  // chunk's source line. Requires a wrapOrigin entry, which wrapOne only
+  // records for lines carrying an id.
+  private resolveChunkColumn(
+    chunk: FormattedLine,
+    x: number,
+  ): { sourceLineId: number; offset: number } | null {
     const origin = this.wrapOrigin.get(chunk);
     if (!origin) {
       return null;
@@ -9263,6 +9356,37 @@ export class Screen {
     return true;
   }
 
+  // Resolve a cell inside the overlay's CONTENT rows (the header is not
+  // selectable — it's a bar hit region) to a position in the overlay's
+  // line buffer. Mirrors drawBtwOverlay's row arithmetic exactly, window
+  // and bottom-anchored index alike, so the chunk resolved here is the
+  // chunk the user clicked on. Returns null for any other cell, which is
+  // what lets resolveCellToSource fall through to the transcript.
+  private resolveBtwOverlayCell(
+    x: number,
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    const region = this.btwOverlayRegion;
+    if (!this.btwOverlayOpen || region === null || region.contentRows <= 0) {
+      return null;
+    }
+    const rowIdx = y - (region.top + 1);
+    if (rowIdx < 0 || rowIdx >= region.contentRows) {
+      return null;
+    }
+    const w = this.term.width;
+    if (x < 1 || x > w) {
+      return null;
+    }
+    const win = this.wrapBtwWindow(w, region.contentRows, this.btwOverlayScroll);
+    const lineIdx = win.rows.length - region.contentRows + rowIdx;
+    const chunk = lineIdx >= 0 ? win.rows[lineIdx] : undefined;
+    if (!chunk) {
+      return null;
+    }
+    return this.resolveChunkColumn(chunk, x);
+  }
+
   // True when the cell falls inside the overlay pane, header row included —
   // the header is the pane's top separator, and a wheel notch that lands on
   // it should scroll the pane rather than the transcript above.
@@ -9325,10 +9449,15 @@ export class Screen {
       const row = headerRow + 1 + i;
       const lineIdx = wrappedTail.length - contentRows + i;
       const line = lineIdx >= 0 ? wrappedTail[lineIdx] : undefined;
-      const sig = formattedLineSig(`btw|c${i}`, w, line);
+      // Selection highlight, same channel the transcript uses. It has to
+      // be in the signature too or a row whose only change is the
+      // highlight would be skipped as unchanged. drawScrollback runs
+      // first each paint and leaves selectionRenderBounds primed for us.
+      const selRange = line ? this.selectionRangeForChunk(line) : null;
+      const sig = formattedLineSig(`btw|c${i}`, w, line, null, null, selRange);
       this.paintRow(row, sig, () => {
         if (line) {
-          this.writeFormattedLine(line, w);
+          this.writeFormattedLine(line, w, null, 0, selRange);
         } else {
           this.term.noFormat(" ".repeat(w));
         }
@@ -9416,8 +9545,9 @@ export class Screen {
 
   private wrapOne(line: FormattedLine, width: number): FormattedLine[] {
     const id = this.lineIds.get(line);
-    if (id !== undefined) {
-      const cached = this.wrapCache.get(id);
+    const cacheable = id !== undefined && !this.uncachedWrap.has(line);
+    if (cacheable) {
+      const cached = this.wrapCache.get(id!);
       if (cached) {
         return cached;
       }
@@ -9613,8 +9743,8 @@ export class Screen {
       }
       wrapped.push(wrappedLine);
     }
-    if (id !== undefined) {
-      this.wrapCache.set(id, wrapped);
+    if (cacheable) {
+      this.wrapCache.set(id!, wrapped);
     }
     return wrapped;
   }
