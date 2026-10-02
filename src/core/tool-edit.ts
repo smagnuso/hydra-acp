@@ -118,3 +118,98 @@ export function locationPaths(locations: unknown): string[] {
 export function firstLocationPath(locations: unknown): string | undefined {
   return locationPaths(locations)[0];
 }
+
+export interface PatchedFile {
+  path: string;
+  added?: number;
+  removed?: number;
+  // Unified diff for this file: inline, or a blob ref in references mode.
+  patch?: string;
+  patchRef?: { hash: string; bytes: number };
+}
+
+// Rebuild old/new text from a unified diff's hunks. Hunks are concatenated,
+// so unchanged lines between them are absent; the line diff downstream
+// still aligns the shared context.
+export function parseUnifiedPatch(patch: string): {
+  oldText: string;
+  newText: string;
+} {
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line.startsWith("\\")) {
+      continue;
+    }
+    const text = line.slice(1);
+    if (line.startsWith("-")) {
+      oldLines.push(text);
+    } else if (line.startsWith("+")) {
+      newLines.push(text);
+    } else if (line.startsWith(" ")) {
+      oldLines.push(text);
+      newLines.push(text);
+    }
+  }
+  return {
+    oldText: oldLines.length > 0 ? oldLines.join("\n") + "\n" : "",
+    newText: newLines.length > 0 ? newLines.join("\n") + "\n" : "",
+  };
+}
+
+// Files touched by a multi-file patch tool (opencode's apply_patch, sent
+// for OpenAI models). It declares kind "edit" but carries no diff block and
+// no locations; the only record of what changed is the per-file summary in
+// `rawOutput.metadata.files[]` on the completed update.
+export function extractPatchedFiles(update: unknown): PatchedFile[] {
+  if (update === null || typeof update !== "object") {
+    return [];
+  }
+  const rawOutput = (update as { rawOutput?: unknown }).rawOutput;
+  if (rawOutput === null || typeof rawOutput !== "object") {
+    return [];
+  }
+  const metadata = (rawOutput as { metadata?: unknown }).metadata;
+  if (metadata === null || typeof metadata !== "object") {
+    return [];
+  }
+  const files = (metadata as { files?: unknown }).files;
+  if (!Array.isArray(files)) {
+    return [];
+  }
+  const out: PatchedFile[] = [];
+  for (const entry of files) {
+    if (entry === null || typeof entry !== "object") {
+      continue;
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.filePath !== "string" || e.filePath.length === 0) {
+      continue;
+    }
+    const patch = e.patch;
+    const ref =
+      patch !== null && typeof patch === "object"
+        ? (patch as { __hydraBlob?: unknown; bytes?: unknown })
+        : undefined;
+    out.push({
+      path: e.filePath,
+      ...(typeof e.additions === "number" ? { added: e.additions } : {}),
+      ...(typeof e.deletions === "number" ? { removed: e.deletions } : {}),
+      ...(typeof patch === "string" ? { patch } : {}),
+      ...(typeof ref?.__hydraBlob === "string"
+        ? {
+            patchRef: {
+              hash: ref.__hydraBlob,
+              bytes: typeof ref.bytes === "number" ? ref.bytes : 0,
+            },
+          }
+        : {}),
+    });
+  }
+  return out;
+}

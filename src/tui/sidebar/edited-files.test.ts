@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collapseEditedFiles,
   editedFileFromTool,
+  editedFilesFromTool,
   isFileMutatingTool,
 } from "./edited-files.js";
 import type { SidebarEditedFile } from "./types.js";
@@ -329,5 +330,49 @@ describe("paths that arrive on a later update", () => {
     // A later update with locations: [] must not clear it.
     merge(st, { status: "completed", locations: [] });
     expect(editedFileFromTool(st, undefined, REPO)!.path).toBe(at("src", "a.ts"));
+  });
+});
+
+describe("editedFilesFromTool", () => {
+  it("expands a multi-file patch into one entry per file", () => {
+    const entries = editedFilesFromTool(
+      state({
+        rawKind: "edit",
+        patchedFiles: [
+          { path: at("a.ts"), added: 3, removed: 1 },
+          { path: "b.ts", added: 2, removed: 0 },
+        ],
+      }),
+      undefined,
+      REPO,
+    );
+    expect(entries).toEqual([
+      { path: at("a.ts"), added: 3, removed: 1 },
+      { path: at("b.ts"), added: 2, removed: 0 },
+    ]);
+  });
+
+  it("ignores patched files until the call completes", () => {
+    expect(
+      editedFilesFromTool(
+        state({
+          rawKind: "edit",
+          status: "in_progress",
+          patchedFiles: [{ path: "a.ts" }],
+        }),
+        undefined,
+        REPO,
+      ),
+    ).toEqual([]);
+  });
+
+  it("falls back to the single-file rules", () => {
+    expect(
+      editedFilesFromTool(
+        state({ rawKind: "edit", locations: [{ path: "a.ts" }] }),
+        undefined,
+        REPO,
+      ),
+    ).toEqual([{ path: at("a.ts"), added: undefined, removed: undefined }]);
   });
 });

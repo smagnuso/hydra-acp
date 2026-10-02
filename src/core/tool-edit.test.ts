@@ -3,6 +3,8 @@ import {
   FILE_EDITED_EVENT_KIND,
   FILE_MUTATING_KINDS,
   ToolKindTracker,
+  extractPatchedFiles,
+  parseUnifiedPatch,
   firstLocationPath,
   isFileMutatingKind,
   locationPaths,
@@ -119,5 +121,80 @@ describe("locationPaths", () => {
     expect(firstLocationPath([{ path: "" }, { path: "/b.ts" }])).toBe("/b.ts");
     expect(firstLocationPath([])).toBeUndefined();
     expect(firstLocationPath(undefined)).toBeUndefined();
+  });
+});
+
+describe("extractPatchedFiles", () => {
+  it("reads per-file summaries from rawOutput.metadata.files", () => {
+    const update = {
+      rawOutput: {
+        metadata: {
+          files: [
+            { filePath: "/r/a.ts", type: "update", additions: 68, deletions: 2 },
+            { filePath: "/r/b.ts", type: "add" },
+            { relativePath: "no-path" },
+          ],
+        },
+      },
+    };
+    expect(extractPatchedFiles(update)).toEqual([
+      { path: "/r/a.ts", added: 68, removed: 2 },
+      { path: "/r/b.ts" },
+    ]);
+  });
+
+  it("tolerates unrelated shapes", () => {
+    for (const u of [undefined, null, {}, { rawOutput: "x" }, { rawOutput: { metadata: { files: 3 } } }]) {
+      expect(extractPatchedFiles(u)).toEqual([]);
+    }
+  });
+});
+
+describe("parseUnifiedPatch", () => {
+  it("rebuilds old and new text from hunks, skipping headers", () => {
+    const patch = [
+      "Index: /r/a.ts",
+      "===================================================================",
+      "--- /r/a.ts",
+      "+++ /r/a.ts",
+      "@@ -1,3 +1,3 @@",
+      " keep",
+      "-old line",
+      "+new line",
+      "\\ No newline at end of file",
+      "@@ -10,2 +10,3 @@",
+      " tail",
+      "+added",
+    ].join("\n");
+    expect(parseUnifiedPatch(patch)).toEqual({
+      oldText: "keep\nold line\ntail\n",
+      newText: "keep\nnew line\ntail\nadded\n",
+    });
+  });
+
+  it("returns empty text for a patch with no hunks", () => {
+    expect(parseUnifiedPatch("--- a\n+++ b")).toEqual({
+      oldText: "",
+      newText: "",
+    });
+  });
+});
+
+describe("extractPatchedFiles patch field", () => {
+  it("captures an inline patch or a blob ref", () => {
+    const update = {
+      rawOutput: {
+        metadata: {
+          files: [
+            { filePath: "/r/a.ts", patch: "@@\n+x" },
+            { filePath: "/r/b.ts", patch: { __hydraBlob: "abc", bytes: 9 } },
+          ],
+        },
+      },
+    };
+    expect(extractPatchedFiles(update)).toEqual([
+      { path: "/r/a.ts", patch: "@@\n+x" },
+      { path: "/r/b.ts", patchRef: { hash: "abc", bytes: 9 } },
+    ]);
   });
 });

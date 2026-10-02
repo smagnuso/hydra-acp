@@ -17,7 +17,11 @@
 //    life of the session and collapses by path at render time.
 
 import { resolve as resolvePath } from "node:path";
-import { firstLocationPath, isFileMutatingKind } from "../../core/tool-edit.js";
+import {
+  extractPatchedFiles,
+  firstLocationPath,
+  isFileMutatingKind,
+} from "../../core/tool-edit.js";
 import { countDiffChanges } from "../format.js";
 import type { ToolLineState } from "../format.js";
 import type { EditDiff } from "../../core/render-update.js";
@@ -70,6 +74,25 @@ export function editedFileFromTool(
     added: changes?.added,
     removed: changes?.removed,
   };
+}
+
+// All files one tool call contributes. Same rules as editedFileFromTool,
+// plus multi-file patch calls (apply_patch), which name every file in
+// `patchedFiles` instead of a single diff or location.
+export function editedFilesFromTool(
+  state: Pick<ToolLineState, "rawKind" | "status" | "locations" | "patchedFiles">,
+  diff: EditDiff | undefined,
+  cwd: string | null,
+): SidebarEditedFile[] {
+  if (state.status === "completed" && state.patchedFiles !== undefined) {
+    return state.patchedFiles.map((f) => ({
+      path: cwd === null ? f.path : resolvePath(cwd, f.path),
+      added: f.added,
+      removed: f.removed,
+    }));
+  }
+  const single = editedFileFromTool(state, diff, cwd);
+  return single === null ? [] : [single];
 }
 
 // Collapse per-tool-call entries into one row per file, summing line counts.

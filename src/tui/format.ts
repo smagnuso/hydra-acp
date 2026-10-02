@@ -17,6 +17,7 @@ import {
 } from "./theme/index.js";
 import { thisMachine } from "../core/machine.js";
 import { shortenHomePath } from "../core/paths.js";
+import type { PatchedFile } from "../core/tool-edit.js";
 import {
   sanitizeSingleLine,
   sanitizeWireText,
@@ -1759,6 +1760,10 @@ export interface ToolLineState {
   // bash call in the repo root reports the directory, which is how the
   // sidebar's edited-files list ended up showing "cli".
   rawKind?: string;
+  // Per-file summary from a multi-file patch tool (apply_patch), which
+  // sends no diff block or locations. Latest-wins; only the completion
+  // update carries it.
+  patchedFiles?: PatchedFile[];
   // The title from the initial `tool_call` event — usually the tool's
   // generic name (e.g. "Terminal", "Read File").
   initialTitle: string;
@@ -2124,10 +2129,16 @@ export function formatEditDiffBlock(
   // newRef carry the blob sha256 + byte size). We can't compute +/- counts
   // without the content, so the collapsed mark shows an approximate size
   // hint instead; the app fetches the body when the diff is expanded.
-  const deferred = diff.oldRef !== undefined || diff.newRef !== undefined;
+  const deferred =
+    diff.oldRef !== undefined ||
+    diff.newRef !== undefined ||
+    diff.patchRef !== undefined;
   let summary: string;
   if (deferred) {
-    const bytes = (diff.oldRef?.bytes ?? 0) + (diff.newRef?.bytes ?? 0);
+    const bytes =
+      (diff.oldRef?.bytes ?? 0) +
+      (diff.newRef?.bytes ?? 0) +
+      (diff.patchRef?.bytes ?? 0);
     summary = ` (~${formatDiffBytes(bytes)})`;
   } else {
     // Summarize the change as (+added -removed) so the one-line mark conveys

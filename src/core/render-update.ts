@@ -4,6 +4,7 @@
 import { posix as posixPath } from "node:path";
 import stripAnsi from "strip-ansi";
 import { shortenHomePath } from "./paths.js";
+import { parseUnifiedPatch, type PatchedFile } from "./tool-edit.js";
 
 import { getParentToolUseId, getWorkerTaskId } from "../tui/worker-id.js";
 import type { Attachment } from "../tui/input.js";
@@ -53,6 +54,23 @@ export interface EditDiff {
   // the real content on demand (e.g. when the user expands the diff).
   oldRef?: { hash: string; bytes: number };
   newRef?: { hash: string; bytes: number };
+  // Same idea for a patch tool's unified diff, which has to be fetched and
+  // parsed into oldText/newText before it can render.
+  patchRef?: { hash: string; bytes: number };
+}
+
+// One EditDiff per file a multi-file patch tool touched. Files whose patch
+// is missing yield no diff; a blob-ref patch yields a deferred one.
+export function patchedFileDiffs(files: PatchedFile[]): EditDiff[] {
+  const out: EditDiff[] = [];
+  for (const f of files) {
+    if (f.patch !== undefined) {
+      out.push({ path: f.path, ...parseUnifiedPatch(f.patch) });
+    } else if (f.patchRef !== undefined) {
+      out.push({ path: f.path, oldText: "", newText: "", patchRef: f.patchRef });
+    }
+  }
+  return out;
 }
 
 export type RenderEvent =

@@ -64,6 +64,7 @@ export {
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { parseForeignSessionId } from "../core/foreign-session-id.js";
 import { paths, shortenHomePath } from "../core/paths.js";
+import { extractPatchedFiles, parseUnifiedPatch } from "../core/tool-edit.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import { isGuardianReviewToolCall } from "../core/tool-noise.js";
 import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
@@ -214,6 +215,7 @@ import {
   extractToolResultSummary,
   mapUpdate,
   normalizeAdvertisedCommands,
+  patchedFileDiffs,
   sanitizeSingleLine,
   sanitizeWireText,
   type AvailableCommand,
@@ -307,7 +309,7 @@ import type {
 import { parseGitPorcelainV2 } from "./sidebar/git-status.js";
 import {
   collapseEditedFiles,
-  editedFileFromTool,
+  editedFilesFromTool,
 } from "./sidebar/edited-files.js";
 import { isRunningStatus, runningTools } from "./sidebar/running-tools.js";
 import { parseTodoWrite } from "./sidebar/todos.js";
@@ -8063,7 +8065,7 @@ async function runSession(
   // resolution — the deferred `toolContent: "references"` fetch lands well
   // after the call completes — an overwrite instead of a double count.
   // Cleared only by /clear, which is the user asking for a clean slate.
-  const sessionEditedByTool = new Map<string, SidebarEditedFile>();
+  const sessionEditedByTool = new Map<string, SidebarEditedFile[]>();
   // Latest todo list seen from a todowrite tool call. Latest-wins, not
   // accumulated: each call carries the COMPLETE list, so merging would
   // resurrect entries the agent has dropped.
@@ -8622,16 +8624,16 @@ async function runSession(
     if (state === undefined) {
       return;
     }
-    const entry = editedFileFromTool(
+    const entries = editedFilesFromTool(
       state,
       renderedEditDiffs.get(toolCallId) ?? state.editDiff,
       resolvedCwd,
     );
-    if (entry === null) {
+    if (entries.length === 0) {
       sessionEditedByTool.delete(toolCallId);
       return;
     }
-    sessionEditedByTool.set(toolCallId, entry);
+    sessionEditedByTool.set(toolCallId, entries);
   };
 
   const recordToolCall = (
@@ -8717,6 +8719,10 @@ async function runSession(
     // paths behave the same. Latest-wins: the count only arrives on the
     // completion update.
     if (rawUpdate !== undefined) {
+      const patched = extractPatchedFiles(rawUpdate);
+      if (patched.length > 0) {
+        state.patchedFiles = patched;
+      }
       const summary = extractToolResultSummary(rawUpdate);
       if (summary !== undefined) {
         state.resultSummary = summary;
@@ -8835,6 +8841,11 @@ async function runSession(
   // toggles it rapidly.
   const fetchingDiffs = new Set<string>();
 
+  const isDeferredDiff = (diff: EditDiff): boolean =>
+    diff.oldRef !== undefined ||
+    diff.newRef !== undefined ||
+    diff.patchRef !== undefined;
+
   // A diff delivered in references mode carries oldRef/newRef instead of
   // body text. Fetch the blob(s), splice the content in, and re-render the
   // block with the real diff.
@@ -8842,19 +8853,29 @@ async function runSession(
     if (fetchingDiffs.has(toolCallId)) {
       return;
     }
-    if (diff.oldRef === undefined && diff.newRef === undefined) {
+    if (!isDeferredDiff(diff)) {
       return;
     }
     fetchingDiffs.add(toolCallId);
     void (async () => {
-      const [oldText, newText] = await Promise.all([
+      let [oldText, newText] = await Promise.all([
         diff.oldRef ? fetchToolContent(diff.oldRef.hash) : Promise.resolve(diff.oldText),
         diff.newRef ? fetchToolContent(diff.newRef.hash) : Promise.resolve(diff.newText),
       ]);
+      let patchFailed = false;
+      if (diff.patchRef) {
+        const patch = await fetchToolContent(diff.patchRef.hash);
+        if (patch === null) {
+          patchFailed = true;
+        } else {
+          ({ oldText, newText } = parseUnifiedPatch(patch));
+        }
+      }
       // A required blob came back null → the fetch failed. Show an error
       // in place of the body but keep the diff deferred so a later click /
       // scroll-into-view retries, rather than silently collapsing to empty.
       const failed =
+        patchFailed ||
         (diff.oldRef !== undefined && oldText === null) ||
         (diff.newRef !== undefined && newText === null);
       if (failed) {
@@ -8944,7 +8965,7 @@ async function runSession(
       return;
     }
     screen.upsertLines(key, out);
-    if (mode === "diff" && (diff.oldRef !== undefined || diff.newRef !== undefined)) {
+    if (mode === "diff" && isDeferredDiff(diff)) {
       // Don't fetch yet — register for a "became visible" callback so the
       // body is pulled only when this diff is actually on screen (lazy even
       // in showFileUpdates="diff", where many diffs render off-screen).
@@ -8961,18 +8982,33 @@ async function runSession(
     }
     const id = key.slice("editdiff:".length);
     const diff = renderedEditDiffs.get(id);
-    if (diff && (diff.oldRef !== undefined || diff.newRef !== undefined)) {
+    if (diff && isDeferredDiff(diff)) {
       resolveDeferredDiff(id, diff);
     }
   };
 
+  // A multi-file patch renders one block per file, keyed by a derived id so
+  // each block keeps its own click override and retained payload.
   const maybeRenderEditDiff = (toolCallId: string): void => {
+    const state = toolStates.get(toolCallId);
+    renderEditDiffFor(toolCallId, state?.editDiff, state?.status);
+    if (state?.patchedFiles !== undefined) {
+      patchedFileDiffs(state.patchedFiles).forEach((diff, i) => {
+        renderEditDiffFor(`${toolCallId}#${i}`, diff, state.status);
+      });
+    }
+  };
+
+  const renderEditDiffFor = (
+    toolCallId: string,
+    editDiff: EditDiff | undefined,
+    status: string | undefined,
+  ): void => {
     const key = `editdiff:${toolCallId}`;
     // Decide the mode this id should render at; null means "show nothing".
     const globalMode = viewPrefs.showFileUpdates;
-    const state = toolStates.get(toolCallId);
     let mode: "edit" | "diff" | null;
-    if (globalMode === "none" || !state?.editDiff || state.status !== "completed") {
+    if (globalMode === "none" || !editDiff || status !== "completed") {
       mode = null;
     } else {
       // A per-block click override forces this id's mode; otherwise the
@@ -8992,7 +9028,7 @@ async function runSession(
       screen.removeKey(key);
       return;
     }
-    const diff = state!.editDiff!;
+    const diff = editDiff!;
     // Remember the payload so a later ^O mode toggle can re-render this
     // diff even after the turn boundary wipes toolStates/toolCallOrder.
     renderedEditDiffs.set(toolCallId, diff);
@@ -9501,7 +9537,7 @@ async function runSession(
   };
 
   const editedFilesForSidebar = (): SidebarEditedFile[] =>
-    collapseEditedFiles(sessionEditedByTool.values());
+    collapseEditedFiles([...sessionEditedByTool.values()].flat());
 
   // Route a left-click on a keyed scrollback block to a per-block
   // expand/collapse toggle. Only the clicked block changes; the global ^O
