@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   isClaudeSelfCompactionUpdate,
   isCodexSelfCompactionUpdate,
+  isContextUsageDrop,
   isSelfCompactionUpdate,
+  OpencodeSummaryDetector,
 } from "./context-compaction-signal.js";
 
 describe("isCodexSelfCompactionUpdate", () => {
@@ -141,5 +143,65 @@ describe("isSelfCompactionUpdate", () => {
         content: { type: "text", text: "Hello." },
       }),
     ).toBe(false);
+  });
+});
+
+describe("isContextUsageDrop", () => {
+  it("flags a fall of more than half from a substantial prior figure", () => {
+    expect(isContextUsageDrop(898_002, 54_220)).toBe(true);
+  });
+
+  it("ignores a modest fall", () => {
+    expect(isContextUsageDrop(100_000, 60_000)).toBe(false);
+  });
+
+  it("ignores a drop to zero (cleared context)", () => {
+    expect(isContextUsageDrop(100_000, 0)).toBe(false);
+  });
+
+  it("ignores small priors and a missing prior", () => {
+    expect(isContextUsageDrop(10_000, 1_000)).toBe(false);
+    expect(isContextUsageDrop(undefined, 50_000)).toBe(false);
+  });
+});
+
+describe("OpencodeSummaryDetector", () => {
+  const chunk = (messageId: string | undefined, text: string) => ({
+    sessionUpdate: "agent_message_chunk",
+    ...(messageId ? { messageId } : {}),
+    content: { type: "text", text },
+  });
+
+  it("fires once when both headings have streamed in", () => {
+    const d = new OpencodeSummaryDetector();
+    expect(d.feed(chunk("m1", "##"))).toBe(false);
+    expect(d.feed(chunk("m1", " Objective"))).toBe(false);
+    expect(d.feed(chunk("m1", "\n- goal\n\n## Important"))).toBe(false);
+    expect(d.feed(chunk("m1", " Details\n- x"))).toBe(true);
+    expect(d.feed(chunk("m1", " more"))).toBe(false);
+  });
+
+  it("does not fire for ordinary prose", () => {
+    const d = new OpencodeSummaryDetector();
+    expect(d.feed(chunk("m1", "Here is the fix"))).toBe(false);
+    expect(d.feed(chunk("m1", "\n## Important Details\n"))).toBe(false);
+  });
+
+  it("does not fire for a message that has only the first heading", () => {
+    const d = new OpencodeSummaryDetector();
+    expect(d.feed(chunk("m1", "## Objective\n- a\n"))).toBe(false);
+    expect(d.feed(chunk("m2", "unrelated"))).toBe(false);
+  });
+
+  it("resets between messages and ignores other update kinds", () => {
+    const d = new OpencodeSummaryDetector();
+    expect(d.feed({ sessionUpdate: "tool_call" })).toBe(false);
+    expect(d.feed(chunk("m1", "## Objective\n## Important Details\n"))).toBe(true);
+    expect(d.feed(chunk("m2", "## Objective\n## Important Details\n"))).toBe(true);
+  });
+
+  it("ignores chunks without a messageId", () => {
+    const d = new OpencodeSummaryDetector();
+    expect(d.feed(chunk(undefined, "## Objective\n## Important Details\n"))).toBe(false);
   });
 });

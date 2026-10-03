@@ -78,7 +78,11 @@ import {
 } from "./model-verb.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
-import { isSelfCompactionUpdate } from "./context-compaction-signal.js";
+import {
+  isContextUsageDrop,
+  isSelfCompactionUpdate,
+  OpencodeSummaryDetector,
+} from "./context-compaction-signal.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
 import {
@@ -844,6 +848,7 @@ export class Session {
   // (a slash command and a REST-driven uncompact, say), and the second
   // swap would then rotate the upstream out from under the first.
   private swapInFlight = false;
+  private readonly opencodeSummary = new OpencodeSummaryDetector();
   // True while applyModeChange / applyModelChange is executing. Guards
   // isQuiescedForSwap so a mode/model change that arrives mid-prompt
   // (from the agent's current_mode_update / current_model_update) does
@@ -1894,16 +1899,12 @@ export class Session {
     // "nothing compacted yet". Side effect only; the update itself still
     // falls through to the normal record/broadcast below so it stays
     // visible in history.
+    const selfUpdate = (envelope as { update?: Record<string, unknown> }).update;
     if (
-      isSelfCompactionUpdate(
-        (envelope as { update?: Record<string, unknown> }).update,
-      )
+      isSelfCompactionUpdate(selfUpdate) ||
+      (this.agentId === "opencode" && this.opencodeSummary.feed(selfUpdate))
     ) {
-      void this.armRecallInPlace().catch((err) => {
-        this.logger?.warn(
-          `armRecallInPlace failed: ${(err as Error).message}`,
-        );
-      });
+      this.armRecallFromSelfCompaction();
     }
     // Snapshot interceptors and broadcast run on the post-chain envelope.
     const agentCmds = extractAdvertisedCommands(envelope);
@@ -1961,6 +1962,12 @@ export class Session {
   // search/range/tool_calls call returns real results instead of
   // "nothing compacted yet". No synopsis, no LLM call, no swap, no
   // respawn.
+  private armRecallFromSelfCompaction(): void {
+    void this.armRecallInPlace().catch((err) => {
+      this.logger?.warn(`armRecallInPlace failed: ${(err as Error).message}`);
+    });
+  }
+
   private async armRecallInPlace(): Promise<void> {
     if (!this.historyStore) {
       return;
@@ -6637,6 +6644,13 @@ export class Session {
     }
     const next: UsageSnapshot = { ...(this._currentUsage ?? {}) };
     let changed = false;
+    if (
+      typeof update.used === "number" &&
+      !this.swapInFlight &&
+      isContextUsageDrop(next.used, update.used)
+    ) {
+      this.armRecallFromSelfCompaction();
+    }
     if (typeof update.used === "number" && next.used !== update.used) {
       next.used = update.used;
       changed = true;

@@ -19,12 +19,18 @@
 // as a fixed-string agent_message_chunk, "\n\nCompacting completed." —
 // hardcoded in the wrapper's own code, not model-generated, so an exact
 // match is safe. A self-triggered compaction there surfaces only as a
-// usage_update discontinuity (no text, no structured marker), which this
-// module deliberately does not try to catch: that's indistinguishable
-// from hydra's own char-estimate noise and not worth a heuristic.
+// usage_update discontinuity (no text, no structured marker), caught by
+// isContextUsageDrop.
 //
-// opencode: nothing to check for. Its ACP bridge (acp/event.ts) never
-// forwards the internal session.compacted event at all.
+// opencode: its ACP bridge never forwards the internal session.compacted
+// event, but the summary it wrote streams as an ordinary mid-turn
+// agent_message_chunk under its own messageId, always shaped
+// "## Objective\n...## Important Details\n...". Matching both headings in one
+// message identifies it; see OpencodeSummaryDetector.
+//
+// Usage discontinuity: any agent that reports `used` shows a large fall when
+// it compacts itself. isContextUsageDrop is the generic fallback; the caller
+// must exclude drops hydra caused (swap in flight) itself.
 
 const CODEX_COMPACTION_TITLE = "Compact conversation";
 const CODEX_COMPACTION_META_KEY = "contextCompaction";
@@ -77,4 +83,69 @@ export function isSelfCompactionUpdate(
   return (
     isCodexSelfCompactionUpdate(update) || isClaudeSelfCompactionUpdate(update)
   );
+}
+
+const OPENCODE_SUMMARY_HEADINGS = ["## Objective\n", "## Important Details\n"];
+const OPENCODE_SUMMARY_MAX_BUFFER = 8_000;
+const USAGE_DROP_MIN_PRIOR = 20_000;
+const USAGE_DROP_RATIO = 0.5;
+
+// True when `used` fell by more than half from a substantial prior figure
+// to a nonzero one. Zero is excluded: that reads as a cleared context, not
+// a compaction.
+export function isContextUsageDrop(prev: number | undefined, next: number): boolean {
+  return (
+    prev !== undefined &&
+    prev >= USAGE_DROP_MIN_PRIOR &&
+    next > 0 &&
+    next < prev * USAGE_DROP_RATIO
+  );
+}
+
+// Stateful: the summary arrives as many chunks, so each new messageId's text
+// is buffered while it still looks like the start of a summary and the
+// detector fires once, when both headings have been seen.
+export class OpencodeSummaryDetector {
+  private messageId: string | undefined;
+  private buffer = "";
+  private settled = false;
+
+  // True exactly once per summary message, on the chunk that completes it.
+  feed(update: Record<string, unknown> | undefined): boolean {
+    if (!update || update.sessionUpdate !== "agent_message_chunk") {
+      return false;
+    }
+    const content = update.content;
+    if (!content || typeof content !== "object" || Array.isArray(content)) {
+      return false;
+    }
+    const text = (content as Record<string, unknown>).text;
+    if (typeof text !== "string") {
+      return false;
+    }
+    const messageId =
+      typeof update.messageId === "string" ? update.messageId : undefined;
+    if (messageId === undefined || messageId !== this.messageId) {
+      this.messageId = messageId;
+      this.buffer = "";
+      this.settled = messageId === undefined;
+    }
+    if (this.settled) {
+      return false;
+    }
+    this.buffer += text;
+    const first = OPENCODE_SUMMARY_HEADINGS[0]!;
+    const head = this.buffer.slice(0, first.length);
+    if (!first.startsWith(head) || this.buffer.length > OPENCODE_SUMMARY_MAX_BUFFER) {
+      this.settled = true;
+      this.buffer = "";
+      return false;
+    }
+    if (OPENCODE_SUMMARY_HEADINGS.every((h) => this.buffer.includes(h))) {
+      this.settled = true;
+      this.buffer = "";
+      return true;
+    }
+    return false;
+  }
 }
