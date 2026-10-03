@@ -2945,6 +2945,30 @@ describe("Session", () => {
       expect(findUpdate("turn_complete")).toBeDefined();
     });
 
+    it("an unknown /hydra verb still closes the turn so peers and busy state settle", async () => {
+      const { session } = makeSession("hydra_session_U", "u_U");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      await expect(
+        session.prompt(alice.clientId, {
+          prompt: [{ type: "text", text: "/hydra nosuchverb" }],
+        }),
+      ).rejects.toThrow(/unknown \/hydra verb/);
+
+      const turnComplete = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "turn_complete",
+      );
+      expect(turnComplete).toBeDefined();
+      expect(session.turnStartedAt).toBeUndefined();
+    });
+
     it("/hydra title does not seed the session title from the slash text", async () => {
       // A slash command shouldn't become the session title, even if
       // it's the very first prompt (e.g. user fires `/hydra title

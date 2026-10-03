@@ -10463,24 +10463,37 @@ export class Session {
       isBareAlias
     ) {
       let result: unknown;
-      if (slashFirstWord === "/sessions") {
-        result = await this.handleSessionsCommand();
-      } else if (slashFirstWord === "/help") {
-        result = await this.handleHelpCommand();
-      } else if (slashFirstWord === "/mode") {
-        result = await this.handleModeCommand(promptText);
-      } else if (slashFirstWord === "/model") {
-        result = await this.handleModelCommand(promptText);
-      } else if (isBareAlias) {
-        const rest = promptText.slice(slashFirstWord.length).trim();
-        const rewritten = rest ? `/hydra ${bareWord} ${rest}` : `/hydra ${bareWord}`;
-        result = await this.handleSlashCommand(rewritten, entry.messageId);
-      } else {
-        // /hydra ... — dispatch via the shared handler, passing the
-        // queue entry's messageId so extension commands can correlate
-        // amends and other queue events back to their in-flight
-        // dispatch.
-        result = await this.handleSlashCommand(promptText, entry.messageId);
+      try {
+        if (slashFirstWord === "/sessions") {
+          result = await this.handleSessionsCommand();
+        } else if (slashFirstWord === "/help") {
+          result = await this.handleHelpCommand();
+        } else if (slashFirstWord === "/mode") {
+          result = await this.handleModeCommand(promptText);
+        } else if (slashFirstWord === "/model") {
+          result = await this.handleModelCommand(promptText);
+        } else if (isBareAlias) {
+          const rest = promptText.slice(slashFirstWord.length).trim();
+          const rewritten = rest ? `/hydra ${bareWord} ${rest}` : `/hydra ${bareWord}`;
+          result = await this.handleSlashCommand(rewritten, entry.messageId);
+        } else {
+          // /hydra ... — dispatch via the shared handler, passing the
+          // queue entry's messageId so extension commands can correlate
+          // amends and other queue events back to their in-flight
+          // dispatch.
+          result = await this.handleSlashCommand(promptText, entry.messageId);
+        }
+      } catch (err) {
+        if (!this.closed) {
+          this.broadcastTurnComplete(
+            entry.clientId,
+            { stopReason: "error" },
+            entry.messageId,
+            this.originatorNeedsTurnComplete(entry),
+          );
+        }
+        this.clearAmendIfMatches(entry.messageId);
+        throw err;
       }
       if (!this.closed) {
         this.broadcastTurnComplete(
