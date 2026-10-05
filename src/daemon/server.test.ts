@@ -8,6 +8,7 @@ import { startDaemon, type DaemonHandle } from "./server.js";
 import type { HydraConfig } from "../core/config.js";
 import { SessionStore } from "../core/session-store.js";
 import { HYDRA_CAT_CLIENT_NAME } from "../core/hydra-version.js";
+import { JsonRpcErrorCodes } from "../acp/types.js";
 
 // Not exported from test-utils: vitest's `it` has a type that cannot be
 // named across a module boundary (TS4023), and this is the only user.
@@ -634,6 +635,136 @@ describe("startDaemon", () => {
       expect(response.result.sessions).toEqual([]);
 
       ws.close();
+    });
+
+    describe("session/delete over ACP", () => {
+      const importBundle = async (sessionId: string): Promise<string> => {
+        const imp = await fetch(`${baseUrl}/v1/sessions/import`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${TEST_TOKEN}`,
+          },
+          body: JSON.stringify({
+            bundle: {
+              version: 1,
+              exportedAt: "2026-05-13T00:00:00.000Z",
+              exportedFrom: { hydraVersion: "0.1.0", machine: "origin-host" },
+              session: {
+                sessionId,
+                lineageId: `${sessionId}_lineage`,
+                agentId: "claude-acp",
+                cwd: "/delete-check",
+                title: "delete check",
+                interactive: true,
+                createdAt: "2026-05-13T00:00:00.000Z",
+                updatedAt: "2026-05-13T00:00:00.000Z",
+              },
+              history: [],
+            },
+          }),
+        });
+        expect(imp.status).toBe(201);
+        return ((await imp.json()) as { sessionId: string }).sessionId;
+      };
+
+      let nextId = 100;
+      const call = (
+        ws: WebSocket,
+        method: string,
+        params: unknown,
+      ): Promise<{ result?: Record<string, unknown>; error?: { code: number } }> =>
+        new Promise((resolve) => {
+          const id = nextId++;
+          const onMessage = (data: unknown): void => {
+            const msg = JSON.parse(String(data)) as { id?: number };
+            if (msg.id === id) {
+              ws.off("message", onMessage);
+              resolve(msg as never);
+            }
+          };
+          ws.on("message", onMessage);
+          ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        });
+
+      const connect = async (): Promise<WebSocket> => {
+        const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        const init = await call(ws, "initialize", {
+          protocolVersion: 1,
+          clientCapabilities: {},
+          clientInfo: { name: "delete-test", version: "0" },
+        });
+        expect(init.error).toBeUndefined();
+        return ws;
+      };
+
+      const exists = async (sessionId: string): Promise<boolean> => {
+        const r = await fetch(`${baseUrl}/v1/sessions/${sessionId}`, {
+          headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+        });
+        return r.status === 200;
+      };
+
+      it("removes the session record and answers {}", async () => {
+        const id = await importBundle("hydra_session_delete_std");
+        expect(await exists(id)).toBe(true);
+        const ws = await connect();
+
+        const response = await call(ws, "session/delete", { sessionId: id });
+
+        expect(response.error, JSON.stringify(response.error)).toBeUndefined();
+        expect(response.result).toEqual({});
+        expect(await exists(id)).toBe(false);
+        const listed = await call(ws, "session/list", { cwd: "/delete-check" });
+        const sessions = (listed.result?.sessions ?? []) as Array<{ sessionId: string }>;
+        expect(sessions.some((s) => s.sessionId === id)).toBe(false);
+        ws.close();
+      });
+
+      it("succeeds silently when the session is already gone", async () => {
+        const ws = await connect();
+        const response = await call(ws, "session/delete", {
+          sessionId: "hydra_session_never_existed",
+        });
+        expect(response.error, JSON.stringify(response.error)).toBeUndefined();
+        expect(response.result).toEqual({});
+        ws.close();
+      });
+
+      it("keeps the legacy hydra-acp/session/delete alias: result shape and not-found error", async () => {
+        const id = await importBundle("hydra_session_delete_alias");
+        const ws = await connect();
+
+        const first = await call(ws, "hydra-acp/session/delete", { sessionId: id });
+        expect(first.error).toBeUndefined();
+        expect(first.result).toEqual({ deleted: true, sessionId: id });
+        expect(await exists(id)).toBe(false);
+
+        const again = await call(ws, "hydra-acp/session/delete", { sessionId: id });
+        expect(again.error?.code).toBe(JsonRpcErrorCodes.SessionNotFound);
+        ws.close();
+      });
+
+      it("session/close is available to ordinary clients and keeps the record", async () => {
+        const id = await importBundle("hydra_session_close_std");
+        const ws = await connect();
+        const response = await call(ws, "session/close", { sessionId: id });
+        expect(response.error, JSON.stringify(response.error)).toBeUndefined();
+        expect(response.result).toEqual({});
+        expect(await exists(id)).toBe(true);
+        ws.close();
+      });
+
+      it("rejects a request without a sessionId", async () => {
+        const ws = await connect();
+        const response = await call(ws, "session/delete", {});
+        expect(response.error?.code).toBe(JsonRpcErrorCodes.InvalidParams);
+        ws.close();
+      });
     });
 
     it("returns spec-compliant entries for session/list over ACP", async () => {
@@ -1337,7 +1468,7 @@ describe("startDaemon", () => {
       // No session attached → no error surfaced to the client (the cancel
       // is a no-op when the session can't be found, matching the
       // notification path's silent behavior).
-      expect(response.error).toBeUndefined();
+      expect(response.error, JSON.stringify(response.error)).toBeUndefined();
 
       ws.close();
     });

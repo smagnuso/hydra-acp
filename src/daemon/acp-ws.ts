@@ -1004,265 +1004,268 @@ export function registerAcpWsEndpoint(
             : {}),
         };
       });
+    }
 
-      // Branch a local session into a new one that shares context up to
-      // the chosen turn boundary. forkAt defaults to the latest
-      // turn_complete; agentId defaults to the source's agent; cwd
-      // defaults to the source's cwd. The new session is written with
-      // upstreamSessionId="" so the resurrect below triggers seedFromImport
-      // (same wire shape as an imported session).
-      connection.onRequest("hydra-acp/session/fork", async (raw) => {
-        const params = (raw ?? {}) as {
-          sessionId?: unknown;
-          forkAt?: unknown;
-          cwd?: unknown;
-          agentId?: unknown;
-          mode?: unknown;
-          model?: unknown;
-        };
-        if (typeof params.sessionId !== "string") {
-          throw rpcError(
-            JsonRpcErrorCodes.InvalidParams,
-            "fork_session requires sessionId",
-          );
-        }
-        const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
-        const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
-        const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
-        const mode = (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
-          ? params.mode
-          : undefined;
-        const model = typeof params.model === "string" && params.model.length > 0
-          ? params.model
-          : undefined;
-        const result = await deps.manager.forkSession(params.sessionId, {
-          ...(forkAt !== undefined ? { forkAt } : {}),
-          ...(cwd !== undefined ? { cwd } : {}),
-          ...(agentId !== undefined ? { agentId } : {}),
-          ...(mode !== undefined ? { mode } : {}),
-          ...(model !== undefined ? { model } : {}),
-        });
-        // forkSession only persists a cold record — no live Session is
-        // spawned. Bind this connection now (resurrect + attach, same as
-        // session/load's cold path) so the fork is immediately promptable
-        // instead of requiring a follow-up session/attach. Same fix as the
-        // standard session/fork alias below — see that handler's comment.
-        let session = deps.manager.get(result.sessionId);
-        if (!session) {
-          const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
-          if (!fromDisk) {
-            throw rpcError(
-              JsonRpcErrorCodes.InternalError,
-              `fork ${result.sessionId} vanished before it could be attached`,
-            );
-          }
-          session = await resurrectFromDisk(deps, {
-            ...fromDisk,
-            onInstallProgress: makeInstallProgressForwarder(connection),
-          });
-        }
-        evictPriorAttachment(state, session, session.sessionId);
-        const client = bindClientToSession(connection, session, state);
-        const { entries: replay } = await session.attach(client, "full");
-        state.attached.set(session.sessionId, {
-          sessionId: session.sessionId,
-          clientId: client.clientId,
-          readonly: false,
-        });
-        for (const note of replay) {
-          if (connection.isClosed()) {
-            break;
-          }
-          await connection
-            .notify(
-              note.method,
-              withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
-            )
-            .catch(() => undefined);
-        }
-        return { ...result, sessionId: session.sessionId };
-      });
-
-      // Speculative-compat alias for the still-Draft ACP RFD
-      // https://agentclientprotocol.com/rfds/session-fork — accept the
-      // standard verb and delegate to the hydra fork machinery so generic
-      // ACP clients can fork without speaking hydra-acp/*. The RFD shape
-      // is `{sessionId, cwd?, mcpServers?}`; extras (forkAt, agentId,
-      // mode, model) remain hydra-only on the namespaced verb.
-      //
-      // Defaults intentionally conservative for standard callers: mode
-      // defaults to "verbatim" (no surprise ephemeral-agent spend), and
-      // fork happens at the source's latest turn boundary (RFD only
-      // envisions tip-fork today). mcpServers is accepted but currently
-      // ignored — forkSession inherits the source's servers; when the
-      // RFD stabilizes and forkSession grows an mcpServers override, wire
-      // it through here.
-      connection.onRequest("session/fork", async (raw) => {
-        const params = (raw ?? {}) as {
-          sessionId?: unknown;
-          cwd?: unknown;
-          mcpServers?: unknown;
-        };
-        if (typeof params.sessionId !== "string") {
-          throw rpcError(
-            JsonRpcErrorCodes.InvalidParams,
-            "session/fork requires sessionId",
-          );
-        }
-        const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
-        const result = await deps.manager.forkSession(params.sessionId, {
-          ...(cwd !== undefined ? { cwd } : {}),
-          mode: "verbatim",
-        });
-        // forkSession only persists a cold record — no live Session is
-        // spawned. In plain ACP a returned sessionId is immediately
-        // usable, so bind this connection now (resurrect + attach, same
-        // as session/load's cold path) instead of leaving the caller to
-        // discover it needs a hydra-specific session/attach first.
-        let session = deps.manager.get(result.sessionId);
-        if (!session) {
-          const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
-          if (!fromDisk) {
-            throw rpcError(
-              JsonRpcErrorCodes.InternalError,
-              `fork ${result.sessionId} vanished before it could be attached`,
-            );
-          }
-          session = await resurrectFromDisk(deps, {
-            ...fromDisk,
-            onInstallProgress: makeInstallProgressForwarder(connection),
-          });
-        }
-        evictPriorAttachment(state, session, session.sessionId);
-        const client = bindClientToSession(connection, session, state);
-        const { entries: replay } = await session.attach(client, "full");
-        state.attached.set(session.sessionId, {
-          sessionId: session.sessionId,
-          clientId: client.clientId,
-          readonly: false,
-        });
-        for (const note of replay) {
-          if (connection.isClosed()) {
-            break;
-          }
-          await connection
-            .notify(
-              note.method,
-              withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
-            )
-            .catch(() => undefined);
-        }
-        return { sessionId: session.sessionId };
-      });
-
-      // Delete a session record (and, if live, close the agent first).
-      // Mirror the HTTP DELETE /v1/sessions/:id route so ACP clients
-      // (TUI, slack, future extensions) can purge a session without
-      // dropping to the REST API. Persists a tombstone via
-      // SessionManager so the periodic agent sync doesn't reimport the
-      // upstream session under a fresh hydra id.
-      // Shared handler for standard `session/delete` and the legacy
-      // `hydra-acp/session/delete` alias. The standard method (ACP v1,
-      // stabilized 2026-06-05) is the preferred entry point; the alias
-      // stays for one release cycle so external clients pinned to the
-      // hydra-prefixed name keep working. The standard-shaped variant
-      // returns `{}` per spec and treats a missing session as silent
-      // success ("SHOULD succeed silently"); the legacy alias preserves
-      // hydra's older `{ deleted, sessionId }` return and hard-error on
-      // missing to avoid changing behavior for existing callers.
-      const deleteSession = async (
-        raw: unknown,
-        methodLabel: string,
-      ): Promise<{ id: string; existed: boolean }> => {
-        const params = (raw ?? {}) as { sessionId?: unknown };
-        if (typeof params.sessionId !== "string") {
-          throw rpcError(
-            JsonRpcErrorCodes.InvalidParams,
-            `${methodLabel} requires sessionId`,
-          );
-        }
-        const id =
-          (await deps.manager.resolveCanonicalId(params.sessionId)) ??
-          params.sessionId;
-        const live = deps.manager.get(id);
-        if (live) {
-          await live.close({
-            deleteRecord: true,
-            by: `session/delete ${state.clientId}`,
-          });
-          await deps.manager.waitForDeletion(id);
-          // Safety net for the agent.onExit race — see DELETE /v1/sessions/:id.
-          if (await deps.manager.hasRecord(id)) {
-            await deps.manager.deleteRecord(id);
-          }
-          return { id, existed: true };
-        }
-        const removed = await deps.manager.deleteRecord(id);
-        return { id, existed: removed };
+    // Branch a local session into a new one that shares context up to
+    // the chosen turn boundary. forkAt defaults to the latest
+    // turn_complete; agentId defaults to the source's agent; cwd
+    // defaults to the source's cwd. The new session is written with
+    // upstreamSessionId="" so the resurrect below triggers seedFromImport
+    // (same wire shape as an imported session).
+    connection.onRequest("hydra-acp/session/fork", async (raw) => {
+      const params = (raw ?? {}) as {
+        sessionId?: unknown;
+        forkAt?: unknown;
+        cwd?: unknown;
+        agentId?: unknown;
+        mode?: unknown;
+        model?: unknown;
       };
-      connection.onRequest("session/delete", async (raw) => {
-        await deleteSession(raw, "session/delete");
-        return {};
+      if (typeof params.sessionId !== "string") {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "fork_session requires sessionId",
+        );
+      }
+      const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
+      const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+      const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
+      const mode = (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
+        ? params.mode
+        : undefined;
+      const model = typeof params.model === "string" && params.model.length > 0
+        ? params.model
+        : undefined;
+      const result = await deps.manager.forkSession(params.sessionId, {
+        ...(forkAt !== undefined ? { forkAt } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(agentId !== undefined ? { agentId } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(model !== undefined ? { model } : {}),
       });
-
-      // Standard session/close: cancel any ongoing work and free the
-      // resources associated with the session, but keep the on-disk
-      // record so session/list still shows it and session/resume can
-      // reactivate it later. Distinct from session/delete (which
-      // removes the record) and from hydra-acp/session/force_cancel
-      // (which cancels the current turn but keeps the agent live).
-      // See https://agentclientprotocol.com/protocol/v1/session-setup#closing-active-sessions.
-      // Client intent: "I'm done with this session for now" — the
-      // routine counterpart to the idle-timer auto-close hydra already
-      // performs, converging on the same Session.close({deleteRecord:false})
-      // path so the hydra-acp/session/closed notification fires
-      // uniformly regardless of who initiated the close.
-      connection.onRequest("session/close", async (raw) => {
-        const params = (raw ?? {}) as { sessionId?: unknown };
-        if (typeof params.sessionId !== "string") {
+      // forkSession only persists a cold record — no live Session is
+      // spawned. Bind this connection now (resurrect + attach, same as
+      // session/load's cold path) so the fork is immediately promptable
+      // instead of requiring a follow-up session/attach. Same fix as the
+      // standard session/fork alias below — see that handler's comment.
+      let session = deps.manager.get(result.sessionId);
+      if (!session) {
+        const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
+        if (!fromDisk) {
           throw rpcError(
-            JsonRpcErrorCodes.InvalidParams,
-            "session/close requires sessionId",
+            JsonRpcErrorCodes.InternalError,
+            `fork ${result.sessionId} vanished before it could be attached`,
           );
         }
-        denyIfReadonly(params.sessionId, "session/close");
-        const id =
-          (await deps.manager.resolveCanonicalId(params.sessionId)) ??
-          params.sessionId;
-        const live = deps.manager.get(id);
-        if (live) {
-          await live.close({
-            deleteRecord: false,
-            by: `session/close ${state.clientId}` +
-              (state.processIdentity ? ` (${state.processIdentity.name})` : ""),
-          });
-          return {};
+        session = await resurrectFromDisk(deps, {
+          ...fromDisk,
+          onInstallProgress: makeInstallProgressForwarder(connection),
+        });
+      }
+      evictPriorAttachment(state, session, session.sessionId);
+      const client = bindClientToSession(connection, session, state);
+      const { entries: replay } = await session.attach(client, "full");
+      state.attached.set(session.sessionId, {
+        sessionId: session.sessionId,
+        clientId: client.clientId,
+        readonly: false,
+      });
+      for (const note of replay) {
+        if (connection.isClosed()) {
+          break;
         }
-        // Idempotent when the session exists in history but isn't live:
-        // client asked us to free resources and there are none to free.
-        // Only truly-unknown sessions surface as SessionNotFound.
+        await connection
+          .notify(
+            note.method,
+            withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+          )
+          .catch(() => undefined);
+      }
+      return { ...result, sessionId: session.sessionId };
+    });
+
+    // Speculative-compat alias for the still-Draft ACP RFD
+    // https://agentclientprotocol.com/rfds/session-fork — accept the
+    // standard verb and delegate to the hydra fork machinery so generic
+    // ACP clients can fork without speaking hydra-acp/*. The RFD shape
+    // is `{sessionId, cwd?, mcpServers?}`; extras (forkAt, agentId,
+    // mode, model) remain hydra-only on the namespaced verb.
+    //
+    // Defaults intentionally conservative for standard callers: mode
+    // defaults to "verbatim" (no surprise ephemeral-agent spend), and
+    // fork happens at the source's latest turn boundary (RFD only
+    // envisions tip-fork today). mcpServers is accepted but currently
+    // ignored — forkSession inherits the source's servers; when the
+    // RFD stabilizes and forkSession grows an mcpServers override, wire
+    // it through here.
+    connection.onRequest("session/fork", async (raw) => {
+      const params = (raw ?? {}) as {
+        sessionId?: unknown;
+        cwd?: unknown;
+        mcpServers?: unknown;
+      };
+      if (typeof params.sessionId !== "string") {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/fork requires sessionId",
+        );
+      }
+      const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+      const result = await deps.manager.forkSession(params.sessionId, {
+        ...(cwd !== undefined ? { cwd } : {}),
+        mode: "verbatim",
+      });
+      // forkSession only persists a cold record — no live Session is
+      // spawned. In plain ACP a returned sessionId is immediately
+      // usable, so bind this connection now (resurrect + attach, same
+      // as session/load's cold path) instead of leaving the caller to
+      // discover it needs a hydra-specific session/attach first.
+      let session = deps.manager.get(result.sessionId);
+      if (!session) {
+        const fromDisk = await deps.manager.loadFromDisk(result.sessionId);
+        if (!fromDisk) {
+          throw rpcError(
+            JsonRpcErrorCodes.InternalError,
+            `fork ${result.sessionId} vanished before it could be attached`,
+          );
+        }
+        session = await resurrectFromDisk(deps, {
+          ...fromDisk,
+          onInstallProgress: makeInstallProgressForwarder(connection),
+        });
+      }
+      evictPriorAttachment(state, session, session.sessionId);
+      const client = bindClientToSession(connection, session, state);
+      const { entries: replay } = await session.attach(client, "full");
+      state.attached.set(session.sessionId, {
+        sessionId: session.sessionId,
+        clientId: client.clientId,
+        readonly: false,
+      });
+      for (const note of replay) {
+        if (connection.isClosed()) {
+          break;
+        }
+        await connection
+          .notify(
+            note.method,
+            withFrameSeq(withRecordedAt(note.params, note.recordedAt), note.seq),
+          )
+          .catch(() => undefined);
+      }
+      return { sessionId: session.sessionId };
+    });
+
+    // Delete a session record (and, if live, close the agent first).
+    // Mirror the HTTP DELETE /v1/sessions/:id route so ACP clients
+    // (TUI, slack, future extensions) can purge a session without
+    // dropping to the REST API. Persists a tombstone via
+    // SessionManager so the periodic agent sync doesn't reimport the
+    // upstream session under a fresh hydra id.
+    // Shared handler for standard `session/delete` and the legacy
+    // `hydra-acp/session/delete` alias. The standard method (ACP v1,
+    // stabilized 2026-06-05) is the preferred entry point; the alias
+    // stays for one release cycle so external clients pinned to the
+    // hydra-prefixed name keep working. The standard-shaped variant
+    // returns `{}` per spec and treats a missing session as silent
+    // success ("SHOULD succeed silently"); the legacy alias preserves
+    // hydra's older `{ deleted, sessionId }` return and hard-error on
+    // missing to avoid changing behavior for existing callers.
+    const deleteSession = async (
+      raw: unknown,
+      methodLabel: string,
+    ): Promise<{ id: string; existed: boolean }> => {
+      const params = (raw ?? {}) as { sessionId?: unknown };
+      if (typeof params.sessionId !== "string") {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          `${methodLabel} requires sessionId`,
+        );
+      }
+      const id =
+        (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+        params.sessionId;
+      const live = deps.manager.get(id);
+      if (live) {
+        await live.close({
+          deleteRecord: true,
+          by: `session/delete ${state.clientId}`,
+        });
+        await deps.manager.waitForDeletion(id);
+        // Safety net for the agent.onExit race — see DELETE /v1/sessions/:id.
         if (await deps.manager.hasRecord(id)) {
-          return {};
+          await deps.manager.deleteRecord(id);
         }
+        return { id, existed: true };
+      }
+      const removed = await deps.manager.deleteRecord(id);
+      return { id, existed: removed };
+    };
+    connection.onRequest("session/delete", async (raw) => {
+      await deleteSession(raw, "session/delete");
+      return {};
+    });
+
+    // Standard session/close: cancel any ongoing work and free the
+    // resources associated with the session, but keep the on-disk
+    // record so session/list still shows it and session/resume can
+    // reactivate it later. Distinct from session/delete (which
+    // removes the record) and from hydra-acp/session/force_cancel
+    // (which cancels the current turn but keeps the agent live).
+    // See https://agentclientprotocol.com/protocol/v1/session-setup#closing-active-sessions.
+    // Client intent: "I'm done with this session for now" — the
+    // routine counterpart to the idle-timer auto-close hydra already
+    // performs, converging on the same Session.close({deleteRecord:false})
+    // path so the hydra-acp/session/closed notification fires
+    // uniformly regardless of who initiated the close.
+    connection.onRequest("session/close", async (raw) => {
+      const params = (raw ?? {}) as { sessionId?: unknown };
+      if (typeof params.sessionId !== "string") {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/close requires sessionId",
+        );
+      }
+      denyIfReadonly(params.sessionId, "session/close");
+      const id =
+        (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+        params.sessionId;
+      const live = deps.manager.get(id);
+      if (live) {
+        await live.close({
+          deleteRecord: false,
+          by: `session/close ${state.clientId}` +
+            (state.processIdentity ? ` (${state.processIdentity.name})` : ""),
+        });
+        return {};
+      }
+      // Idempotent when the session exists in history but isn't live:
+      // client asked us to free resources and there are none to free.
+      // Only truly-unknown sessions surface as SessionNotFound.
+      if (await deps.manager.hasRecord(id)) {
+        return {};
+      }
+      throw rpcError(
+        JsonRpcErrorCodes.SessionNotFound,
+        `session ${id} not found`,
+      );
+    });
+    connection.onRequest("hydra-acp/session/delete", async (raw) => {
+      const { id, existed } = await deleteSession(
+        raw,
+        "hydra-acp/session/delete",
+      );
+      if (!existed) {
         throw rpcError(
           JsonRpcErrorCodes.SessionNotFound,
           `session ${id} not found`,
         );
-      });
-      connection.onRequest("hydra-acp/session/delete", async (raw) => {
-        const { id, existed } = await deleteSession(
-          raw,
-          "hydra-acp/session/delete",
-        );
-        if (!existed) {
-          throw rpcError(
-            JsonRpcErrorCodes.SessionNotFound,
-            `session ${id} not found`,
-          );
-        }
-        return { deleted: true, sessionId: id };
-      });
+      }
+      return { deleted: true, sessionId: id };
+    });
 
+    // Transformer-only again: the session/* and hydra-acp/session/* methods above are for every client kind.
+    if (processIdentity?.kind === "transformer") {
       connection.onRequest("hydra-acp/child_session/await", async (raw) => {
         const params = (raw ?? {}) as {
           childSessionId?: unknown;
