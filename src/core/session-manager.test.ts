@@ -4496,6 +4496,45 @@ describe("SessionManager: parentSessionId", () => {
   });
 });
 
+describe("SessionManager: createdAt in list()", () => {
+  it("reports when a warm session was created, unmoved by later activity", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_created" });
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    const session = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    const [entry] = await manager.list({ includeNonInteractive: true, status: "warm" });
+    expect(entry?.createdAt).toBe(new Date(session.createdAt).toISOString());
+  });
+
+  it("reports a cold session's createdAt from its record", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    await new SessionStore().write({
+      sessionId: "hydra_session_created_cold",
+      cwd: WORK_CWD,
+      agentId: "claude-code",
+      upstreamSessionId: "u_created_cold",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      updatedAt: "2026-02-02T03:04:05.000Z",
+      attentionFlags: [],
+    });
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("should not spawn"); },
+    );
+
+    const entries = await manager.list({ includeNonInteractive: true });
+    const cold = entries.find((e) => e.sessionId === "hydra_session_created_cold");
+    expect(cold?.createdAt).toBe("2026-01-02T03:04:05.000Z");
+  });
+});
+
 describe("SessionManager: originatingClient", () => {
   it("surfaces originatingClient for a warm session in list() and persists it", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });

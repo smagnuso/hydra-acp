@@ -1856,6 +1856,7 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 | `workspaceInfo` | `object?` | Present only for a session running in an isolated workspace: `{ path, sourceCwd, label, provider, snapshot?, vcs? }`. Group and attribute on `workspaceInfo.sourceCwd ?? cwd`. See [Workspace isolation](#workspace-isolation). |
 | `workspaceError` | `string?` | Present when isolation was requested and fell back to the source tree. Live-only. Absent `workspaceInfo` **plus** this field is "you asked and did not get it". |
 | `title` | `string?` | Session label (`Session.title`). Matches the top-level `title` on `session/list`. |
+| `createdAt` | `string?` | When the session was created (ISO-8601). Unlike `updatedAt` it never moves. |
 | `currentModel` | `string?` | Last-known model id; lets attach paint header state before any new updates land. |
 | `currentUsage` | `{used?, size?, costAmount?, costCurrency?}` | Last-known token/cost snapshot. |
 | `importedFromMachine` | `string?` | Origin hostname; present iff imported. |

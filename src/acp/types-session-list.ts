@@ -104,6 +104,8 @@ export const SessionListEntry = z.object({
   // User-set sort weight; >0 floats the session to the top of the
   // picker. Absent / 0 = normal priority.
   priority: z.number().int().nonnegative().optional(),
+  // When the session was created; unlike updatedAt it never moves.
+  createdAt: z.string().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["warm", "cold"]).default("warm"),
@@ -266,6 +268,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.upstreamSessionId !== undefined) {
     meta.upstreamSessionId = entry.upstreamSessionId;
+  }
+  if (entry.createdAt !== undefined) {
+    meta.createdAt = entry.createdAt;
   }
   if (entry.currentModel !== undefined) {
     meta.currentModel = entry.currentModel;
