@@ -1637,6 +1637,31 @@ describe("Session", () => {
     });
   });
 
+  describe("edit counts on tool calls", () => {
+    it("stamps an edit's line counts on the update every client receives", async () => {
+      const { session, mock } = makeSession("sess_stats", "u_stats");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_stats",
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc_edit",
+          title: "Edit",
+          rawInput: { file_path: "/r/a.ts", old_string: "one\n", new_string: "one\ntwo\n" },
+        },
+      });
+
+      const note = findSessionUpdate(a.stream.sent, "tool_call") as
+        | { params?: { update?: { _meta?: Record<string, { editStats?: unknown }> } } }
+        | undefined;
+      expect(note?.params?.update?._meta?.["hydra-acp"]?.editStats).toEqual([
+        { path: "/r/a.ts", added: 1, removed: 0 },
+      ]);
+    });
+  });
+
   describe("recordedAt on recorded session/update events", () => {
     const hydraMeta = (m: unknown): { recordedAt?: number } | undefined =>
       (

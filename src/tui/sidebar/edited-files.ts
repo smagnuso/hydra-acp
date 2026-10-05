@@ -50,7 +50,7 @@ export function isFileMutatingTool(
 // `cwd` absolutizes tool-reported relative paths so double-click-to-open
 // doesn't depend on the editor's own working directory.
 export function editedFileFromTool(
-  state: Pick<ToolLineState, "rawKind" | "status" | "locations">,
+  state: Pick<ToolLineState, "rawKind" | "status" | "locations" | "editStats">,
   diff: EditDiff | undefined,
   cwd: string | null,
 ): SidebarEditedFile | null {
@@ -68,7 +68,7 @@ export function editedFileFromTool(
   }
   // Line counts are only known for edits that carried a diff; a Write with
   // no diff shows as touched-without-extent.
-  const changes = diff === undefined ? undefined : countDiffChanges(diff);
+  const changes = diff === undefined ? undefined : diffChanges(state, diff);
   return {
     path: cwd === null ? reported : resolvePath(cwd, reported),
     added: changes?.added,
@@ -76,11 +76,31 @@ export function editedFileFromTool(
   };
 }
 
+// An edit's extent. When its text arrived only as a blob ref (a references
+// mode replay) counting it would read +0 -0, so the daemon's recorded counts
+// stand in; with none recorded the extent is unknown.
+function diffChanges(
+  state: Pick<ToolLineState, "editStats">,
+  diff: EditDiff,
+): { added: number; removed: number } | undefined {
+  if (diff.oldRef === undefined && diff.newRef === undefined) {
+    return countDiffChanges(diff);
+  }
+  const stats = state.editStats?.filter((s) => diff.path === undefined || s.path === diff.path);
+  if (stats === undefined || stats.length === 0) {
+    return undefined;
+  }
+  return stats.reduce(
+    (sum, s) => ({ added: sum.added + s.added, removed: sum.removed + s.removed }),
+    { added: 0, removed: 0 },
+  );
+}
+
 // All files one tool call contributes. Same rules as editedFileFromTool,
 // plus multi-file patch calls (apply_patch), which name every file in
 // `patchedFiles` instead of a single diff or location.
 export function editedFilesFromTool(
-  state: Pick<ToolLineState, "rawKind" | "status" | "locations" | "patchedFiles">,
+  state: Pick<ToolLineState, "rawKind" | "status" | "locations" | "patchedFiles" | "editStats">,
   diff: EditDiff | undefined,
   cwd: string | null,
 ): SidebarEditedFile[] {

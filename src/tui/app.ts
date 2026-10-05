@@ -1,6 +1,7 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
+import { readEditStats } from "../core/edit-stats.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
@@ -8722,6 +8723,10 @@ async function runSession(
       const patched = extractPatchedFiles(rawUpdate);
       if (patched.length > 0) {
         state.patchedFiles = patched;
+      }
+      const stats = readEditStats(rawUpdate);
+      if (stats !== undefined) {
+        state.editStats = stats;
       }
       const summary = extractToolResultSummary(rawUpdate);
       if (summary !== undefined) {

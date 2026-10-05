@@ -1,4 +1,5 @@
 import type { SideInfo } from "../acp/types-side.js";
+import { withEditStats } from "./edit-stats.js";
 import { elidedExtensionName, prefixedExtensionNames } from "./extension-names.js";
 import { ownEntries } from "./side-context.js";
 import { customAlphabet } from "nanoid";
@@ -1956,7 +1957,7 @@ export class Session {
       return;
     }
     this.maybeApplyAgentSessionInfo(envelope);
-    this.recordAndBroadcast("session/update", envelope);
+    this.recordAndBroadcast("session/update", withEditStats(envelope));
   }
 
   // Arms recall in place when another agent reports it already compacted

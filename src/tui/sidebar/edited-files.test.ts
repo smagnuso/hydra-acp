@@ -376,3 +376,22 @@ describe("editedFilesFromTool", () => {
     ).toEqual([{ path: at("a.ts"), added: undefined, removed: undefined }]);
   });
 });
+
+describe("edits whose text arrived as a blob ref", () => {
+  const refDiff: EditDiff = { path: at("big.ts"), oldText: "", newText: "", newRef: { hash: "h", bytes: 9000 } };
+
+  it("use the counts the daemon recorded", () => {
+    const entry = editedFileFromTool(
+      state({ rawKind: "edit", editStats: [{ path: at("big.ts"), added: 40, removed: 3 }] }),
+      refDiff,
+      REPO,
+    );
+    expect(entry).toEqual({ path: at("big.ts"), added: 40, removed: 3 });
+  });
+
+  it("show no extent rather than +0 -0 when none were recorded", () => {
+    const entry = editedFileFromTool(state({ rawKind: "edit" }), refDiff, REPO);
+    expect(entry).toEqual({ path: at("big.ts"), added: undefined, removed: undefined });
+  });
+});
+
