@@ -6636,6 +6636,29 @@ describe("Session", () => {
       );
     });
 
+    it("routes the elided short form to a `hydra-<short>` registration too", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      request.mockResolvedValue({ text: "ok" });
+      registry.register("hydra-ahp", connection, [{ verb: "token" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const result = await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra ahp token mint vscode" }],
+      });
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(request).toHaveBeenCalledWith(
+        "hydra-acp/commands/invoke",
+        expect.objectContaining({ verb: "token", args: "mint vscode" }),
+      );
+      const names = session.mergedAvailableCommands().map((c) => c.name);
+      expect(names).toContain("hydra hydra-ahp token");
+      expect(names).toContain("hydra ahp token");
+    });
+
     it("amend on an in-flight extension command fires hydra-acp/commands/cancel and unsticks the queue", async () => {
       // Stage B: when amend lands on an extension-bound user prompt
       // (the planner's `/hydra planner create` is the canonical

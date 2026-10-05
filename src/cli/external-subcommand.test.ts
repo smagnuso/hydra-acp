@@ -104,6 +104,21 @@ describe("findExternalSubcommand", () => {
     expectSamePath(findExternalSubcommand("planner", env), target);
   });
 
+  it("finds a hydra-<name> binary only when an extension of that name is registered", () => {
+    const target = makeExecutable(pathDir1, "hydra-ahp");
+    const env = { PATH: pathDir1 };
+    expect(findExternalSubcommand("ahp", env)).toBeUndefined();
+    expect(findExternalSubcommand("ahp", env, new Set(["other"]))).toBeUndefined();
+    expectSamePath(findExternalSubcommand("ahp", env, new Set(["hydra-ahp"])), target);
+  });
+
+  it("prefers hydra-acp-<name> over hydra-<name>", () => {
+    makeExecutable(pathDir1, "hydra-ahp");
+    const preferred = makeExecutable(pathDir2, "hydra-acp-ahp");
+    const env = { PATH: [pathDir1, pathDir2].join(delimiter) };
+    expectSamePath(findExternalSubcommand("ahp", env, new Set(["hydra-ahp"])), preferred);
+  });
+
   it("returns undefined when no binary matches", () => {
     const env = { PATH: [pathDir1, pathDir2].join(delimiter) };
     expect(findExternalSubcommand("planner", env)).toBeUndefined();

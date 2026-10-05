@@ -6,8 +6,9 @@
 // hydra-acp itself and the external command.
 
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { paths } from "../core/paths.js";
 
 // Every subcommand the top-level CLI handles internally. Anything not in
 // this set is a candidate for external dispatch. Keep in sync with the
@@ -91,28 +92,48 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
-// Look up `hydra-acp-<name>` on PATH. Returns the absolute path of the
-// first match, or undefined if none. On Windows, also tries the PATHEXT
-// extensions (typically .EXE / .CMD / .BAT).
+// Names of the extensions registered in config.json, read without the
+// daemon. A malformed or missing config just means none.
+export function registeredExtensionNames(): ReadonlySet<string> {
+  try {
+    const raw = JSON.parse(readFileSync(paths.config(), "utf8")) as { extensions?: unknown };
+    const extensions = raw.extensions;
+    if (extensions && typeof extensions === "object" && !Array.isArray(extensions)) {
+      return new Set(Object.keys(extensions));
+    }
+  } catch {
+    void 0;
+  }
+  return new Set();
+}
+
+// Look up `hydra-acp-<name>` on PATH, then `hydra-<name>` when an extension
+// of that name is registered (a bare hydra-* binary on PATH is otherwise
+// not ours to run). Returns the absolute path of the first match, or
+// undefined if none. On Windows, also tries the PATHEXT extensions
+// (typically .EXE / .CMD / .BAT).
 export function findExternalSubcommand(
   name: string,
   env: NodeJS.ProcessEnv = process.env,
+  registered: ReadonlySet<string> = new Set(),
 ): string | undefined {
   const pathVar = env["PATH"] ?? env["Path"] ?? "";
   if (pathVar.length === 0) {
     return undefined;
   }
   const dirs = pathVar.split(delimiter).filter((d) => d.length > 0);
-  const base = `hydra-acp-${name}`;
+  const bases = [`hydra-acp-${name}`, ...(registered.has(`hydra-${name}`) ? [`hydra-${name}`] : [])];
   const exts =
     process.platform === "win32"
       ? (env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD").split(";")
       : [""];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = join(dir, base + ext);
-      if (isExecutableFile(candidate)) {
-        return candidate;
+  for (const base of bases) {
+    for (const dir of dirs) {
+      for (const ext of exts) {
+        const candidate = join(dir, base + ext);
+        if (isExecutableFile(candidate)) {
+          return candidate;
+        }
       }
     }
   }
@@ -161,7 +182,7 @@ export function maybeDispatchExternal(
   if (isBuiltinSubcommand(name)) {
     return false;
   }
-  const bin = findExternalSubcommand(name);
+  const bin = findExternalSubcommand(name, process.env, registeredExtensionNames());
   if (bin === undefined) {
     return false;
   }

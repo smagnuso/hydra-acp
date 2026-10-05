@@ -500,7 +500,8 @@ hydra-acp auth revoke <id>                 # revoke a session token
 ```
 
 Any `hydra-acp <name>` that isn't a built-in verb is exec'd as `hydra-acp-<name>`
-from PATH, git-style. Ecosystem packages like `@hydra-acp/planner` hang their
+from PATH, git-style (or as `hydra-<name>` when an extension named `hydra-<name>` is
+registered in `config.json`). Ecosystem packages like `@hydra-acp/planner` hang their
 own subcommands off that mechanism. `hydra-acp --help` is authoritative and
 covers flags this table leaves out; `hydra-acp <verb> --help` scopes it to one verb.
 
@@ -563,8 +564,8 @@ conversation log.
 | `/hydra kill` | Close this session. The agent dies; the record is kept and can be resumed. |
 
 Extensions and transformers register their own, reachable as `/hydra <name>
-<verb>` — and the `hydra-acp-` prefix can be elided, so `/hydra planner status`
-routes to `hydra-acp-planner`.
+<verb>`, and the `hydra-acp-` or `hydra-` prefix can be elided, so `/hydra planner status`
+routes to `hydra-acp-planner` and `/hydra ahp token mint` to `hydra-ahp`.
 
 **The TUI has its own set**, which only work there:
 

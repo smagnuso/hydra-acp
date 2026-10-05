@@ -1,4 +1,5 @@
 import type { SideInfo } from "../acp/types-side.js";
+import { elidedExtensionName, prefixedExtensionNames } from "./extension-names.js";
 import { ownEntries } from "./side-context.js";
 import { customAlphabet } from "nanoid";
 import { parseForeignSessionId } from "./foreign-session-id.js";
@@ -7358,13 +7359,14 @@ export class Session {
           entry.description = command.description;
         }
         out.push(entry);
-        // Convention: names starting with `hydra-acp-` are surfaced under
-        // the elided short form too, matching the dispatch fallback in
-        // handleSlashCommand. Both forms work; the short form is the
-        // recommended UX, the long form is preserved for explicit usage
-        // and backward compatibility.
-        const short = name.startsWith("hydra-acp-") ? name.slice("hydra-acp-".length) : name;
-        if (name.startsWith("hydra-acp-") && short.length > 0) {
+        // Convention: names starting with `hydra-acp-` or `hydra-` are
+        // surfaced under the elided short form too, matching the dispatch
+        // fallback in handleSlashCommand. Both forms work; the short form
+        // is the recommended UX, the long form is preserved for explicit
+        // usage and backward compatibility.
+        const elided = elidedExtensionName(name);
+        const short = elided ?? name;
+        if (elided !== undefined) {
           const shortHead = command.verb ? `hydra ${short} ${command.verb}` : `hydra ${short}`;
           const shortDisplay = command.argsHint
             ? `${shortHead} ${command.argsHint}`
@@ -7449,9 +7451,7 @@ export class Session {
         continue;
       }
       seenExtNames.add(name);
-      const short = name.startsWith("hydra-acp-")
-        ? name.slice("hydra-acp-".length)
-        : name;
+      const short = elidedExtensionName(name) ?? name;
       if (!short || reserved.has(short) || result.has(short)) {
         continue;
       }
@@ -7622,12 +7622,14 @@ export class Session {
         ? this.runExtensionCommandInline(first, remainder, messageId)
         : this.runExtensionCommand(first, remainder);
     }
-    // Convention: ecosystem packages are named `hydra-acp-<foo>`. Allow
-    // the user to elide the prefix so `/hydra planner ...` routes the
-    // same as `/hydra hydra-acp-planner ...`. Built-ins and exact-name
-    // matches above still win — this is strictly the fallback.
-    const eliprefixed = `hydra-acp-${first}`;
-    if (this.extensionCommands?.has(eliprefixed)) {
+    // Convention: ecosystem packages are named `hydra-acp-<foo>` or
+    // `hydra-<foo>`. Allow the user to elide the prefix so `/hydra planner ...`
+    // routes the same as `/hydra hydra-acp-planner ...`. Built-ins and
+    // exact-name matches above still win; this is strictly the fallback.
+    const eliprefixed = prefixedExtensionNames(first).find((candidate) =>
+      this.extensionCommands?.has(candidate),
+    );
+    if (eliprefixed !== undefined) {
       return inline
         ? this.runExtensionCommandInline(eliprefixed, remainder, messageId)
         : this.runExtensionCommand(eliprefixed, remainder);
