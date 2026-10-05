@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { thisMachine } from "../../core/machine.js";
 import { paths } from "../../core/paths.js";
 import { expandHome, type CompactionConfig } from "../../core/config.js";
@@ -824,7 +824,7 @@ export function registerSessionRoutes(
   // forkAt defaults to the source's most recent turn_complete; cwd
   // and agentId default to the source's. The new session carries
   // upstreamSessionId="" so its first attach triggers seedFromImport.
-  app.post("/v1/sessions/:id/fork", async (request, reply) => {
+  const forkRoute = (side: boolean) => async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const body = (request.body ?? {}) as {
@@ -834,6 +834,7 @@ export function registerSessionRoutes(
       title?: unknown;
       mode?: unknown;
       model?: unknown;
+      selection?: unknown;
     };
     const opts: {
       forkAt?: string;
@@ -842,6 +843,7 @@ export function registerSessionRoutes(
       title?: string;
       mode?: "verbatim" | "synthesis";
       model?: string;
+      side?: { selection?: { text: string; responsePartId?: string } };
     } = {};
     if (body.forkAt !== undefined) {
       if (typeof body.forkAt !== "string" || body.forkAt.length === 0) {
@@ -871,7 +873,24 @@ export function registerSessionRoutes(
       }
       opts.title = body.title;
     }
-    if (body.mode !== undefined) {
+    if (side) {
+      const selection = body.selection as { text?: unknown; responsePartId?: unknown } | undefined;
+      if (selection !== undefined) {
+        if (typeof selection.text !== "string" || selection.text.length === 0) {
+          reply.code(400).send({ error: "selection.text must be a non-empty string" });
+          return;
+        }
+        opts.side = {
+          selection: {
+            text: selection.text,
+            ...(typeof selection.responsePartId === "string" ? { responsePartId: selection.responsePartId } : {}),
+          },
+        };
+      } else {
+        opts.side = {};
+      }
+    }
+    if (body.mode !== undefined && !side) {
       if (body.mode !== "verbatim" && body.mode !== "synthesis") {
         reply.code(400).send({ error: "mode must be \"verbatim\" or \"synthesis\"" });
         return;
@@ -903,7 +922,10 @@ export function registerSessionRoutes(
       }
       reply.code(500).send({ error: e.message });
     }
-  });
+  };
+  app.post("/v1/sessions/:id/fork", forkRoute(false));
+  // Branch for an aside: same as fork, verbatim, with the copied history marked as context only.
+  app.post("/v1/sessions/:id/side", forkRoute(true));
 
   app.post("/v1/sessions/import", async (request, reply) => {
     const body = (request.body ?? {}) as {

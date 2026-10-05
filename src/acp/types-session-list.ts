@@ -1,3 +1,4 @@
+import { SideInfoSchema } from "./types-side.js";
 import { z } from "zod";
 import { mergeMeta } from "./types-hydra-meta.js";
 import type { CompactionState } from "../core/snapshot.js";
@@ -89,6 +90,7 @@ export const SessionListEntry = z.object({
   // local session, an import is a cross-machine takeover.
   forkedFromSessionId: z.string().optional(),
   forkedFromMessageId: z.string().optional(),
+  side: SideInfoSchema.optional(),
   // clientInfo from the process that issued session/new. Carried for
   // log/display; the effective filtering signal is `interactive` below.
   originatingClient: z
@@ -285,6 +287,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.forkedFromMessageId !== undefined) {
     meta.forkedFromMessageId = entry.forkedFromMessageId;
+  }
+  if (entry.side !== undefined) {
+    meta.side = entry.side;
   }
   if (entry.originatingClient !== undefined) {
     meta.originatingClient = entry.originatingClient;

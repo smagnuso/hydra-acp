@@ -34,8 +34,8 @@ function fakeFetch(
     }
     fetchCalls.push({ url, method, body });
 
-    if (url.includes("/fork")) {
-      const match = url.match(/\/sessions\/([^/]+)\/fork$/);
+    if (url.includes("/side")) {
+      const match = url.match(/\/sessions\/([^/]+)\/side$/);
       const sourceId = match ? decodeURIComponent(match[1] ?? "") : "";
       const resp = forkResponses[sourceId];
       if (!resp) {
@@ -218,7 +218,7 @@ describe("runBtwSidechain", () => {
       const emitter = await result;
 
       // Verify fork was called via HTTP.
-      const forkCall = fetchCalls.find((c) => c.url.includes("/fork"));
+      const forkCall = fetchCalls.find((c) => c.url.includes("/side"));
       expect(forkCall).toBeDefined();
       expect(forkCall?.method).toBe("POST");
 
@@ -295,7 +295,7 @@ describe("runBtwSidechain", () => {
       await tick();
       await result;
 
-      const forkCall = fetchCalls.find((c) => c.url.includes("/fork"));
+      const forkCall = fetchCalls.find((c) => c.url.includes("/side"));
       expect(forkCall).toBeDefined();
       expect((forkCall?.body as { forkAt?: string })?.forkAt).toBe("msg-abc123");
     });
@@ -464,7 +464,7 @@ describe("runBtwSidechain", () => {
       // forkSession throws because the source session doesn't exist.
       const fetchImpl = (async (input: string | URL | Request) => {
         const url = String(input);
-        if (url.includes("/fork")) {
+        if (url.includes("/side")) {
           return new Response(
             JSON.stringify({ error: "session not found" }),
             { status: 404 },

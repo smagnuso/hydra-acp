@@ -439,13 +439,35 @@ export async function forkSession(
   id: string,
   opts: { forkAt?: string; cwd?: string; agentId?: string; title?: string; mode?: "verbatim" | "synthesis" } = {},
   fetchImpl: typeof fetch = fetch,
-): Promise<{
+): Promise<ForkResult> {
+  return postFork(target, `/v1/sessions/${id}/fork`, "fork", opts, fetchImpl);
+}
+
+// Fork for an aside (/btw): always verbatim, with the copied history marked as context only.
+export async function sideSession(
+  target: RemoteTarget,
+  id: string,
+  opts: { forkAt?: string; cwd?: string; agentId?: string; title?: string; model?: string } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<ForkResult> {
+  return postFork(target, `/v1/sessions/${id}/side`, "side fork", opts, fetchImpl);
+}
+
+interface ForkResult {
   sessionId: string;
   forkedFromSessionId: string;
   forkedAt: string;
-}> {
+}
+
+async function postFork(
+  target: RemoteTarget,
+  path: string,
+  what: string,
+  opts: object,
+  fetchImpl: typeof fetch,
+): Promise<ForkResult> {
   const response = await fetchWithTimeout(
-    `${target.baseUrl}/v1/sessions/${id}/fork`,
+    `${target.baseUrl}${path}`,
     {
       method: "POST",
       headers: {
@@ -469,13 +491,9 @@ export async function forkSession(
     } catch {
       void 0;
     }
-    throw new Error(`fork failed (HTTP ${response.status})${detail}`);
+    throw new Error(`${what} failed (HTTP ${response.status})${detail}`);
   }
-  return (await response.json()) as {
-    sessionId: string;
-    forkedFromSessionId: string;
-    forkedAt: string;
-  };
+  return (await response.json()) as ForkResult;
 }
 
 export async function killSession(

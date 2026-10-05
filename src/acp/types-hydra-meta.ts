@@ -1,3 +1,4 @@
+import { SideInfoSchema, type SideInfo } from "./types-side.js";
 import { SessionResumeHints } from "./types-session.js";
 import { SessionListUsage } from "./types-session-list.js";
 
@@ -328,6 +329,7 @@ export interface HydraMeta {
   parentSessionId?: string;
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  side?: SideInfo;
   originatingClient?: { name: string; version?: string };
   // Agent's own initialize-time capability claim, forwarded verbatim.
   agentCapabilities?: unknown;
@@ -713,6 +715,10 @@ export function extractHydraMeta(
   }
   if (typeof obj.forkedFromMessageId === "string") {
     out.forkedFromMessageId = obj.forkedFromMessageId;
+  }
+  const side = SideInfoSchema.safeParse(obj.side);
+  if (side.success) {
+    out.side = side.data;
   }
   if (
     obj.originatingClient &&

@@ -637,7 +637,7 @@ describe("startDaemon", () => {
       ws.close();
     });
 
-    describe("session/delete over ACP", () => {
+    describe("session/delete and hydra-acp/session/side over ACP", () => {
       const importBundle = async (sessionId: string): Promise<string> => {
         const imp = await fetch(`${baseUrl}/v1/sessions/import`, {
           method: "POST",
@@ -763,6 +763,18 @@ describe("startDaemon", () => {
         const ws = await connect();
         const response = await call(ws, "session/delete", {});
         expect(response.error?.code).toBe(JsonRpcErrorCodes.InvalidParams);
+        ws.close();
+      });
+
+      it("hydra-acp/session/side validates its params before forking", async () => {
+        const id = await importBundle("hydra_session_side_src");
+        const ws = await connect();
+        const noId = await call(ws, "hydra-acp/session/side", {});
+        expect(noId.error?.code).toBe(JsonRpcErrorCodes.InvalidParams);
+        const emptySelection = await call(ws, "hydra-acp/session/side", { sessionId: id, selection: { text: "" } });
+        expect(emptySelection.error?.code).toBe(JsonRpcErrorCodes.InvalidParams);
+        const ghost = await call(ws, "hydra-acp/session/side", { sessionId: "hydra_session_ghost" });
+        expect(ghost.error?.code).toBe(JsonRpcErrorCodes.SessionNotFound);
         ws.close();
       });
     });

@@ -11,7 +11,7 @@ import { WebSocket, type ClientOptions } from "ws";
 import { wsTlsOptions } from "../../core/tls-trust.js";
 import type { MessageStream } from "../../acp/framing.js";
 import type { RemoteTarget } from "../../core/remote-target.js";
-import { forkSession, killSession } from "../discovery.js";
+import { killSession, sideSession } from "../discovery.js";
 import { JsonRpcConnection } from "../../acp/connection.js";
 import { wsToMessageStream } from "../../acp/ws-stream.js";
 import { ACP_PROTOCOL_VERSION, HYDRA_META_KEY } from "../../acp/types.js";
@@ -129,7 +129,7 @@ export function runBtwSidechain(
           // list --all`. Threaded through forkSession itself — single
           // round-trip, no rename race window.
           const titlePreview = prompt.replace(/\s+/g, " ").trim().slice(0, 60);
-          const forkResult = await forkSession(
+          const forkResult = await sideSession(
             target,
             sourceSessionId,
             {
@@ -137,7 +137,6 @@ export function runBtwSidechain(
               cwd: opts.cwd,
               agentId: opts.agentId,
               title: `btw: ${titlePreview}`,
-              mode: "verbatim",
             },
             fetchImpl,
           );

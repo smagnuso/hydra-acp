@@ -1,3 +1,4 @@
+import { ownEntries } from "../core/side-context.js";
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { nanoid } from "nanoid";
@@ -1012,7 +1013,7 @@ export function registerAcpWsEndpoint(
     // defaults to the source's cwd. The new session is written with
     // upstreamSessionId="" so the resurrect below triggers seedFromImport
     // (same wire shape as an imported session).
-    connection.onRequest("hydra-acp/session/fork", async (raw) => {
+    const forkAndAttach = async (raw: unknown, side: boolean): Promise<Record<string, unknown>> => {
       const params = (raw ?? {}) as {
         sessionId?: unknown;
         forkAt?: unknown;
@@ -1020,6 +1021,7 @@ export function registerAcpWsEndpoint(
         agentId?: unknown;
         mode?: unknown;
         model?: unknown;
+        selection?: unknown;
       };
       if (typeof params.sessionId !== "string") {
         throw rpcError(
@@ -1030,13 +1032,31 @@ export function registerAcpWsEndpoint(
       const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
       const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
       const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
-      const mode = (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
+      const mode = side ? undefined : (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
         ? params.mode
         : undefined;
       const model = typeof params.model === "string" && params.model.length > 0
         ? params.model
         : undefined;
+      let sideInfo: { selection?: { text: string; responsePartId?: string } } | undefined;
+      if (side) {
+        const selection = params.selection as { text?: unknown; responsePartId?: unknown } | undefined;
+        if (selection !== undefined && (typeof selection.text !== "string" || selection.text.length === 0)) {
+          throw rpcError(JsonRpcErrorCodes.InvalidParams, "selection.text must be a non-empty string");
+        }
+        sideInfo = {
+          ...(selection !== undefined
+            ? {
+                selection: {
+                  text: selection.text as string,
+                  ...(typeof selection.responsePartId === "string" ? { responsePartId: selection.responsePartId } : {}),
+                },
+              }
+            : {}),
+        };
+      }
       const result = await deps.manager.forkSession(params.sessionId, {
+        ...(sideInfo !== undefined ? { side: sideInfo } : {}),
         ...(forkAt !== undefined ? { forkAt } : {}),
         ...(cwd !== undefined ? { cwd } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
@@ -1082,7 +1102,10 @@ export function registerAcpWsEndpoint(
           .catch(() => undefined);
       }
       return { ...result, sessionId: session.sessionId };
-    });
+    };
+    connection.onRequest("hydra-acp/session/fork", (raw) => forkAndAttach(raw, false));
+    // Fork for an aside: the copied history is context for the agent and clients see only what comes after it.
+    connection.onRequest("hydra-acp/session/side", (raw) => forkAndAttach(raw, true));
 
     // Speculative-compat alias for the still-Draft ACP RFD
     // https://agentclientprotocol.com/rfds/session-fork — accept the
@@ -1733,11 +1756,14 @@ export function registerAcpWsEndpoint(
             `session ${params.sessionId} not found`,
           );
         }
-        const history = await deps.manager.loadHistory(lookupId, {
-          ...(hydraAttach.historyLimit !== undefined
-            ? { maxEntries: hydraAttach.historyLimit }
-            : {}),
-        });
+        const history = ownEntries(
+          await deps.manager.loadHistory(lookupId, {
+            ...(hydraAttach.historyLimit !== undefined
+              ? { maxEntries: hydraAttach.historyLimit }
+              : {}),
+          }),
+          fromDisk.side,
+        );
         const viewerClientId = params.clientId ?? `cli_${nanoid(8)}`;
         state.attached.set(fromDisk.hydraSessionId, {
           sessionId: fromDisk.hydraSessionId,
@@ -3487,6 +3513,10 @@ function buildInitializeResult(): InitializeResult {
             agentSwap: true,
             synthesis: true,
             model: true,
+          },
+          // hydra-acp/session/side: a verbatim fork whose copied history is context only.
+          side: {
+            selection: true,
           },
         },
       }),

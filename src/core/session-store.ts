@@ -1,3 +1,4 @@
+import { SideInfoSchema, type SideInfo } from "../acp/types-side.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { customAlphabet } from "nanoid";
@@ -368,6 +369,7 @@ export const SessionRecord = z.object({
   // ended at. Kept so future UI can show "branched from turn N of session X".
   forkedFromSessionId: z.string().optional(),
   forkedFromMessageId: z.string().optional(),
+  side: SideInfoSchema.optional(),
   // When set, this fork session's background synopsis generation is in
   // progress ("running") or terminated abnormally ("failed"). Absent means
   // either not a synthesis fork, or synopsis already landed (check `synopsis`
@@ -735,6 +737,7 @@ export function recordFromMemorySession(args: {
   parentSessionId?: string;
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  side?: SideInfo;
   forkSynthesisState?: "running" | "failed";
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
@@ -809,6 +812,7 @@ export function recordFromMemorySession(args: {
     parentSessionId: args.parentSessionId,
     forkedFromSessionId: args.forkedFromSessionId,
     forkedFromMessageId: args.forkedFromMessageId,
+    side: args.side,
     forkSynthesisState: args.forkSynthesisState,
     originatingClient: args.originatingClient,
     interactive: args.interactive,

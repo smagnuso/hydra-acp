@@ -1,3 +1,5 @@
+import type { SideInfo } from "../acp/types-side.js";
+import { ownEntries } from "./side-context.js";
 import { customAlphabet } from "nanoid";
 import { parseForeignSessionId } from "./foreign-session-id.js";
 import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
@@ -359,6 +361,7 @@ export interface SessionInit {
   // meta.json so list views can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  side?: SideInfo;
   // Synthesis-fork state set by two-phase fork. "running" while synopsis
   // generation is in progress, "failed" when it errors. Absent when not a
   // synthesis fork or when synopsis is already present and clean.
@@ -782,6 +785,7 @@ export class Session {
   readonly parentSessionId: string | undefined;
   readonly forkedFromSessionId: string | undefined;
   readonly forkedFromMessageId: string | undefined;
+  readonly side: SideInfo | undefined;
   forkSynthesisState: "running" | "failed" | undefined;
   readonly originatingClient: { name: string; version?: string } | undefined;
   // Tristate. Mutates from undefined → true on first prompt (or directly
@@ -1510,6 +1514,7 @@ export class Session {
     this.parentSessionId = init.parentSessionId;
     this.forkedFromSessionId = init.forkedFromSessionId;
     this.forkedFromMessageId = init.forkedFromMessageId;
+    this.side = init.side;
     this.forkSynthesisState = init.forkSynthesisState;
     this.originatingClient = init.originatingClient;
     this.title = init.title;
@@ -3239,9 +3244,12 @@ export class Session {
       opts.historyLimit === 0
         ? Infinity
         : opts.historyLimit ?? this.historyMaxEntries;
-    const raw = await this.getHistorySnapshot(
-      opts.toolContent ?? "inline",
-      limit === Infinity ? Infinity : limit * 2,
+    const raw = ownEntries(
+      await this.getHistorySnapshot(
+        opts.toolContent ?? "inline",
+        limit === Infinity ? Infinity : limit * 2,
+      ),
+      this.side,
     );
     // Filter out state-update entries from historical data so a fresh-attaching
     // client sees only the synthesized snapshot (buildStateSnapshotReplay) for

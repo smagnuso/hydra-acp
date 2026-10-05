@@ -1049,6 +1049,97 @@ describe("session routes: termination broadcasts session_closed", () => {
   });
 });
 
+describe("session routes: POST /v1/sessions/:id/side", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  const update = (seq: number, update: Record<string, unknown>) => ({
+    method: "session/update",
+    params: { sessionId: "u_src", update },
+    recordedAt: seq,
+    seq,
+  });
+
+  async function seedSource(): Promise<string> {
+    const imported = await harness.manager.importBundle({
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_src",
+        lineageId: "lin_route_side",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      history: [
+        update(1, { sessionUpdate: "prompt_received", messageId: "m_q", prompt: [{ type: "text", text: "hi" }] }),
+        update(2, { sessionUpdate: "agent_message_chunk", messageId: "m_a", content: { type: "text", text: "hello" } }),
+        update(3, { sessionUpdate: "turn_complete", messageId: "m_a", stopReason: "end_turn" }),
+      ],
+    });
+    return imported.sessionId;
+  }
+
+  const post = (id: string, body: unknown): Promise<Response> =>
+    fetch(`${harness.baseUrl}/v1/sessions/${id}/side`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("forks verbatim and records the side with the end of the copied history", async () => {
+    const sourceId = await seedSource();
+    const res = await post(sourceId, { selection: { text: "hello", responsePartId: "p1" } });
+    expect(res.status).toBe(201);
+    const { sessionId, forkedFromSessionId } = (await res.json()) as { sessionId: string; forkedFromSessionId: string };
+    expect(forkedFromSessionId).toBe(sourceId);
+    const list = (await (await fetch(`${harness.baseUrl}/v1/sessions?includeNonInteractive=1`)).json()) as {
+      sessions: Array<{ sessionId: string; side?: unknown }>;
+    };
+    expect(list.sessions.find((row) => row.sessionId === sessionId)?.side).toEqual({
+      selection: { text: "hello", responsePartId: "p1" },
+      contextThroughSeq: 3,
+    });
+    expect(list.sessions.find((row) => row.sessionId === sourceId)?.side).toBeUndefined();
+  });
+
+  it("marks a side with no selection too", async () => {
+    const sourceId = await seedSource();
+    const { sessionId } = (await (await post(sourceId, {})).json()) as { sessionId: string };
+    const list = (await (await fetch(`${harness.baseUrl}/v1/sessions?includeNonInteractive=1`)).json()) as {
+      sessions: Array<{ sessionId: string; side?: unknown }>;
+    };
+    expect(list.sessions.find((row) => row.sessionId === sessionId)?.side).toEqual({ contextThroughSeq: 3 });
+  });
+
+  it("serves no copied history from the page route", async () => {
+    const sourceId = await seedSource();
+    const { sessionId } = (await (await post(sourceId, {})).json()) as { sessionId: string };
+    const own = await fetch(`${harness.baseUrl}/v1/sessions/${sessionId}/history/page?beforeSeq=100`);
+    expect(await own.json()).toEqual({ entries: [], hasMore: false });
+    const source = (await (await fetch(`${harness.baseUrl}/v1/sessions/${sourceId}/history/page?beforeSeq=100`)).json()) as {
+      entries: unknown[];
+    };
+    expect(source.entries.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an empty selection and an unknown source", async () => {
+    const sourceId = await seedSource();
+    expect((await post(sourceId, { selection: { text: "" } })).status).toBe(400);
+    expect((await post("hydra_session_ghost", {})).status).toBe(404);
+  });
+});
+
 describe("session routes: POST /v1/sessions/:id/fork", () => {
   let harness: Harness;
 

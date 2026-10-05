@@ -1,3 +1,5 @@
+import type { SideInfo } from "../acp/types-side.js";
+import { contextBoundary, ownEntries } from "./side-context.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { thisMachine } from "./machine.js";
@@ -351,6 +353,7 @@ export interface ResurrectParams {
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  side?: SideInfo;
   // Synthesis-fork state restored from meta.json on resurrect so the
   // live Session carries it forward and list views see it immediately.
   forkSynthesisState?: "running" | "failed";
@@ -1654,6 +1657,7 @@ export class SessionManager {
       priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
+      side: params.side,
       forwardedEnv: params.forwardedEnv,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
@@ -1808,6 +1812,7 @@ export class SessionManager {
       priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
+      side: params.side,
       forwardedEnv: params.forwardedEnv,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
@@ -5962,13 +5967,17 @@ export class SessionManager {
     sessionId: string,
     opts: { beforeSeq: number; turns: number },
   ): Promise<{ entries: HistoryStoreEntry[]; hasMore: boolean } | undefined> {
-    if (!this.sessions.has(sessionId) && !(await this.store.read(sessionId))) {
+    const record = await this.store.read(sessionId);
+    if (!this.sessions.has(sessionId) && !record) {
       return undefined;
     }
-    return this.histories.pageBefore(sessionId, {
+    const side = this.sessions.get(sessionId)?.side ?? record?.side;
+    const page = await this.histories.pageBefore(sessionId, {
       ...opts,
       skip: (e) => isStateUpdate(e.method, e.params),
     });
+    const entries = ownEntries(page.entries, side);
+    return { entries, hasMore: page.hasMore && entries.length === page.entries.length };
   }
 
   // Read the on-disk history.jsonl for a session without constructing a
@@ -6036,6 +6045,7 @@ export class SessionManager {
       priority: record.priority,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
+      side: record.side,
       forkSynthesisState: record.forkSynthesisState,
       forwardedEnv: record.forwardedEnv,
       // `cwd` above is already the workspace path, so the agent respawns
@@ -6239,6 +6249,7 @@ export class SessionManager {
       parentSessionId: session.parentSessionId,
       forkedFromSessionId: session.forkedFromSessionId,
       forkedFromMessageId: session.forkedFromMessageId,
+      side: session.side,
       forkSynthesisState: session.forkSynthesisState,
       originatingClient: session.originatingClient,
       interactive: session.interactive,
@@ -6286,6 +6297,7 @@ export class SessionManager {
         parentSessionId: live.parentSessionId,
         forkedFromSessionId: live.forkedFromSessionId,
         forkedFromMessageId: live.forkedFromMessageId,
+        side: live.side,
         forkSynthesisState: live.forkSynthesisState,
         originatingClient: live.originatingClient,
         interactive,
@@ -6321,6 +6333,7 @@ export class SessionManager {
       parentSessionId: r.parentSessionId,
       forkedFromSessionId: r.forkedFromSessionId,
       forkedFromMessageId: r.forkedFromMessageId,
+      side: r.side,
       forkSynthesisState: r.forkSynthesisState,
       originatingClient: r.originatingClient,
       interactive,
@@ -6506,6 +6519,7 @@ export class SessionManager {
         parentSessionId: session.parentSessionId,
         forkedFromSessionId: session.forkedFromSessionId,
         forkedFromMessageId: session.forkedFromMessageId,
+        side: session.side,
         originatingClient: session.originatingClient,
         interactive,
         priority: session.priority,
@@ -6561,6 +6575,7 @@ export class SessionManager {
         parentSessionId: r.parentSessionId,
         forkedFromSessionId: r.forkedFromSessionId,
         forkedFromMessageId: r.forkedFromMessageId,
+        side: r.side,
         originatingClient: r.originatingClient,
         interactive,
         priority: r.priority,
@@ -6749,6 +6764,9 @@ export class SessionManager {
       // fork does not require an interactive attach first. See
       // deliverHeadlessPrompt.
       prompt?: string;
+      // Marks the fork as a side chat. Defaults mode to "verbatim" and records
+      // where the copied context ends so clients can show only the aside.
+      side?: { selection?: { text: string; responsePartId?: string } };
     } = {},
   ): Promise<{
     sessionId: string;
@@ -6781,7 +6799,7 @@ export class SessionManager {
 
     let slicedHistory = sourceHistory;
     let forkedAt: string;
-    const mode = opts.mode ?? "synthesis";
+    const mode = opts.mode ?? (opts.side ? "verbatim" : "synthesis");
     // Set in phase 1 for synthesis forks so recordForBundle picks it up.
     // Undefined for verbatim and cross-machine imports.
     let forkSynthesisState: "running" | undefined;
@@ -6970,6 +6988,14 @@ export class SessionManager {
       ...(forkWorkspace !== undefined ? { workspace: forkWorkspace } : {}),
       forkedFromSessionId: sourceSessionId,
       forkedFromMessageId: forkedAt,
+      ...(opts.side !== undefined
+        ? {
+            side: {
+              ...(opts.side.selection !== undefined ? { selection: opts.side.selection } : {}),
+              ...contextBoundary(slicedHistory),
+            },
+          }
+        : {}),
       ...(forkSynthesisState !== undefined ? { forkSynthesisState } : {}),
     });
 
@@ -7120,6 +7146,7 @@ export class SessionManager {
     // unset so meta.json doesn't lie about the origin.
     forkedFromSessionId?: string;
     forkedFromMessageId?: string;
+    side?: SideInfo;
     // Transient marker for synthesis-mode forks — stamped in phase 1 so the
     // recall MCP mint predicate fires immediately. Cleared by the background
     // phase via mutateRecord once synopsis lands or fails.
@@ -7173,6 +7200,7 @@ export class SessionManager {
           ? {
               forkedFromSessionId: args.forkedFromSessionId,
               forkedFromMessageId: args.forkedFromMessageId,
+              ...(args.side !== undefined ? { side: args.side } : {}),
             }
           : {
               importedFromSessionId: args.bundle.session.sessionId,
@@ -8417,6 +8445,7 @@ export function mergeForPersistence(
       session.forkedFromSessionId ?? existing?.forkedFromSessionId,
     forkedFromMessageId:
       session.forkedFromMessageId ?? existing?.forkedFromMessageId,
+    side: session.side ?? existing?.side,
     originatingClient:
       session.originatingClient ?? existing?.originatingClient,
     interactive: session.interactive ?? existing?.interactive,

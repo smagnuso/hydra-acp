@@ -799,6 +799,40 @@ Branch a local session. `forkAt` defaults to the source's most-recent `turn_comp
 - `400` — validation (empty `cwd`, empty `agentId`, agent not installed, …).
 - `404` — source session unknown.
 
+#### `POST /v1/sessions/:id/side`
+
+Branch a local session for an aside. A side session is a verbatim fork whose copied history is context for the agent only: it is marked on the record, and replays and history pages leave it out, so a client shows just what happens in the side session itself. Everything else matches `POST /v1/sessions/:id/fork`; `mode` is not accepted (always `verbatim`).
+
+**Request body**
+
+```jsonc
+{
+  "forkAt":    "<messageId>",   // optional; defaults to the source's latest turn_complete
+  "cwd":       "/work-fork",    // optional
+  "agentId":   "claude-acp",    // optional
+  "model":     "claude-opus-4-7", // optional
+  "title":     "btw: ...",      // optional
+  "selection": { "text": "...", "responsePartId": "<id>" }  // optional; text must be non-empty
+}
+```
+
+**Response (`201 Created`)**: the same shape as fork. The row for the new session carries `side` (see [`side` on session rows](#side-on-session-rows)).
+
+**Errors**: as for fork, plus `400` for an empty `selection.text`.
+
+The prompt that starts the aside is the caller's to flag: a caller that wants the side session kept out of default lists sends it with `_meta["hydra-acp"].ancillary` as the `/btw` overlay does; one that wants a durable chat sends it plainly.
+
+##### `side` on session rows
+
+Present iff the session was created as a side session.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `selection` | `{text, responsePartId?}?` | The selected text the aside was opened on, as the caller supplied it. |
+| `contextThroughSeq` | `number?` | The highest `seq` among the history copied from the source. Frames at or below it are context; `session/attach` replay, the cold-session viewer replay and `GET /v1/sessions/:id/history/page` omit them. `GET /v1/sessions/:id/history` still returns everything. Absent when the copied history carries no `seq`. |
+
+On `session/list` it rides in `_meta["hydra-acp"].side`.
+
 #### `POST /v1/sessions/import`
 
 Import a session bundle. Without `replace`, a `lineageId` clash with an existing local session returns `409` citing the existing local id. With `replace: true`, the existing local session is overwritten in-place (its local id is preserved); any live in-memory copy is closed.
@@ -1829,6 +1863,7 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 | `parentSessionId` | `string?` | Set iff spawned as a transformer child. |
 | `forkedFromSessionId` | `string?` | Local-fork breadcrumb. |
 | `forkedFromMessageId` | `string?` | Local-fork breadcrumb. |
+| `side` | `object?` | Set iff created by `hydra-acp/session/side`; see [`side` on session rows](#side-on-session-rows). |
 | `originatingClient` | `{name, version?}?` | `clientInfo` of the process that issued `session/new`. |
 | `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
 
@@ -1902,6 +1937,7 @@ Field reference for `_meta["hydra-acp"]` (always-present fields first, then opti
 | `parentSessionId` | `string?` | Set iff spawned as a child by a transformer. |
 | `forkedFromSessionId` | `string?` | Local-fork breadcrumb; present iff locally forked. |
 | `forkedFromMessageId` | `string?` | Local-fork breadcrumb; present iff locally forked. |
+| `side` | `object?` | Present iff created as a side session; see [`side` on session rows](#side-on-session-rows). |
 | `originatingClient` | `object?` | `clientInfo` of the process that issued `session/new`: `{ name, version? }`. |
 | `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
 
@@ -3131,6 +3167,10 @@ Hydra also accepts the still-Draft standard [ACP `session/fork` RFD](https://age
 The alias always forks at the source's latest turn boundary and uses `mode: "verbatim"` — no ephemeral synopsis synthesis, no agent swap, no `forkAt`. Clients that want those knobs must use `hydra-acp/session/fork`. Hydra advertises the alias via `sessionCapabilities.fork = {}` on `initialize`, and the extras via `_meta["hydra-acp"].session.fork`.
 
 Status caveat: the RFD is Draft (not Preview/Completed) and has been since 2025-11-20. If it reshapes when it moves to Preview, this alias will need to adjust.
+
+#### Request: `hydra-acp/session/side`
+
+The WS twin of `POST /v1/sessions/:id/side`, with the binding behavior of `hydra-acp/session/fork`: the calling connection is attached to the new session before the call returns. Params: `sessionId`, and optionally `forkAt`, `cwd`, `agentId`, `model`, `title`, `selection`. `mode` is ignored. Advertised as `_meta["hydra-acp"].session.side` (`{ "selection": true }`) on `initialize`.
 
 ### Agent install progress
 
