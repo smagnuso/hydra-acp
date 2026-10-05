@@ -297,4 +297,32 @@ describe("foldHunks", () => {
   it("returns [] for an empty list", () => {
     expect(foldHunks([])).toEqual([]);
   });
+
+  it("reads a patch tool's per-file diffs, as opencode's apply_patch records them", () => {
+    const files = aggregateFileEdits([
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: newId(),
+            rawOutput: {
+              metadata: {
+                files: [
+                  { filePath: "/r/a.cpp", patch: "@@ -1 +1 @@\n-old\n+new\n" },
+                  { filePath: "/r/new.js", patch: "@@ -0,0 +1 @@\n+fresh\n" },
+                ],
+              },
+            },
+          },
+        },
+        recordedAt: 1,
+      },
+    ]);
+    expect(files).toEqual([
+      { path: "/r/a.cpp", hunks: [{ oldText: "old\n", newText: "new\n" }], created: false },
+      { path: "/r/new.js", hunks: [{ oldText: "", newText: "fresh\n" }], created: true },
+    ]);
+  });
 });
+

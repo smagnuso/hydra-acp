@@ -20,7 +20,7 @@
 // Deletes are NOT represented: nothing on the wire marks a file as
 // removed. A file the session deleted will simply not appear in the
 // diff output.
-import { extractEditDiff } from "./render-update.js";
+import { editTexts, extractFileEdits } from "./file-edits.js";
 
 type HistoryEntryLike = {
   method?: unknown;
@@ -28,8 +28,9 @@ type HistoryEntryLike = {
   [key: string]: unknown;
 };
 
-// A single hunk: one Edit/Write/MultiEdit-sub-edit. Snippet-scoped for
-// Edit (old_string/new_string), whole-file-scoped for Write (oldText="").
+// A single hunk: one Edit/Write/MultiEdit-sub-edit or one file of a patch.
+// Snippet-scoped for Edit (old_string/new_string), whole-file-scoped for
+// Write (oldText="").
 export interface FileHunk {
   oldText: string;
   newText: string;
@@ -163,80 +164,15 @@ function mergeEdit(
   existing.hunks.push(hunk);
 }
 
-// Pull every (path, oldText, newText) triple from a single update.
-// Handles three carriers:
-//   1. content[] type:"diff" — canonical ACP, one block per file.
-//   2. rawInput.{file_path, old_string, new_string} — Claude Edit tool.
-//   3. rawInput.{path|file_path, content} — Claude Write tool.
-//   4. rawInput.edits[] — Claude MultiEdit tool, all edits on the
-//      shared rawInput.file_path. Expanded to one RawEdit per item.
-// Falls back to extractEditDiff (which only returns the first
-// canonical/rawInput hit) when none of the multi-shaped paths match,
-// so single-edit tools still work without duplicating that logic.
+// Every (path, oldText, newText) triple in one update, from whichever
+// carrier the agent used (see file-edits.ts). A patch tool's per-file
+// unified diff becomes one hunk of its concatenated hunks.
 function extractRawEdits(update: Record<string, unknown>): RawEdit[] {
   const out: RawEdit[] = [];
-  // 1) MultiEdit shape — rawInput.edits[] with shared file_path.
-  const rawInput = update.rawInput;
-  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
-    const r = rawInput as Record<string, unknown>;
-    const filePath =
-      typeof r.file_path === "string"
-        ? r.file_path
-        : typeof r.path === "string"
-          ? r.path
-          : undefined;
-    const subEdits = r.edits;
-    if (filePath !== undefined && Array.isArray(subEdits)) {
-      for (const item of subEdits) {
-        if (!item || typeof item !== "object") {
-          continue;
-        }
-        const it = item as Record<string, unknown>;
-        const oldText = typeof it.old_string === "string" ? it.old_string : undefined;
-        const newText = typeof it.new_string === "string" ? it.new_string : undefined;
-        if (oldText === undefined || newText === undefined) {
-          continue;
-        }
-        out.push({ path: filePath, oldText, newText });
-      }
-      if (out.length > 0) {
-        return out;
-      }
+  for (const edit of extractFileEdits(update)) {
+    if (edit.path !== undefined) {
+      out.push({ path: edit.path, ...editTexts(edit) });
     }
-  }
-  // 2) content[] type:"diff" blocks — emit one RawEdit per block. The
-  // canonical ACP carrier puts one block per file, but defensively
-  // accept multiple in case an agent batches.
-  const content = update.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (!block || typeof block !== "object") {
-        continue;
-      }
-      const b = block as Record<string, unknown>;
-      if (b.type !== "diff") {
-        continue;
-      }
-      const path = typeof b.path === "string" ? b.path : undefined;
-      if (path === undefined) {
-        continue;
-      }
-      const oldText = typeof b.oldText === "string" ? b.oldText : "";
-      const newText = typeof b.newText === "string" ? b.newText : "";
-      out.push({ path, oldText, newText });
-    }
-    if (out.length > 0) {
-      return out;
-    }
-  }
-  // 3) Single-edit fallback via extractEditDiff (Edit/Write).
-  const diff = extractEditDiff(update);
-  if (diff && diff.path) {
-    out.push({
-      path: diff.path,
-      oldText: diff.oldText,
-      newText: diff.newText,
-    });
   }
   return out;
 }

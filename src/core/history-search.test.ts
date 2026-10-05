@@ -232,6 +232,21 @@ describe("edit: scope", () => {
       .not.toContain("edit");
   });
 
+  it("finds a file a patch tool changed", () => {
+    const patched: HistoryEntry = {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "p1",
+          rawOutput: { metadata: { files: [{ filePath: ABS, patch: { __hydraBlob: "h", bytes: 4000 } }] } },
+        },
+      },
+      recordedAt: 1,
+    };
+    expect(scanSessionEntries([patched], q("app.ts", "edit"), 10).totalMatches).toBe(1);
+  });
+
   it("matches an isolated session's workspace edits against the source tree", () => {
     // An isolated session's cwd IS the workspace; its edits all land
     // under there, so without normalization a query naming the real

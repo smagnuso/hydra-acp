@@ -17,6 +17,7 @@
 // (history files are read in their entirety by HistoryStore.load); the
 // caller bounds work via maxSessions / maxSnippetsPerSession.
 
+import { editedFilePaths } from "./file-edits.js";
 import type { SessionManager } from "./session-manager.js";
 import type { HistoryEntry } from "./history-store.js";
 import { sanitizeSingleLine, sanitizeWireText } from "./render-update.js";
@@ -582,7 +583,11 @@ function extractToolFragments(u: Record<string, unknown>): Fragment[] {
       out.push(frag);
     }
   }
-  for (const path of editedPaths(u)) {
+  // Paths this call changed. Histories here are loaded with
+  // tools:"references", so bodies over TOOL_BLOB_THRESHOLD are blob refs;
+  // editedFilePaths reads the path whatever the body is, so the largest
+  // writes a session made are not silently dropped.
+  for (const path of editedFilePaths(u)) {
     const frag: Fragment = { kind: "edit", text: path };
     if (toolName !== undefined) {
       frag.toolName = toolName;
@@ -610,59 +615,6 @@ function extractToolFragments(u: Record<string, unknown>): Fragment[] {
       frag.toolName = toolName;
     }
     out.push(frag);
-  }
-  return out;
-}
-
-// Paths of files this tool call CHANGED, deduped within the call.
-//
-// Same carrier vocabulary as history-edits.ts's extractRawEdits and
-// render-update.ts's extractEditDiff — canonical content[] type:"diff",
-// plus Claude's Edit / Write / MultiEdit rawInput shapes — with one
-// deliberate difference: those two gate on the body being a `string`,
-// because they need the text to build a hunk. We only need the path, so
-// we gate on the body field being *present*. That matters here and
-// nowhere else: histories are loaded with tools:"references", so any
-// body over TOOL_BLOB_THRESHOLD is a { __hydraBlob } object rather than
-// a string, and a string-gated read silently drops exactly the largest
-// writes a session made.
-//
-// Deliberately over-includes: an unknown MCP tool taking both a path and
-// a content-ish field reads as an edit. Prefer that to missing real ones,
-// and the caller is asking "who changed this file", not counting.
-function editedPaths(u: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const push = (p: unknown): void => {
-    if (typeof p !== "string" || p.length === 0 || seen.has(p)) {
-      return;
-    }
-    seen.add(p);
-    out.push(p);
-  };
-  const content = u.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (!block || typeof block !== "object") {
-        continue;
-      }
-      const b = block as Record<string, unknown>;
-      if (b.type === "diff") {
-        push(b.path);
-      }
-    }
-  }
-  const rawInput = u.rawInput;
-  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
-    const r = rawInput as Record<string, unknown>;
-    const carriesEdit =
-      r.old_string !== undefined ||
-      r.new_string !== undefined ||
-      r.content !== undefined ||
-      Array.isArray(r.edits);
-    if (carriesEdit) {
-      push(typeof r.file_path === "string" ? r.file_path : r.path);
-    }
   }
   return out;
 }

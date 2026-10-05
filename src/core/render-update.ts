@@ -5,6 +5,7 @@ import { posix as posixPath } from "node:path";
 import stripAnsi from "strip-ansi";
 import { shortenHomePath } from "./paths.js";
 import { parseUnifiedPatch, type PatchedFile } from "./tool-edit.js";
+import { diffBlockEdits, rawInputEdit, type FileEdit } from "./file-edits.js";
 
 import { getParentToolUseId, getWorkerTaskId } from "../tui/worker-id.js";
 import type { Attachment } from "../tui/input.js";
@@ -533,82 +534,28 @@ export function isExitPlanModeTool(name: string | undefined): boolean {
 //      treated as oldText:"")
 // Returns null when none of those shapes are present so the format
 // layer keeps the row single-line for non-edit tools.
-// Read a diff block's old/new field, which is either an inline string or a
-// blob ref ({ __hydraBlob, bytes }) when delivered in references mode.
-function readDiffField(
-  value: unknown,
-): { text?: string; ref?: { hash: string; bytes: number } } | undefined {
-  if (typeof value === "string") {
-    return { text: value };
-  }
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const v = value as { __hydraBlob?: unknown; bytes?: unknown };
-    if (typeof v.__hydraBlob === "string") {
-      return {
-        ref: {
-          hash: v.__hydraBlob,
-          bytes: typeof v.bytes === "number" ? v.bytes : 0,
-        },
-      };
-    }
-  }
-  return undefined;
-}
-
 export function extractEditDiff(u: UpdateLike): EditDiff | null {
-  const content = u.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (!block || typeof block !== "object") {
-        continue;
-      }
-      const b = block as Record<string, unknown>;
-      if (b.type !== "diff") {
-        continue;
-      }
-      // In "references" mode oldText/newText arrive as blob refs
-      // ({ __hydraBlob, bytes }) rather than strings; capture them as
-      // oldRef/newRef so the client can fetch the body on demand.
-      const oldField = readDiffField(b.oldText);
-      const newField = readDiffField(b.newText);
-      if (oldField === undefined && newField === undefined) {
-        continue;
-      }
-      const path = typeof b.path === "string" ? b.path : undefined;
-      return {
-        ...(path !== undefined ? { path } : {}),
-        oldText: oldField?.text ?? "",
-        newText: newField?.text ?? "",
-        ...(oldField?.ref ? { oldRef: oldField.ref } : {}),
-        ...(newField?.ref ? { newRef: newField.ref } : {}),
-      };
-    }
+  const block = diffBlockEdits(u)[0];
+  if (block) {
+    return toEditDiff(block);
   }
-  const rawInput = u.rawInput;
-  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
-    const r = rawInput as Record<string, unknown>;
-    const filePath =
-      typeof r.file_path === "string"
-        ? r.file_path
-        : typeof r.path === "string"
-          ? r.path
-          : undefined;
-    if (typeof r.old_string === "string" && typeof r.new_string === "string") {
-      return {
-        ...(filePath !== undefined ? { path: filePath } : {}),
-        oldText: r.old_string,
-        newText: r.new_string,
-      };
-    }
-    if (typeof r.content === "string") {
-      return {
-        ...(filePath !== undefined ? { path: filePath } : {}),
-        oldText: "",
-        newText: r.content,
-      };
-    }
+  // Only diff blocks are fetched on demand; an Edit/Write input renders
+  // only when its text arrived inline.
+  const single = rawInputEdit(u);
+  if (single?.old?.text !== undefined && single.new?.text !== undefined) {
+    return toEditDiff(single);
   }
   return null;
+}
+
+function toEditDiff(edit: FileEdit): EditDiff {
+  return {
+    ...(edit.path !== undefined ? { path: edit.path } : {}),
+    oldText: edit.old?.text ?? "",
+    newText: edit.new?.text ?? "",
+    ...(edit.old?.ref ? { oldRef: edit.old.ref } : {}),
+    ...(edit.new?.ref ? { newRef: edit.new.ref } : {}),
+  };
 }
 
 function readExitPlanMarkdown(u: UpdateLike): string | null {
