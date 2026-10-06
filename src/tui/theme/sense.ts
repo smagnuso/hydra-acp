@@ -327,6 +327,13 @@ export function schemeBackground(scheme: ColorScheme): Color {
   return scheme === "dark" ? rgb(0, 0, 0) : rgb(255, 255, 255);
 }
 
+// An `ESC ]` with no terminator yet at the end of a read: the rest of a reply
+// that tmux or the terminal wrote in pieces. ESC alone is the Escape key and is
+// never held.
+const OSC_TAIL = /\u001b\](?:[^\u0007\u001b]*\u001b?)?$/;
+const MAX_OSC_CARRY = 64;
+const OSC_CARRY_MS = 50;
+
 /** The one method of terminal-kit's we have to wrap. */
 interface StdinDecoder {
   onStdin: (chunk: Buffer) => void;
@@ -375,14 +382,40 @@ export function installReplyFilter(
   if (typeof original !== "function") {
     return;
   }
+  let carry = "";
+  let carryTimer: NodeJS.Timeout | null = null;
   t.onStdin = function filtered(chunk: Buffer): void {
-    const text = chunk.toString("latin1");
+    const self = this;
+    let text = chunk.toString("latin1");
+    if (carryTimer !== null) {
+      clearTimeout(carryTimer);
+      carryTimer = null;
+    }
+    if (carry.length > 0) {
+      text = carry + text;
+      carry = "";
+    }
+    const tail = OSC_TAIL.exec(text);
+    if (tail !== null && text.length - tail.index <= MAX_OSC_CARRY) {
+      carry = text.slice(tail.index);
+      text = text.slice(0, tail.index);
+      carryTimer = setTimeout(() => {
+        carryTimer = null;
+        const held = carry;
+        carry = "";
+        original.call(self, Buffer.from(held, "latin1"));
+      }, OSC_CARRY_MS);
+      carryTimer.unref?.();
+      if (text.length === 0) {
+        return;
+      }
+    }
     if (
       !hasOsc11(text) &&
       !/\u001b\[\?997;/.test(text) &&
       !hasCprReport(text)
     ) {
-      original.call(this, chunk);
+      original.call(this, Buffer.from(text, "latin1"));
       return;
     }
     const background = parseOsc11(text);

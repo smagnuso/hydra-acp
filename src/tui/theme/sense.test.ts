@@ -292,6 +292,58 @@ describe("installReplyFilter routes what it strips", () => {
     expect(events).toEqual([]);
     expect(f.seen).toEqual(["\u001b[Ahello"]);
   });
+
+  // tmux 3.6 forwards pane palette queries to the outer terminal and relays the
+  // answer, which can arrive split across reads.
+  describe("a reply split across reads", () => {
+    const splits: Array<[string, string]> = [
+      ["\u001b]", "4;150;rgb:afaf/d7d7/8787\u0007"],
+      ["\u001b]4;150;rgb:afaf", "/d7d7/8787\u0007"],
+      ["\u001b]4;150;rgb:afaf/d7d7/8787", "\u0007"],
+      ["\u001b]4;150;rgb:afaf/d7d7/8787\u001b", "\\"],
+    ];
+
+    for (const [a, b] of splits) {
+      it(`is reassembled and scrubbed: ${JSON.stringify(a)} | ${JSON.stringify(b)}`, () => {
+        const f = fakeTerm();
+        installReplyFilter(f.term);
+        f.term.onStdin(Buffer.from(`x${a}`, "latin1"));
+        f.term.onStdin(Buffer.from(`${b}y`, "latin1"));
+        expect(f.seen.join("")).toBe("xy");
+      });
+    }
+
+    it("still routes a split background reply to its handler", () => {
+      const f = fakeTerm();
+      const colors: unknown[] = [];
+      installReplyFilter(f.term, { onBackground: (c) => colors.push(c) });
+      f.term.onStdin(Buffer.from("\u001b]11;rgb:ffff/ff", "latin1"));
+      f.term.onStdin(Buffer.from("ff/ffff\u0007", "latin1"));
+      expect(colors).toEqual([rgb(255, 255, 255)]);
+      expect(f.seen).toEqual([]);
+    });
+
+    it("releases a held prefix that never completes", () => {
+      vi.useFakeTimers();
+      try {
+        const f = fakeTerm();
+        installReplyFilter(f.term);
+        f.term.onStdin(Buffer.from("a\u001b]", "latin1"));
+        expect(f.seen.join("")).toBe("a");
+        vi.advanceTimersByTime(200);
+        expect(f.seen.join("")).toBe("a\u001b]");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not hold a bare ESC keypress", () => {
+      const f = fakeTerm();
+      installReplyFilter(f.term);
+      f.term.onStdin(Buffer.from("\u001b", "latin1"));
+      expect(f.seen).toEqual(["\u001b"]);
+    });
+  });
 });
 
 describe("parseOsc4 and parseOsc10", () => {
