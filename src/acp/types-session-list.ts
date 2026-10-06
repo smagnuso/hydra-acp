@@ -104,6 +104,12 @@ export const SessionListEntry = z.object({
   // User-set sort weight; >0 floats the session to the top of the
   // picker. Absent / 0 = normal priority.
   priority: z.number().int().nonnegative().optional(),
+  // Read state (epoch ms). `unread` is true while the last turn ended
+  // after the last time a client marked the session read; mark it with
+  // PATCH /v1/sessions/:id { read }. Never moves updatedAt.
+  lastTurnEndedAt: z.number().optional(),
+  readAt: z.number().optional(),
+  unread: z.boolean().optional(),
   // When the session was created; unlike updatedAt it never moves.
   createdAt: z.string().optional(),
   updatedAt: z.string(),
@@ -304,6 +310,15 @@ export function buildHydraSessionMeta(
   }
   if (entry.priority !== undefined && entry.priority > 0) {
     meta.priority = entry.priority;
+  }
+  if (entry.lastTurnEndedAt !== undefined) {
+    meta.lastTurnEndedAt = entry.lastTurnEndedAt;
+  }
+  if (entry.readAt !== undefined) {
+    meta.readAt = entry.readAt;
+  }
+  if (entry.unread) {
+    meta.unread = true;
   }
   // Armed background tasks, both halves. Emitted on the attach response —
   // not just in session/list — because a client's armed state is otherwise

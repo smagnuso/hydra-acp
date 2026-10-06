@@ -377,7 +377,10 @@ List sessions known to the daemon.
       "status":          "warm",     // "warm" | "cold"
       "busy":            false,
       "attachedClients": 2,
-      "updatedAt":       "2026-05-29T18:01:23.000Z"
+      "updatedAt":       "2026-05-29T18:01:23.000Z",
+      "lastTurnEndedAt": 1788396250000, // see Read state below
+      "readAt":          1788396240000,
+      "unread":          true
       // …other SessionListEntry fields (currentModel, currentUsage,
       // importedFromMachine, forkedFromSessionId, …)
     },
@@ -387,6 +390,8 @@ List sessions known to the daemon.
   "cursor":  1788396252071.123      // pass back as `since=` on the next poll
 }
 ```
+
+**Read state.** One read/unread state per session, shared by every client. `lastTurnEndedAt` is when the last agent turn ended (solicited or not) and `readAt` is when a client last marked the session read, both epoch ms; `unread` is `lastTurnEndedAt > readAt`, and is absent or `false` otherwise. A session with no `readAt` reads as read: the daemon pins `readAt` to the previous turn's end (or `createdAt`) when the next turn ends, so that turn is the one that makes it unread. Clients mark sessions read with [`PATCH /v1/sessions/:id`](#patch-v1sessionsid) `{ "read": true }` when a person has seen them; being attached is not enough. Neither field moves `updatedAt`. The fields also appear in `session/list` `_meta["hydra-acp"]`.
 
 #### `GET /v1/sessions/:id`
 
@@ -602,6 +607,26 @@ Response: `204` on success, `400` on empty title, `404` on unknown session.
 Picker `T` and `/hydra title` route here. Synopsis runs out-of-band; the new title surfaces via `session_info_update` on the next refresh. Works on live and cold sessions.
 
 Response: `202` accepted, `404` on unknown session.
+
+**Request body — priority**
+
+```jsonc
+{ "priority": 1 }
+```
+
+User-set sort weight: a positive integer floats the session to the top of the picker; `0` or `null` clears it. Works on live and cold sessions.
+
+Response: `204` on success, `400` if not a non-negative integer or `null`, `404` on unknown session.
+
+**Request body — read state**
+
+```jsonc
+{ "read": true }
+```
+
+Marks the session read as of now (`true`), or unread (`false`, which moves `readAt` just behind `lastTurnEndedAt`; a session with no ended turn stays read). Call it when a person has seen the session, not on attach: extensions attach with nobody looking. Does not move `updatedAt`. Works on live and cold sessions, and forwards to the home daemon for a federated id. See *Read state* under [`GET /v1/sessions`](#get-v1sessions).
+
+Response: `204` on success, `400` if `read` is not a boolean, `404` on unknown session.
 
 **Request body — repair the working directory**
 
@@ -1890,6 +1915,7 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 | `side` | `object?` | Set iff created by `hydra-acp/session/side`; see [`side` on session rows](#side-on-session-rows). |
 | `originatingClient` | `{name, version?}?` | `clientInfo` of the process that issued `session/new`. |
 | `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
+| `lastTurnEndedAt`, `readAt`, `unread` | `number?`, `number?`, `boolean?` | [Read state](#get-v1sessions): `unread` present (and `true`) only while the last turn ended after `readAt`. |
 
 Live-only extras (present on `session/new` and `session/attach`; the read-only viewer path supplies the disk-persisted subset, omitting `turnStartedAt`/`queue`/`agentCapabilities`):
 
@@ -1964,6 +1990,7 @@ Field reference for `_meta["hydra-acp"]` (always-present fields first, then opti
 | `side` | `object?` | Present iff created as a side session; see [`side` on session rows](#side-on-session-rows). |
 | `originatingClient` | `object?` | `clientInfo` of the process that issued `session/new`: `{ name, version? }`. |
 | `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
+| `lastTurnEndedAt`, `readAt`, `unread` | `number?`, `number?`, `boolean?` | [Read state](#get-v1sessions): `unread` present (and `true`) only while the last turn ended after `readAt`. |
 
 #### Hydra-only `session/attach` options (`_meta["hydra-acp"]`)
 

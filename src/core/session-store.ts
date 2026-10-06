@@ -394,6 +394,12 @@ export const SessionRecord = z.object({
   // `*`; no agent involvement, no broadcast — picker auto-refresh picks
   // it up on the next tick.
   priority: z.number().int().nonnegative().optional(),
+  // Epoch ms when the last agent turn ended, and when a person last
+  // looked at the session (set by clients through PATCH). The session is
+  // unread while lastTurnEndedAt > readAt; an absent readAt reads as
+  // read and is pinned when the next turn ends. Neither moves updatedAt.
+  lastTurnEndedAt: z.number().int().nonnegative().optional(),
+  readAt: z.number().int().nonnegative().optional(),
   // Caller-supplied environment variables to forward into the child
   // agent process on every spawn for this session (brand-new agent,
   // cold-resurrect, and respawn paths). Overwritten in full when a
@@ -742,6 +748,8 @@ export function recordFromMemorySession(args: {
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
   priority?: number;
+  lastTurnEndedAt?: number;
+  readAt?: number;
   forwardedEnv?: Record<string, string>;
   workspace?: PersistedWorkspace;
   compactionState?: CompactionState;
@@ -817,6 +825,8 @@ export function recordFromMemorySession(args: {
     originatingClient: args.originatingClient,
     interactive: args.interactive,
     priority: args.priority,
+    lastTurnEndedAt: args.lastTurnEndedAt,
+    readAt: args.readAt,
     forwardedEnv: args.forwardedEnv,
     workspace: args.workspace,
       attentionFlags: args.attentionFlags ?? [],

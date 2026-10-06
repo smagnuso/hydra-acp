@@ -47,6 +47,7 @@ import {
   type UpstreamGenerationReason,
   type SessionRecord,
 } from "./session-store.js";
+import { nextReadAt, readStateFields, type SessionReadState } from "./read-state.js";
 import { getProvider as getWorkspaceProvider } from "./workspace/registry.js";
 import {
   allAnchorRefs,
@@ -350,6 +351,9 @@ export interface ResurrectParams {
   // Session so toggles + list rendering see the persisted value
   // immediately on wake.
   priority?: number;
+  // Read state from meta.json; see SessionRecord.lastTurnEndedAt.
+  lastTurnEndedAt?: number;
+  readAt?: number;
   // Local-fork breadcrumbs from meta.json. Read-only on the resurrected
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
@@ -1656,6 +1660,8 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       priority: params.priority,
+      lastTurnEndedAt: params.lastTurnEndedAt,
+      readAt: params.readAt,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       side: params.side,
@@ -1811,6 +1817,8 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       priority: params.priority,
+      lastTurnEndedAt: params.lastTurnEndedAt,
+      readAt: params.readAt,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       side: params.side,
@@ -5992,6 +6000,15 @@ export class SessionManager {
         () => undefined,
       );
     });
+    // Invalidated on both sides of the write: live rows read the Session
+    // now, and a listing built while the write was in flight must not
+    // outlive it once the session goes cold.
+    session.onReadStateChange((state) => {
+      this.invalidateListCache();
+      void this.persistReadState(session.sessionId, state)
+        .then(() => this.invalidateListCache())
+        .catch(() => undefined);
+    });
     this.sessions.set(session.sessionId, session);
     this.invalidateListCache();
     // Read-modify-write so a resurrect preserves fields the in-memory
@@ -6122,6 +6139,8 @@ export class SessionManager {
       originatingClient: record.originatingClient,
       interactive: record.interactive,
       priority: record.priority,
+      lastTurnEndedAt: record.lastTurnEndedAt,
+      readAt: record.readAt,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
       side: record.side,
@@ -6344,6 +6363,7 @@ export class SessionManager {
         : {}),
       awaitingInput: session.awaitingInput,
       agentPid: session.agentPid,
+      ...readStateFields(session),
     };
   }
 
@@ -6392,6 +6412,7 @@ export class SessionManager {
         armedTasks: live.armedBackgroundTasks.length,
         ...(live.armedSince !== undefined ? { armedSince: live.armedSince } : {}),
         awaitingInput: live.awaitingInput,
+        ...readStateFields(live),
       };
     }
     const r = await this.store.read(sessionId).catch(() => undefined);
@@ -6426,6 +6447,7 @@ export class SessionManager {
       busy: false,
       armedTasks: 0,
       awaitingInput: false,
+      ...readStateFields(r),
     };
   }
 
@@ -6619,6 +6641,7 @@ export class SessionManager {
         awaitingInput: session.awaitingInput,
         compactionState: session.compactionState,
         forkSynthesisState: session.forkSynthesisState,
+        ...readStateFields(session),
       });
     }
     return { entries, liveIds };
@@ -6671,6 +6694,7 @@ export class SessionManager {
         awaitingInput: false,
         compactionState: r.compactionState,
         forkSynthesisState: r.forkSynthesisState,
+        ...readStateFields(r),
       });
     }
     return entries;
@@ -7762,6 +7786,51 @@ export class SessionManager {
     await this.mutateRecord(sessionId, fields);
   }
 
+  // Marks a session read or unread (SessionRecord.readAt), live or cold.
+  // Returns false when there is no such session.
+  async setRead(sessionId: string, read: boolean): Promise<boolean> {
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      live.setRead(read);
+      return true;
+    }
+    let found = false;
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      found = true;
+      const readAt = nextReadAt(record, read);
+      if (readAt !== undefined) {
+        await this.store.write({ ...record, readAt });
+      }
+    });
+    this.invalidateListCache();
+    return found;
+  }
+
+  // Unlike mutateRecord, leaves updatedAt alone: a turn ending already
+  // moved it, and a person looking at a session is not activity in it.
+  // The write still moves meta.json's mtime, which is what puts the row
+  // into the next GET /v1/sessions?since= delta.
+  private async persistReadState(
+    sessionId: string,
+    state: SessionReadState,
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      await this.store.write({
+        ...record,
+        lastTurnEndedAt: state.lastTurnEndedAt,
+        readAt: state.readAt,
+      });
+    });
+  }
+
   // Read-modify-write a session's meta.json record under the per-session
   // write queue. Spreads `fields` over the current record, bumps
   // updatedAt, and deletes any keys named in `remove`. No-op if the
@@ -8534,6 +8603,8 @@ export function mergeForPersistence(
       session.originatingClient ?? existing?.originatingClient,
     interactive: session.interactive ?? existing?.interactive,
     priority: session.priority ?? existing?.priority,
+    lastTurnEndedAt: session.lastTurnEndedAt ?? existing?.lastTurnEndedAt,
+    readAt: session.readAt ?? existing?.readAt,
     // Live Session is the source of truth for forwardedEnv: it's set
     // from the most recent session/new or session/attach (overwrite
     // semantics, including an explicit empty map) and from the

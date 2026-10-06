@@ -497,6 +497,7 @@ export function registerSessionRoutes(
       title?: unknown;
       regen?: unknown;
       priority?: unknown;
+      read?: unknown;
       workspace?: unknown;
       cwd?: unknown;
     };
@@ -576,6 +577,22 @@ export function registerSessionRoutes(
         return;
       }
       const ok = await manager.setPriority(id, next);
+      if (!ok) {
+        reply.code(404).send({ error: "session not found" });
+        return;
+      }
+      reply.code(204).send();
+      return;
+    }
+    if (body.read !== undefined) {
+      // Clients call this when a person has seen (or wants to flag) the
+      // session; being attached is not enough, since extensions attach
+      // with nobody looking. Leaves updatedAt alone.
+      if (typeof body.read !== "boolean") {
+        reply.code(400).send({ error: "read must be a boolean" });
+        return;
+      }
+      const ok = await manager.setRead(id, body.read);
       if (!ok) {
         reply.code(404).send({ error: "session not found" });
         return;

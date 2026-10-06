@@ -263,6 +263,63 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.title).toBe("Cold rename");
   });
 
+  describe("read state", () => {
+    function endTurn(session: object): void {
+      (session as {
+        broadcastTurnComplete(originatorClientId: string, response: unknown, promptMessageId?: string): void;
+      }).broadcastTurnComplete("some_client", { stopReason: "end_turn" }, "m_1");
+    }
+
+    async function row(id: string) {
+      const entries = await harness.manager.list({ cwd: "/w", includeNonInteractive: true });
+      return entries.find((e) => e.sessionId === id);
+    }
+
+    function patchRead(id: string, read: unknown): Promise<Response> {
+      return fetch(`${harness.baseUrl}/v1/sessions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ read }),
+      });
+    }
+
+    it("lists a live session unread after a turn ends, and read once PATCHed", async () => {
+      const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+      endTurn(session);
+      expect((await row(session.sessionId))?.unread).toBe(true);
+
+      expect((await patchRead(session.sessionId, true)).status).toBe(204);
+      expect((await row(session.sessionId))?.unread).toBe(false);
+
+      expect((await patchRead(session.sessionId, false)).status).toBe(204);
+      expect((await row(session.sessionId))?.unread).toBe(true);
+    });
+
+    it("keeps read state across a close and marks a cold session without moving updatedAt", async () => {
+      const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+      const id = session.sessionId;
+      endTurn(session);
+      await settleTracked();
+      await session.close({ deleteRecord: false });
+      expect(harness.manager.get(id)).toBeUndefined();
+      expect((await row(id))?.unread).toBe(true);
+
+      const store = new SessionStore();
+      const before = await store.read(id);
+      expect((await patchRead(id, true)).status).toBe(204);
+      const after = await store.read(id);
+      expect(after?.readAt).toBeGreaterThanOrEqual(after?.lastTurnEndedAt ?? Infinity);
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+      expect((await row(id))?.unread).toBe(false);
+    });
+
+    it("rejects a read that is not a boolean, and an unknown session", async () => {
+      const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+      expect((await patchRead(session.sessionId, "yes")).status).toBe(400);
+      expect((await patchRead("hydra_session_nope", true)).status).toBe(404);
+    });
+  });
+
   it("PATCH /v1/sessions/:id with { workspace: null } clears a cold session's binding", async () => {
     // The binding outlives the workspace directory, which is what makes
     // the next resurrect rebuild it. Clearing it is how a session is

@@ -6,6 +6,7 @@ import { customAlphabet } from "nanoid";
 import { parseForeignSessionId } from "./foreign-session-id.js";
 import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
 import { deliverTurnNotify, type TurnNotifyRegistration } from "./turn-notify.js";
+import { isUnread, nextReadAt, type SessionReadState } from "./read-state.js";
 
 // nanoid's default alphabet is URL-safe (alphanumerics + `-` + `_`). We
 // drop both punctuation chars: `-` collides with parsers that treat dashes
@@ -378,6 +379,10 @@ export interface SessionInit {
   // User-set sort weight. 0 / absent → normal; positive → pinned to top
   // of the picker. Loaded from the persisted record on resurrect.
   priority?: number;
+  // Read state, loaded from the persisted record on resurrect. See
+  // SessionRecord.lastTurnEndedAt / readAt.
+  lastTurnEndedAt?: number;
+  readAt?: number;
   // Caller-supplied env to forward into the agent process on spawn.
   // Used by SessionManager on the initial bootstrap; reapplied on
   // respawnAgent via the spawnReplacementAgent callback. Updates from
@@ -802,6 +807,16 @@ export class Session {
   private _priority: number | undefined;
   get priority(): number | undefined {
     return this._priority;
+  }
+  // See SessionRecord.lastTurnEndedAt / readAt. Moved by noteTurnEnded()
+  // and setRead(), both of which fire onReadStateChange.
+  private _lastTurnEndedAt: number | undefined;
+  get lastTurnEndedAt(): number | undefined {
+    return this._lastTurnEndedAt;
+  }
+  private _readAt: number | undefined;
+  get readAt(): number | undefined {
+    return this._readAt;
   }
   title: string | undefined;
   // Entry index up to which history has been compacted. Undefined or 0
@@ -1393,6 +1408,7 @@ export class Session {
   private modeHandlers: Array<(mode: string) => void> = [];
   private interactiveHandlers: Array<(interactive: boolean) => void> = [];
   private priorityHandlers: Array<(priority: number | undefined) => void> = [];
+  private readStateHandlers: Array<(state: SessionReadState) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
   // Cost carried over from a RELOADED upstream session — the previous life's
@@ -1600,6 +1616,8 @@ export class Session {
     }
     this._interactive = init.interactive;
     this._priority = init.priority;
+    this._lastTurnEndedAt = init.lastTurnEndedAt;
+    this._readAt = init.readAt;
     this._summarizedThroughEntry = init.summarizedThroughEntry;
     this.compactionState = init.compactionState;
     if (init.compactionState) {
@@ -3982,6 +4000,7 @@ export class Session {
       };
     }
     this.promptStartedAt = undefined;
+    this.noteTurnEnded();
     // From here on, agent output with no prompt in flight means the agent
     // resumed a turn on its own. See noteAgentActivity.
     this.sawTurnComplete = true;
@@ -4810,6 +4829,7 @@ export class Session {
     const durationMs = Date.now() - turn.startedAt;
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
+    this.noteTurnEnded();
     // Feeds openUnsolicitedTurn's rapid-reopen streak. Any other reason is
     // what a legitimately finishing background task looks like, not a sign
     // cancel failed to stop anything.
@@ -7068,6 +7088,55 @@ export class Session {
 
   onPriorityChange(handler: (priority: number | undefined) => void): void {
     this.priorityHandlers.push(handler);
+  }
+
+  onReadStateChange(handler: (state: SessionReadState) => void): void {
+    this.readStateHandlers.push(handler);
+  }
+
+  get unread(): boolean {
+    return isUnread(this._lastTurnEndedAt, this._readAt);
+  }
+
+  // Marks the session read as of now, or unread (see nextReadAt). Unlike
+  // most setters this leaves updatedAt alone: looking at a session is not
+  // activity in it.
+  setRead(read: boolean, now = Date.now()): void {
+    const next = nextReadAt(
+      { lastTurnEndedAt: this._lastTurnEndedAt, readAt: this._readAt },
+      read,
+      now,
+    );
+    if (next === undefined) {
+      return;
+    }
+    this._readAt = next;
+    this.fireReadState();
+  }
+
+  // Called at every turn boundary, solicited or not. A session that has
+  // never been marked read gets its readAt pinned to the previous turn's
+  // end first, so the turn ending now is the one that makes it unread.
+  private noteTurnEnded(now = Date.now()): void {
+    if (this._readAt === undefined) {
+      this._readAt = this._lastTurnEndedAt ?? this.createdAt;
+    }
+    this._lastTurnEndedAt = now;
+    this.fireReadState();
+  }
+
+  private fireReadState(): void {
+    const state: SessionReadState = {
+      lastTurnEndedAt: this._lastTurnEndedAt,
+      readAt: this._readAt,
+    };
+    for (const handler of this.readStateHandlers) {
+      try {
+        handler(state);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   // Update the user-set sort weight. Passing 0 or undefined returns the
