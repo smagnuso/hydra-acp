@@ -133,18 +133,37 @@ function leftovers(dir: string): string[] {
 // blocked, so a stream whose end() was already called (agent and extension
 // logs, an appendFile in flight) never gets the turn it needs to close its
 // file, and on Windows that open file keeps the directory from going.
-async function sweep(dir: string, test: string, maxRetries: number): Promise<void> {
+//
+// The async rm retries each entry on its own, so a tree with several busy
+// files can run far past maxRetries' budget. The deadline bounds the wait;
+// an rm still going past it keeps working in the background.
+async function sweep(
+  dir: string,
+  test: string,
+  maxRetries: number,
+  deadlineMs: number,
+): Promise<void> {
   const started = Date.now();
   let error: NodeJS.ErrnoException | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const removal = fs.promises.rm(dir, {
+    recursive: true,
+    force: true,
+    maxRetries,
+    retryDelay: 50,
+  });
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(Object.assign(new Error("sweep deadline"), { code: "DEADLINE" }));
+    }, deadlineMs);
+  });
   try {
-    await fs.promises.rm(dir, {
-      recursive: true,
-      force: true,
-      maxRetries,
-      retryDelay: 50,
-    });
+    await Promise.race([removal, deadline]);
   } catch (err) {
     error = err as NodeJS.ErrnoException;
+    removal.catch(() => undefined);
+  } finally {
+    clearTimeout(timer);
   }
   const ms = Date.now() - started;
   if (!cleanupLogDir || (!error && ms < SLOW_SWEEP_MS)) {
@@ -185,12 +204,12 @@ afterEach(async (ctx) => {
     // this lives under is removed wholesale in afterAll, so nothing leaks
     // beyond the run.
     //
-    // Six retries (about 1s) and no more: on Windows a file a test left
-    // open cannot leave its directory until the handle closes, and a
+    // Six retries and a 2s deadline, no more: on Windows a file a test
+    // left open cannot leave its directory until the handle closes, and a
     // 20-retry budget made each such test wait out 10.5s for nothing.
     const home = currentHome;
     currentHome = undefined;
-    await sweep(home, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`, 6);
+    await sweep(home, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`, 6, 2_000);
   }
 });
 
@@ -199,5 +218,5 @@ afterAll(async () => {
   // sweep just moved the ENOTEMPTY here, where it fails the whole file
   // rather than one test. The root is a mkdtemp under os.tmpdir(), so
   // the worst case of giving up is a directory the OS reaps later.
-  await sweep(workerRoot, "(worker root)", 20);
+  await sweep(workerRoot, "(worker root)", 20, 10_000);
 }, 15_000);

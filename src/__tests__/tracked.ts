@@ -36,7 +36,7 @@ export class TrackedSessionManager extends SessionManager {
   }
 }
 
-const SETTLE_STEP_MS = 2_000;
+const SETTLE_STEP_MS = 1_000;
 
 // A close that waits on a mock agent which never answers must not hang teardown.
 async function bounded(work: Promise<unknown>): Promise<void> {
