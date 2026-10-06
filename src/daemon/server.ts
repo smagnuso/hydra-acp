@@ -122,7 +122,7 @@ export async function startDaemon(
     : undefined;
 
   await fsp.mkdir(paths.home(), { recursive: true });
-  const { stream: logStream, fileStream } = await buildLogStream(
+  const { stream: logStream, fileStream, closeFile: closeLogFile } = await buildLogStream(
     config.daemon.logLevel,
   );
 
@@ -639,6 +639,9 @@ export async function startDaemon(
       void 0;
     }
     await safeStep("fileStream.flushSync", () => fileStream.flushSync());
+    // An open log keeps Windows from removing its directory, which an
+    // in-process daemon (tests, embedders) outlives.
+    await safeStep("fileStream.close", closeLogFile);
   };
 
   return {
@@ -712,11 +715,26 @@ async function buildLogStream(level: string) {
     limit: { count: LOG_RETENTION_COUNT, removeOtherLogFiles: true },
   });
   const stderrStream = pino.destination(2);
+  let closed = false;
+  // Late log calls (agent stderr after shutdown) must not hit a closed SonicBoom, which throws.
+  const guardedFile = {
+    write: (chunk: string) => {
+      if (!closed) {
+        fileStream.write(chunk);
+      }
+    },
+  };
   const stream = pino.multistream([
-    { stream: fileStream, level: level as Level },
+    { stream: guardedFile, level: level as Level },
     { stream: stderrStream, level: level as Level },
   ]);
-  return { stream, fileStream };
+  const closeFile = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      closed = true;
+      fileStream.once("close", () => resolve());
+      fileStream.end();
+    });
+  return { stream, fileStream, closeFile };
 }
 
 // TCP-level TLS terminator. Accepts TLS connections on (listenHost,

@@ -7,6 +7,11 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows legs
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -22,7 +27,7 @@ jobs:
         # tested everywhere that floor is claimed rather than on POSIX
         # alone. Windows is exactly where a version-specific difference
         # in fs/child_process would otherwise surface unseen.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ inputs.windows_only && fromJSON('["windows-latest"]') || fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') }}
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4

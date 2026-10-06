@@ -119,6 +119,11 @@ export class AgentInstance {
       this.writeLog(
         `--- spawn error: ${err.message} time=${new Date().toISOString()} ---\n`,
       );
+      // A child that never started may never emit "exit", which is what closes the log.
+      if (child.pid === undefined) {
+        this.fileLog?.end();
+        this.fileLog = undefined;
+      }
       this.connection.fail(new Error(msg));
     });
 

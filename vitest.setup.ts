@@ -110,11 +110,11 @@ beforeEach(() => {
   process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = "1";
 });
 
-// Retries back off linearly (50ms, 100ms, ... 1000ms), so a sweep that
-// never succeeds stalls its test for 10.5s and the empty catch below hides
-// why. Set HYDRA_ACP_TEST_CLEANUP_LOG to a directory to get one JSON line
-// per sweep that retried or gave up: the test, the time spent, the error
-// code and what was still on disk.
+// Retries back off linearly (50ms, 100ms, ...), so N retries can stall a
+// test for 25*N*(N+1) ms, and the swallowed error hides why. Set
+// HYDRA_ACP_TEST_CLEANUP_LOG to a directory to get one JSON line per sweep
+// that retried or gave up: the test, the time spent, the error code and
+// what was still on disk.
 const cleanupLogDir = process.env.HYDRA_ACP_TEST_CLEANUP_LOG;
 const SLOW_SWEEP_MS = 40;
 
@@ -129,14 +129,14 @@ function leftovers(dir: string): string[] {
   }
 }
 
-function sweep(dir: string, test: string): void {
+function sweep(dir: string, test: string, maxRetries: number): void {
   const started = Date.now();
   let error: NodeJS.ErrnoException | undefined;
   try {
     fs.rmSync(dir, {
       recursive: true,
       force: true,
-      maxRetries: 20,
+      maxRetries,
       retryDelay: 50,
     });
   } catch (err) {
@@ -180,7 +180,11 @@ afterEach((ctx) => {
     // that already passed, so sweep() swallows it. The per-worker root
     // this lives under is removed wholesale in afterAll, so nothing leaks
     // beyond the run.
-    sweep(currentHome, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`);
+    //
+    // Six retries (about 1s) and no more: on Windows a file a test left
+    // open cannot leave its directory until the handle closes, and a
+    // 20-retry budget made each such test wait out 10.5s for nothing.
+    sweep(currentHome, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`, 6);
     currentHome = undefined;
   }
 });
@@ -190,5 +194,5 @@ afterAll(() => {
   // sweep just moved the ENOTEMPTY here, where it fails the whole file
   // rather than one test. The root is a mkdtemp under os.tmpdir(), so
   // the worst case of giving up is a directory the OS reaps later.
-  sweep(workerRoot, "(worker root)");
+  sweep(workerRoot, "(worker root)", 20);
 });
