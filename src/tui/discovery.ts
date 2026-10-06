@@ -571,6 +571,29 @@ export async function setSessionPriority(
   }
 }
 
+// Mark a session read via PATCH .../sessions/:id { read }. Best-effort:
+// read state is a convenience, so a missing session or a daemon that
+// predates the field (400) is not an error.
+export async function markSessionRead(
+  target: RemoteTarget,
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ read: true }),
+    },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  ).catch(() => undefined);
+}
+
 // Ask the daemon to regenerate a warm session's title via its agent
 // (equivalent to typing bare `/hydra title` in the composer). The daemon
 // responds 202 immediately — the regen runs asynchronously on the

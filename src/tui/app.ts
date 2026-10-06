@@ -96,6 +96,7 @@ import {
   listRemoteNames,
   fetchRemoteInfo,
   createSessionOnRemote,
+  markSessionRead,
   pickMostRecent,
   renameSession,
   type DiscoveredSession,
@@ -2336,6 +2337,10 @@ async function runSession(
       sessionBusySince = null;
       if (attachSettled) {
         lastTurnEndedAt = Date.now();
+        // The turn ended in front of the user, so they have seen it.
+        if (resolvedSessionId !== null) {
+          void markSessionRead(target, resolvedSessionId);
+        }
       } else {
         replayedTurnEndSeen = true;
       }
@@ -10516,6 +10521,9 @@ async function runSession(
   // history, and stamping the idle clock off it would date the session's
   // last turn to the moment we attached.
   attachSettled = true;
+  if (resolvedSessionId !== null) {
+    void markSessionRead(target, resolvedSessionId);
+  }
 
   // Tear down volatile in-flight UI state ahead of a reconnect attach.
   // Deliberately leaves the tools block live (toolsBlockStartedAt stays

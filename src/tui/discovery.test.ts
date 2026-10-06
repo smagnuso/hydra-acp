@@ -5,6 +5,7 @@ import {
   fetchWithTimeout,
   killSession,
   listSessions,
+  markSessionRead,
   listSessionsPage,
   mergeSessionListPage,
   pickMostRecent,
@@ -277,6 +278,35 @@ describe("killSession", () => {
   it("throws on other non-2xx", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
     await expect(killSession(target, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("markSessionRead", () => {
+  it("issues PATCH { read: true } with bearer auth", async () => {
+    const captured: { url: string; method?: string; auth?: string; body?: string } = { url: "" };
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      captured.url = input as string;
+      captured.method = init?.method;
+      captured.auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"];
+      captured.body = init?.body as string;
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    await markSessionRead(target, "peer:sess-1", fetchImpl);
+    expect(captured.url).toBe(`${target.baseUrl}/v1/sessions/peer%3Asess-1`);
+    expect(captured.method).toBe("PATCH");
+    expect(captured.auth).toBe("Bearer tok");
+    expect(JSON.parse(captured.body ?? "")).toEqual({ read: true });
+  });
+
+  it("never throws, whatever the daemon answers", async () => {
+    const answers = [400, 404, 500].map((status) => (async () => new Response("x", { status })) as typeof fetch);
+    for (const fetchImpl of answers) {
+      await expect(markSessionRead(target, "sess-1", fetchImpl)).resolves.toBeUndefined();
+    }
+    const failing = (async () => {
+      throw new Error("offline");
+    }) as typeof fetch;
+    await expect(markSessionRead(target, "sess-1", failing)).resolves.toBeUndefined();
   });
 });
 
