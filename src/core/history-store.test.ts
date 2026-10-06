@@ -526,3 +526,67 @@ describe("HistoryStore", () => {
     await expect(fs.access(paths.toolsDir(sid))).rejects.toThrow();
   });
 });
+
+describe("HistoryStore.truncateAfterTurn", () => {
+  const id = "hydra_session_rewind";
+  const update = (sessionUpdate: string, messageId: string, recordedAt: number) => ({
+    method: "session/update",
+    params: { sessionId: id, update: { sessionUpdate, messageId } },
+    recordedAt,
+  });
+
+  async function twoTurns(store: HistoryStore): Promise<void> {
+    await store.rewrite(id, [
+      update("prompt_received", "p1", 1),
+      update("agent_message_chunk", "a1", 2),
+      update("turn_complete", "t1", 3),
+      update("prompt_received", "p2", 4),
+      update("agent_message_chunk", "a2", 5),
+      update("turn_complete", "t2", 6),
+    ]);
+  }
+
+  const ids = async (store: HistoryStore): Promise<unknown[]> =>
+    (await store.load(id)).map((e) => (e.params as { update: { messageId: string } }).update.messageId);
+
+  it("keeps the whole turn holding keepThrough and drops the rest", async () => {
+    const store = new HistoryStore();
+    await twoTurns(store);
+    expect(await store.truncateAfterTurn(id, "p1")).toEqual({ kept: 3, removed: 3 });
+    expect(await ids(store)).toEqual(["p1", "a1", "t1"]);
+  });
+
+  it("cuts at an agent-initiated turn as well as a prompt", async () => {
+    const store = new HistoryStore();
+    await store.rewrite(id, [
+      update("prompt_received", "p1", 1),
+      update("turn_complete", "t1", 2),
+      update("_hydra_turn_started", "u1", 3),
+      update("agent_message_chunk", "a2", 4),
+    ]);
+    expect(await store.truncateAfterTurn(id, "t1")).toEqual({ kept: 2, removed: 2 });
+  });
+
+  it("drops nothing when keepThrough is in the last turn", async () => {
+    const store = new HistoryStore();
+    await twoTurns(store);
+    expect(await store.truncateAfterTurn(id, "a2")).toEqual({ kept: 6, removed: 0 });
+  });
+
+  it("returns undefined for a messageId it does not hold", async () => {
+    const store = new HistoryStore();
+    await twoTurns(store);
+    expect(await store.truncateAfterTurn(id, "nope")).toBeUndefined();
+    expect(await ids(store)).toHaveLength(6);
+  });
+
+  it("clears the history and its archives for null", async () => {
+    const store = new HistoryStore({ maxEntries: 2 });
+    await twoTurns(store);
+    await store.compact(id, 2);
+    expect((await store.listArchives(id)).length).toBe(1);
+    expect(await store.truncateAfterTurn(id, null)).toEqual({ kept: 0, removed: 2 });
+    expect(await store.load(id)).toEqual([]);
+    expect(await store.listArchives(id)).toEqual([]);
+  });
+});

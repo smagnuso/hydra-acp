@@ -558,6 +558,7 @@ conversation log.
 | `/hydra config [<id> [<value>]]` | List or set an agent-advertised config option (model, mode, effort). No args lists them; `<id>` shows its choices; `<id> <value>` applies one. |
 | `/hydra compact [status]` | Compact history now. `status` inspects state without triggering. |
 | `/hydra uncompact` | Roll back the most recent compaction, before any new turns. |
+| `/hydra clear` | Drop every turn of the conversation, this command included, and restart the agent with no context. Every attached client's transcript empties. |
 | `/hydra fork [verbatim]` | Fork into a new session. Default is a synopsis brief; `verbatim` slices at the last completed turn. |
 | `/hydra workspace <start [name] [--clean] \| sync \| merge \| apply \| stop \| detach \| clean [--deep] \| discard \| status>` | Move this session into an isolated checkout and land, park, or throw away the work. `start --clean` leaves your uncommitted changes behind instead of copying them in; `apply` stages the work into your tree without its history; `clean` wipes the workspace and stays in it. See [isolated workspaces](#isolated-workspaces). |
 | `/hydra restart` | Restart the agent with a fresh `session/new`, preserving history. Useful when the available models have changed underneath you. |

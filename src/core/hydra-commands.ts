@@ -62,6 +62,12 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Roll back the most recent compaction swap (only available immediately after a swap, before any new turns)",
   },
   {
+    verb: "clear",
+    name: "hydra clear",
+    description:
+      "Drop every turn of this conversation, this command included, and restart the agent with no context",
+  },
+  {
     verb: "fork",
     name: "hydra fork",
     argsHint: "[--verbatim] [prompt]",

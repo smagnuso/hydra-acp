@@ -1191,6 +1191,9 @@ export class Session {
   private onCompactionSwapHook: ((breadcrumb: RollbackBreadcrumb) => void) | undefined;
   private persistWatermarkHook: ((summarizedThroughEntry: number) => void) | undefined;
   private uncompactHook: (() => Promise<void>) | undefined;
+  // Set by the SessionManager, which owns the record a rewind rewrites:
+  // how /hydra clear rewinds this session.
+  rewindHook: ((keepThrough: string | null) => Promise<unknown>) | undefined;
   private forkHook:
     | ((opts?: {
         mode?: "verbatim" | "synthesis";
@@ -7601,6 +7604,8 @@ export class Session {
           return this.runWorkspaceCommand(remainder);
         case "restart":
           return inline ? this.runRestartCommandInline() : this.runRestartCommand();
+        case "clear":
+          return this.runClearCommand();
         case "compact":
           return inline ? this.runCompactCommandInline(remainder) : this.runCompactCommand(remainder);
         case "uncompact":
@@ -8635,13 +8640,89 @@ export class Session {
     return { stopReason: "cancelled" };
   }
 
-  // Shared kill-and-respawn used by /hydra restart (queued) and forceCancel
-  // (immediate). Spawns a fresh agent, swaps it in, kills the old one, and
-  // re-seeds the conversation transcript so the new process has context.
-  private async respawnAgent(): Promise<void> {
+  // Rewind in place, for edit-and-resend: `cut` truncates history.jsonl
+  // and says whether anything was dropped; if so a fresh agent is seeded
+  // from what is left and every attached client is told to drop what it
+  // shows past the kept turn. Refused unless the session is idle; once
+  // started it runs as an internal queue entry, so a prompt sent right
+  // after (the edited message) waits for it. `afterCurrentTurn` is for a
+  // /hydra command, whose own turn is the one in flight: the rewind then
+  // runs as soon as that turn ends.
+  async rewind(
+    keepThrough: string | null,
+    cut: () => Promise<boolean>,
+    opts: { afterCurrentTurn?: boolean } = {},
+  ): Promise<void> {
+    const busy = (): string | undefined =>
+      (this.promptInFlight && !opts.afterCurrentTurn) || this.promptQueue.length > 0
+        ? "the session is busy; wait for the current turn and queued prompts to finish, then try again"
+        : this.swapInFlight
+          ? "the session's agent is being replaced; try again in a moment"
+          : undefined;
+    const blocker = busy() ?? (await this.quiesceBlocker()) ?? busy();
+    if (blocker !== undefined) {
+      throw withCode(new Error(blocker), JsonRpcErrorCodes.InvalidRequest);
+    }
+    if (!this.spawnReplacementAgent) {
+      throw withCode(
+        new Error("agent restart not configured for this session"),
+        JsonRpcErrorCodes.InternalError,
+      );
+    }
+    await this.enqueuePrompt("rewind", async () => {
+      this.swapInFlight = true;
+      try {
+        if (!(await cut())) {
+          return;
+        }
+        await this.respawnAgent({ rewind: true });
+      } finally {
+        this.swapInFlight = false;
+      }
+      this.broadcastClientUpdate({
+        sessionUpdate: "_hydra_history_truncated",
+        keepThrough,
+      });
+    });
+  }
+
+  // "/hydra clear": every turn goes, this one included, once it ends, and
+  // the agent restarts with no context. Not awaited: the rewind is queued
+  // behind this very turn.
+  private runClearCommand(): Promise<unknown> {
+    if (!this.rewindHook) {
+      throw withCode(
+        new Error("clear not configured for this session"),
+        JsonRpcErrorCodes.InternalError,
+      );
+    }
+    void this.rewindHook(null).catch((err: unknown) => {
+      this.broadcastSyntheticText(`/hydra clear failed: ${(err as Error).message}`);
+    });
+    return Promise.resolve({ stopReason: "end_turn" });
+  }
+
+  // Shared kill-and-respawn used by /hydra restart (queued), forceCancel
+  // (immediate) and rewind. Spawns a fresh agent, swaps it in, kills the
+  // old one, and re-seeds the conversation transcript so the new process
+  // has context. A rewind keeps the model and mode the user picked and
+  // frames the transcript as context for a message still to come.
+  private async respawnAgent(opts: { rewind?: boolean } = {}): Promise<void> {
     const spawnAgent = this.spawnReplacementAgent!;
     const agentId = this.agentId;
-    const transcript = await this.buildSwitchTranscript(agentId);
+    const transcript = await this.buildSwitchTranscript(
+      agentId,
+      opts.rewind
+        ? {
+            intro:
+              "You are continuing a conversation whose later turns were withdrawn by the user. Below is the transcript of what remains.",
+            followup:
+              "Each line is prefixed with its speaker. Treat this as context for the next user message; do not re-respond to earlier turns.",
+          }
+        : undefined,
+    );
+    const persistedModel = this.currentModel;
+    const persistedMode = this.currentMode;
 
     const fresh = await spawnAgent({
       agentId,
@@ -8651,6 +8732,24 @@ export class Session {
     });
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent, { respawn: true });
+    if (opts.rewind) {
+      const restored = await restoreCurrentModel({
+        agent: fresh.agent,
+        upstreamSessionId: fresh.upstreamSessionId,
+        persistedModel,
+        agentReportedModel: fresh.initialModel,
+        logger: this.logger,
+      });
+      this.applyAgentConfigOptionResponse(restored.result, "model");
+      await restoreCurrentMode({
+        agent: fresh.agent,
+        upstreamSessionId: fresh.upstreamSessionId,
+        persistedMode,
+        agentReportedMode: fresh.initialMode,
+        logger: this.logger,
+      });
+      fresh.agent.connection.drainBuffered("session/update");
+    }
 
     const oldAgent = this.agent;
     this.agent = fresh.agent;
@@ -8663,8 +8762,10 @@ export class Session {
     // Re-advertise the restarted agent's models/modes from its session/new
     // response (see runAgentCommand) so clients' dropdowns repopulate even
     // when the agent doesn't emit a follow-up current_model_update.
-    this.currentModel = fresh.initialModel;
-    this.currentMode = fresh.initialMode;
+    if (!opts.rewind) {
+      this.currentModel = fresh.initialModel;
+      this.currentMode = fresh.initialMode;
+    }
     this.setAgentAdvertisedModels(fresh.initialModels ?? []);
     this.setAgentAdvertisedModes(fresh.initialModes ?? []);
     this.agentAdvertisedConfigOptions = fresh.initialConfigOptions ?? [];
@@ -8678,7 +8779,9 @@ export class Session {
       await this.runInternalPrompt(transcript).catch(() => undefined);
     }
 
-    this.broadcastAgentSwitch(agentId, agentId);
+    if (!opts.rewind) {
+      this.broadcastAgentSwitch(agentId, agentId);
+    }
 
     // Routed through notifyAgentChange rather than walking the handlers
     // inline: this path calls accumulateAndResetCost above, and the

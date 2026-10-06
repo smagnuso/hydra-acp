@@ -5599,6 +5599,76 @@ export class SessionManager {
     }
   }
 
+  // Rewind a session in place (edit-and-resend): every turn after the one
+  // holding `keepThrough` is dropped from history, or every turn when it
+  // is null, and the session id stays. A live session must be idle; its
+  // agent is replaced by one seeded from what remains and attached clients
+  // receive `_hydra_history_truncated`. A cold one is marked for the
+  // import takeover, so its next attach seeds a fresh agent the same way.
+  // A compaction watermark past the cut no longer describes the history,
+  // so it goes with its synopsis; the rollback breadcrumb always goes,
+  // since rolling back would resume an agent that saw the dropped turns.
+  async rewindSession(
+    sessionId: string,
+    keepThrough: string | null,
+    opts: { afterCurrentTurn?: boolean } = {},
+  ): Promise<{ sessionId: string; removed: number }> {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      const err = new Error(`session not found: ${sessionId}`) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.SessionNotFound;
+      throw err;
+    }
+    if (this.rollbackLocks.has(sessionId) || record.compactionState != null) {
+      const err = new Error(
+        "the session is being compacted or rolled back; try again when that finishes",
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.InvalidRequest;
+      throw err;
+    }
+    let removed = 0;
+    const cut = async (): Promise<boolean> => {
+      const outcome = await this.histories.truncateAfterTurn(sessionId, keepThrough);
+      if (!outcome) {
+        const err = new Error(
+          `keepThrough messageId not found in the session's recent history: ${keepThrough}`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      removed = outcome.removed;
+      if (removed === 0) {
+        return false;
+      }
+      const watermark = record.summarizedThroughEntry;
+      const stale = watermark !== undefined && outcome.kept < watermark;
+      if (stale) {
+        const live = this.get(sessionId);
+        if (live) {
+          live.summarizedThroughEntry = undefined;
+        }
+      }
+      await this.mutateRecord(
+        sessionId,
+        {},
+        stale ? ["rollbackBreadcrumb", "synopsis", "summarizedThroughEntry"] : ["rollbackBreadcrumb"],
+      );
+      return true;
+    };
+    this.rollbackLocks.add(sessionId);
+    try {
+      const live = this.get(sessionId);
+      if (live) {
+        await live.rewind(keepThrough, cut, opts);
+      } else if (await cut()) {
+        await this.mutateRecord(sessionId, { upstreamSessionId: "" });
+      }
+    } finally {
+      this.rollbackLocks.delete(sessionId);
+    }
+    return { sessionId, removed };
+  }
+
   // Roll back the most recent compaction swap for a session. Guards:
   //   - session must be live
   //   - session record must have a rollbackBreadcrumb
@@ -5845,6 +5915,8 @@ export class SessionManager {
         return;
       }
     });
+    session.rewindHook = (keepThrough) =>
+      this.rewindSession(session.sessionId, keepThrough, { afterCurrentTurn: true });
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });

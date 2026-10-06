@@ -3034,3 +3034,80 @@ describe("POST /v1/sessions/:id/attention/clear", () => {
     expect(flags).toHaveLength(1);
   });
 });
+
+describe("session routes: POST /v1/sessions/:id/rewind", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  const update = (sessionUpdate: string, messageId: string, recordedAt: number) => ({
+    method: "session/update",
+    params: { sessionId: "u_src", update: { sessionUpdate, messageId } },
+    recordedAt,
+  });
+
+  async function seedTwoTurns(): Promise<string> {
+    const imported = await harness.manager.importBundle({
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_rewound",
+        lineageId: "lin_route_rewind",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      history: [
+        update("prompt_received", "p1", 1),
+        update("turn_complete", "t1", 2),
+        update("prompt_received", "p2", 3),
+        update("turn_complete", "t2", 4),
+      ],
+    });
+    return imported.sessionId;
+  }
+
+  const rewind = (id: string, body: unknown): Promise<Response> =>
+    fetch(`${harness.baseUrl}/v1/sessions/${id}/rewind`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("drops the turns after the kept one on a cold session and keeps its id", async () => {
+    const id = await seedTwoTurns();
+    const res = await rewind(id, { keepThrough: "p1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionId: id, removed: 2 });
+    const kept = await new HistoryStore().load(id);
+    expect(kept.map((e) => (e.params as { update: { messageId: string } }).update.messageId)).toEqual(["p1", "t1"]);
+    const record = await new SessionStore().read(id);
+    expect(record?.upstreamSessionId).toBe("");
+  });
+
+  it("drops every turn for a null keepThrough", async () => {
+    const id = await seedTwoTurns();
+    const res = await rewind(id, { keepThrough: null });
+    expect(res.status).toBe(200);
+    expect(await new HistoryStore().load(id)).toEqual([]);
+  });
+
+  it("returns 400 for a missing keepThrough or one the history does not hold", async () => {
+    const id = await seedTwoTurns();
+    expect((await rewind(id, {})).status).toBe(400);
+    expect((await rewind(id, { keepThrough: "nope" })).status).toBe(400);
+  });
+
+  it("returns 404 for an unknown session", async () => {
+    expect((await rewind("hydra_session_ghost", { keepThrough: null })).status).toBe(404);
+  });
+});

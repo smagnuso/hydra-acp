@@ -927,6 +927,36 @@ export function registerSessionRoutes(
   // Branch for an aside: same as fork, verbatim, with the copied history marked as context only.
   app.post("/v1/sessions/:id/side", forkRoute(true));
 
+  // Edit-and-resend: drop every turn after the one holding keepThrough
+  // (null drops them all), in place, under the same session id.
+  app.post("/v1/sessions/:id/rewind", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const keepThrough = ((request.body ?? {}) as { keepThrough?: unknown }).keepThrough;
+    if (keepThrough !== null && (typeof keepThrough !== "string" || keepThrough.length === 0)) {
+      reply.code(400).send({ error: "keepThrough must be a non-empty messageId, or null to drop every turn" });
+      return;
+    }
+    try {
+      reply.code(200).send(await manager.rewindSession(id, keepThrough));
+    } catch (err) {
+      const e = err as Error & { code?: number };
+      if (e.code === JsonRpcErrorCodes.SessionNotFound) {
+        reply.code(404).send({ error: e.message });
+        return;
+      }
+      if (e.code === JsonRpcErrorCodes.InvalidParams) {
+        reply.code(400).send({ error: e.message });
+        return;
+      }
+      if (e.code === JsonRpcErrorCodes.InvalidRequest) {
+        reply.code(409).send({ error: e.message });
+        return;
+      }
+      reply.code(500).send({ error: e.message });
+    }
+  });
+
   app.post("/v1/sessions/import", async (request, reply) => {
     const body = (request.body ?? {}) as {
       bundle?: unknown;

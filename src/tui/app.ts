@@ -736,6 +736,10 @@ export interface TuiOptions {
   // session existed. Fired alongside initialPrompt on the first
   // enqueuePrompt. Only honored when ctx.sessionId === "__new__".
   initialAttachments?: Attachment[];
+  // Composer contents to restore when a session is reopened in place (a
+  // rewind elsewhere rebuilt its transcript). Consumed once, so a later
+  // hand-off that spreads these options does not restore it again.
+  initialDraft?: { text: string; attachments: Attachment[] };
   // View-only mode. When true the TUI attaches with readonly:true so
   // the daemon won't resurrect or spawn an agent (cold session viewer
   // path) and refuses any state-changing JSON-RPC method from this
@@ -1999,6 +2003,9 @@ async function runSession(
       }) => Promise<void>)
     | null = null;
   let onDisconnectHook: ((err?: Error) => void) | null = null;
+  // Assigned once the session-switch machinery exists; a rewind reported
+  // before then has nothing on screen to rebuild yet.
+  let reopenAfterRewind: () => Promise<void> = async () => undefined;
   const stream = new ResilientWsStream({
     url: wsUrl,
     subprotocols,
@@ -2403,6 +2410,7 @@ async function runSession(
     "config_option_update",
     "_hydra_compaction",
     "_hydra_workspace",
+    "_hydra_history_truncated",
     "clarifier_question_asked",
     "clarifier_question_answered",
     "clarifier_question_dismissed",
@@ -2472,6 +2480,10 @@ async function runSession(
     }
     if (rawTag === "_hydra_workspace") {
       handleWorkspaceUpdate(update);
+      return;
+    }
+    if (rawTag === "_hydra_history_truncated") {
+      void reopenAfterRewind();
       return;
     }
     if (rawTag === "clarifier_question_asked") {
@@ -3733,6 +3745,10 @@ async function runSession(
     history: buildCombinedHistory(globalHistory, displayHistory),
   });
   dispatcherRef = dispatcher;
+  if (opts.initialDraft) {
+    dispatcher.setBuffer(opts.initialDraft.text, opts.initialDraft.attachments);
+    delete opts.initialDraft;
+  }
   // Gates recording of peer user-text events into prompt history.
   // Flipped to true after the initial attach-replay drain completes —
   // before that, replayed user-text events get folded in via a single
@@ -6568,6 +6584,29 @@ async function runSession(
     };
     if (next.agentId !== undefined)
       nextOpts.agentId = next.agentId;
+    resume(nextOpts);
+  };
+
+  // A rewind dropped turns this screen shows, and the scrollback cannot
+  // be cut at a turn (its lines carry no messageIds). Reopening the same
+  // session rebuilds the transcript from a full replay, the way a session
+  // switch does, keeping whatever was in the composer.
+  reopenAfterRewind = async (): Promise<void> => {
+    if (!finishSession) {
+      return;
+    }
+    const resume = finishSession;
+    finishSession = null;
+    const draft = dispatcher.state();
+    teardown();
+    const nextOpts: TuiOptions = {
+      ...opts,
+      sessionId: resolvedSessionId,
+      cwd: resolvedCwd,
+      initialDraft: { text: draft.buffer.join("\n"), attachments: draft.attachments },
+    };
+    delete nextOpts.resumeHint;
+    delete nextOpts.jumpToRecordedAt;
     resume(nextOpts);
   };
 

@@ -1107,6 +1107,29 @@ export function registerAcpWsEndpoint(
     // Fork for an aside: the copied history is context for the agent and clients see only what comes after it.
     connection.onRequest("hydra-acp/session/side", (raw) => forkAndAttach(raw, true));
 
+    // Edit-and-resend in place: same session id, every turn after the one
+    // holding keepThrough dropped (null: all of them).
+    connection.onRequest("hydra-acp/session/rewind", async (raw) => {
+      const params = (raw ?? {}) as { sessionId?: unknown; keepThrough?: unknown };
+      if (typeof params.sessionId !== "string") {
+        throw rpcError(JsonRpcErrorCodes.InvalidParams, "hydra-acp/session/rewind requires sessionId");
+      }
+      const keepThrough = params.keepThrough;
+      if (keepThrough !== null && (typeof keepThrough !== "string" || keepThrough.length === 0)) {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "keepThrough must be a non-empty messageId, or null to drop every turn",
+        );
+      }
+      const id = (await deps.manager.resolveCanonicalId(params.sessionId)) ?? params.sessionId;
+      try {
+        return await deps.manager.rewindSession(id, keepThrough);
+      } catch (err) {
+        const e = err as Error & { code?: number };
+        throw rpcError(e.code ?? JsonRpcErrorCodes.InternalError, e.message);
+      }
+    });
+
     // Speculative-compat alias for the still-Draft ACP RFD
     // https://agentclientprotocol.com/rfds/session-fork — accept the
     // standard verb and delegate to the hydra fork machinery so generic
@@ -3518,6 +3541,8 @@ function buildInitializeResult(): InitializeResult {
           side: {
             selection: true,
           },
+          // hydra-acp/session/rewind: edit-and-resend in place.
+          rewind: {},
         },
       }),
       // Pre-standard `_session/steering` extension (claude-agent-acp,

@@ -49,6 +49,16 @@ export interface HistoryEntry {
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
+// The session/update payload of one history line, for locating turns.
+function parseUpdate(line: string): { messageId?: unknown; sessionUpdate?: unknown } | undefined {
+  try {
+    const entry = JSON.parse(line) as { method?: unknown; params?: { update?: Record<string, unknown> } };
+    return entry.method === "session/update" ? entry.params?.update : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const DEFAULT_MAX_ENTRIES = 1000;
 const DEFAULT_ARCHIVE_MAX_BYTES = 10_000_000;
 const DEFAULT_ARCHIVE_TIERS = 10;
@@ -154,6 +164,72 @@ export class HistoryStore {
     });
   }
 
+  // Rewind: drop every entry after the turn holding `keepThrough` (any
+  // messageId recorded in that turn), or everything when it is null. The
+  // turn ends where the next one starts (prompt_received or
+  // _hydra_turn_started), so the kept turn stays whole. Only the live file
+  // is searched: a turn already spilled to an archive cannot be a cut
+  // point, and returns undefined like an unknown messageId. Clearing
+  // everything also sweeps the archives. Kept lines are written back
+  // verbatim, so their blob refs and seqs are untouched.
+  async truncateAfterTurn(
+    sessionId: string,
+    keepThrough: string | null,
+  ): Promise<{ kept: number; removed: number } | undefined> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return undefined;
+    }
+    let result: { kept: number; removed: number } | undefined;
+    await this.enqueue(sessionId, async () => {
+      let raw = "";
+      try {
+        raw = await fs.readFile(paths.historyFile(sessionId), "utf8");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw err;
+        }
+      }
+      const lines = raw.split("\n").filter((l) => l.length > 0);
+      let cut = 0;
+      if (keepThrough !== null) {
+        const updates = lines.map(parseUpdate);
+        let target = -1;
+        for (let i = updates.length - 1; i >= 0; i--) {
+          if (updates[i]?.messageId === keepThrough) {
+            target = i;
+            break;
+          }
+        }
+        if (target < 0) {
+          return;
+        }
+        cut = lines.length;
+        for (let i = target + 1; i < updates.length; i++) {
+          const kind = updates[i]?.sessionUpdate;
+          if (kind === "prompt_received" || kind === "_hydra_turn_started") {
+            cut = i;
+            break;
+          }
+        }
+      }
+      const kept = lines.slice(0, cut);
+      await fs.writeFile(
+        paths.historyFile(sessionId),
+        kept.length === 0 ? "" : kept.join("\n") + "\n",
+        { encoding: "utf8", mode: 0o600 },
+      );
+      if (keepThrough === null) {
+        for (const n of await this.listArchiveIndices(sessionId)) {
+          await this.unlinkArchive(sessionId, n);
+        }
+        this.nextArchiveIndex.delete(sessionId);
+      }
+      this.archiveLineCounts.delete(sessionId);
+      result = { kept: kept.length, removed: lines.length - kept.length };
+    });
+    return result;
+  }
+
   // Trim the on-disk history file to the most recent maxEntries lines.
   // Runs through the same per-session write queue as append/rewrite so
   // it's safe to invoke alongside ongoing writes; a no-op if the file is
@@ -165,8 +241,9 @@ export class HistoryStore {
   // archive's post-append size exceeds archiveMaxBytes, the next spill
   // rolls to N+1 (byte cap is soft — a batch is never split across
   // files). Once archiveTiers archives exist and a new one is needed,
-  // the oldest (lowest N) is deleted first. This is the only path in
-  // the store that ever discards data; a fresh install with default
+  // the oldest (lowest N) is deleted first. Apart from an explicit
+  // rewind (truncateAfterTurn), this is the only path in the store that
+  // ever discards data; a fresh install with default
   // config keeps ~100MB of spilled history per session before the ring
   // starts turning over.
   async compact(sessionId: string, maxEntries: number): Promise<void> {

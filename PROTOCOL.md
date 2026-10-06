@@ -833,6 +833,29 @@ Present iff the session was created as a side session.
 
 On `session/list` it rides in `_meta["hydra-acp"].side`.
 
+#### `POST /v1/sessions/:id/rewind`
+
+Edit-and-resend, in place: drop every turn after the one holding `keepThrough`, under the same session id. Unlike a fork, every attached client stays on the session and sees the change.
+
+**Request body**
+
+```jsonc
+{
+  "keepThrough": "<messageId>"   // required; any messageId recorded in the last turn to keep, typically its prompt's.
+                                 // null drops every turn.
+}
+```
+
+The kept turn stays whole: the cut lands where the next turn starts (its `prompt_received` or `_hydra_turn_started`). Only the live `history.jsonl` is searched, so a turn already spilled to an archive is not a valid `keepThrough`; `null` sweeps the archives too.
+
+A **live** session must be idle: no turn running, nothing queued, nothing else (compaction, a model or mode change) driving the agent. Its agent is then replaced by a fresh one seeded with a transcript of what remains, keeping the current model and mode, and every attached client receives [`_hydra_history_truncated`](#sessionupdate--history-truncated). The rewind runs as a queue entry, so a prompt sent right after it (the edited message) waits for it rather than racing it. A **cold** session is cut on disk and marked for the import takeover (`upstreamSessionId: ""`), so its next attach seeds a fresh agent the same way.
+
+A compaction watermark (`summarizedThroughEntry`) past the cut goes, with its `synopsis`. The `rollbackBreadcrumb` always goes: rolling back would resume an agent that saw the dropped turns.
+
+**Response (`200 OK`)**: `{ "sessionId": "<id>", "removed": <entries dropped> }`. `removed: 0` (the kept turn was already the last) changes nothing and replaces no agent.
+
+**Errors**: `400` for a missing or empty `keepThrough`, or one the live history does not hold; `404` for an unknown session; `409` while the session is busy, compacting or rolling back.
+
 #### `POST /v1/sessions/import`
 
 Import a session bundle. Without `replace`, a `lineageId` clash with an existing local session returns `409` citing the existing local id. With `replace: true`, the existing local session is overwritten in-place (its local id is preserved); any live in-memory copy is closed.
@@ -1197,7 +1220,7 @@ the incoming agent's ledger is unrelated to the outgoing one's.
 | Cold resurrect (`session/load`) | reused | retain | armed |
 | `rollbackToUpstream` | reused (**earlier** id) | bank | not armed |
 | Compaction swap / `/hydra agent` | new (`session/new`) | bank | not armed |
-| `/hydra restart`, `forceCancel` | new (`session/new`) | bank | not armed |
+| `/hydra restart`, `forceCancel`, rewind, `/hydra clear` | new (`session/new`) | bank | not armed |
 | `session import` reseed | new (`session/new`) | bank exporter's total | not armed |
 | `agent sync` row, first open | reused | nothing to retain | no-op |
 | Fork | new | nothing (fork resets billing) | no-op |
@@ -1651,7 +1674,7 @@ The cap is only evaluated when `fromSession` is present. **Label-only sends are 
 
 | Field | Type | Semantics |
 |---|---|---|
-| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `_hydra_current_model_update`, `current_mode_update`, `available_commands_update`, `_hydra_available_modes_update`, `usage_update`, `config_option_update`, `_hydra_compaction`, `_hydra_workspace`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
+| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `_hydra_current_model_update`, `current_mode_update`, `available_commands_update`, `_hydra_available_modes_update`, `usage_update`, `config_option_update`, `_hydra_compaction`, `_hydra_workspace`), and on ephemeral pushes such as `client_disconnected` and `_hydra_history_truncated`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
 | `seq` | `number` | Monotonic frame cursor, unique per recorded entry and strictly increasing within a session. Present on every **recordable** `session/update`, live and replayed alike, carrying the same value either way. Absent on the same state kinds and ephemeral pushes as `recordedAt`, and on daemons predating the field. Send the newest one you have processed back as [`session/attach`](#request-sessionattach)'s `afterSeq` to resume exactly. Opaque: compare for equality, or order two of them; do not do arithmetic on the difference. |
 
 **Why `seq` exists.** `messageId` names a *message*, not a frame. Agents stamp one id across every chunk of a streamed reply, thought chunks included — a single reply routinely spans dozens of entries under one id, and one measured session used 1761 distinct ids across 2990 recorded frames, the largest covering 105 of them. That makes `afterMessageId` ambiguous in exactly the situation it is used: a client that disconnected part-way through a reply names the whole reply, and the daemon must guess whether the client has all of it or only its first chunk. Resolving to the message's last frame (what `afterMessageId` does) silently drops everything the client had not yet received — **permanently**, because the client's cursor then sits beyond the gap and no later reconnect asks for it again. Resolving to the first frame instead re-sends content the client already has, which a client that appends streamed chunks cannot detect. `seq` addresses one frame, so neither guess is needed.
@@ -3172,6 +3195,28 @@ Status caveat: the RFD is Draft (not Preview/Completed) and has been since 2025-
 #### Request: `hydra-acp/session/side`
 
 The WS twin of `POST /v1/sessions/:id/side`, with the binding behavior of `hydra-acp/session/fork`: the calling connection is attached to the new session before the call returns. Params: `sessionId`, and optionally `forkAt`, `cwd`, `agentId`, `model`, `title`, `selection`. `mode` is ignored. Advertised as `_meta["hydra-acp"].session.side` (`{ "selection": true }`) on `initialize`.
+
+#### Request: `hydra-acp/session/rewind`
+
+The WS twin of [`POST /v1/sessions/:id/rewind`](#post-v1sessionsidrewind). Params: `sessionId`, `keepThrough` (`string | null`, required). Result: `{ sessionId, removed }`. Errors: `InvalidParams` for a bad or unknown `keepThrough`, `SessionNotFound`, `InvalidRequest` while the session is busy. The calling connection's attachment is unaffected: the session id does not change. Advertised as `_meta["hydra-acp"].session.rewind` (`{}`) on `initialize`.
+
+#### session/update — history truncated
+
+Sent to every client attached to a live session when a rewind drops turns:
+
+```jsonc
+{
+  "sessionId": "<id>",
+  "update": {
+    "sessionUpdate": "_hydra_history_truncated",
+    "keepThrough": "<messageId>" | null   // as the rewind was asked; null: every turn is gone
+  }
+}
+```
+
+The name says what happened to the history rather than which operation did it, so anything that cuts history sends it: a rewind with the `keepThrough` it was given, and `/hydra clear` with `keepThrough: null`. `/hydra clear` runs the null rewind as soon as its own turn ends, so the command's turn goes too and the transcript is left empty.
+
+Broadcast only: it is neither recorded in `history.jsonl` nor carries `recordedAt` or `seq`, and the `/history?follow=1` stream does not see it. Everything a client shows after the turn holding `keepThrough` is gone from the session, and any replay cursor (`afterSeq`, `afterMessageId`) it holds may point into the dropped range, where it would fall back to a full replay. The simplest correct handling is to discard the transcript and cursors and re-attach with `historyPolicy: "full"`. A client that missed the broadcast (it was not attached) needs nothing special: its next resume finds its cursor gone and is answered with a full replay.
 
 ### Agent install progress
 
