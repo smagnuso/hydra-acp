@@ -129,11 +129,15 @@ function leftovers(dir: string): string[] {
   }
 }
 
-function sweep(dir: string, test: string, maxRetries: number): void {
+// Async on purpose: rmSync sleeps between retries with the event loop
+// blocked, so a stream whose end() was already called (agent and extension
+// logs, an appendFile in flight) never gets the turn it needs to close its
+// file, and on Windows that open file keeps the directory from going.
+async function sweep(dir: string, test: string, maxRetries: number): Promise<void> {
   const started = Date.now();
   let error: NodeJS.ErrnoException | undefined;
   try {
-    fs.rmSync(dir, {
+    await fs.promises.rm(dir, {
       recursive: true,
       force: true,
       maxRetries,
@@ -165,10 +169,10 @@ function sweep(dir: string, test: string, maxRetries: number): void {
   }
 }
 
-afterEach((ctx) => {
+afterEach(async (ctx) => {
   if (currentHome) {
     // Fire-and-forget writes from Session (queue persist, history append)
-    // can land mid-rm: as rmSync walks the tree, a pending mkdir/writeFile
+    // can land mid-rm: as rm walks the tree, a pending mkdir/writeFile
     // recreates a file inside the dir we just emptied and the next rmdir
     // fails with ENOTEMPTY. maxRetries/retryDelay tells Node to retry on
     // exactly that code (also EBUSY/EMFILE/ENFILE/EPERM), which gives
@@ -184,15 +188,16 @@ afterEach((ctx) => {
     // Six retries (about 1s) and no more: on Windows a file a test left
     // open cannot leave its directory until the handle closes, and a
     // 20-retry budget made each such test wait out 10.5s for nothing.
-    sweep(currentHome, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`, 6);
+    const home = currentHome;
     currentHome = undefined;
+    await sweep(home, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`, 6);
   }
 });
 
-afterAll(() => {
+afterAll(async () => {
   // Same race as afterEach, one level up: hardening only the per-test
   // sweep just moved the ENOTEMPTY here, where it fails the whole file
   // rather than one test. The root is a mkdtemp under os.tmpdir(), so
   // the worst case of giving up is a directory the OS reaps later.
-  sweep(workerRoot, "(worker root)", 20);
-});
+  await sweep(workerRoot, "(worker root)", 20);
+}, 15_000);

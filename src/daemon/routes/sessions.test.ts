@@ -8,7 +8,6 @@ import type { AddressInfo } from "node:net";
 import { registerSessionRoutes, type SessionRouteDefaults } from "./sessions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { Registry, type RegistryAgent } from "../../core/registry.js";
-import { HistoryStore } from "../../core/history-store.js";
 import {
   makeMockAgent,
   makeControlledStream,
@@ -19,6 +18,9 @@ import { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
 import { McpTokenRegistry } from "../mcp/token-registry.js";
 import { SessionStore } from "../../core/session-store.js";
 import { paths } from "../../core/paths.js";
+import { TrackedHistoryStore, TrackedSessionManager, settleTracked } from "../../__tests__/tracked.js";
+
+afterEach(settleTracked);
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return { id, name: id, distribution: { npx: { package: id } } };
@@ -52,7 +54,7 @@ async function buildHarness(
   } = {},
 ): Promise<Harness> {
   const mocks: MockAgentControls[] = [];
-  const manager = new SessionManager(
+  const manager = new TrackedSessionManager(
     fakeRegistry([fakeRegistryAgent("claude-code")]),
     () => {
       const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
@@ -724,7 +726,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       cwd: "/w",
       agentId: "claude-code",
     });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     await history.append(a.sessionId, {
       method: "session/update",
       params: {
@@ -798,7 +800,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       cwd: "/w",
       agentId: "claude-code",
     });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     const sameText = {
       method: "session/update",
       params: {
@@ -843,7 +845,7 @@ describe("session routes: termination broadcasts session_closed", () => {
 
   it("GET /export?tools=summary sheds diff bodies; default inline keeps them", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     const big = "x".repeat(50_000);
     await history.append(s.sessionId, {
       method: "session/update",
@@ -882,7 +884,7 @@ describe("session routes: termination broadcasts session_closed", () => {
 
   it("GET /export?tools=references ships ref-form history + deduped gzipped toolBlobs", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     const big = "K".repeat(30_000);
     await history.append(s.sessionId, {
       method: "session/update",
@@ -934,7 +936,7 @@ describe("session routes: termination broadcasts session_closed", () => {
 
   it("GET /v1/sessions/:id/diff returns aggregated per-file hunks", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     // Two distinct files, one with two snippet edits to exercise hunks[].
     await history.append(s.sessionId, {
       method: "session/update",
@@ -1012,7 +1014,7 @@ describe("session routes: termination broadcasts session_closed", () => {
 
   it("GET /tools/:hash returns an externalized blob, 404 for unknown", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
-    const history = new HistoryStore();
+    const history = new TrackedHistoryStore();
     const big = "Z".repeat(20_000);
     await history.append(s.sessionId, {
       method: "session/update",
@@ -1365,7 +1367,7 @@ describe("POST /v1/sessions extension MCP injection", () => {
 
   beforeEach(async () => {
     mocks = [];
-    manager = new SessionManager(
+    manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
@@ -1508,7 +1510,7 @@ describe("POST /v1/sessions honors a directory `.hydra-acp.json`", () => {
       "utf8",
     );
     mocks = [];
-    manager = new SessionManager(
+    manager = new TrackedSessionManager(
       fakeRegistry([
         fakeRegistryAgent("claude-code"),
         fakeRegistryAgent("claude-personal"),
@@ -3088,7 +3090,7 @@ describe("session routes: POST /v1/sessions/:id/rewind", () => {
     const res = await rewind(id, { keepThrough: "p1" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ sessionId: id, removed: 2 });
-    const kept = await new HistoryStore().load(id);
+    const kept = await new TrackedHistoryStore().load(id);
     expect(kept.map((e) => (e.params as { update: { messageId: string } }).update.messageId)).toEqual(["p1", "t1"]);
     const record = await new SessionStore().read(id);
     expect(record?.upstreamSessionId).toBe("");
@@ -3098,7 +3100,7 @@ describe("session routes: POST /v1/sessions/:id/rewind", () => {
     const id = await seedTwoTurns();
     const res = await rewind(id, { keepThrough: null });
     expect(res.status).toBe(200);
-    expect(await new HistoryStore().load(id)).toEqual([]);
+    expect(await new TrackedHistoryStore().load(id)).toEqual([]);
   });
 
   it("returns 400 for a missing keepThrough or one the history does not hold", async () => {

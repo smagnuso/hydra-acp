@@ -1,7 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { Session, type AttachedClient } from "./session.js";
 import type { AttentionFlag } from "../acp/types-attention.js";
-import { HistoryStore } from "./history-store.js";
 import { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import {
@@ -14,6 +13,9 @@ import {
   type JsonRpcNotification,
   type JsonRpcRequest,
 } from "../acp/types.js";
+import { TrackedHistoryStore, TrackedSession, settleTracked } from "../__tests__/tracked.js";
+
+afterEach(settleTracked);
 
 // Narrow a JsonRpcMessage stream entry to a session/update notification
 // (or request) whose .update.sessionUpdate matches the given kind.
@@ -89,7 +91,7 @@ function makeClient(clientInfo?: { name: string; version?: string }): {
 describe("Session ID prefix", () => {
   it("auto-generated sessionId starts with hydra_session_", () => {
     const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-    const s = new Session({
+    const s = new TrackedSession({
       cwd: "/w",
       agentId: "mock",
       agent: mock.agent,
@@ -101,13 +103,13 @@ describe("Session ID prefix", () => {
 
 function makeSession(sessionId = "sess_test", upstream = "agent-sess-1") {
   const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-  const session = new Session({
+  const session = new TrackedSession({
     sessionId,
     cwd: "/work",
     agentId: "mock",
     agent: mock.agent,
     upstreamSessionId: upstream,
-    historyStore: new HistoryStore(),
+    historyStore: new TrackedHistoryStore(),
   });
   return { session, mock };
 }
@@ -1965,10 +1967,10 @@ describe("Session", () => {
 
   describe("history compaction trigger", () => {
     it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const compactSpy = vi.spyOn(store, "compact").mockResolvedValue();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_HC",
         cwd: "/w",
         agentId: "mock",
@@ -2135,7 +2137,7 @@ describe("Session", () => {
     // incoming agent has never seen and can never re-report.
     const resurrected = (current: number, retired?: number) => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_led",
         cwd: "/work",
         agentId: "mock",
@@ -2268,7 +2270,7 @@ describe("Session", () => {
     // sizeable turn cancel out the imported cost.
     it("import reseed keeps the imported total (probe not armed)", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_imp",
         cwd: "/work",
         agentId: "mock",
@@ -2287,7 +2289,7 @@ describe("Session", () => {
     // banked and the agent's own ledger is the whole truth on first open.
     it("synced session with no persisted usage adopts the agent total as-is", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_sync",
         cwd: "/work",
         agentId: "mock",
@@ -2711,7 +2713,7 @@ describe("Session", () => {
 
     it("does not clobber a resurrected title with the first prompt", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_TR",
         cwd: "/work",
         agentId: "mock",
@@ -3097,13 +3099,13 @@ describe("Session", () => {
       // title (if any) lands on the cold record asynchronously.
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const scheduleSynopsis = vi.fn();
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_HR",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_HR",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleSynopsis,
       });
       const { client: alice } = makeClient();
@@ -3131,13 +3133,13 @@ describe("Session", () => {
     it("/hydra compact schedules compaction via scheduleCompaction hook", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const scheduleCompaction = vi.fn();
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CK",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CK",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction,
       });
       const { client: alice } = makeClient();
@@ -3153,13 +3155,13 @@ describe("Session", () => {
     it("/hydra compact emits a synthetic confirmation via scheduleCompaction hook", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const scheduleCompaction = vi.fn();
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CE",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CE",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction,
       });
       const { client: alice, stream } = makeClient();
@@ -3184,13 +3186,13 @@ describe("Session", () => {
         iter: 2,
         attempts: 0,
       });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CS1",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CS1",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction: vi.fn(),
         getCompactionState,
         summarizedThroughEntry: 47,
@@ -3214,13 +3216,13 @@ describe("Session", () => {
     it("/hydra compact status emits 'no compaction in progress' when no state but has summarized entry", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const getCompactionState = vi.fn().mockResolvedValue(undefined);
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CS2",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CS2",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction: vi.fn(),
         getCompactionState,
         summarizedThroughEntry: 12,
@@ -3242,13 +3244,13 @@ describe("Session", () => {
     it("/hydra compact status emits 'never been compacted' when no state and no summarized entry", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const getCompactionState = vi.fn().mockResolvedValue(undefined);
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CS3",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CS3",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction: vi.fn(),
         getCompactionState,
       });
@@ -3267,13 +3269,13 @@ describe("Session", () => {
 
     it("/hydra compact status reports how many compactions there were and when", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CS4",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_live",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction: vi.fn(),
         getCompactionState: vi.fn().mockResolvedValue(undefined),
         getUpstreamGenerations: vi.fn().mockResolvedValue([
@@ -3320,13 +3322,13 @@ describe("Session", () => {
     // rotations as compactions is the failure mode this guards.
     it("/hydra compact status does not count pre-reason rotations as compactions", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CS5",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_c",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction: vi.fn(),
         getCompactionState: vi.fn().mockResolvedValue(undefined),
         getUpstreamGenerations: vi.fn().mockResolvedValue([
@@ -3354,13 +3356,13 @@ describe("Session", () => {
     it("/hydra compact without scheduleCompaction hook emits error message", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       // No scheduleCompaction provided
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_CX",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_CX",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
       });
       const { client: alice, stream } = makeClient();
       session.attach(alice, "full");
@@ -3381,13 +3383,13 @@ describe("Session", () => {
         forkedFromSessionId: "hydra_session_FK",
         forkedAt: "",
       });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_FK",
         cwd: "/work",
         agentId: "mock",
         agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
         upstreamSessionId: "u_FK",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         forkHook,
       });
       const { client: alice } = makeClient();
@@ -3411,13 +3413,13 @@ describe("Session", () => {
         forkedFromSessionId: "hydra_session_FV",
         forkedAt: "",
       });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_FV",
         cwd: "/work",
         agentId: "mock",
         agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
         upstreamSessionId: "u_FV",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         forkHook,
       });
       const { client: alice } = makeClient();
@@ -3440,13 +3442,13 @@ describe("Session", () => {
         forkedFromSessionId: "hydra_session_FP",
         forkedAt: "",
       });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_FP",
         cwd: "/work",
         agentId: "mock",
         agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
         upstreamSessionId: "u_FP",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         forkHook,
       });
       const { client: alice, stream } = makeClient();
@@ -3473,13 +3475,13 @@ describe("Session", () => {
         forkedFromSessionId: "hydra_session_FB",
         forkedAt: "",
       });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_FB",
         cwd: "/work",
         agentId: "mock",
         agent: makeMockAgent({ agentId: "mock", cwd: "/work" }).agent,
         upstreamSessionId: "u_FB",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         forkHook,
       });
       const { client: alice } = makeClient();
@@ -3524,13 +3526,13 @@ describe("Session", () => {
     it("/hydra agent schedules a cross-agent synthesis via scheduleCompaction hook with targetAgentId and emits a synthetic banner", async () => {
       const scheduleCompaction = vi.fn();
       const mock = makeMockAgent({ agentId: "old", cwd: "/w" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_SW",
         cwd: "/w",
         agentId: "old",
         agent: mock.agent,
         upstreamSessionId: "u_old",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction,
       });
       const { client: alice, stream } = makeClient();
@@ -3579,13 +3581,13 @@ describe("Session", () => {
           return { stopReason: "end_turn" };
         },
       );
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_SWQ",
         cwd: "/w",
         agentId: "old",
         agent: mock.agent,
         upstreamSessionId: "u_old",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         scheduleCompaction,
       });
       const { client: alice } = makeClient();
@@ -3946,7 +3948,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_idle",
           cwd: "/w",
           agentId: "mock",
@@ -3975,7 +3977,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_pinned",
           cwd: "/w",
           agentId: "mock",
@@ -4002,7 +4004,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_idle_broadcast",
           cwd: "/w",
           agentId: "mock",
@@ -4031,7 +4033,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_active",
           cwd: "/w",
           agentId: "mock",
@@ -4065,7 +4067,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_state_only",
           cwd: "/w",
           agentId: "mock",
@@ -4094,7 +4096,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_persistent",
           cwd: "/w",
           agentId: "mock",
@@ -4119,7 +4121,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_resurrected",
           cwd: "/w",
           agentId: "mock",
@@ -4148,7 +4150,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_queue_alive",
           cwd: "/w",
           agentId: "mock",
@@ -4200,7 +4202,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_armed_alive",
           cwd: "/w",
           agentId: "mock",
@@ -4239,7 +4241,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_orphan",
           cwd: "/w",
           agentId: "mock",
@@ -4274,7 +4276,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_orphan_attached",
           cwd: "/w",
           agentId: "mock",
@@ -4298,7 +4300,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_orphan_reattach",
           cwd: "/w",
           agentId: "mock",
@@ -4330,7 +4332,7 @@ describe("Session", () => {
       // true permanently — this must be exempt for good, not just while
       // someone happens to be attached.
       const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_orphan_used",
         cwd: "/w",
         agentId: "mock",
@@ -4371,7 +4373,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_orphan_inflight",
           cwd: "/w",
           agentId: "mock",
@@ -4407,7 +4409,7 @@ describe("Session", () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const session = new Session({
+        const session = new TrackedSession({
           sessionId: "hydra_session_orphan_disabled",
           cwd: "/w",
           agentId: "mock",
@@ -6413,13 +6415,13 @@ describe("Session", () => {
   describe("extension slash-command dispatch", () => {
     function makeSessionWithRegistry(registry: ExtensionCommandRegistry) {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "hydra_session_ext",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u_ext",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         extensionCommands: registry,
       });
       return { session, mock };
@@ -6951,13 +6953,13 @@ describe("Session", () => {
 
     it("buildConfigOptions always includes the hydra-native agent option even with no modes/models/catalog", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co1",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u1",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
       });
       const opts = session.buildConfigOptions();
       expect(opts).toHaveLength(1);
@@ -6973,13 +6975,13 @@ describe("Session", () => {
 
     it("buildConfigOptions orders model, mode, then agent and uses spec categories", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co2",
         cwd: "/work",
         agentId: "claude-acp",
         agent: mock.agent,
         upstreamSessionId: "u2",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         currentModel: "model-2",
         currentMode: "code",
         agentModels: [
@@ -7008,13 +7010,13 @@ describe("Session", () => {
 
     it("buildConfigOptions injects the live agent when the catalog omits it", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co3",
         cwd: "/work",
         agentId: "custom-local",
         agent: mock.agent,
         upstreamSessionId: "u3",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         availableAgents: () => [{ id: "opencode", name: "opencode" }],
       });
       const agent = session.buildConfigOptions().find((o) => o.id === "agent")!;
@@ -7024,13 +7026,13 @@ describe("Session", () => {
 
     it("buildConfigOptions injects the live model and mode when the advertised list omits them", () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co4",
         cwd: "/work",
         agentId: "claude-acp",
         agent: mock.agent,
         upstreamSessionId: "u4",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         currentModel: "claude-fable-5-1[1m]",
         currentMode: "auto",
         agentModels: [
@@ -7050,13 +7052,13 @@ describe("Session", () => {
 
     it("applyModelChange also broadcasts a config_option_update snapshot", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co4",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u4",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         agentModels: [{ modelId: "m1" }, { modelId: "m2" }],
       });
       const { client, stream } = makeClient();
@@ -7074,13 +7076,13 @@ describe("Session", () => {
 
     it("applyModeChange also broadcasts a config_option_update snapshot", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_co5",
         cwd: "/work",
         agentId: "mock",
         agent: mock.agent,
         upstreamSessionId: "u5",
-        historyStore: new HistoryStore(),
+        historyStore: new TrackedHistoryStore(),
         agentModes: [{ id: "ask" }, { id: "code" }],
       });
       const { client, stream } = makeClient();
@@ -7098,8 +7100,8 @@ describe("Session", () => {
 
     it("config_option_update broadcasts are not recorded to history", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const store = new HistoryStore();
-      const session = new Session({
+      const store = new TrackedHistoryStore();
+      const session = new TrackedSession({
         sessionId: "sess_co6",
         cwd: "/work",
         agentId: "mock",
@@ -7432,9 +7434,9 @@ describe("Session", () => {
 
   describe("per-turn usage_update persistence (recordCurrentUsageSnapshot)", () => {
     it("broadcastTurnComplete after applyAgentUsage writes one usage_update to historyStore", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_ut1",
         cwd: "/work",
         agentId: "mock",
@@ -7475,9 +7477,9 @@ describe("Session", () => {
     // fact — reconciling it against an agent's own ledger degenerates into
     // guessing by cwd and time window.
     it("stamps upstreamSessionId + agentId on the recorded usage_update", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_attr",
         cwd: "/work",
         agentId: "opencode",
@@ -7525,9 +7527,9 @@ describe("Session", () => {
     // session with no usage at all returns undefined and bails earlier, so
     // seeding an empty snapshot is what actually exercises the ordering.
     it("stamp does not defeat the empty-snapshot guard", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_attr2",
         cwd: "/work",
         agentId: "opencode",
@@ -7551,9 +7553,9 @@ describe("Session", () => {
     });
 
     it("zero-usage turn writes no usage_update entry", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_ut2",
         cwd: "/work",
         agentId: "mock",
@@ -7576,9 +7578,9 @@ describe("Session", () => {
     });
 
     it("two turns produce two usage_update entries, second has costAmount >= first", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_ut3",
         cwd: "/work",
         agentId: "mock",
@@ -7625,9 +7627,9 @@ describe("Session", () => {
     });
 
     it("recorded envelope shape matches buildStateSnapshotReplay (used/size/cost.optionality)", () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_ut4",
         cwd: "/work",
         agentId: "mock",
@@ -7659,11 +7661,11 @@ describe("Session", () => {
     });
 
     it("with non-zero cumulativeCost, recorded cost.amount = cumulativeCost + current-life costAmount", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
 
       // Build a session that has prior-life cost (simulating a resurrected session).
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_ut5",
         cwd: "/work",
         agentId: "mock",
@@ -7703,9 +7705,9 @@ describe("Session", () => {
     });
 
     it("fresh-attach replay filters usage_update from raw history (only synthesized snapshot)", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_rf1",
         cwd: "/work",
         agentId: "mock",
@@ -7764,9 +7766,9 @@ describe("Session", () => {
     });
 
     it("fresh-attach replay filters ALL state-update kinds from raw history", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_rf2",
         cwd: "/work",
         agentId: "mock",
@@ -7811,9 +7813,9 @@ describe("Session", () => {
     });
 
     it("after_message replay with usage_update in history uses correct cutoff", async () => {
-      const store = new HistoryStore();
+      const store = new TrackedHistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-      const session = new Session({
+      const session = new TrackedSession({
         sessionId: "sess_rf3",
         cwd: "/work",
         agentId: "mock",
@@ -8110,7 +8112,7 @@ describe("cost ledger never loses spend", () => {
     reload?: boolean;
   }) => {
     const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-    const session = new Session({
+    const session = new TrackedSession({
       sessionId: "sess_noloss",
       cwd: "/work",
       agentId: "mock",

@@ -15,10 +15,12 @@ import {
   isRepeatingArming,
   type AttachedClient,
 } from "./session.js";
-import { HistoryStore } from "./history-store.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { makeControlledStream, makeMockAgent } from "../__tests__/test-utils.js";
 import type { JsonRpcMessage } from "../acp/types.js";
+import { TrackedHistoryStore, TrackedSession, settleTracked } from "../__tests__/tracked.js";
+
+afterEach(settleTracked);
 
 function makeClient(): AttachedClient {
   return {
@@ -29,13 +31,13 @@ function makeClient(): AttachedClient {
 
 function makeSession(sessionId = "sess_u", upstream = "u_agent") {
   const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
-  const session = new Session({
+  const session = new TrackedSession({
     sessionId,
     cwd: "/work",
     agentId: "mock",
     agent: mock.agent,
     upstreamSessionId: upstream,
-    historyStore: new HistoryStore(),
+    historyStore: new TrackedHistoryStore(),
   });
   return { session, mock };
 }

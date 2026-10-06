@@ -28,6 +28,9 @@ import {
 import { JsonRpcErrorCodes } from "../acp/types.js";
 import { HYDRA_CAT_CLIENT_NAME } from "./hydra-version.js";
 import { SynopsisCoordinator } from "./synopsis-coordinator.js";
+import { TrackedSessionManager, settleTracked } from "../__tests__/tracked.js";
+
+afterEach(settleTracked);
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return {
@@ -59,7 +62,7 @@ describe("SessionManager.resurrect", () => {
   beforeEach(() => {
     mocks = [];
     mockIndex = 0;
-    manager = new SessionManager(
+    manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -182,7 +185,7 @@ describe("SessionManager.resurrect", () => {
 
   it("recovers via import-reseed when session/load fails for the upstream id", async () => {
     let spawnCount = 0;
-    const failingMgr = new SessionManager(
+    const failingMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -226,7 +229,7 @@ describe("SessionManager.resurrect", () => {
     const authMethods = [
       { id: "claude-login", description: "Log in", type: "agent" as const },
     ];
-    const authMgr = new SessionManager(
+    const authMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -269,7 +272,7 @@ describe("SessionManager.resurrect", () => {
 
   it("still recovers via import-reseed when session/load fails with a non-auth code (regression guard)", async () => {
     let spawnCount = 0;
-    const recoverMgr = new SessionManager(
+    const recoverMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -302,7 +305,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("captures the agent's _meta on session/load for passthrough", async () => {
-    const passthroughMgr = new SessionManager(
+    const passthroughMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -326,7 +329,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("captures agent.steeringSupported from initialize's _meta.steering.supported on resurrect", async () => {
-    const steeringMgr = new SessionManager(
+    const steeringMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -351,7 +354,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("defaults agent.steeringSupported to false when initialize's _meta omits it", async () => {
-    const noSteeringMgr = new SessionManager(
+    const noSteeringMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -373,7 +376,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("captures a non-model/mode config option from session/load's configOptions, category and description intact", async () => {
-    const configOptMgr = new SessionManager(
+    const configOptMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -428,7 +431,7 @@ describe("SessionManager.resurrect", () => {
     // different one than session/load reported — and the dimensions follow
     // the model. The reply is the only chance to see them: the drain right
     // after the restore discards any notification it prompted.
-    const restoreMgr = new SessionManager(
+    const restoreMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -492,7 +495,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("does not let the first prompt after resurrect clobber the persisted title", async () => {
-    const titledMgr = new SessionManager(
+    const titledMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -529,7 +532,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("does not let the resurrected agent's own session_info_update clobber the persisted title (regression: only the first-prompt heuristic was gated, not the agent-emitted one)", async () => {
-    const titledMgr = new SessionManager(
+    const titledMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -567,7 +570,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("re-seeds the title from the next prompt when the resurrected record had none (firstPromptSeeded gates on title)", async () => {
-    const untitledMgr = new SessionManager(
+    const untitledMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -607,7 +610,7 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("propagates title onto the resurrected session and into list()", async () => {
-    const titledMgr = new SessionManager(
+    const titledMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -673,7 +676,7 @@ describe("SessionManager.resurrect: dead cwd reseed", () => {
       return Promise.resolve({});
     });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       (opts) => {
         spawnedCwd = opts.cwd;
@@ -726,7 +729,7 @@ describe("SessionManager.reapIfOrphanedNonInteractive", () => {
       }
       return Promise.resolve({});
     });
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -876,7 +879,7 @@ describe("SessionManager: history persistence", () => {
   beforeEach(() => {
     tmpHome = process.env.HYDRA_ACP_HOME!;
     mocks = [];
-    manager = new SessionManager(
+    manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -996,7 +999,7 @@ describe("SessionManager: history persistence", () => {
     // returns. Those land in the connection's pre-handler buffer.
     // Without drainBuffered, wireAgent's subscription would flush
     // them through recordAndBroadcast and double the on-disk log.
-    const replayMgr = new SessionManager(
+    const replayMgr = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -1455,7 +1458,7 @@ describe("SessionManager: history persistence", () => {
       // mode we want, so no reapply is needed.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -1519,7 +1522,7 @@ describe("SessionManager: history persistence", () => {
       // mode.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -1585,7 +1588,7 @@ describe("SessionManager: history persistence", () => {
       // should get pushed back.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -1676,7 +1679,7 @@ describe("SessionManager: history persistence", () => {
       // back with thoughts silently off.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-acp")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
@@ -1729,7 +1732,7 @@ describe("SessionManager: history persistence", () => {
 
     it("sends no _meta to agents that don't read claudeCode options", async () => {
       const localMocks: MockAgentControls[] = [];
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("opencode")]),
         () => {
           const m = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
@@ -1755,7 +1758,7 @@ describe("SessionManager: history persistence", () => {
       // whatever the agent reports back (which should now be opus).
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-acp")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
@@ -1805,7 +1808,7 @@ describe("SessionManager: history persistence", () => {
     it("skips session/set_model on resurrect when the agent already reports the persisted model", async () => {
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -1866,7 +1869,7 @@ describe("SessionManager: history persistence", () => {
       // doResurrect should fall back to whatever the agent actually reported.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
           const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
@@ -1917,7 +1920,7 @@ describe("SessionManager: history persistence", () => {
       // persisted model, not the agent's default.
       const localMocks: MockAgentControls[] = [];
       let callIndex = 0;
-      const localManager = new SessionManager(
+      const localManager = new TrackedSessionManager(
         fakeRegistry([fakeRegistryAgent("codex-acp")]),
         () => {
           const m = makeMockAgent({ agentId: "codex-acp", cwd: WORK_CWD });
@@ -2161,7 +2164,7 @@ describe("SessionManager: /hydra agent persistence", () => {
     const handed: MockAgentControls[] = [oldMock];
     let idx = 0;
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("old"), fakeRegistryAgent("new")]),
       () => {
         const m = handed[idx++];
@@ -2228,7 +2231,7 @@ describe("SessionManager: /hydra agent persistence", () => {
     const handed: MockAgentControls[] = [oldMock];
     let idx = 0;
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("old"), fakeRegistryAgent("new")]),
       () => {
         const m = handed[idx++];
@@ -2327,7 +2330,7 @@ describe("SessionManager: importBundle", () => {
   }
 
   function noSpawnManager(): SessionManager {
-    return new SessionManager(
+    return new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         throw new Error("spawner should not be called from importBundle alone");
@@ -2639,7 +2642,7 @@ describe("SessionManager: importBundle", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_live_imported" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -2685,7 +2688,7 @@ describe("SessionManager: closeAll", () => {
     // clients would just see the WS drop and never the explicit "session
     // is gone" signal that drives the cold banner.
     const mocks: MockAgentControls[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -2745,7 +2748,7 @@ describe("SessionManager: resurrect from import", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh" })
       .mockResolvedValueOnce({ stopReason: "end_turn" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -2804,7 +2807,7 @@ describe("SessionManager: resurrect from import", () => {
 describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("create() rejects and kills the agent when initialize fails", async () => {
     const mocks: MockAgentControls[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -2822,7 +2825,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
 
   it("create() rejects and kills the agent when session/new fails", async () => {
     const mocks: MockAgentControls[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -2841,7 +2844,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   });
 
   it("create() rejects when the agent id isn't in the registry", async () => {
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
@@ -2852,7 +2855,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
 
   it("resurrect() rejects and kills the agent when initialize fails", async () => {
     const mocks: MockAgentControls[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -2876,7 +2879,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("resurrect() throws cleanly when both session/load and the recovery spawn fail", async () => {
     let spawnCount = 0;
     const mocks: MockAgentControls[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
@@ -2909,7 +2912,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   });
 
   it("loadFromDisk returns undefined for an unknown session id", async () => {
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
@@ -2918,7 +2921,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   });
 
   it("hasRecord returns false for an unknown session id", async () => {
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
@@ -2926,7 +2929,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   });
 
   it("getHistory returns undefined for an unknown session id", async () => {
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
@@ -3067,7 +3070,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh" })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3095,7 +3098,7 @@ describe("SessionManager: sessionDefaults", () => {
         models: { currentModelId: "openai/gpt-5-codex" },
       });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3113,7 +3116,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_fresh" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
@@ -3127,7 +3130,7 @@ describe("SessionManager: sessionDefaults", () => {
   it("passes persisted model (not sessionDefaults config) to session/load _meta on resurrect for claude-acp", async () => {
     // _meta.claudeCode.options.model must use the persisted model — not sessionDefaults[agentId].model.
     const mocks: ReturnType<typeof makeMockAgent>[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
@@ -3168,7 +3171,7 @@ describe("SessionManager: sessionDefaults", () => {
     // opencode and other agents restore model from their own session state;
     // injecting _meta.claudeCode would be noise (and potentially harmful).
     const mocks: ReturnType<typeof makeMockAgent>[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => {
         const m = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
@@ -3202,7 +3205,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh" })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3230,7 +3233,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh" })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
@@ -3260,7 +3263,7 @@ describe("SessionManager: sessionDefaults", () => {
       })
       .mockRejectedValueOnce(new Error("unknown model id"));
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3294,7 +3297,7 @@ describe("SessionManager: sessionDefaults", () => {
       });
 
     const warnMessages: string[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3347,7 +3350,7 @@ describe("SessionManager: sessionDefaults", () => {
       })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("pi-dev")]),
       () => mock.agent,
       undefined,
@@ -3382,7 +3385,7 @@ describe("SessionManager: sessionDefaults", () => {
       });
 
     const warnMessages: string[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3414,7 +3417,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh" })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3444,7 +3447,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ ok: true }) // session/set_model
       .mockResolvedValueOnce({ ok: true }); // session/set_mode
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3475,7 +3478,7 @@ describe("SessionManager: sessionDefaults", () => {
         modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
       });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3495,7 +3498,7 @@ describe("SessionManager: sessionDefaults", () => {
     });
 
     const warnMessages: string[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -3546,7 +3549,7 @@ describe("SessionManager: sessionDefaults", () => {
         ],
       });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => mock.agent,
       undefined,
@@ -3586,7 +3589,7 @@ describe("SessionManager: sessionDefaults", () => {
       })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => mock.agent,
       undefined,
@@ -3609,7 +3612,7 @@ describe("SessionManager: sessionDefaults", () => {
       .mockResolvedValueOnce({ sessionId: "u_fresh", configOptions: [] });
 
     const warnMessages: string[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => mock.agent,
       undefined,
@@ -3648,7 +3651,7 @@ describe("SessionManager: sessionDefaults", () => {
       });
 
     const warnMessages: string[] = [];
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => mock.agent,
       undefined,
@@ -3705,7 +3708,7 @@ describe("SessionManager: sessionDefaults", () => {
       })
       .mockResolvedValueOnce({ ok: true }); // session/set_config_option
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => mock.agent,
       undefined,
@@ -3764,7 +3767,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
       // completion.
       .mockImplementationOnce(() => new Promise(() => undefined));
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -3810,7 +3813,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
     ]);
 
     let spawnCount = 0;
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         spawnCount += 1;
@@ -3852,7 +3855,7 @@ describe("SessionManager.syncFromAgent", () => {
     for (const page of opts.pages) {
       requestMock.mockResolvedValueOnce(page);
     }
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4082,7 +4085,7 @@ describe("SessionManager.syncFromAgent", () => {
   });
 
   it("rejects when the agent is not in the registry", async () => {
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code" }).agent,
     );
@@ -4319,7 +4322,7 @@ describe("SessionManager.deleteRecord", () => {
       updatedAt: "2026-05-15T10:00:00.000Z",
       attentionFlags: [],
     });
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => makeMockAgent({ agentId: "claude-code" }).agent,
     );
@@ -4348,7 +4351,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
       .mockResolvedValueOnce({});
     const drainSpy = vi.spyOn(mock.agent.connection, "drainBuffered");
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4393,7 +4396,7 @@ describe("SessionManager: parentSessionId", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_child" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4421,7 +4424,7 @@ describe("SessionManager: parentSessionId", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_live" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4454,7 +4457,7 @@ describe("SessionManager: parentSessionId", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_live" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4485,7 +4488,7 @@ describe("SessionManager: parentSessionId", () => {
       attentionFlags: [],
     });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => { throw new Error("should not spawn"); },
     );
@@ -4503,7 +4506,7 @@ describe("SessionManager: createdAt in list()", () => {
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_created" });
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4524,7 +4527,7 @@ describe("SessionManager: createdAt in list()", () => {
       updatedAt: "2026-02-02T03:04:05.000Z",
       attentionFlags: [],
     });
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => { throw new Error("should not spawn"); },
     );
@@ -4543,7 +4546,7 @@ describe("SessionManager: originatingClient", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_origin" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4585,7 +4588,7 @@ describe("SessionManager: originatingClient", () => {
       attentionFlags: [],
     });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => { throw new Error("should not spawn"); },
     );
@@ -4607,7 +4610,7 @@ describe("SessionManager.create: transformChain threading", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_chain" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4640,7 +4643,7 @@ describe("SessionManager.create: transformChain threading", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_no_chain" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4667,7 +4670,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
       })
       .mockResolvedValueOnce({ sessionId: "u_init_intercept" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4715,7 +4718,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_no_intercept" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4763,7 +4766,7 @@ describe("SessionManager.create: captures child authMethods on AgentInstance", (
       })
       .mockResolvedValueOnce({ sessionId: "u_auth_capture" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4826,7 +4829,7 @@ describe("SessionManager.create: captures child authMethods on AgentInstance", (
       })
       .mockResolvedValueOnce({ sessionId: "u_auth_meta" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("qwen-code")]),
       () => mock.agent,
     );
@@ -4855,7 +4858,7 @@ describe("SessionManager.create: captures child authMethods on AgentInstance", (
       .mockResolvedValueOnce({ protocolVersion: 1, agentCapabilities: {} })
       .mockResolvedValueOnce({ sessionId: "u_no_auth" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4893,7 +4896,7 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
         ],
       });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -4959,7 +4962,7 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
         ],
       });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
       undefined,
@@ -5001,7 +5004,7 @@ describe("SessionManager.create: initial config options beyond model/mode", () =
       })
       .mockResolvedValueOnce({ ok: true });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
@@ -5026,7 +5029,7 @@ describe("SessionManager.create: agent.steeringSupported capture", () => {
       })
       .mockResolvedValueOnce({ sessionId: "u_steer_new" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -5042,7 +5045,7 @@ describe("SessionManager.create: agent.steeringSupported capture", () => {
       .mockResolvedValueOnce({ protocolVersion: 1 })
       .mockResolvedValueOnce({ sessionId: "u_nosteer_new" });
 
-    const manager = new SessionManager(
+    const manager = new TrackedSessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => mock.agent,
     );
@@ -5122,7 +5125,7 @@ describe("SessionManager.forkSession", () => {
   }
 
   function noSpawnManager(agents = ["claude-code"]): SessionManager {
-    return new SessionManager(
+    return new TrackedSessionManager(
       fakeRegistry(agents.map((id) => fakeRegistryAgent(id))),
       () => {
         throw new Error("spawner should not be called from forkSession");
@@ -5533,7 +5536,7 @@ describe("SessionManager.forkSession", () => {
 describe("SessionManager: extension state", () => {
   const EXT_CWD = process.cwd();
   function makeManagerForExt(): SessionManager {
-    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+    return new TrackedSessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
       const mock = makeMockAgent({ agentId: "claude-code", cwd: EXT_CWD });
       const req = mock.agent.connection.request as ReturnType<typeof vi.fn>;
       req.mockImplementation((method: string) => {
@@ -5678,7 +5681,7 @@ describe("SessionManager: extension state", () => {
 describe("SessionManager: rollback breadcrumb pinning", () => {
   const BC_CWD = process.cwd();
   function makeManagerForBreadcrumb(): SessionManager {
-    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+    return new TrackedSessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
       const mock = makeMockAgent({ agentId: "claude-code", cwd: BC_CWD });
       const req = mock.agent.connection.request as ReturnType<typeof vi.fn>;
       req.mockImplementation((method: string) => {
@@ -6118,7 +6121,7 @@ describe("SessionManager.isRetiredGeneration", () => {
       upstreamGenerations: generations,
       attentionFlags: [],
     });
-    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+    return new TrackedSessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
       throw new Error("no agent spawn expected");
     });
   }
@@ -6263,7 +6266,7 @@ describe("SessionManager.syncFromAgent store-keyed dedupe", () => {
       agentCapabilities: { sessionCapabilities: { list: {} } },
     });
     requestMock.mockResolvedValueOnce({ sessions });
-    return new SessionManager(fakeRegistry(AGENTS), () => mock.agent);
+    return new TrackedSessionManager(fakeRegistry(AGENTS), () => mock.agent);
   }
 
   async function seedRecord(agentId: string, upstreamSessionId: string): Promise<void> {
