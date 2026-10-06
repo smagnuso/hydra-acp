@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { paths } from "./paths.js";
 import { externalizeToolEntry, expandToolRefs } from "./tool-content.js";
 import { putToolBlob, getToolBlob, deleteToolBlobs } from "./tool-store.js";
+import { turnEndIndex } from "./turn-boundary.js";
 
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
@@ -166,8 +167,7 @@ export class HistoryStore {
 
   // Rewind: drop every entry after the turn holding `keepThrough` (any
   // messageId recorded in that turn), or everything when it is null. The
-  // turn ends where the next one starts (prompt_received or
-  // _hydra_turn_started), so the kept turn stays whole. Only the live file
+  // kept turn stays whole (see turnEndIndex). Only the live file
   // is searched: a turn already spilled to an archive cannot be a cut
   // point, and returns undefined like an unknown messageId. Clearing
   // everything also sweeps the archives. Kept lines are written back
@@ -192,25 +192,11 @@ export class HistoryStore {
       const lines = raw.split("\n").filter((l) => l.length > 0);
       let cut = 0;
       if (keepThrough !== null) {
-        const updates = lines.map(parseUpdate);
-        let target = -1;
-        for (let i = updates.length - 1; i >= 0; i--) {
-          if (updates[i]?.messageId === keepThrough) {
-            target = i;
-            break;
-          }
-        }
-        if (target < 0) {
+        const end = turnEndIndex(lines.map(parseUpdate), keepThrough);
+        if (end < 0) {
           return;
         }
-        cut = lines.length;
-        for (let i = target + 1; i < updates.length; i++) {
-          const kind = updates[i]?.sessionUpdate;
-          if (kind === "prompt_received" || kind === "_hydra_turn_started") {
-            cut = i;
-            break;
-          }
-        }
+        cut = end + 1;
       }
       const kept = lines.slice(0, cut);
       await fs.writeFile(

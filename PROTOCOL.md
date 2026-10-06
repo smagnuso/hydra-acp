@@ -770,7 +770,7 @@ Out-of-range bounds **clamp rather than error**: `last=99` on a 5-turn session r
 
 #### `POST /v1/sessions/:id/fork`
 
-Branch a local session. `forkAt` defaults to the source's most-recent `turn_complete`; `cwd` and `agentId` default to the source's. The new session is minted with a fresh local id + `lineageId` and carries `forkedFromSessionId` for ancestry views.
+Branch a local session. `forkAt` names the last turn to copy, by any messageId recorded in it (its prompt's, an agent message's, or its `turn_complete`'s), and the fork keeps that turn whole; it defaults to the source's most-recent `turn_complete`. `cwd` and `agentId` default to the source's. The new session is minted with a fresh local id + `lineageId` and carries `forkedFromSessionId` for ancestry views.
 
 **Request body**
 

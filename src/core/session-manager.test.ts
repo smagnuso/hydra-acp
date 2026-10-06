@@ -5211,6 +5211,30 @@ describe("SessionManager.forkSession", () => {
     expect(update.messageId).toBe("m_one");
   });
 
+  it("keeps the whole turn when forkAt names its prompt", async () => {
+    const manager = noSpawnManager();
+    const update = (sessionUpdate: string, messageId: string, t: number) => ({
+      method: "session/update",
+      params: { sessionId: "u", update: { sessionUpdate, messageId } },
+      recordedAt: t,
+    });
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_prompt_fork",
+        history: [
+          update("prompt_received", "p1", 1),
+          update("agent_message_chunk", "a1", 2),
+          turnComplete("t1", 3),
+          update("prompt_received", "p2", 4),
+          turnComplete("t2", 5),
+        ],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, { forkAt: "p1", mode: "verbatim" });
+    const history = await readHistory(fork.sessionId);
+    expect(history.map((e) => (e.params as { update: { messageId: string } }).update.messageId)).toEqual(["p1", "a1", "t1"]);
+  });
+
   it("mints a fresh lineageId for the fork", async () => {
     const manager = noSpawnManager();
     const source = await manager.importBundle(

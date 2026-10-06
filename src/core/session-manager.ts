@@ -22,7 +22,6 @@ import {
   HYDRA_SESSION_PREFIX,
   Session,
   extractPromptText,
-  findMessageIdIndex,
   firstLine,
   parseConfigOptionValues,
   isStateUpdate,
@@ -91,6 +90,7 @@ import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator, type HydraCompactionPayload } from "./synopsis-coordinator.js";
 import { generateSynopsis } from "./synopsis-agent.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
+import { turnEndIndex, updatesOf } from "./turn-boundary.js";
 import { countTurns } from "./history-aggregate.js";
 import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
 import { collectToolBlobHashes } from "./tool-content.js";
@@ -6798,8 +6798,8 @@ export class SessionManager {
   // triggers seedFromImport — same wire shape as an imported session.
   //
   // forkAt defaults to the messageId of the source's most recent
-  // turn_complete; explicit forkAt must reference a session/update
-  // entry that's present in the source's history.jsonl. Cutting at a
+  // turn_complete; an explicit forkAt is any messageId recorded in the
+  // last turn to copy, which is kept whole (turnEndIndex). Cutting at a
   // completed turn excludes any in-flight prompt by construction
   // (history.jsonl is appended serially per session), so no locking
   // against the live source is needed.
@@ -6892,7 +6892,7 @@ export class SessionManager {
     if (mode === "verbatim") {
       // Legacy path — slice via forkAt or last completed turn.
       if (opts.forkAt !== undefined) {
-        const ci = findMessageIdIndex(sourceHistory, opts.forkAt);
+        const ci = turnEndIndex(updatesOf(sourceHistory), opts.forkAt);
         if (ci < 0) {
           const err = new Error(
             `forkAt messageId not found in source history: ${opts.forkAt}`,
@@ -6923,7 +6923,7 @@ export class SessionManager {
       // so callers mid-turn (e.g. /hydra fork excluding its own trigger
       // message) don't carry an in-flight turn into the fork.
       if (opts.forkAt !== undefined && opts.forkAt !== "") {
-        const ci = findMessageIdIndex(sourceHistory, opts.forkAt);
+        const ci = turnEndIndex(updatesOf(sourceHistory), opts.forkAt);
         if (ci < 0) {
           const err = new Error(
             `forkAt messageId not found in source history: ${opts.forkAt}`,
