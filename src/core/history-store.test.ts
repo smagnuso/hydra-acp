@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
 import { HistoryStore } from "./history-store.js";
+import { coalesceReplay } from "./coalesce-replay.js";
 import { paths } from "./paths.js";
 
 describe("HistoryStore", () => {
@@ -588,5 +589,58 @@ describe("HistoryStore.truncateAfterTurn", () => {
     expect(await store.truncateAfterTurn(id, null)).toEqual({ kept: 0, removed: 2 });
     expect(await store.load(id)).toEqual([]);
     expect(await store.listArchives(id)).toEqual([]);
+  });
+});
+
+describe("coalescing before expanding tool refs", () => {
+  const sid = "hydra_session_streamed";
+  const line = (i: number): string => `[${i}/40] Building object ${"x".repeat(120)}\n`;
+
+  async function streamedBuild(store: HistoryStore): Promise<string> {
+    let seq = 0;
+    await store.append(sid, {
+      method: "session/update",
+      params: { sessionId: sid, update: { sessionUpdate: "prompt_received", messageId: "m1", prompt: [] } },
+      recordedAt: 1,
+      seq: ++seq,
+    });
+    let output = "";
+    for (let i = 0; i < 40; i++) {
+      output += line(i);
+      await store.append(sid, {
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "build",
+            status: i === 39 ? "completed" : "in_progress",
+            content: [{ type: "content", content: { type: "text", text: output } }],
+          },
+        },
+        recordedAt: 2 + i,
+        seq: ++seq,
+      });
+    }
+    return output;
+  }
+
+  it("gives an attach replay the same entries as expanding everything first", async () => {
+    const store = new HistoryStore();
+    const output = await streamedBuild(store);
+    const before = coalesceReplay(await store.load(sid));
+    const after = await store.hydrate(sid, coalesceReplay(await store.load(sid, { tools: "references" })));
+    expect(after).toEqual(before);
+    const update = (after.at(-1)!.params as { update: { content: Array<{ content: { text: string } }> } }).update;
+    expect(update.content.map((block) => block.content.text)).toEqual([output]);
+  });
+
+  it("gives a history page the same entries as expanding everything first", async () => {
+    const store = new HistoryStore();
+    await streamedBuild(store);
+    const before = coalesceReplay((await store.pageBefore(sid, { beforeSeq: 1000, turns: 1 })).entries);
+    const page = await store.pageBefore(sid, { beforeSeq: 1000, turns: 1, hydrate: false });
+    expect(JSON.stringify(page.entries)).toContain("__hydraBlob");
+    expect(await store.hydrate(sid, coalesceReplay(page.entries))).toEqual(before);
   });
 });

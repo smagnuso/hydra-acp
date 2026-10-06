@@ -23,7 +23,6 @@ import {
   applyToolContentMode,
   parseToolContentMode,
 } from "../../core/tool-content.js";
-import { coalesceReplay } from "../../core/coalesce-replay.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
@@ -1223,7 +1222,7 @@ export function registerSessionRoutes(
       return;
     }
     reply.code(200).send({
-      entries: coalesceReplay(page.entries),
+      entries: page.entries,
       hasMore: page.hasMore,
     });
   });

@@ -3232,8 +3232,17 @@ export class Session {
     // streaming render can be reproduced at its real granularity. The
     // synthetic state snapshot is never coalesced, so it's emitted as-is
     // either way.
-    const maybeCoalesce = (entries: CachedNotification[]): CachedNotification[] =>
-      opts.raw ? entries : coalesceReplay(entries);
+    // Inline content is expanded only after coalescing, which keeps the last
+    // of a streamed command's many stored outputs; expanding first read them all.
+    const toolContent = opts.toolContent ?? "inline";
+    const expandLater = toolContent === "inline" && !opts.raw && this.historyStore !== undefined;
+    const maybeCoalesce = async (entries: CachedNotification[]): Promise<CachedNotification[]> => {
+      if (opts.raw) {
+        return entries;
+      }
+      const coalesced = coalesceReplay(entries);
+      return expandLater && this.historyStore ? this.historyStore.hydrate(this.sessionId, coalesced) : coalesced;
+    };
     // Load with slack so snapToTurnBoundary below has somewhere to walk
     // back to. load() tails the file to a flat entry count, which lands
     // mid-turn almost every time (measured on a real session: 275 of the
@@ -3251,7 +3260,7 @@ export class Session {
         : opts.historyLimit ?? this.historyMaxEntries;
     const raw = ownEntries(
       await this.getHistorySnapshot(
-        opts.toolContent ?? "inline",
+        expandLater ? "references" : toolContent,
         limit === Infinity ? Infinity : limit * 2,
       ),
       this.side,
@@ -3285,17 +3294,17 @@ export class Session {
             : -1;
       if (cutoff < 0) {
         return {
-          entries: [...state, ...maybeCoalesce(replayable)],
+          entries: [...state, ...(await maybeCoalesce(replayable))],
           appliedPolicy: "full",
         };
       }
       return {
-        entries: [...state, ...maybeCoalesce(replayable.slice(cutoff + 1))],
+        entries: [...state, ...(await maybeCoalesce(replayable.slice(cutoff + 1)))],
         appliedPolicy: "after_message",
       };
     }
     return {
-      entries: [...state, ...maybeCoalesce(replayable)],
+      entries: [...state, ...(await maybeCoalesce(replayable))],
       appliedPolicy: "full",
     };
   }

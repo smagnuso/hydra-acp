@@ -45,7 +45,10 @@ describe("contextBoundary", () => {
 describe("a side session's attach replay", () => {
   async function replayed(side: { contextThroughSeq?: number } | undefined): Promise<string> {
     const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-    const store = { load: async () => [frame(1, "context"), frame(2, "more context"), frame(3, "own")] } as unknown as HistoryStore;
+    const store = {
+      load: async () => [frame(1, "context"), frame(2, "more context"), frame(3, "own")],
+      hydrate: async (_sessionId: string, entries: unknown[]) => entries,
+    } as unknown as HistoryStore;
     const session = new Session({
       sessionId: "hydra_session_side",
       cwd: "/w",

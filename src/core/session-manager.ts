@@ -1,4 +1,5 @@
 import type { SideInfo } from "../acp/types-side.js";
+import { coalesceReplay } from "./coalesce-replay.js";
 import { contextBoundary, ownEntries } from "./side-context.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -6044,12 +6045,18 @@ export class SessionManager {
       return undefined;
     }
     const side = this.sessions.get(sessionId)?.side ?? record?.side;
+    // Coalesced before tool refs are expanded: a streamed command's output is
+    // stored once per update, and only the last survives coalescing.
     const page = await this.histories.pageBefore(sessionId, {
       ...opts,
       skip: (e) => isStateUpdate(e.method, e.params),
+      hydrate: false,
     });
     const entries = ownEntries(page.entries, side);
-    return { entries, hasMore: page.hasMore && entries.length === page.entries.length };
+    return {
+      entries: await this.histories.hydrate(sessionId, coalesceReplay(entries)),
+      hasMore: page.hasMore && entries.length === page.entries.length,
+    };
   }
 
   // Read the on-disk history.jsonl for a session without constructing a

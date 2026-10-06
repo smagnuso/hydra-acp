@@ -681,6 +681,17 @@ export class HistoryStore {
     return out;
   }
 
+  // Expand the tool refs of entries loaded or paged with references left in
+  // place, so a caller that coalesces first reads only the blobs it keeps.
+  async hydrate(sessionId: string, entries: HistoryEntry[]): Promise<HistoryEntry[]> {
+    const blobCache = new Map<string, string | null>();
+    const out: HistoryEntry[] = [];
+    for (const entry of entries) {
+      out.push(await this.hydrateEntry(sessionId, entry, blobCache));
+    }
+    return out;
+  }
+
   // Hydrate a single entry: expand any tool-content blob refs back to
   // inline content, using a per-session cache for repeated hashes.
   // Extracted so both the iterator and rangeSlice can share it without
@@ -718,8 +729,11 @@ export class HistoryStore {
   // Live entries are also buffered for the reverse-yield, but the live
   // file is entry-capped (sessionHistoryMaxEntries) so this is bounded
   // by the operator's config, not by archive depth.
+  // `hydrate: false` yields tool refs as stored, for callers that drop most
+  // entries and expand only what they keep (see hydrate()).
   async *iterRecallNewestFirst(
     sessionId: string,
+    opts: { hydrate?: boolean } = {},
   ): AsyncGenerator<RecallEntry> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return;
@@ -738,9 +752,10 @@ export class HistoryStore {
     for await (const e of this.streamFile(paths.historyFile(sessionId))) {
       live.push(e);
     }
+    const hydrate = opts.hydrate !== false;
     for (let i = live.length - 1; i >= 0; i--) {
-      const hydrated = await this.hydrateEntry(sessionId, live[i]!, blobCache);
-      yield { entryId: archivedTotal + i, entry: hydrated };
+      const entry = hydrate ? await this.hydrateEntry(sessionId, live[i]!, blobCache) : live[i]!;
+      yield { entryId: archivedTotal + i, entry };
     }
     // Walk archives newest first (highest index) and yield entries
     // within each archive newest first too. Precompute the cumulative
@@ -759,8 +774,8 @@ export class HistoryStore {
       }
       const base = bases[ai]!;
       for (let i = bucket.length - 1; i >= 0; i--) {
-        const hydrated = await this.hydrateEntry(sessionId, bucket[i]!, blobCache);
-        yield { entryId: base + i, entry: hydrated };
+        const entry = hydrate ? await this.hydrateEntry(sessionId, bucket[i]!, blobCache) : bucket[i]!;
+        yield { entryId: base + i, entry };
       }
     }
   }
@@ -778,13 +793,14 @@ export class HistoryStore {
       beforeSeq: number;
       turns: number;
       skip?: (entry: HistoryEntry) => boolean;
+      hydrate?: boolean;
     },
   ): Promise<{ entries: HistoryEntry[]; hasMore: boolean }> {
     const collected: HistoryEntry[] = [];
     let turnsSeen = 0;
     let below = false;
     let hasMore = false;
-    for await (const { entry } of this.iterRecallNewestFirst(sessionId)) {
+    for await (const { entry } of this.iterRecallNewestFirst(sessionId, { hydrate: opts.hydrate })) {
       if (!below) {
         if (entry.seq === undefined || entry.seq >= opts.beforeSeq) {
           continue;
