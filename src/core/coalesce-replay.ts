@@ -10,9 +10,11 @@ import type { HistoryEntry } from "./history-store.js";
 //    concatenated into the first occurrence; the rest are dropped.
 //    A chunk separated from its run by an event of a different kind
 //    (e.g. a tool_call) ends the run, matching how clients render.
-//  - tool_call_update: per toolCallId, only the last update is emitted;
-//    its content array is the concatenation of every dropped update's
-//    content plus its own. Other fields (status, title, kind, ...)
+//  - tool_call_update: per toolCallId, only the last update is emitted,
+//    carrying the content of the last update that had any. ACP's content
+//    replaces the call's collection, and agents stream a command's output
+//    by resending all of it so far; concatenating those snapshots grew a
+//    long build's replay quadratically. Other fields (status, title, kind, ...)
 //    come from the last update by virtue of it being the emitted one —
 //    EXCEPT the two that identify what the call acted on, `rawInput` and
 //    `locations`, which agents send on an intermediate update and omit from
@@ -27,7 +29,7 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
   }
 
   const lastToolUpdateIndex = new Map<string, number>();
-  const mergedToolContent = new Map<string, unknown[]>();
+  const latestToolContent = new Map<string, unknown[]>();
   // Per toolCallId, the last non-empty value seen for each carried field.
   const carried = new Map<string, Map<string, unknown>>();
   for (let i = 0; i < entries.length; i++) {
@@ -56,12 +58,7 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
       }
     }
     if (Array.isArray(upd.content) && upd.content.length > 0) {
-      const buf = mergedToolContent.get(id);
-      if (buf) {
-        buf.push(...(upd.content as unknown[]));
-      } else {
-        mergedToolContent.set(id, [...(upd.content as unknown[])]);
-      }
+      latestToolContent.set(id, upd.content as unknown[]);
     }
   }
 
@@ -117,8 +114,8 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
         continue;
       }
       let emitted =
-        id !== undefined && mergedToolContent.has(id)
-          ? withReplacedContent(entry, mergedToolContent.get(id) ?? [])
+        id !== undefined && latestToolContent.has(id)
+          ? withReplacedContent(entry, latestToolContent.get(id) ?? [])
           : entry;
       // Restore the identity of what the call acted on. Only when the
       // terminal update didn't supply it itself: an agent that re-sends the

@@ -900,7 +900,7 @@ The cursor is a `seq`, the same one carried on replayed frames (see `afterSeq` o
 ```
 
 - A page starts at a `prompt_received` so a turn is never split, unless the history begins mid-turn. State updates (model/mode/usage/info/commands) are omitted, as in replay.
-- `entries` are coalesced with the same rules as an attach replay (chunk runs merged, one `tool_call_update` per call, last `plan` per turn). A message run that straddles the boundary with frames you already hold arrives as two pieces.
+- `entries` are coalesced with the same rules as an attach replay (chunk runs merged, one `tool_call_update` per call carrying its latest content, last `plan` per turn). A message run that straddles the boundary with frames you already hold arrives as two pieces.
 - Legacy entries written without a `seq` can't be used as a cursor.
 - Each call walks history newest-first down to the cursor, so deep pages cost more than shallow ones.
 

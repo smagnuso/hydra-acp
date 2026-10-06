@@ -113,7 +113,7 @@ describe("coalesceReplay", () => {
     expect(out).toHaveLength(2);
   });
 
-  it("emits only the last tool_call_update per toolCallId with concatenated content", () => {
+  it("emits only the last tool_call_update per toolCallId with the latest content", () => {
     const out = coalesceReplay([
       simpleUpdate("tool_call", { toolCallId: "t1", content: [] }),
       toolUpdate("t1", [{ type: "content", content: { type: "text", text: "a" } }], "pending"),
@@ -131,11 +131,29 @@ describe("coalesceReplay", () => {
     };
     expect(last.update.sessionUpdate).toBe("tool_call_update");
     expect(last.update.status).toBe("completed");
-    expect(last.update.content.map((c) => c.content.text)).toEqual([
-      "a",
-      "b",
-      "c",
+    expect(last.update.content.map((c) => c.content.text)).toEqual(["c"]);
+  });
+
+  it("keeps a streamed command's output once rather than once per update", () => {
+    const lines = Array.from({ length: 200 }, (_, i) => `line ${i}\n`);
+    const updates = lines.map((_, i) =>
+      toolUpdate("t1", [{ type: "content", content: { type: "text", text: lines.slice(0, i + 1).join("") } }], "in_progress"),
+    );
+    const out = coalesceReplay(updates);
+    expect(out).toHaveLength(1);
+    const update = (out[0]!.params as { update: { content: Array<{ content: { text: string } }> } }).update;
+    expect(update.content).toHaveLength(1);
+    expect(update.content[0]!.content.text).toBe(lines.join(""));
+  });
+
+  it("keeps the last content when the terminal update carries none", () => {
+    const out = coalesceReplay([
+      toolUpdate("t1", [{ type: "content", content: { type: "text", text: "output" } }], "in_progress"),
+      toolUpdate("t1", [], "completed"),
     ]);
+    const update = (out[0]!.params as { update: { status: string; content: Array<{ content: { text: string } }> } }).update;
+    expect(update.status).toBe("completed");
+    expect(update.content.map((c) => c.content.text)).toEqual(["output"]);
   });
 
   it("interleaves merges per toolCallId independently", () => {
@@ -149,9 +167,9 @@ describe("coalesceReplay", () => {
     const aUpd = (out[0]!.params as { update: { toolCallId: string; content: Array<{ content: { text: string } }> } }).update;
     const bUpd = (out[1]!.params as { update: { toolCallId: string; content: Array<{ content: { text: string } }> } }).update;
     expect(aUpd.toolCallId).toBe("a");
-    expect(aUpd.content.map((c) => c.content.text)).toEqual(["a1", "a2"]);
+    expect(aUpd.content.map((c) => c.content.text)).toEqual(["a2"]);
     expect(bUpd.toolCallId).toBe("b");
-    expect(bUpd.content.map((c) => c.content.text)).toEqual(["b1", "b2"]);
+    expect(bUpd.content.map((c) => c.content.text)).toEqual(["b2"]);
   });
 
   it("carries rawInput forward to the surviving tool_call_update", () => {
