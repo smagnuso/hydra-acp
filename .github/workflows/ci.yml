@@ -50,6 +50,15 @@ jobs:
       # absent, which keeps a bare `npm test` working locally.
       - run: npm run build
       - run: npm test
+        env:
+          HYDRA_ACP_TEST_CLEANUP_LOG: ${{ runner.temp }}/cleanup-log
+      # Per-test home sweeps that retried or gave up (see vitest.setup.ts).
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-log-${{ matrix.os }}-node${{ matrix.node }}
+          path: ${{ runner.temp }}/cleanup-log
+          if-no-files-found: ignore
 
   # The single check branch protection requires. Do not rename it.
   #

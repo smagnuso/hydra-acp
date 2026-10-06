@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { threadId } from "node:worker_threads";
 import { afterAll, afterEach, beforeEach } from "vitest";
 import { setControlWriter } from "./src/tui/ansi.js";
 
@@ -109,7 +110,62 @@ beforeEach(() => {
   process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = "1";
 });
 
-afterEach(() => {
+// Retries back off linearly (50ms, 100ms, ... 1000ms), so a sweep that
+// never succeeds stalls its test for 10.5s and the empty catch below hides
+// why. Set HYDRA_ACP_TEST_CLEANUP_LOG to a directory to get one JSON line
+// per sweep that retried or gave up: the test, the time spent, the error
+// code and what was still on disk.
+const cleanupLogDir = process.env.HYDRA_ACP_TEST_CLEANUP_LOG;
+const SLOW_SWEEP_MS = 40;
+
+function leftovers(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir, { recursive: true })
+      .map(String)
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+function sweep(dir: string, test: string): void {
+  const started = Date.now();
+  let error: NodeJS.ErrnoException | undefined;
+  try {
+    fs.rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 20,
+      retryDelay: 50,
+    });
+  } catch (err) {
+    error = err as NodeJS.ErrnoException;
+  }
+  const ms = Date.now() - started;
+  if (!cleanupLogDir || (!error && ms < SLOW_SWEEP_MS)) {
+    return;
+  }
+  const record = {
+    test,
+    ms,
+    gaveUp: error !== undefined,
+    code: error?.code,
+    path: error?.path,
+    leftovers: error ? leftovers(dir) : undefined,
+  };
+  try {
+    fs.mkdirSync(cleanupLogDir, { recursive: true });
+    fs.appendFileSync(
+      path.join(cleanupLogDir, `cleanup-${process.pid}-${threadId}.jsonl`),
+      `${JSON.stringify(record)}\n`,
+    );
+  } catch {
+    // Diagnostics only.
+  }
+}
+
+afterEach((ctx) => {
   if (currentHome) {
     // Fire-and-forget writes from Session (queue persist, history append)
     // can land mid-rm: as rmSync walks the tree, a pending mkdir/writeFile
@@ -119,18 +175,12 @@ afterEach(() => {
     // those stragglers enough time to land and be swept on the next pass.
     // The retry budget has to cover a loaded CI runner, not just a fast
     // dev box; 5x10ms was enough locally and not on macOS runners.
-    try {
-      fs.rmSync(currentHome, {
-        recursive: true,
-        force: true,
-        maxRetries: 20,
-        retryDelay: 50,
-      });
-    } catch {
-      // A straggler that outlasts even that budget must not fail a test
-      // that already passed. The per-worker root this lives under is
-      // removed wholesale in afterAll, so nothing leaks beyond the run.
-    }
+    //
+    // A straggler that outlasts even that budget must not fail a test
+    // that already passed, so sweep() swallows it. The per-worker root
+    // this lives under is removed wholesale in afterAll, so nothing leaks
+    // beyond the run.
+    sweep(currentHome, `${ctx.task.file?.name ?? "?"} > ${ctx.task.name}`);
     currentHome = undefined;
   }
 });
@@ -140,14 +190,5 @@ afterAll(() => {
   // sweep just moved the ENOTEMPTY here, where it fails the whole file
   // rather than one test. The root is a mkdtemp under os.tmpdir(), so
   // the worst case of giving up is a directory the OS reaps later.
-  try {
-    fs.rmSync(workerRoot, {
-      recursive: true,
-      force: true,
-      maxRetries: 20,
-      retryDelay: 50,
-    });
-  } catch {
-    // Deliberately ignored; see above.
-  }
+  sweep(workerRoot, "(worker root)");
 });
