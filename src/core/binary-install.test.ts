@@ -310,7 +310,7 @@ describe("ensureBinary", () => {
           proc.stdout.on("data", (c: Buffer) => {
             out += c.toString("utf8");
           });
-          const [code] = (await once(proc, "exit")) as [number | null];
+          const [code] = (await once(proc, "close")) as [number | null];
           expect(code).toBe(0);
           expect(out.trim()).toBe("ok");
         } finally {
