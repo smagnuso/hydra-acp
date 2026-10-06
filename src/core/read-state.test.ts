@@ -24,6 +24,8 @@ describe("read state", () => {
     expect(nextReadAt({ lastTurnEndedAt: 100, readAt: 50 }, false)).toBeUndefined();
     expect(nextReadAt({ readAt: 50 }, false)).toBeUndefined();
     expect(nextReadAt({ lastTurnEndedAt: 100, readAt: 200 }, true, 200)).toBeUndefined();
+    expect(nextReadAt({ lastTurnEndedAt: 100, readAt: 150 }, true, 900)).toBeUndefined();
+    expect(nextReadAt({ readAt: 150 }, true, 900)).toBeUndefined();
   });
 
   it("puts only the fields it has on a row", () => {

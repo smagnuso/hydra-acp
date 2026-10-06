@@ -28,8 +28,8 @@ export function readStateFields(state: SessionReadState): {
 }
 
 // The readAt that marks a session read as of now, or unread by pulling it
-// back behind the last turn's end. Undefined when nothing changes,
-// including marking unread a session with no ended turn.
+// back behind the last turn's end. Undefined when nothing changes:
+// marking read a session already read, or unread one with no ended turn.
 export function nextReadAt(
   state: SessionReadState,
   read: boolean,
@@ -37,6 +37,9 @@ export function nextReadAt(
 ): number | undefined {
   let next: number | undefined;
   if (read) {
+    if (state.readAt !== undefined && !isUnread(state.lastTurnEndedAt, state.readAt)) {
+      return undefined;
+    }
     next = Math.max(now, state.lastTurnEndedAt ?? 0);
   } else if (
     state.lastTurnEndedAt !== undefined &&

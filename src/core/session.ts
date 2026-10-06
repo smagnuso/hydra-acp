@@ -7118,8 +7118,10 @@ export class Session {
   // never been marked read gets its readAt pinned to the previous turn's
   // end first, so the turn ending now is the one that makes it unread.
   private noteTurnEnded(now = Date.now()): void {
+    // Strictly before now, or a turn ending in the millisecond the session
+    // was created would read as already seen.
     if (this._readAt === undefined) {
-      this._readAt = this._lastTurnEndedAt ?? this.createdAt;
+      this._readAt = Math.min(this._lastTurnEndedAt ?? this.createdAt, now - 1);
     }
     this._lastTurnEndedAt = now;
     this.fireReadState();
