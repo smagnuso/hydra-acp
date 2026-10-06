@@ -107,6 +107,7 @@ type Tokens = Record<TokenKey, string | null>;
 
 const WRITE_TIMEOUT_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 5_000;
+const FOCUS_RESUBSCRIBE_MS = 5_000;
 
 /**
  * Env vars herdr uses to name a pane. Declared here so core/scrub-env.ts
@@ -361,6 +362,9 @@ class HerdrHost implements TerminalHost {
     // workspace, so the reverse lookup is one request rather than a fan-out,
     // and `tab.focus` crosses workspaces on its own (`switch_workspace_tab`).
     reveal: true,
+    // herdr does not forward focus reports to the program in a pane, but its
+    // API knows which pane is focused and announces every change.
+    focus: true,
   };
 
   private readonly socketPath: string;
@@ -387,6 +391,8 @@ class HerdrHost implements TerminalHost {
   // True once anything has been reported, so release() knows whether there
   // is any authority to withdraw.
   private claimed = false;
+  private readonly focusListeners = new Set<(focused: boolean) => void>();
+  private focusSocket: net.Socket | null = null;
 
   constructor(env: NodeJS.ProcessEnv) {
     this.socketPath = env.HERDR_SOCKET_PATH as string;
@@ -681,6 +687,83 @@ class HerdrHost implements TerminalHost {
       pane_id: target.pane_id,
     }).catch(() => undefined);
     return true;
+  }
+
+  async isFocused(): Promise<boolean | null> {
+    const reply = (await request(this.socketPath, "pane.get", {
+      pane_id: this.paneId,
+    })) as { result?: { pane?: { focused?: unknown } }; error?: unknown };
+    const focused = reply?.result?.pane?.focused;
+    return typeof focused === "boolean" ? focused : null;
+  }
+
+  onFocusChange(listener: (focused: boolean) => void): () => void {
+    this.focusListeners.add(listener);
+    this.subscribeFocus();
+    return () => {
+      this.focusListeners.delete(listener);
+      if (this.focusListeners.size === 0) {
+        this.focusSocket?.destroy();
+        this.focusSocket = null;
+      }
+    };
+  }
+
+  // One long-lived subscription for every listener. herdr announces the pane
+  // that GAINED focus, so any other pane's id means this one lost it. A
+  // dropped connection is retried while anyone is still listening.
+  private subscribeFocus(): void {
+    if (this.focusSocket || this.focusListeners.size === 0) {
+      return;
+    }
+    const sock = net.connect(this.socketPath);
+    this.focusSocket = sock;
+    sock.unref();
+    let buf = "";
+    sock.on("connect", () => {
+      sock.write(
+        `${JSON.stringify({
+          id: "hydra-focus",
+          method: "events.subscribe",
+          params: { subscriptions: [{ type: "pane.focused" }] },
+        })}\n`,
+      );
+    });
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      let nl = buf.indexOf("\n");
+      while (nl !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+        let frame: { event?: unknown; data?: { pane_id?: unknown } };
+        try {
+          frame = JSON.parse(line) as typeof frame;
+        } catch {
+          continue;
+        }
+        if (frame.event !== "pane_focused" || typeof frame.data?.pane_id !== "string") {
+          continue;
+        }
+        const focused = frame.data.pane_id === this.paneId;
+        for (const listener of this.focusListeners) {
+          try {
+            listener(focused);
+          } catch {
+            void 0;
+          }
+        }
+      }
+    });
+    const retry = (): void => {
+      if (this.focusSocket !== sock) {
+        return;
+      }
+      this.focusSocket = null;
+      setTimeout(() => this.subscribeFocus(), FOCUS_RESUBSCRIBE_MS).unref();
+    };
+    sock.on("error", retry);
+    sock.on("close", retry);
   }
 
   async readLabel(): Promise<TabLabelView | null> {

@@ -144,6 +144,9 @@ class TmuxHost implements TerminalHost {
     // `list-panes -a` can format an arbitrary pane option, so the
     // @hydra_session we already publish is readable back in one spawn.
     reveal: true,
+    // tmux forwards focus reports on window and pane switches, so the TUI's
+    // own DECSET 1004 tracking already answers this.
+    focus: false,
   };
 
   private readonly socket: string;

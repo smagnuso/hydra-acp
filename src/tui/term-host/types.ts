@@ -182,6 +182,15 @@ export interface TerminalHostCapabilities {
    * id round-trips: herdr's `session` token, tmux's `@hydra_session`.
    */
   reveal: boolean;
+  /**
+   * Can say whether this pane is the one in view, and announce changes.
+   *
+   * For hosts that do not forward terminal focus reports (DECSET 1004) to
+   * the program in a pane. tmux does forward them, so it needs no answer
+   * here; herdr does not, so a pane there never hears that its tab was
+   * switched away. Optional: absent is the same as false.
+   */
+  focus?: boolean;
 }
 
 /** A command to launch, fully assembled by core. */
@@ -312,6 +321,21 @@ export interface TerminalHost {
    * send the user somewhere different each press.
    */
   revealSession?(sessionId: string): Promise<boolean>;
+
+  /**
+   * Whether this pane is the one in view right now. Required when
+   * caps.focus. Null when the host cannot tell.
+   *
+   * Says nothing about the terminal window itself: a host can count its
+   * active pane as focused while the whole window is in the background.
+   */
+  isFocused?(): Promise<boolean | null>;
+
+  /**
+   * Calls `listener` whenever this pane gains or loses the host's focus,
+   * until the returned function is called. Required when caps.focus.
+   */
+  onFocusChange?(listener: (focused: boolean) => void): () => void;
 
   /** Read this pane's tab label. Required when caps.label. */
   readLabel?(): Promise<TabLabelView | null>;

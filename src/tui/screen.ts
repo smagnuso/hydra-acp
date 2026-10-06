@@ -1210,6 +1210,7 @@ export class Screen {
   // otherwise. Wheel and motion still pass through (natural scroll
   // works even on an unfocused window in most desktops).
   private terminalFocused = true;
+  private readonly terminalFocusListeners = new Set<(focused: boolean) => void>();
   // Wall-clock ms of the most recent FOCUS_IN. The terminal typically
   // emits FOCUS_IN BEFORE the click that caused it, so simply checking
   // terminalFocused at press time is too late: the press already looks
@@ -1749,6 +1750,9 @@ export class Screen {
         // highlight while the terminal isn't focused (matches the
         // picker's focus-loss behavior).
         this.scheduleRepaint();
+        for (const listener of this.terminalFocusListeners) {
+          listener(this.terminalFocused);
+        }
       }
     }
     if (text.length === 0) {
@@ -2221,6 +2225,17 @@ export class Screen {
   // Merge a partial snapshot. app.ts pushes deltas from the paths that
   // already track this state (usage-update, turn-complete, plan, tool
   // completion) rather than assembling a whole snapshot each time.
+  // Whether the terminal has focus, per DECSET 1004. True when the terminal
+  // never reports focus, since there is then nothing to go on.
+  isTerminalFocused(): boolean {
+    return this.terminalFocused;
+  }
+
+  onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
+    this.terminalFocusListeners.add(listener);
+    return () => this.terminalFocusListeners.delete(listener);
+  }
+
   setSidebarSnapshot(patch: Partial<SidebarSnapshot>): void {
     this.sidebarSnapshot = { ...this.sidebarSnapshot, ...patch };
     if (this.sidebarVisible) {

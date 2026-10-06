@@ -127,13 +127,14 @@ describe("detection", () => {
 });
 
 describe("capabilities", () => {
-  it("reports, opens tabs, but cannot split, label, or reveal", () => {
+  it("reports, opens tabs, but cannot split, label, reveal, or say whether it is in view", () => {
     expect(host().caps).toEqual({
       openTab: true,
       split: false,
       label: false,
       report: true,
       reveal: false,
+      focus: false,
     });
   });
 });

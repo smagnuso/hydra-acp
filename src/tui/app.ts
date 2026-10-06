@@ -188,7 +188,8 @@ import {
   readStickyHydraSession,
   restoreReportedCwd,
 } from "./terminal-user-var.js";
-import { initTerminalHost } from "./term-host/index.js";
+import { initTerminalHost, terminalHost } from "./term-host/index.js";
+import { paneInView } from "./pane-in-view.js";
 import type { TerminalHostOverride } from "./term-host/index.js";
 import {
   openInNewTab,
@@ -2337,10 +2338,7 @@ async function runSession(
       sessionBusySince = null;
       if (attachSettled) {
         lastTurnEndedAt = Date.now();
-        // The turn ended in front of the user, so they have seen it.
-        if (resolvedSessionId !== null) {
-          void markSessionRead(target, resolvedSessionId);
-        }
+        markReadIfSeen();
       } else {
         replayedTurnEndSeen = true;
       }
@@ -2377,6 +2375,7 @@ async function runSession(
   // gates the turnRunning flag that drives ^C → cancel; without it,
   // a mid-turn reattach leaves ^C falling through to the exit path.
   let screenRef: Screen | null = null;
+  let stopWatchingFocus: (() => void) | null = null;
   let dispatcherRef: InputDispatcher | null = null;
   // Late-bound for the same reason: `toolStates` is built much further down,
   // but the 1Hz stall check above needs to know whether a tool call is still
@@ -4147,6 +4146,20 @@ async function runSession(
   // Make Screen visible to closures that can run during the attach
   // handshake (notably adjustPendingTurns via conn.onNotification).
   screenRef = screen;
+
+  // Marks the session read when the person can see this pane: on attach,
+  // when a turn ends, and when the pane comes back into view.
+  const markReadIfSeen = (): void => {
+    const sessionId = resolvedSessionId;
+    if (sessionId === null) {
+      return;
+    }
+    void paneInView({ terminalFocused: screen.isTerminalFocused(), host: terminalHost() }).then((seen) => {
+      if (seen) {
+        void markSessionRead(target, sessionId);
+      }
+    });
+  };
 
   // Keep the plan block anchored at the bottom of its turn. Without this
   // the plan stays wherever it was first emitted (often near the top of
@@ -6043,6 +6056,8 @@ async function runSession(
     // Set first so any inbound notification/request that lands between
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
+    stopWatchingFocus?.();
+    stopWatchingFocus = null;
     // Cancel any in-flight btw sidechain so its events don't land on a
     // stale screen after we've torn down this session. Then kill any
     // retained reusable fork — without an active TUI it would otherwise
@@ -10521,9 +10536,20 @@ async function runSession(
   // history, and stamping the idle clock off it would date the session's
   // last turn to the moment we attached.
   attachSettled = true;
-  if (resolvedSessionId !== null) {
-    void markSessionRead(target, resolvedSessionId);
-  }
+  markReadIfSeen();
+  // A pane coming back into view has now been seen. herdr does not forward
+  // focus reports to the pane, so its own focus events stand in there.
+  const focusGained = (focused: boolean): void => {
+    if (focused) {
+      markReadIfSeen();
+    }
+  };
+  const stopTerminalFocus = screen.onTerminalFocusChange(focusGained);
+  const stopHostFocus = terminalHost()?.onFocusChange?.(focusGained);
+  stopWatchingFocus = (): void => {
+    stopTerminalFocus();
+    stopHostFocus?.();
+  };
 
   // Tear down volatile in-flight UI state ahead of a reconnect attach.
   // Deliberately leaves the tools block live (toolsBlockStartedAt stays

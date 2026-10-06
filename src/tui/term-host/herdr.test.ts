@@ -1368,3 +1368,102 @@ describe("herdr revealSession", () => {
     await expect(host().revealSession?.("s1")).resolves.toBe(true);
   });
 });
+
+describe("focus", () => {
+  // A socket that answers pane.get with `focused` and lets the test push
+  // subscription events after events.subscribe.
+  function focusSocket(focused: unknown, sockets: Array<{ push(line: string): void; close(): void }>): unknown {
+    let onData: ((d: string) => void) | undefined;
+    let onClose: (() => void) | undefined;
+    const sock = {
+      on(event: string, cb: (...a: unknown[]) => void) {
+        if (event === "connect") {
+          queueMicrotask(() => cb());
+        } else if (event === "data") {
+          onData = cb as (d: string) => void;
+        } else if (event === "close") {
+          onClose = cb as () => void;
+        }
+        return sock;
+      },
+      write(payload: string) {
+        const req = JSON.parse(payload.trim()) as Frame;
+        frames.push(req);
+        const reply =
+          req.method === "pane.get"
+            ? { result: { type: "pane_info", pane: { pane_id: "w1:p1", focused } } }
+            : { id: "hydra-focus", result: { type: "subscription_started" } };
+        queueMicrotask(() => onData?.(`${JSON.stringify(reply)}\n`));
+      },
+      setTimeout() {
+        return sock;
+      },
+      destroy() {},
+      unref() {
+        return sock;
+      },
+    };
+    sockets.push({
+      push: (line) => onData?.(`${line}\n`),
+      close: () => onClose?.(),
+    });
+    return sock;
+  }
+
+  const event = (paneId: string): string =>
+    JSON.stringify({ event: "pane_focused", data: { pane_id: paneId, type: "pane_focused", workspace_id: "w1" } });
+
+  it("claims the capability, since herdr does not forward focus reports", () => {
+    expect(terminalHost()!.caps.focus).toBe(true);
+  });
+
+  it("answers from pane.get for this pane", async () => {
+    connectImpl = () => focusSocket(false, []);
+    expect(await terminalHost()!.isFocused!()).toBe(false);
+    expect(lastOf("pane.get")?.params).toEqual({ pane_id: "w1:p1" });
+    connectImpl = () => focusSocket(true, []);
+    expect(await terminalHost()!.isFocused!()).toBe(true);
+    connectImpl = () => focusSocket("yes", []);
+    expect(await terminalHost()!.isFocused!()).toBeNull();
+  });
+
+  it("reports this pane gaining and losing focus from one subscription", async () => {
+    const sockets: Array<{ push(line: string): void; close(): void }> = [];
+    connectImpl = () => focusSocket(true, sockets);
+    const seen: boolean[] = [];
+    const stop = terminalHost()!.onFocusChange!((focused) => seen.push(focused));
+    const stopOther = terminalHost()!.onFocusChange!(() => undefined);
+    await settle();
+    expect(countOf("events.subscribe")).toBe(1);
+    expect(lastOf("events.subscribe")?.params).toEqual({ subscriptions: [{ type: "pane.focused" }] });
+
+    sockets[0]!.push(event("w1:p2"));
+    sockets[0]!.push(event("w1:p1"));
+    sockets[0]!.push("not json");
+    expect(seen).toEqual([false, true]);
+    stop();
+    stopOther();
+    sockets[0]!.push(event("w1:p2"));
+    expect(seen).toEqual([false, true]);
+  });
+
+  it("subscribes again after herdr drops the connection", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: Array<{ push(line: string): void; close(): void }> = [];
+      connectImpl = () => focusSocket(true, sockets);
+      const seen: boolean[] = [];
+      const stop = terminalHost()!.onFocusChange!((focused) => seen.push(focused));
+      await settle();
+      sockets[0]!.close();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settle();
+      expect(countOf("events.subscribe")).toBe(2);
+      sockets[1]!.push(event("w1:p2"));
+      expect(seen).toEqual([false]);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -130,6 +130,7 @@ class PaseoHost implements TerminalHost {
     label: false,
     report: true,
     reveal: false,
+    focus: false,
   };
 
   private readonly cli: string;
