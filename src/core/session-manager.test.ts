@@ -2278,6 +2278,29 @@ describe("SessionManager: /hydra agent persistence", () => {
     );
     expect(coordinatorSpy).not.toHaveBeenCalled();
   });
+
+  it("drops the cached listing once a swap lands, so no client is handed the old agent", async () => {
+    const manager = new TrackedSessionManager(
+      fakeRegistry([fakeRegistryAgent("old"), fakeRegistryAgent("new")]),
+      () => {
+        throw new Error("unexpected spawner call");
+      },
+    );
+    const internals = manager as unknown as {
+      performSynthesisSwap: (...args: unknown[]) => Promise<void>;
+      invalidateListCache: () => void;
+    };
+    const invalidate = vi.spyOn(internals, "invalidateListCache");
+    const live = {
+      sessionId: "hydra_session_absent",
+      swapUpstream: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await internals.performSynthesisSwap(live, undefined, 0, 0, "new");
+
+    expect(live.swapUpstream).toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalled();
+  });
 });
 
 describe("SessionManager: importBundle", () => {

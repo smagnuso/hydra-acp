@@ -946,6 +946,10 @@ export class SessionManager {
       this.logger?.warn(
         `compaction: swap failed for sessionId=${live.sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
       );
+    } finally {
+      // The swap changes the row's agentId; a listing cached before it
+      // would hand clients the old agent for up to the cache TTL.
+      this.invalidateListCache();
     }
   }
 
