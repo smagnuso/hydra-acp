@@ -137,7 +137,7 @@ describe("senseTerminalColors", () => {
         "\u001b]11;rgb:2828/2a2a/3636\u0007" +
         "\u001b]4;1;rgb:ffff/0000/0000\u0007",
     );
-    const got = await senseTerminalColors(tty.streams, 500);
+    const got = await senseTerminalColors(tty.streams, 500, 20);
     expect(got.foreground).toEqual(rgb(255, 255, 255));
     expect(got.background).toEqual(rgb(40, 42, 54));
     expect(got.palette.get(1)).toEqual(rgb(255, 0, 0));
@@ -181,6 +181,58 @@ describe("senseTerminalColors", () => {
       expect(tty.rawAtEnd()).toBe(false);
       expect(tty.listenerCount()).toBe(0);
     }
+  });
+
+  // A multiplexer relaying queries answers slots one at a time. Giving up after
+  // the first quiet moment would release the tty with echo on while the rest are
+  // still coming, printing them as visible control characters.
+  it("keeps waiting while palette slots are still arriving", async () => {
+    const listeners: Array<(c: Buffer | string) => void> = [];
+    let raw: boolean | undefined;
+    const slot = (n: number): string => `\u001b]4;${n};rgb:afaf/d7d7/8787\u0007`;
+    const streams = {
+      input: {
+        isTTY: true,
+        setRawMode: (m: boolean) => {
+          raw = m;
+        },
+        on: (_e: "data", fn: (c: Buffer | string) => void) => {
+          listeners.push(fn);
+        },
+        off: (_e: "data", fn: (c: Buffer | string) => void) => {
+          listeners.splice(listeners.indexOf(fn), 1);
+        },
+        resume: () => undefined,
+        pause: () => undefined,
+        isPaused: () => false,
+      },
+      output: {
+        isTTY: true,
+        write: () => {
+          const send = (s: string): void => {
+            for (const fn of [...listeners]) {
+              fn(s);
+            }
+          };
+          setTimeout(() => {
+            send("\u001b]10;rgb:c0c0/c0c0/c0c0\u0007\u001b]11;rgb:1010/1010/1010\u0007");
+            for (let i = 0; i < 12; i++) {
+              send(slot(i));
+            }
+          }, 0);
+          // Well past the 50ms settle window, well inside the grace period.
+          setTimeout(() => {
+            for (let i = 12; i < 16; i++) {
+              send(slot(i));
+            }
+          }, 150);
+        },
+      },
+    };
+    const got = await senseTerminalColors(streams, 100, 1000);
+    expect(got.palette.size).toBe(16);
+    expect(raw).toBe(false);
+    expect(listeners).toHaveLength(0);
   });
 
   it("does not query a non-tty", async () => {

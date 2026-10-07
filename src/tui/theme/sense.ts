@@ -37,6 +37,14 @@ const DEFAULT_TIMEOUT_MS = 200;
 // terminal is responsive, so the rest cannot be far behind.
 const SETTLE_MS = 50;
 
+// A multiplexer such as tmux relays palette queries to the real terminal and
+// returns the answers one at a time, so a few slots can still be in flight when
+// the settle window closes. Stopping then releases the tty into cooked mode
+// with echo on, and the stragglers are printed as `^[]4;12;rgb:...^G`. Some
+// slots answering is the signal that the rest are coming, so wait longer, but
+// only then: a terminal that ignores OSC 4 entirely never takes this path.
+const PARTIAL_GRACE_MS = 500;
+
 /** Ask for foreground, background and all sixteen ansi slots in one write. */
 function queryAll(): string {
   let out = "\u001b]10;?\u0007\u001b]11;?\u0007";
@@ -191,6 +199,7 @@ interface SenseStreams {
 export async function senseTerminalColors(
   streams: SenseStreams = { input: process.stdin, output: process.stdout },
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  partialGraceMs: number = PARTIAL_GRACE_MS,
 ): Promise<SensedColors> {
   const { input, output } = streams;
   if (input.isTTY !== true || output.isTTY !== true) {
@@ -200,6 +209,7 @@ export async function senseTerminalColors(
     let buf = "";
     let done = false;
     const wasPaused = input.isPaused?.() ?? false;
+    const startedAt = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let settle: ReturnType<typeof setTimeout> | undefined;
 
@@ -228,7 +238,15 @@ export async function senseTerminalColors(
       if (settle !== undefined) {
         clearTimeout(settle);
       }
-      settle = setTimeout(finish, SETTLE_MS);
+      let wait = SETTLE_MS;
+      if (got.palette.size > 0 && got.palette.size < 16) {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        wait = Math.max(SETTLE_MS, partialGraceMs - (Date.now() - startedAt));
+      }
+      settle = setTimeout(finish, wait);
       (settle as unknown as { unref?: () => void }).unref?.();
     };
 
