@@ -13,6 +13,16 @@ export function setLogMaxBytes(bytes: number): void {
   logMaxBytes = bytes;
 }
 
+let keyTrace = false;
+
+export function setKeyTrace(on: boolean): void {
+  keyTrace = on;
+}
+
+export function keyTraceEnabled(): boolean {
+  return keyTrace || !!process.env.HYDRA_TUI_KEY_TRACE;
+}
+
 export function writeDebugLine(payload: Record<string, unknown>): void {
   const override = process.env.HYDRA_TUI_DEBUG_LOG;
   const target = override === undefined ? paths.tuiLogFile() : override;

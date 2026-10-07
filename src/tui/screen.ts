@@ -88,7 +88,7 @@ import { depthForTerminal } from "./theme/capability.js";
 // they must not trigger the trailing reset.
 const SGR_PATTERN = /\x1b\[[0-9;]*m/;
 const SGR_GLOBAL = /\x1b\[[0-9;]*m/g;
-import { writeDebugLine } from "./debug-log.js";
+import { keyTraceEnabled, writeDebugLine } from "./debug-log.js";
 import type { ChromeActionTarget } from "./chrome-action.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -1705,7 +1705,7 @@ export class Screen {
   }
 
   private handleRawStdin(chunk: Buffer): void {
-    if (process.env.HYDRA_TUI_KEY_TRACE) {
+    if (keyTraceEnabled()) {
       const bytes = Array.from(chunk)
         .map((b) => "0x" + b.toString(16).padStart(2, "0"))
         .join(" ");
@@ -3929,7 +3929,7 @@ export class Screen {
   }
 
   private handleKey(name: string, data: { isCharacter?: boolean }): void {
-    if (process.env.HYDRA_TUI_KEY_TRACE) {
+    if (keyTraceEnabled()) {
       writeDebugLine({ tag: "key", name, isChar: !!data.isCharacter });
     }
     if (data.isCharacter) {

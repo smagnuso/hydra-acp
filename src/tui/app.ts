@@ -68,7 +68,7 @@ import { paths, shortenHomePath } from "../core/paths.js";
 import { extractPatchedFiles, parseUnifiedPatch } from "../core/tool-edit.js";
 import { lookupInheritedAgentValue } from "../core/registry.js";
 import { isGuardianReviewToolCall } from "../core/tool-noise.js";
-import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
+import { setKeyTrace, setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
   buildApproveResponse,
@@ -1306,6 +1306,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // local TUI invocation falls through to resolveLocalTarget here.
   const target = opts.target ?? (await resolveLocalTarget(config));
   setLogMaxBytes(config.tui.logMaxBytes);
+  setKeyTrace(config.tui.keyTrace === true);
   // Ask the terminal about itself, before anything grabs the keyboard, since the
   // answers arrive as input. One round trip carries both questions: OSC 11 for the
   // background and OSC 4 for the sixteen ansi slots. Bounded by the probe's own

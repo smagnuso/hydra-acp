@@ -507,6 +507,10 @@ const TuiConfig = z.object({
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),
+  // When true, record every raw stdin read and decoded keypress in tui.log
+  // (tags "raw" and "key"). Verbose and logs what you type, so leave it off
+  // except while diagnosing input problems. HYDRA_TUI_KEY_TRACE=1 also enables it.
+  keyTrace: z.boolean().optional(),
   // Width cap on the cwd column in the `sessions list` output and the
   // TUI picker. Set higher if you keep deeply-nested working directories
   // and want them visible; the elastic title column shrinks to make room.
