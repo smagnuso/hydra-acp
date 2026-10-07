@@ -89,6 +89,7 @@ import { depthForTerminal } from "./theme/capability.js";
 const SGR_PATTERN = /\x1b\[[0-9;]*m/;
 const SGR_GLOBAL = /\x1b\[[0-9;]*m/g;
 import { keyTraceEnabled, writeDebugLine } from "./debug-log.js";
+import { OscKeyLeakFilter } from "./osc-key-leak.js";
 import type { ChromeActionTarget } from "./chrome-action.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -1704,6 +1705,32 @@ export class Screen {
     return out;
   }
 
+  private readonly oscKeyLeak = new OscKeyLeakFilter();
+  private oscCarryTimer: NodeJS.Timeout | null = null;
+  private releasingOscCarry = false;
+
+  // A partial palette reply is held for the rest of it; if the rest never comes,
+  // it is an ordinary keystroke after all and goes through unchanged.
+  private armOscCarryRelease(): void {
+    if (this.oscCarryTimer !== null) {
+      clearTimeout(this.oscCarryTimer);
+    }
+    this.oscCarryTimer = setTimeout(() => {
+      this.oscCarryTimer = null;
+      const held = this.oscKeyLeak.take();
+      if (held.length === 0) {
+        return;
+      }
+      this.releasingOscCarry = true;
+      try {
+        this.handleRawStdin(Buffer.from(held, "binary"));
+      } finally {
+        this.releasingOscCarry = false;
+      }
+    }, 50);
+    this.oscCarryTimer.unref?.();
+  }
+
   private handleRawStdin(chunk: Buffer): void {
     if (keyTraceEnabled()) {
       const bytes = Array.from(chunk)
@@ -1718,6 +1745,13 @@ export class Screen {
     // string. (binary preserves the byte sequence; node's binary↔Buffer
     // round-trip is lossless.)
     let text = chunk.toString("binary");
+    text = this.oscKeyLeak.push(text, !this.releasingOscCarry);
+    if (this.oscKeyLeak.holding()) {
+      this.armOscCarryRelease();
+    }
+    if (text.length === 0) {
+      return;
+    }
     // Peel off Selective Mouse Reporting probe replies and SGR wheel
     // reports before any other parsing — the rest of the pipeline would
     // otherwise treat them as junk key data.
