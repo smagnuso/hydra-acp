@@ -1348,6 +1348,43 @@ describe("startDaemon", () => {
         ws.close();
       });
 
+      it("a session attached by its prefix-stripped id is addressable by that id afterwards", async () => {
+        const sessionId = await importColdSession();
+        expect(sessionId.startsWith("hydra_session_")).toBe(true);
+        const shortId = sessionId.slice("hydra_session_".length);
+        const ws = await openWs();
+        const responses = new Map<number, (msg: unknown) => void>();
+        ws.on("message", (data) => {
+          const msg = JSON.parse(data.toString("utf8")) as { id?: number };
+          if (msg.id !== undefined) {
+            responses.get(msg.id)?.(msg);
+          }
+        });
+        const call = <T>(id: number, method: string, params: unknown): Promise<T> => {
+          const done = new Promise<T>((resolve) => {
+            responses.set(id, resolve as (msg: unknown) => void);
+          });
+          ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+          return done;
+        };
+
+        const attach = await call<{ result?: { sessionId: string } }>(1, "session/attach", {
+          sessionId: shortId,
+          _meta: { "hydra-acp": { readonly: true } },
+        });
+        expect(attach.result?.sessionId).toBe(sessionId);
+
+        // Reaching the read-only gate (-32011) rather than "not attached"
+        // (SessionNotFound) proves the short id found the attachment.
+        const prompt = await call<{ error?: { code: number } }>(2, "session/prompt", {
+          sessionId: shortId,
+          prompt: [{ type: "text", text: "should not reach agent" }],
+        });
+        expect(prompt.error?.code).toBe(-32011);
+
+        ws.close();
+      });
+
       it("readonly attach rejects session/set_model with PermissionDenied", async () => {
         const sessionId = await importColdSession();
         const ws = await openWs();

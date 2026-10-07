@@ -11,7 +11,7 @@ import {
   type ResurrectParams,
 } from "../core/session-manager.js";
 import { resolveModelId } from "../core/model-resolve.js";
-import { Session, type AttachedClient } from "../core/session.js";
+import { HYDRA_SESSION_PREFIX, Session, type AttachedClient } from "../core/session.js";
 import {
   AmendPromptParams,
   CancelPromptParams,
@@ -391,6 +391,24 @@ export function registerAcpWsEndpoint(
       processIdentity,
       attached: new Map(),
     };
+
+    // session/attach accepts a prefix-stripped id (what pickers and
+    // hydra:// links show) but keys the attachment by the canonical one,
+    // so every later call must be addressed the same way or it misses.
+    connection.setParamsRewriter((params) => {
+      if (params === null || typeof params !== "object") {
+        return params;
+      }
+      const sessionId = (params as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string" || state.attached.has(sessionId)) {
+        return params;
+      }
+      const canonical = HYDRA_SESSION_PREFIX + sessionId;
+      if (!state.attached.has(canonical)) {
+        return params;
+      }
+      return { ...params, sessionId: canonical };
+    });
 
     connection.onClose(() => {
       for (const att of state.attached.values()) {

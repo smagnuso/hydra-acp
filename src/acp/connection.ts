@@ -12,6 +12,7 @@ import type { MessageStream } from "./framing.js";
 
 export type RequestHandler = (params: unknown, method: string) => Promise<unknown>;
 export type NotificationHandler = (params: unknown, method: string) => void;
+export type ParamsRewriter = (params: unknown, method: string) => unknown;
 
 // Thrown by request()/requestWithId() when the connection has already
 // been torn down. Distinguished from a generic Error so callers can
@@ -33,6 +34,7 @@ export class JsonRpcConnection {
   private requestHandlers = new Map<string, RequestHandler>();
   private defaultRequestHandler: RequestHandler | undefined;
   private notificationHandlers = new Map<string, NotificationHandler>();
+  private paramsRewriter: ParamsRewriter | undefined;
   // Fires for every inbound notification, regardless of method name or
   // whether a per-method handler is also registered. Doesn't interact
   // with the per-method buffering below: a catch-all listener is always
@@ -82,6 +84,12 @@ export class JsonRpcConnection {
 
   setDefaultHandler(handler: RequestHandler): void {
     this.defaultRequestHandler = handler;
+  }
+
+  // Runs on every inbound request and notification before any handler
+  // (per-method, default or catch-all) sees its params.
+  setParamsRewriter(rewriter: ParamsRewriter): void {
+    this.paramsRewriter = rewriter;
   }
 
   onNotification(method: string, handler: NotificationHandler): void {
@@ -194,6 +202,9 @@ export class JsonRpcConnection {
 
   private handleIncoming(message: JsonRpcMessage): void {
     if ("method" in message) {
+      if (this.paramsRewriter) {
+        message = { ...message, params: this.paramsRewriter(message.params, message.method) };
+      }
       if ("id" in message && message.id !== undefined) {
         // Never let a failed reply (e.g. ws closed mid-handle) bubble out as
         // an unhandled rejection — that would crash the daemon.
