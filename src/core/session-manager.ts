@@ -5431,13 +5431,13 @@ export class SessionManager {
       };
       delete restDefaults.model;
       delete restDefaults.mode;
+      let initialConfigOptions = extractInitialConfigOptions(
+        hasConfigOptions(seedReply) ? seedReply : newResult,
+      );
       if (Object.keys(restDefaults).length > 0) {
-        let currentOptions = extractInitialConfigOptions(
-          hasConfigOptions(seedReply) ? seedReply : newResult,
-        );
         for (const [configId, value] of Object.entries(restDefaults)) {
           const optWhere = `sessionDefaults[${provenanceAgentId}].${configId}=${JSON.stringify(value)}`;
-          const option = currentOptions.find((o) => o.id === configId);
+          const option = initialConfigOptions.find((o) => o.id === configId);
           if (!option) {
             this.logger?.warn(
               `${optWhere}: agent does not currently advertise configId=${configId}; skipping session/set_config_option`,
@@ -5466,8 +5466,19 @@ export class SessionManager {
             );
             this.logger?.info(`${optWhere}: session/set_config_option accepted`);
             if (hasConfigOptions(reply)) {
-              currentOptions = extractInitialConfigOptions(reply);
+              initialConfigOptions = extractInitialConfigOptions(reply);
               seedReply = reply;
+            } else {
+              // Some agents accept set_config_option without returning a
+              // replacement configOptions snapshot. Keep the accepted value
+              // visible in the initial session state instead of showing the
+              // stale session/new currentValue (for example effort="none"
+              // after setting effort="max").
+              initialConfigOptions = initialConfigOptions.map((current) =>
+                current.id === configId
+                  ? { ...current, currentValue: resolvedValue }
+                  : current,
+              );
             }
           } catch (err) {
             this.logger?.warn(
@@ -5477,24 +5488,11 @@ export class SessionManager {
         }
       }
 
-      // Read the dimensions off the last accepted seed's reply, when one
-      // was sent and accepted: it describes the state the session is
-      // actually on, where newResult describes the one that was just
-      // replaced. claude-acp rebuilds its effort levels per model (and
-      // drops the option for a model with none), so preferring newResult
-      // here would advertise levels the agent would go on to refuse, at a
-      // currentValue belonging to the old model. Only the model/mode
-      // extractors above can keep using newResult — hydra tracks the
-      // seeded model/mode itself, in initialModel/initialMode.
-      //
-      // Gated on the reply actually carrying the array, not merely on a
-      // seed having run: session/set_model (still the lead verb, and the
-      // only one older agents implement) answers without one, and treating
-      // that as authoritative would drop every dimension newResult
-      // advertised rather than refresh it.
-      const initialConfigOptions = extractInitialConfigOptions(
-        hasConfigOptions(seedReply) ? seedReply : newResult,
-      );
+      // initialConfigOptions starts from the freshest complete snapshot we
+      // have (the accepted model/mode seed reply, when it includes one,
+      // otherwise session/new). Accepted config-option seeds replace it
+      // with their snapshot or patch the accepted id when the agent replies
+      // without one.
       return {
         agent,
         upstreamSessionId: sessionIdRaw,
