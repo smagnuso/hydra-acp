@@ -12,7 +12,7 @@ import {
   Registry,
   agentChainRoot,
   listAgents,
-  lookupInheritedAgentValue,
+  mergeInheritedAgentValues,
   planSpawn,
   type AgentChainRef,
   type AgentInstallProgressCallback,
@@ -5310,10 +5310,11 @@ export class SessionManager {
       const modelVerb = inferModelVerbFromResult(newResult);
       // sessionDefaults is keyed by agent id, and an agent derived via
       // config.agents `extends` usually has no entry of its own. Walk the
-      // inheritance chain most-specific-first so `opencode-home` picks up
-      // `sessionDefaults[opencode]` rather than silently landing on
-      // whatever the agent defaults to.
-      const inheritedDefaults = lookupInheritedAgentValue(
+      // inheritance chain and merge, most specific winning per field, so
+      // `opencode-home` picks up `sessionDefaults[opencode]` rather than
+      // silently landing on whatever the agent defaults to, even when it
+      // overrides some fields itself.
+      const inheritedDefaults = mergeInheritedAgentValues(
         this.sessionDefaults,
         agentDef,
       );

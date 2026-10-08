@@ -66,7 +66,7 @@ import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.j
 import { parseForeignSessionId } from "../core/foreign-session-id.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { extractPatchedFiles, parseUnifiedPatch } from "../core/tool-edit.js";
-import { lookupInheritedAgentValue } from "../core/registry.js";
+import { mergeInheritedAgentValues } from "../core/registry.js";
 import { isGuardianReviewToolCall } from "../core/tool-noise.js";
 import { setKeyTrace, setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
@@ -11636,7 +11636,7 @@ async function ensureAgentForNew(
   rememberComposerAgent(
     viewPrefs,
     result.agentId,
-    lookupInheritedAgentValue(config.sessionDefaults, {
+    mergeInheritedAgentValues(config.sessionDefaults, {
       id: result.agentId,
       extendsChain: chosenAgentEntry?.extendsChain,
     })?.value.model,

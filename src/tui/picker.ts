@@ -23,7 +23,7 @@ import {
   type FormatOptions,
 } from "../cli/session-row.js";
 import { localMachines } from "../core/machine.js";
-import { lookupInheritedAgentValue } from "../core/registry.js";
+import { mergeInheritedAgentValues } from "../core/registry.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import {
@@ -2968,7 +2968,7 @@ export async function pickSession(
             defaultModelFor: (agent, host) =>
               agent === undefined
                 ? undefined
-                : lookupInheritedAgentValue(
+                : mergeInheritedAgentValues(
                     (host !== undefined
                       ? opts.hostInfo?.[host]?.sessionDefaults
                       : undefined) ?? opts.config.sessionDefaults,

@@ -10,6 +10,7 @@ import {
   agentInstallId,
   agentInstallState,
   lookupInheritedAgentValue,
+  mergeInheritedAgentValues,
   Registry,
   listAgents,
   planSpawn,
@@ -1233,5 +1234,38 @@ describe("lookupInheritedAgentValue", () => {
     });
     const a = await registry.getAgent("opencode-home");
     expect(lookupInheritedAgentValue({ other: "x" }, a!)).toBeUndefined();
+  });
+});
+
+describe("mergeInheritedAgentValues", () => {
+  it("merges the chain, the derived agent winning per field", async () => {
+    const registry = extendsRegistry({
+      "opencode-local": { extends: "opencode", env: { X: "1" } },
+    });
+    const a = await registry.getAgent("opencode-local");
+    expect(
+      mergeInheritedAgentValues(
+        {
+          opencode: { model: "base-model", effort: "medium" },
+          "opencode-local": { model: "own-model" },
+        },
+        a!,
+      ),
+    ).toEqual({
+      value: { model: "own-model", effort: "medium" },
+      from: "opencode-local",
+    });
+  });
+
+  it("falls back to the base alone and to undefined when nothing matches", async () => {
+    const registry = extendsRegistry({
+      "opencode-local": { extends: "opencode", env: { X: "1" } },
+    });
+    const a = await registry.getAgent("opencode-local");
+    expect(mergeInheritedAgentValues({ opencode: { effort: "low" } }, a!)).toEqual({
+      value: { effort: "low" },
+      from: "opencode",
+    });
+    expect(mergeInheritedAgentValues({ other: { effort: "low" } }, a!)).toBeUndefined();
   });
 });

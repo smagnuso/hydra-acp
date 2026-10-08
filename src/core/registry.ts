@@ -184,6 +184,30 @@ export function lookupInheritedAgentValue<T>(
   return undefined;
 }
 
+// Like lookupInheritedAgentValue, but for maps whose values are records
+// (sessionDefaults): merges every entry along the chain, the most specific
+// key winning per field, so a derived agent that overrides `model` still
+// inherits its base's `effort`. `from` is the most specific matching key.
+export function mergeInheritedAgentValues<T extends Record<string, unknown>>(
+  map: Record<string, T> | undefined,
+  agent: AgentChainRef,
+): { value: T; from: string } | undefined {
+  if (!map) {
+    return undefined;
+  }
+  let merged: T | undefined;
+  let from: string | undefined;
+  for (const key of [...(agent.extendsChain ?? [agent.id])].reverse()) {
+    const value = map[key];
+    if (value === undefined) {
+      continue;
+    }
+    merged = { ...merged, ...value };
+    from = key;
+  }
+  return merged !== undefined && from !== undefined ? { value: merged, from } : undefined;
+}
+
 export const RegistryDocument = z.object({
   version: z.string(),
   agents: z.array(RegistryAgent),
