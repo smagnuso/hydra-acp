@@ -710,6 +710,16 @@ hydra-acp extension start hydra-acp-archiver
 
 See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
 
+**[`@hydra-acp/ahp`](https://github.com/smagnuso/hydra-ahp) — VS Code agent host.** Serves hydra sessions over the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) so VS Code's agent UI can list, watch, and drive them. VS Code connects to it like any remote agent host, while every session stays live and shared with the TUI, browser, and Slack. Start a turn in the TUI and watch it stream in VS Code, or start a session in VS Code and pick it up later from the terminal. It listens on `127.0.0.1:55590` and mints its own token for VS Code, so hydra's tokens never leave the daemon.
+
+```sh
+npm install -g @hydra-acp/ahp
+hydra-acp extensions add hydra-ahp
+hydra-acp extensions start hydra-ahp
+```
+
+See the [package README](https://github.com/smagnuso/hydra-ahp#readme) for connecting VS Code and minting a token (`/hydra ahp token mint`).
+
 **[`@hydra-acp/planner`](https://github.com/smagnuso/hydra-acp-planner) — multi-agent project orchestrator.** Invoked via `/hydra planner create <description>` from any session: asks the host agent to decompose the project into a task DAG, then spawns N worker sessions and drives them in parallel by prompt management, with progress streaming back into your original chat. Boards persist under `~/.hydra-acp/planner/projects/<id>/` so plans survive daemon restarts. Strictly speaking it's a [transformer](#transformers), not an extension — it sits in the daemon's message pipeline rather than attaching as a client — but it installs and configures the same way.
 
 ```sh
