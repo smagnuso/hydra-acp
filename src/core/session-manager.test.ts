@@ -3590,6 +3590,49 @@ describe("SessionManager: sessionDefaults", () => {
     ).toBe("high");
   });
 
+  it("reflects a seeded config option when the agent reply has no options snapshot", async () => {
+    const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        configOptions: [
+          {
+            id: "effort",
+            name: "Effort",
+            type: "select",
+            currentValue: "none",
+            options: [
+              { value: "none", name: "None" },
+              { value: "max", name: "Max" },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+
+    const manager = new TrackedSessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => mock.agent,
+      undefined,
+      { sessionDefaults: { "claude-acp": { effort: "max" } } },
+    );
+
+    const session = await manager.create({
+      cwd: WORK_CWD,
+      agentId: "claude-acp",
+    });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_config_option",
+      { sessionId: "u_fresh", configId: "effort", value: "max" },
+    ]);
+    expect(
+      session.buildConfigOptions().find((o) => o.id === "effort")?.currentValue,
+    ).toBe("max");
+  });
+
   it("resolves a generic configId value fuzzily against the advertised options", async () => {
     const mock = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
