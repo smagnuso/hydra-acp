@@ -990,7 +990,9 @@ describe("SessionManager: history persistence", () => {
         content: { type: "text", text: "original turn output" },
       },
     });
-    await flushHistoryWrites();
+    await vi.waitFor(async () => {
+      expect(await manager.getHistory(sessionId)).not.toHaveLength(0);
+    });
     await live.close({ deleteRecord: false });
 
     // Fresh SessionManager whose session/load mock simulates the
