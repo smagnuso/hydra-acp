@@ -61,7 +61,7 @@ export async function readDaemonPidFile(): Promise<DaemonPidInfo | undefined> {
     };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
+    if (code === "ENOENT" || err instanceof SyntaxError) {
       return undefined;
     }
     throw err;
@@ -69,10 +69,13 @@ export async function readDaemonPidFile(): Promise<DaemonPidInfo | undefined> {
 }
 
 export async function writeDaemonPidFile(info: DaemonPidInfo): Promise<void> {
-  await fsp.writeFile(paths.pidFile(), JSON.stringify(info) + "\n", {
+  const target = paths.pidFile();
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fsp.writeFile(tmp, JSON.stringify(info) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fsp.rename(tmp, target);
 }
 
 // A signal-0 probe answers "does this pid exist", not "may I signal it".
