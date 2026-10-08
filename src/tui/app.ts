@@ -1435,12 +1435,6 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     onBackground: (color) => backgroundReplyHook?.(color),
     onScheme: (scheme) => schemeChangeHook?.(scheme),
   });
-  // Ask to be told when the terminal's light/dark setting changes. Ignored by
-  // terminals that do not implement mode 2031, which is most of them today.
-  // Turned off in the teardown path alongside the other terminal modes.
-  if (config.tui.themeBackground === undefined) {
-    writeControl(SCHEME_REPORTS_ON);
-  }
   // Inline spans and syntax colours are baked into text at parse time, where no
   // terminal is in scope. Tell the theme what this one can do so those match
   // what paint-time resolution emits — otherwise text after an inline span
@@ -5384,6 +5378,13 @@ async function runSession(
   };
   schemeChangeHook = onSchemeChange;
   backgroundReplyHook = applyBackground;
+  // Ask to be told when the terminal's light/dark setting changes. Ignored by
+  // terminals that do not implement mode 2031. Turned off in the teardown path.
+  // Sent only once input is grabbed: terminals answer an enable immediately, and
+  // a reply landing while the tty is cooked is echoed as literal `^[[?997;1n`.
+  if (config.tui.themeBackground === undefined) {
+    writeControl(SCHEME_REPORTS_ON);
+  }
 
   /**
    * Advance an option's value.
