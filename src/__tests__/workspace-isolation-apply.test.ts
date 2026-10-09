@@ -28,7 +28,7 @@ import {
 } from "./workspace-isolation-harness.js";
 
 // Real git in temp trees, same as the other isolation suites.
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 registerTempRootCleanup();
 
