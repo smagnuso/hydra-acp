@@ -900,7 +900,7 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 ## Architecture
 
 ```
-           VS Code         Chrome            Slack        ← clients
+           VS Code         Chrome            Slack       ← clients
               │               │                │
           hydra-ahp   hydra-acp-browser  hydra-acp-slack ← hydra extensions
               │               │                │
@@ -908,13 +908,13 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
                               │
                           WSS / HTTP
                               │
-                          hydra-acp                     ← hydra daemon
+                          hydra-acp                      ← hydra daemon
                               │
-                      T1 → T2 → … → Tn                  ← hydra transformers
+                      T1 → T2 → … → Tn                   ← hydra transformers
                               │
             ┌───────────┬─────┴─────┬───────────┐
             │           │           │           │
-         claude     opencode       pi         codex     ← agents
+         claude     opencode       pi         codex      ← agents
 ```
 
 ### How it works
