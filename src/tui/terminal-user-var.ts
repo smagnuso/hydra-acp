@@ -50,7 +50,8 @@ function writeOSC(name: string, value: string): void {
 // Tried in order:
 //   - readlink /proc/self/fd/0 (Linux)
 //   - readlink /dev/fd/0 (BSD / macOS)
-//   - spawnSync("tty") (fallback, works everywhere with a real TTY)
+//   - spawnSync("tty") with inherited stdin (works everywhere with a
+//     real TTY; the only path that succeeds on macOS)
 // Returns null when stdin isn't a TTY or every strategy fails.
 function resolveTtyBasename(): string | null {
   if (!process.stdin.isTTY) {
@@ -71,8 +72,16 @@ function resolveTtyBasename(): string | null {
   if (linked) {
     return linked;
   }
+  // stdin must be inherited: tty(1) reports on its own stdin, and
+  // spawnSync's default is a pipe, which always yields "not a tty".
+  // This is the only strategy that works on macOS, where /dev/fd/0 is
+  // a device node rather than a symlink (readlink fails with EINVAL).
   try {
-    const r = spawnSync("tty", [], { encoding: "utf8", timeout: 500 });
+    const r = spawnSync("tty", [], {
+      encoding: "utf8",
+      stdio: ["inherit", "pipe", "ignore"],
+      timeout: 500,
+    });
     if (r.status !== 0) {
       return null;
     }
