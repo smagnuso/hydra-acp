@@ -26,6 +26,14 @@ const MAX_HELD = 80;
 
 export class OscKeyLeakFilter {
   private carry = "";
+  private removed = 0;
+
+  /** How many leaked replies were removed since the last call. */
+  takeRemoved(): number {
+    const n = this.removed;
+    this.removed = 0;
+    return n;
+  }
 
   /** Whether a partial reply is being held back for the next read. */
   holding(): boolean {
@@ -46,7 +54,11 @@ export class OscKeyLeakFilter {
   push(text: string, hold = true): string {
     let t = this.carry + text;
     this.carry = "";
-    t = t.replace(ALT_FORM, "").replace(PASTE_FORM, "");
+    const drop = (): string => {
+      this.removed += 1;
+      return "";
+    };
+    t = t.replace(ALT_FORM, drop).replace(PASTE_FORM, drop);
     if (hold) {
       const m = HELD_TAIL.exec(t);
       if (m !== null && t.length - m.index <= MAX_HELD) {

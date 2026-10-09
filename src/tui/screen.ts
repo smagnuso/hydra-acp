@@ -90,6 +90,12 @@ const SGR_PATTERN = /\x1b\[[0-9;]*m/;
 const SGR_GLOBAL = /\x1b\[[0-9;]*m/g;
 import { keyTraceEnabled, writeDebugLine } from "./debug-log.js";
 import { OscKeyLeakFilter } from "./osc-key-leak.js";
+import { InputRecorder, printable } from "./input-recorder.js";
+
+// Anything shaped like part of a palette reply that is still in the input after
+// filtering: a colour spec, or the `4;N;` head of one.
+const SUSPECT_REPLY =
+  /rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}|(?:^|[^0-9])(?:4;\d{1,3}|1[01]);(?:rgb:|#[0-9a-fA-F]{6})/;
 import type { ChromeActionTarget } from "./chrome-action.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -1357,7 +1363,10 @@ export class Screen {
     };
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name, data) => this.handleMouse(name, data);
-    this.rawStdinHandler = (chunk) => this.handleRawStdin(chunk);
+    this.rawStdinHandler = (chunk) => {
+      this.inputRecorder.record(chunk.toString("binary"));
+      this.handleRawStdin(chunk);
+    };
   }
 
   // Starts (or resumes) the screen's painting + input pipeline. When
@@ -1706,6 +1715,25 @@ export class Screen {
   }
 
   private readonly oscKeyLeak = new OscKeyLeakFilter();
+  private readonly inputRecorder = new InputRecorder();
+
+  // Reply-shaped text that got through the filter, or a leak it just removed:
+  // either is worth a record of the reads around it.
+  private recordInputSuspect(reason: string, text: string): void {
+    const reads = this.inputRecorder.snapshot();
+    if (reads === null) {
+      return;
+    }
+    writeDebugLine({
+      src: "input-suspect",
+      reason,
+      focused: this.terminalFocused,
+      sinceFocusInMs:
+        this.lastFocusInAt === 0 ? null : Date.now() - this.lastFocusInAt,
+      survivor: reason === "survived" ? printable(text) : undefined,
+      reads,
+    });
+  }
   private oscCarryTimer: NodeJS.Timeout | null = null;
   private releasingOscCarry = false;
 
@@ -1746,11 +1774,17 @@ export class Screen {
     // round-trip is lossless.)
     let text = chunk.toString("binary");
     text = this.oscKeyLeak.push(text, !this.releasingOscCarry);
+    if (this.oscKeyLeak.takeRemoved() > 0) {
+      this.recordInputSuspect("filtered", text);
+    }
     if (this.oscKeyLeak.holding()) {
       this.armOscCarryRelease();
     }
     if (text.length === 0) {
       return;
+    }
+    if (SUSPECT_REPLY.test(text)) {
+      this.recordInputSuspect("survived", text);
     }
     // Peel off Selective Mouse Reporting probe replies and SGR wheel
     // reports before any other parsing — the rest of the pipeline would
