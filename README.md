@@ -1023,37 +1023,13 @@ All three are documented in [`PROTOCOL.md`](PROTOCOL.md), with endpoint shapes, 
 The daemon exposes a process-management surface. Treat the service token like an SSH key.
 
 - **Default bind is `127.0.0.1`.** Cross-host access requires TLS + a strong token.
+- **Remote access is opt-in via `hydra-acp daemon listen`.** `tailnet` binds the tailnet IP with a CA-signed cert, `all` binds every interface with a self-signed cert, and `local` goes back to loopback. The daemon refuses a non-loopback bind without TLS; see [Accepting remote clients](#accepting-remote-clients).
 - **No anonymous access.** Every request — REST and WSS — must present the bearer token.
 - **Token rotation:** `hydra-acp init --rotate-token` invalidates the old token; running clients are kicked.
 - **Sandboxing is the user's responsibility.** Spawned agents inherit the daemon's filesystem and shell. Run the daemon under a restricted user or inside a container if you don't trust agents fully.
 - **Subprocess scope:** agent processes inherit `cwd` and a sanitized environment. The daemon does not pass its service token through to spawned agents.
 
 The service token (stored at `~/.hydra-acp/auth-token`, mode 0600) is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. The token never leaves `~/.hydra-acp/`.
-
-> **Windows:** mode 0600 is not enforcement there. Windows derives file access from ACLs, and Node's `chmod` only toggles the read-only bit, so `auth-token` (along with `config.json`, `peers.json`, `remotes.json`, and the session records) inherits whatever the parent directory grants. On a machine with more than one interactive user, restrict `%USERPROFILE%\.hydra-acp` yourself, e.g. `icacls "%USERPROFILE%\.hydra-acp" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`.
-
-For remote access (binding to a non-loopback address), enable TLS via:
-
-```json
-{
-  "daemon": {
-    "tls": {
-      "cert": "/path/to/cert.pem",
-      "key": "/path/to/key.pem"
-    }
-  }
-}
-```
-
-The daemon refuses to bind to non-loopback hosts without TLS configured.
-`hydra-acp daemon listen` writes all of this for you (see
-[Accepting remote clients](#accepting-remote-clients)). To do it by hand, a
-self-signed cert is enough, since `remote add`'s TOFU handshake only needs a
-key pair to pin, not a CA-signed one:
-
-```sh
-openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes -keyout key.pem -out cert.pem -subj "/CN=$(hostname)"
-```
 
 ## License
 
