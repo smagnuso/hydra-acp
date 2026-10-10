@@ -5489,6 +5489,17 @@ export class SessionManager {
         }
       }
 
+      // Seeding can make the agent emit config_option_update frames that
+      // carry the pre-seed values (opencode's model switch reports
+      // effort="none"). Replayed after wiring they would clobber the seeded
+      // state, which initialConfigOptions already reflects.
+      agent.connection.dropBufferedWhere(
+        "session/update",
+        (params) =>
+          (params as { update?: { sessionUpdate?: unknown } } | undefined)
+            ?.update?.sessionUpdate === "config_option_update",
+      );
+
       // initialConfigOptions starts from the freshest complete snapshot we
       // have (the accepted model/mode seed reply, when it includes one,
       // otherwise session/new). Accepted config-option seeds replace it

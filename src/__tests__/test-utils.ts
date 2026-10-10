@@ -219,6 +219,19 @@ export function makeMockAgent(opts: {
     drainBuffered(method: string): void {
       bufferedNotifications.delete(method);
     },
+    dropBufferedWhere(
+      method: string,
+      drop: (params: unknown) => boolean,
+    ): void {
+      const buf = bufferedNotifications.get(method);
+      if (!buf) {
+        return;
+      }
+      bufferedNotifications.set(
+        method,
+        buf.filter((note) => !drop(note.params)),
+      );
+    },
     onClose(_handler: (err?: Error) => void): void {
       void _handler;
     },

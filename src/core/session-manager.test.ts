@@ -3113,6 +3113,52 @@ describe("SessionManager: sessionDefaults", () => {
     expect(session.currentModel).toBe("openai/gpt-5-codex");
   });
 
+  it("does not replay a stale config_option_update over the seeded effort", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    const effortOpt = (currentValue: string) => ({
+      id: "effort",
+      name: "Effort",
+      category: "thought_level",
+      currentValue,
+      options: [
+        { value: "none", name: "None" },
+        { value: "medium", name: "Medium" },
+      ],
+    });
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        configOptions: [effortOpt("none")],
+      })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ configOptions: [effortOpt("medium")] });
+    // The model switch's own notification, still carrying the pre-seed value.
+    mock.triggerNotification("session/update", {
+      sessionId: "u_fresh",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [effortOpt("none")],
+      },
+    });
+
+    const manager = new TrackedSessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      {
+        sessionDefaults: {
+          opencode: { model: "openai/gpt-5-codex", effort: "medium" },
+        },
+      },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+
+    expect(session.extraConfigOptionValues()).toEqual({ effort: "medium" });
+  });
+
   it("skips session/set_model when the agent already reports that model", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;

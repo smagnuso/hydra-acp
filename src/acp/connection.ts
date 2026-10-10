@@ -121,6 +121,25 @@ export class JsonRpcConnection {
     return count;
   }
 
+  // Discard only the buffered notifications of `method` that match `drop`,
+  // keeping the rest queued for the handler that registers later.
+  dropBufferedWhere(
+    method: string,
+    drop: (params: unknown) => boolean,
+  ): number {
+    const buf = this.bufferedNotifications.get(method);
+    if (!buf) {
+      return 0;
+    }
+    const kept = buf.filter((note) => !drop(note.params));
+    if (kept.length > 0) {
+      this.bufferedNotifications.set(method, kept);
+    } else {
+      this.bufferedNotifications.delete(method);
+    }
+    return buf.length - kept.length;
+  }
+
   // See notes on the field above: fires for every notification, in
   // addition to whatever per-method handler(s) also run. Used by
   // acp-forward.ts to relay a federated peer's traffic verbatim without
