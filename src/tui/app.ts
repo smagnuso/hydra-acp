@@ -4143,10 +4143,15 @@ async function runSession(
   screenRef = screen;
 
   // Marks the session read when the person can see this pane: on attach,
-  // when a turn ends, and when the pane comes back into view.
+  // when a turn ends, and when the pane comes back into view. A pane with no
+  // input for READ_IDLE_MS is left unread for an active client to mark.
+  const READ_IDLE_MS = config.tui.readIdleSeconds * 1_000;
+  let lastInputAt = Date.now();
+  const isReadIdle = (now = Date.now()): boolean =>
+    READ_IDLE_MS > 0 && now - lastInputAt > READ_IDLE_MS;
   const markReadIfSeen = (): void => {
     const sessionId = resolvedSessionId;
-    if (sessionId === null) {
+    if (sessionId === null || isReadIdle()) {
       return;
     }
     void paneInView({ terminalFocused: screen.isTerminalFocused(), host: terminalHost() }).then((seen) => {
@@ -10543,12 +10548,25 @@ async function runSession(
   // focus reports to the pane, so its own focus events stand in there.
   const focusGained = (focused: boolean): void => {
     if (focused) {
+      lastInputAt = Date.now();
       markReadIfSeen();
     }
   };
+  const stopInputWatch = screen.onInput(() => {
+    const now = Date.now();
+    const wasIdle = isReadIdle(now);
+    if (!wasIdle && now - lastInputAt < 1000) {
+      return;
+    }
+    lastInputAt = now;
+    if (wasIdle) {
+      markReadIfSeen();
+    }
+  });
   const stopTerminalFocus = screen.onTerminalFocusChange(focusGained);
   const stopHostFocus = terminalHost()?.onFocusChange?.(focusGained);
   stopWatchingFocus = (): void => {
+    stopInputWatch();
     stopTerminalFocus();
     stopHostFocus?.();
   };

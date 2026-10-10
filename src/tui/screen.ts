@@ -1218,6 +1218,7 @@ export class Screen {
   // works even on an unfocused window in most desktops).
   private terminalFocused = true;
   private readonly terminalFocusListeners = new Set<(focused: boolean) => void>();
+  private readonly inputListeners = new Set<() => void>();
   // Wall-clock ms of the most recent FOCUS_IN. The terminal typically
   // emits FOCUS_IN BEFORE the click that caused it, so simply checking
   // terminalFocused at press time is too late: the press already looks
@@ -1786,6 +1787,11 @@ export class Screen {
     if (SUSPECT_REPLY.test(text)) {
       this.recordInputSuspect("survived", text);
     }
+    if (text.split(FOCUS_IN).join("").split(FOCUS_OUT).join("").length > 0) {
+      for (const listener of this.inputListeners) {
+        listener();
+      }
+    }
     // Peel off Selective Mouse Reporting probe replies and SGR wheel
     // reports before any other parsing — the rest of the pipeline would
     // otherwise treat them as junk key data.
@@ -2302,6 +2308,13 @@ export class Screen {
   onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
     this.terminalFocusListeners.add(listener);
     return () => this.terminalFocusListeners.delete(listener);
+  }
+
+  // Fires on every chunk of keyboard or mouse input; focus reports alone
+  // are not input.
+  onInput(listener: () => void): () => void {
+    this.inputListeners.add(listener);
+    return () => this.inputListeners.delete(listener);
   }
 
   setSidebarSnapshot(patch: Partial<SidebarSnapshot>): void {

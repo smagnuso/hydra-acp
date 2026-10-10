@@ -424,6 +424,11 @@ const TuiConfig = z.object({
   // which is why this lives at the top level rather than under
   // `composer`. Override per entry with that entry's `refreshMs`.
   scriptRefreshMs: z.number().int().positive().default(5_000),
+  // Seconds without keyboard or mouse input after which this TUI stops
+  // marking its session read on its own, leaving it unread for a client
+  // someone is actually using. Input or focus after that marks it read.
+  // 0 disables the idle check, so a focused pane always marks read.
+  readIdleSeconds: z.number().int().nonnegative().default(180),
   // Minimum interval (ms) between full-screen repaints driven by content
   // events (agent text chunks, tool/plan updates, elapsed-tick refreshes).
   // User-action repaints — scrolling, prompt-row changes, modal open/close,

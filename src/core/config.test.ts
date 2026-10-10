@@ -150,6 +150,12 @@ describe("tui.scriptRefreshMs schema", () => {
   it("rejects a non-positive value", () => {
     expect(() => HydraConfig.parse({ tui: { scriptRefreshMs: 0 } })).toThrow();
   });
+
+  it("defaults tui.readIdleSeconds to 180 and accepts 0 to disable", () => {
+    expect(HydraConfig.parse({}).tui.readIdleSeconds).toBe(180);
+    expect(HydraConfig.parse({ tui: { readIdleSeconds: 0 } }).tui.readIdleSeconds).toBe(0);
+    expect(() => HydraConfig.parse({ tui: { readIdleSeconds: -1 } })).toThrow();
+  });
 });
 
 describe("tui.sessionColumns schema", () => {

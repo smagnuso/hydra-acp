@@ -46,6 +46,7 @@ function testConfig(): HydraConfig {
       },
       sessionbar: { left: ["cwd", "title"], right: ["agentModel"] },
       scriptRefreshMs: 5_000,
+      readIdleSeconds: 180,
       repaintThrottleMs: 1000,
       maxScrollbackLines: 10_000,
       mouse: false,
