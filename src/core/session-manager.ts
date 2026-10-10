@@ -5160,6 +5160,9 @@ export class SessionManager {
     currentOptions: ConfigOption[],
   ): Promise<ConfigOption[]> {
     if (!persistedValues || Object.keys(persistedValues).length === 0) {
+      this.logger?.info(
+        `resurrect: no persisted configOptionValues; agent reports ${JSON.stringify(Object.fromEntries(currentOptions.map((o) => [o.id, o.currentValue])))}`,
+      );
       return currentOptions;
     }
     let options = currentOptions;
@@ -5173,8 +5176,14 @@ export class SessionManager {
         continue;
       }
       if (value === option.currentValue) {
+        this.logger?.info(
+          `${where}: agent already reports ${JSON.stringify(option.currentValue)}; nothing to restore`,
+        );
         continue;
       }
+      this.logger?.info(
+        `${where}: agent reports ${JSON.stringify(option.currentValue)}; restoring`,
+      );
       const resolution = resolveCandidate(value, option.options.map((o) => o.value));
       if (resolution.kind !== "exact" && resolution.kind !== "resolved") {
         this.logger?.warn(`${where} ${resolution.kind}; skipping session/set_config_option`);
