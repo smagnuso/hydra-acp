@@ -1031,6 +1031,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       },
       recordedAt: 3,
     });
+    await history.compact(s.sessionId, 1);
 
     const auth = { Authorization: "Bearer test" } as Record<string, string>;
     const res = await fetch(

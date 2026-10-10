@@ -6709,7 +6709,7 @@ export class SessionManager {
   // populate the bundle's exportedFrom metadata themselves.
   async exportBundle(
     sessionId: string,
-    opts: { tools?: "inline" | "references" } = {},
+    opts: { tools?: "inline" | "references"; includeArchivedHistory?: boolean } = {},
   ): Promise<
     | {
         record: SessionRecord & { lineageId: string };
@@ -6744,9 +6744,11 @@ export class SessionManager {
       withLineage = backfilled as SessionRecord & { lineageId: string };
     }
     const tools = opts.tools ?? "inline";
-    const history = await this.histories
-      .load(sessionId, tools === "references" ? { tools: "references" } : {})
-      .catch(() => []);
+    const history = opts.includeArchivedHistory
+      ? await this.loadArchivedHistory(sessionId, tools)
+      : await this.histories
+          .load(sessionId, tools === "references" ? { tools: "references" } : {})
+          .catch(() => []);
     const promptHistory = await loadPromptHistorySafely(sessionId);
     if (tools !== "references") {
       return { record: withLineage, history, promptHistory };
@@ -6761,6 +6763,19 @@ export class SessionManager {
       }
     }
     return { record: withLineage, history, promptHistory, toolBlobs };
+  }
+
+  private async loadArchivedHistory(
+    sessionId: string,
+    tools: "inline" | "references",
+  ): Promise<HistoryStoreEntry[]> {
+    const archived = await this.histories.loadArchives(sessionId);
+    const live = await this.histories.load(sessionId, {
+      tools: "references",
+      maxEntries: Infinity,
+    });
+    const history = [...archived, ...live];
+    return tools === "references" ? history : this.histories.hydrate(sessionId, history);
   }
 
   // Create a local session from an imported bundle. Without `replace`,

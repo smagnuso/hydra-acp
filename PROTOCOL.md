@@ -747,7 +747,7 @@ Also `409` when a guard refuses (agent mid-turn, workspace shared, provider reco
 
 #### `GET /v1/sessions/:id/diff`
 
-Reconstructed per-file diff for a session — the same aggregation `hydra session diff --json` runs client-side, but server-side so other consumers (e.g. the planner's verified-diff audit) can fetch a ready-made shape with a single HTTP call instead of pulling the full export and redoing the walk. The diff is drawn from the session's recorded `tool_call` / `tool_call_update` edit payloads (canonical `content[].type:"diff"`, Claude `Edit`/`Write`/`MultiEdit` raw inputs); no git, no filesystem read of the workspace. Deletes aren't representable today and won't appear.
+Reconstructed per-file diff for a session — the same aggregation `hydra session diff --json` runs client-side, but server-side so other consumers (e.g. the planner's verified-diff audit) can fetch a ready-made shape with a single HTTP call instead of pulling the full export and redoing the walk. The diff is drawn from the session's recorded `tool_call` / `tool_call_update` edit payloads (canonical `content[].type:"diff"`, Claude `Edit`/`Write`/`MultiEdit` raw inputs), including entries in retained history archives; no git, no filesystem read of the workspace. Deletes aren't representable today and won't appear.
 
 **Query parameters**
 

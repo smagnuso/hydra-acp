@@ -718,7 +718,7 @@ export function registerSessionRoutes(
   app.get("/v1/sessions/:id/diff", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
-    const exported = await manager.exportBundle(id);
+    const exported = await manager.exportBundle(id, { includeArchivedHistory: true });
     if (!exported) {
       reply.code(404).send({ error: "session not found" });
       return;
