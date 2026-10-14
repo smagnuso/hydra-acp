@@ -616,6 +616,12 @@ export async function pickSession(
     history: [],
     collapsePastes: false,
   });
+  let findSelection: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  } | null = null;
   let findResults: SessionHits[] = [];
   let findTruncated = false;
   let findSelectedIdx = 0;
@@ -1921,6 +1927,27 @@ export async function pickSession(
     findBoxCursorVisualCol = layout.cursorVisualCol;
   };
 
+  const findSelectionRangeFor = (
+    visualIdx: number,
+  ): { start: number; end: number } | null => {
+    const sel = findSelection;
+    const vr = findVisualRows[visualIdx];
+    if (sel === null || !vr) {
+      return null;
+    }
+    if (vr.bufferIdx < sel.startRow || vr.bufferIdx > sel.endRow) {
+      return null;
+    }
+    const rowSelStart = vr.bufferIdx === sel.startRow ? sel.startCol : vr.startCol;
+    const rowSelEnd = vr.bufferIdx === sel.endRow ? sel.endCol : vr.endCol;
+    const s = Math.max(rowSelStart, vr.startCol);
+    const e = Math.min(rowSelEnd, vr.endCol);
+    if (e <= s) {
+      return null;
+    }
+    return { start: s - vr.startCol, end: e - vr.startCol };
+  };
+
   const paintFindBoxBodyRow = (visualIdx: number, focused: boolean): void => {
     termWidth = readTermWidth(term);
     const inner = Math.max(2, termWidth - 3);
@@ -1934,15 +1961,26 @@ export async function pickSession(
     }
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
-    if (focused) {
-      paint(term, "box-border-focused", "│");
-      paint(term, "content", ` ${slice}${pad}`);
-      paint(term, "box-border-focused", "│");
-    } else {
-      paint(term, "box-border", "│");
-      paint(term, "content", ` ${slice}${pad}`);
-      paint(term, "box-border", "│");
-    }
+    const selRange = findSelectionRangeFor(visualIdx);
+    const paintBody = (): void => {
+      if (selRange === null) {
+        paint(term, "content", ` ${slice}${pad}`);
+        return;
+      }
+      paint(term, "content", " ");
+      if (selRange.start > 0) {
+        paint(term, "content", slice.slice(0, selRange.start));
+      }
+      paint(term, "selection-highlight", slice.slice(selRange.start, selRange.end));
+      if (selRange.end < slice.length) {
+        paint(term, "content", slice.slice(selRange.end));
+      }
+      paint(term, "content", pad);
+    };
+    const border = focused ? "box-border-focused" : "box-border";
+    paint(term, border, "│");
+    paintBody();
+    paint(term, border, "│");
     term.styleReset();
   };
 
@@ -2002,6 +2040,14 @@ export async function pickSession(
       term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
       term.hideCursor(false);
     });
+  };
+
+  const clearFindSelection = (): void => {
+    if (findSelection === null) {
+      return;
+    }
+    findSelection = null;
+    repaintFindBoxChrome();
   };
 
   // Snippet indent on the result's second row ("    " before the prefix).
@@ -2272,6 +2318,7 @@ export async function pickSession(
   // input box is focused.
   const feedFindPaste = (text: string): void => {
     const prevRows = findBoxRows;
+    findSelection = null;
     findComposer.feed({ type: "paste", text });
     computeFindBoxLayout();
     if (findBoxRows !== prevRows) {
@@ -3040,6 +3087,9 @@ export async function pickSession(
       // dismisses a lingering composer selection before it's acted on.
       if (promptSelection !== null) {
         clearComposerSelection();
+      }
+      if (findSelection !== null) {
+        clearFindSelection();
       }
       if (data?.isCharacter) {
         // A stray chord prefix must not eat the character typed right
@@ -4218,6 +4268,229 @@ export async function pickSession(
       // on the same cell as the press.
       let findPressCell: { x: number; y: number } | null = null;
 
+      const resolveCellToFindOffset = (
+        x: number,
+        y: number,
+      ): { row: number; col: number } | null => {
+        const rowOffset = y - 2;
+        if (rowOffset < 0 || rowOffset >= findBoxRows) {
+          return null;
+        }
+        const vr = findVisualRows[findBoxWindowStart + rowOffset];
+        if (!vr) {
+          return null;
+        }
+        const colInSlice = Math.max(0, Math.min(vr.endCol - vr.startCol, x - 3));
+        return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
+      };
+
+      const setFindSelection = (
+        a: { row: number; col: number },
+        b: { row: number; col: number },
+      ): void => {
+        const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
+        const start = before ? a : b;
+        const end = before ? b : a;
+        if (start.row === end.row && start.col === end.col) {
+          clearFindSelection();
+          return;
+        }
+        const cur = findSelection;
+        if (
+          cur &&
+          cur.startRow === start.row &&
+          cur.startCol === start.col &&
+          cur.endRow === end.row &&
+          cur.endCol === end.col
+        ) {
+          return;
+        }
+        findSelection = {
+          startRow: start.row,
+          startCol: start.col,
+          endRow: end.row,
+          endCol: end.col,
+        };
+        repaintFindBoxChrome();
+      };
+
+      const findSelectionText = (): string => {
+        const sel = findSelection;
+        if (sel === null) {
+          return "";
+        }
+        const buffer = findComposer.state().buffer;
+        if (sel.startRow === sel.endRow) {
+          return (buffer[sel.startRow] ?? "").slice(sel.startCol, sel.endCol);
+        }
+        const parts: string[] = [(buffer[sel.startRow] ?? "").slice(sel.startCol)];
+        for (let r = sel.startRow + 1; r < sel.endRow; r++) {
+          parts.push(buffer[r] ?? "");
+        }
+        parts.push((buffer[sel.endRow] ?? "").slice(0, sel.endCol));
+        return parts.join("\n");
+      };
+
+      const findWordBoundsAt = (
+        pos: { row: number; col: number },
+      ): { start: number; end: number } | null => {
+        const line = findComposer.state().buffer[pos.row] ?? "";
+        if (line.length === 0) {
+          return null;
+        }
+        const idx = Math.max(0, Math.min(line.length - 1, pos.col));
+        if (!PROMPT_ASCII_WORD_RE.test(line[idx]!)) {
+          return null;
+        }
+        let start = idx;
+        while (start > 0 && PROMPT_ASCII_WORD_RE.test(line[start - 1]!)) {
+          start--;
+        }
+        let end = idx + 1;
+        while (end < line.length && PROMPT_ASCII_WORD_RE.test(line[end]!)) {
+          end++;
+        }
+        return { start, end };
+      };
+
+      const selectFindWholeLine = (row: number): void => {
+        const line = findComposer.state().buffer[row] ?? "";
+        setFindSelection({ row, col: 0 }, { row, col: line.length });
+      };
+
+      const handleFindSelectionPress = (cell: { x: number; y: number }): void => {
+        if (!inAppSelectionEnabled) {
+          return;
+        }
+        const anchor = resolveCellToFindOffset(cell.x, cell.y);
+        if (anchor === null) {
+          return;
+        }
+        promptSelectionAnchor = anchor;
+        promptSelectionDragStarted = false;
+        promptDoubleClickPending = false;
+        promptPendingClickCount = 1;
+        promptSelectionGranularity = "char";
+        promptSelectionAnchorWordBounds = null;
+        promptSelectionAnchorLineRow = null;
+        clearFindSelection();
+        const now = Date.now();
+        const last = promptLastLeftClick;
+        const isChainCandidate =
+          last !== null &&
+          now - last.t <= PROMPT_DOUBLE_CLICK_MAX_MS &&
+          Math.abs(cell.x - last.x) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
+          Math.abs(cell.y - last.y) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
+          last.row !== null &&
+          last.row === anchor.row;
+        if (
+          isChainCandidate &&
+          last!.count === 2 &&
+          cell.x === last!.x &&
+          cell.y === last!.y
+        ) {
+          promptPendingClickCount = 3;
+          selectFindWholeLine(anchor.row);
+          promptSelectionGranularity = "line";
+          promptSelectionAnchorLineRow = anchor.row;
+          promptDoubleClickPending = true;
+          return;
+        }
+        if (isChainCandidate && last!.count === 1) {
+          promptPendingClickCount = 2;
+          const word = findWordBoundsAt(anchor);
+          if (word !== null) {
+            setFindSelection(
+              { row: anchor.row, col: word.start },
+              { row: anchor.row, col: word.end },
+            );
+            promptDoubleClickPending = true;
+            promptSelectionGranularity = "word";
+            promptSelectionAnchorWordBounds = {
+              row: anchor.row,
+              start: word.start,
+              end: word.end,
+            };
+          }
+        }
+      };
+
+      const handleFindSelectionDrag = (cell: { x: number; y: number }): void => {
+        if (promptSelectionAnchor === null) {
+          return;
+        }
+        const focus = resolveCellToFindOffset(
+          Math.max(1, Math.min(termWidth, cell.x)),
+          Math.max(2, Math.min(1 + findBoxRows, cell.y)),
+        );
+        if (focus === null) {
+          return;
+        }
+        promptSelectionDragStarted = true;
+        if (promptSelectionGranularity === "word") {
+          const bounds = promptSelectionAnchorWordBounds;
+          if (bounds === null) {
+            return;
+          }
+          const focusBefore =
+            focus.row < bounds.row ||
+            (focus.row === bounds.row && focus.col < bounds.start);
+          const focusAfter =
+            focus.row > bounds.row ||
+            (focus.row === bounds.row && focus.col > bounds.end);
+          let start = { row: bounds.row, col: bounds.start };
+          let end = { row: bounds.row, col: bounds.end };
+          if (focusBefore) {
+            const w = findWordBoundsAt(focus);
+            start = w !== null ? { row: focus.row, col: w.start } : focus;
+          } else if (focusAfter) {
+            const w = findWordBoundsAt(focus);
+            end = w !== null ? { row: focus.row, col: w.end } : focus;
+          }
+          setFindSelection(start, end);
+        } else if (promptSelectionGranularity === "line") {
+          const anchorRow = promptSelectionAnchorLineRow;
+          if (anchorRow === null) {
+            return;
+          }
+          const endRow = Math.max(anchorRow, focus.row);
+          const endLine = findComposer.state().buffer[endRow] ?? "";
+          setFindSelection(
+            { row: Math.min(anchorRow, focus.row), col: 0 },
+            { row: endRow, col: endLine.length },
+          );
+        } else {
+          setFindSelection(promptSelectionAnchor, focus);
+        }
+      };
+
+      // Returns true when the release completed a selection gesture (not a plain click).
+      const handleFindSelectionRelease = (cell: { x: number; y: number }): boolean => {
+        const dragStarted = promptSelectionDragStarted;
+        const doubleClick = promptDoubleClickPending;
+        promptSelectionAnchor = null;
+        promptSelectionDragStarted = false;
+        promptDoubleClickPending = false;
+        const resolved = resolveCellToFindOffset(cell.x, cell.y);
+        promptLastLeftClick = {
+          x: cell.x,
+          y: cell.y,
+          t: Date.now(),
+          count: promptPendingClickCount,
+          row: resolved?.row ?? null,
+        };
+        promptPendingClickCount = 1;
+        if (!dragStarted && !doubleClick) {
+          clearFindSelection();
+          return false;
+        }
+        const text = findSelectionText();
+        if (text.length > 0) {
+          void writeClipboard(text, { target: selectionClipboardTarget });
+        }
+        return true;
+      };
+
       const findOnMouse = (
         name: string,
         data?: { x?: number; y?: number },
@@ -4252,6 +4525,19 @@ export async function pickSession(
         }
         if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
           findPressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
+          if (typeof data?.x === "number" && typeof data.y === "number") {
+            handleFindSelectionPress({ x: data.x, y: data.y });
+          }
+          return;
+        }
+        if (name === "MOUSE_DRAG") {
+          if (
+            promptSelectionAnchor !== null &&
+            typeof data?.x === "number" &&
+            typeof data.y === "number"
+          ) {
+            handleFindSelectionDrag({ x: data.x, y: data.y });
+          }
           return;
         }
         const y = data?.y;
@@ -4273,6 +4559,14 @@ export async function pickSession(
           return;
         }
         if (name !== "MOUSE_LEFT_BUTTON_RELEASED") {
+          return;
+        }
+        if (
+          promptSelectionAnchor !== null &&
+          typeof data?.x === "number" &&
+          handleFindSelectionRelease({ x: data.x, y })
+        ) {
+          findPressCell = null;
           return;
         }
         const sameCell =
