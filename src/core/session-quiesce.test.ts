@@ -667,4 +667,78 @@ describe("cancelled turns close their own tool chain", () => {
 
     expect(await session.isQuiescedForSwap()).toBe(true);
   });
+
+  describe("opencode backgrounded shell", () => {
+    const armOpencodeShell = (toolCallId: string): Record<string, unknown> => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "completed",
+      title: "cmake --build out",
+      rawInput: { command: "cmake --build out", background: true },
+      rawOutput: { metadata: { status: "running", shellID: "sh_1" } },
+    });
+
+    function makeSession(id: string) {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+      const session = new Session({
+        sessionId: `hydra_session_${id}`,
+        cwd: "/w",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: `u-${id}`,
+        historyStore: new HistoryStore(),
+      });
+      return { mock, session };
+    }
+
+    it("arms on rawInput.background and shows the shell id", async () => {
+      const { mock, session } = makeSession("oc1");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, armOpencodeShell("tc-oc1"));
+
+      expect(session.armedBackgroundTasks).toMatchObject([
+        { toolCallId: "tc-oc1", taskId: "sh_1", label: "cmake --build out" },
+      ]);
+    });
+
+    it("arms from the running rawOutput alone, and ignores a settled one", async () => {
+      const { mock, session } = makeSession("oc2");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-oc2",
+        rawOutput: { metadata: { status: "running", shellID: "sh_2" } },
+      });
+      await triggerUpdate(mock, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-oc3",
+        rawOutput: { metadata: { status: "completed", shellID: "sh_3", exit: 0 } },
+      });
+
+      expect(session.armedBackgroundTasks.map((t) => t.taskId)).toEqual(["sh_2"]);
+    });
+
+    it("does not arm a foreground shell", async () => {
+      const { mock, session } = makeSession("oc3");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-fg",
+        status: "completed",
+        rawInput: { command: "ls", background: false },
+        rawOutput: { metadata: { status: "completed", truncated: false, exit: 0 } },
+      });
+
+      expect(session.armedBackgroundTasks).toEqual([]);
+    });
+
+    it("does not block a swap, since nothing signals its end", async () => {
+      const { mock, session } = makeSession("oc4");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, armOpencodeShell("tc-oc4"));
+
+      expect(session.armedBackgroundTasks).toHaveLength(1);
+      expect(await session.quiesceBlocker()).toBeUndefined();
+    });
+  });
 });

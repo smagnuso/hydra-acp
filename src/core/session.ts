@@ -1092,6 +1092,10 @@ export class Session {
       // armOpenToolCalls). A resumption proves nothing about it, so it
       // leaves only on the call's own terminal update.
       openToolCall?: true;
+      // The agent gives no wire signal when this task ends (opencode's
+      // backgrounded shell resumes the model without emitting anything), so
+      // it can strand. Shown to clients, but never allowed to block a swap.
+      endUnobservable?: true;
     }
   >();
   // Last {count, since} pushed to clients, so a mutation that doesn't move
@@ -4189,10 +4193,13 @@ export class Session {
     const claudeMeta = extractClaudeCodeMeta(update._meta);
     this.rememberToolLabel(toolCallId, update, rawInput, claudeMeta);
     this.noteBackgroundTaskStopped(update, rawInput, claudeMeta);
+    const opencodeShellId = extractOpencodeShellId(update.rawOutput);
     const taskId = typeof claudeMeta?.toolResponse?.taskId === "string"
       ? claudeMeta.toolResponse.taskId
-      : extractBackgroundBashTaskId(update.rawOutput);
-    const isBackground = taskId !== undefined ||
+      : opencodeShellId ?? extractBackgroundBashTaskId(update.rawOutput);
+    const opencodeBackground = opencodeShellId !== undefined ||
+      rawInput?.background === true;
+    const isBackground = taskId !== undefined || opencodeBackground ||
       (rawInput !== undefined && rawInput.run_in_background === true);
     if (!isBackground) {
       return;
@@ -4230,6 +4237,9 @@ export class Session {
       ...(knownTaskId !== undefined ? { taskId: knownTaskId } : {}),
       repeating,
       armedAt: existing?.armedAt ?? now,
+      ...(opencodeBackground || existing?.endUnobservable === true
+        ? { endUnobservable: true as const }
+        : {}),
     });
     this.onArmedTasksChanged();
   }
@@ -4368,7 +4378,7 @@ export class Session {
         .map((t) => t.description || t.taskType);
     }
     return [...this.armedTasks.values()]
-      .filter((t) => !t.repeating)
+      .filter((t) => !t.repeating && t.endUnobservable !== true)
       .map((t) => t.label);
   }
 
@@ -10998,7 +11008,7 @@ export function isRepeatingArming(
     undefined,
   rawInput: Record<string, unknown> | undefined,
 ): boolean {
-  if (rawInput?.run_in_background === true) {
+  if (rawInput?.run_in_background === true || rawInput?.background === true) {
     return false;
   }
   return claudeMeta?.toolName === "Monitor" || title === "Monitor" ||
@@ -11022,6 +11032,23 @@ function extractBackgroundBashTaskId(rawOutput: unknown): string | undefined {
     rawOutput,
   );
   return m?.[1];
+}
+
+// opencode backgrounds a shell with `background: true` and reports the job
+// as rawOutput.metadata = { status: "running", shellID }. Only the running
+// state arms: a settled call can echo the same shellID and must not.
+function extractOpencodeShellId(rawOutput: unknown): string | undefined {
+  if (!rawOutput || typeof rawOutput !== "object" || Array.isArray(rawOutput)) {
+    return undefined;
+  }
+  const metadata = (rawOutput as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return undefined;
+  }
+  const { status, shellID } = metadata as Record<string, unknown>;
+  return status === "running" && typeof shellID === "string" && shellID !== ""
+    ? shellID
+    : undefined;
 }
 
 // Read the `claudeCode` block out of an update's _meta. A vendor namespace,
