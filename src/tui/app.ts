@@ -11681,6 +11681,3 @@ function debugLogUpdate(update: unknown, event: RenderEvent | null): void {
     event: event === null ? null : { kind: event.kind },
   });
 }
-
-
-

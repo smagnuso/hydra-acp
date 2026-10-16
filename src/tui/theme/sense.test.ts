@@ -306,6 +306,20 @@ describe("installReplyFilter routes what it strips", () => {
     expect(f.seen).toEqual(["xy"]);
   });
 
+  it("installs on a callable terminal-kit terminal", () => {
+    const seen: string[] = [];
+    const schemes: string[] = [];
+    const term = Object.assign(() => undefined, {
+      onStdin(chunk: Buffer) {
+        seen.push(chunk.toString("latin1"));
+      },
+    });
+    installReplyFilter(term, { onScheme: (s) => schemes.push(s) });
+    term.onStdin(Buffer.from("x\u001b[?997;1ny", "latin1"));
+    expect(seen).toEqual(["xy"]);
+    expect(schemes).toEqual(["dark"]);
+  });
+
   // The delivery path for the live re-query: after grabInput, terminal-kit owns
   // stdin, so senseTerminalColors's raw-mode probe cannot be used a second time.
   it("delivers a background reply", () => {
@@ -348,6 +362,58 @@ describe("installReplyFilter routes what it strips", () => {
   // tmux 3.6 forwards pane palette queries to the outer terminal and relays the
   // answer, which can arrive split across reads.
   describe("a reply split across reads", () => {
+    for (const scheme of ["1", "2"]) {
+      const report = `\u001b[?997;${scheme}n`;
+      for (let split = 2; split < report.length; split++) {
+        it(`reassembles scheme ${scheme} at byte ${split}`, () => {
+          const f = fakeTerm();
+          const schemes: string[] = [];
+          installReplyFilter(f.term, { onScheme: (s) => schemes.push(s) });
+          f.term.onStdin(Buffer.from(`x${report.slice(0, split)}`, "latin1"));
+          expect(f.seen.join("")).toBe("x");
+          f.term.onStdin(Buffer.from(`${report.slice(split)}y`, "latin1"));
+          expect(f.seen.join("")).toBe("xy");
+          expect(schemes).toEqual([scheme === "1" ? "dark" : "light"]);
+        });
+      }
+    }
+
+    it("reassembles repeated scheme reports arriving a byte at a time", () => {
+      const f = fakeTerm();
+      const schemes: string[] = [];
+      installReplyFilter(f.term, { onScheme: (s) => schemes.push(s) });
+      for (let i = 0; i < 4; i++) {
+        f.term.onStdin(Buffer.from("\u001b[", "latin1"));
+        for (const byte of "?997;1n") {
+          f.term.onStdin(Buffer.from(byte, "latin1"));
+        }
+      }
+      expect(f.seen).toEqual([]);
+      expect(schemes).toEqual(["dark", "dark", "dark", "dark"]);
+    });
+
+    it("passes unrelated CSI input through after a held prefix", () => {
+      const f = fakeTerm();
+      installReplyFilter(f.term);
+      f.term.onStdin(Buffer.from("\u001b[", "latin1"));
+      f.term.onStdin(Buffer.from("Ahello", "latin1"));
+      expect(f.seen).toEqual(["\u001b[Ahello"]);
+    });
+
+    it("releases an incomplete scheme report on timeout", () => {
+      vi.useFakeTimers();
+      try {
+        const f = fakeTerm();
+        installReplyFilter(f.term);
+        f.term.onStdin(Buffer.from("x\u001b[?997;", "latin1"));
+        expect(f.seen).toEqual(["x"]);
+        vi.advanceTimersByTime(200);
+        expect(f.seen.join("")).toBe("x\u001b[?997;");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     const splits: Array<[string, string]> = [
       ["\u001b]", "4;150;rgb:afaf/d7d7/8787\u0007"],
       ["\u001b]4;150;rgb:afaf", "/d7d7/8787\u0007"],

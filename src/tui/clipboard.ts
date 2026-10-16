@@ -10,7 +10,7 @@
 //   - macOS: shell out to `osascript` with «class PNGf» (writes to
 //     temp PNG); if that fails, run `pbpaste` for text. The coercion
 //     converts JPEG/TIFF/PDF clipboard images to PNG transparently.
-//   - Linux: detect `wl-paste` (Wayland) or `xclip` (X11). First ask
+//   - Linux: prefer `xclip` (X11/XWayland), then `wl-paste` (Wayland). First ask
 //     the tool which mimes the clipboard advertises, pick a supported
 //     image type (png > jpeg > gif > webp), and only then fetch. This
 //     matters because xclip, asked for `-t image/png` on a text-only
@@ -107,12 +107,12 @@ export async function readPrimarySelection(
     cmd = "pbpaste";
     args = [];
   } else if (env.platform === "linux") {
-    if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-paste"))) {
-      cmd = "wl-paste";
-      args = ["--primary", "-n"];
-    } else if (env.env.DISPLAY && (await which(env, "xclip"))) {
+    if (env.env.DISPLAY && (await which(env, "xclip"))) {
       cmd = "xclip";
       args = ["-selection", "primary", "-o"];
+    } else if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-paste"))) {
+      cmd = "wl-paste";
+      args = ["--primary", "-n"];
     } else {
       return {
         ok: false,
@@ -209,17 +209,7 @@ async function writeNative(
   if (env.platform === "linux") {
     const wantClip = target === "clipboard" || target === "both";
     const wantPrim = target === "primary" || target === "both";
-    if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-copy"))) {
-      return writeLinuxSelections(
-        env,
-        buf,
-        "wl-copy",
-        [],
-        ["--primary"],
-        wantClip,
-        wantPrim,
-      );
-    }
+    // wl-copy's fallback surface steals focus on compositors without data-control.
     if (env.env.DISPLAY && (await which(env, "xclip"))) {
       return writeLinuxSelections(
         env,
@@ -227,6 +217,17 @@ async function writeNative(
         "xclip",
         ["-selection", "clipboard", "-i"],
         ["-selection", "primary", "-i"],
+        wantClip,
+        wantPrim,
+      );
+    }
+    if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-copy"))) {
+      return writeLinuxSelections(
+        env,
+        buf,
+        "wl-copy",
+        [],
+        ["--primary"],
         wantClip,
         wantPrim,
       );
@@ -441,6 +442,14 @@ interface LinuxTool {
 }
 
 async function detectLinuxTool(env: ClipboardEnv): Promise<LinuxTool | null> {
+  if (env.env.DISPLAY && (await which(env, "xclip"))) {
+    return {
+      cmd: "xclip",
+      listTargetsArgs: ["-selection", "clipboard", "-t", "TARGETS", "-o"],
+      imageArgs: (mime) => ["-selection", "clipboard", "-t", mime, "-o"],
+      textArgs: ["-selection", "clipboard", "-o"],
+    };
+  }
   if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-paste"))) {
     return {
       cmd: "wl-paste",
@@ -450,14 +459,6 @@ async function detectLinuxTool(env: ClipboardEnv): Promise<LinuxTool | null> {
       // normalize line endings below, but this avoids a spurious
       // empty trailing row from a single-line clipboard text.
       textArgs: ["-n"],
-    };
-  }
-  if (env.env.DISPLAY && (await which(env, "xclip"))) {
-    return {
-      cmd: "xclip",
-      listTargetsArgs: ["-selection", "clipboard", "-t", "TARGETS", "-o"],
-      imageArgs: (mime) => ["-selection", "clipboard", "-t", mime, "-o"],
-      textArgs: ["-selection", "clipboard", "-o"],
     };
   }
   return null;

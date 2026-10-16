@@ -209,7 +209,7 @@ describe("readClipboard — Linux", () => {
     ]);
     const result = await readClipboard({
       platform: "linux",
-      env: { WAYLAND_DISPLAY: "wayland-0", DISPLAY: ":0" },
+      env: { WAYLAND_DISPLAY: "wayland-0" },
       spawn,
       tmpdir: () => "/tmp",
     });
@@ -277,7 +277,10 @@ describe("readClipboard — Linux", () => {
     );
   });
 
-  it("uses xclip when DISPLAY is set but Wayland is not", async () => {
+  it.each([
+    { DISPLAY: ":0" },
+    { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" },
+  ])("uses xclip for image paste with %j", async (env) => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     const { spawn, calls } = makeSpawnFake([
       { cmd: "which", args: ["xclip"], code: 0 },
@@ -296,7 +299,7 @@ describe("readClipboard — Linux", () => {
     ]);
     const result = await readClipboard({
       platform: "linux",
-      env: { DISPLAY: ":0" },
+      env,
       spawn,
       tmpdir: () => "/tmp",
     });
@@ -482,7 +485,10 @@ describe("writeClipboard", () => {
     expect(Buffer.concat(primarySink).toString("utf-8")).toBe("wayland-text");
   });
 
-  it("pipes text to xclip on X11 Linux, mirroring into PRIMARY", async () => {
+  it.each([
+    { DISPLAY: ":0" },
+    { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" },
+  ])("copies to both xclip selections with %j", async (env) => {
     const sink: Buffer[] = [];
     const primarySink: Buffer[] = [];
     const { spawn, calls } = makeSpawnFake([
@@ -502,7 +508,7 @@ describe("writeClipboard", () => {
     ]);
     const result = await writeClipboard("x11-text", {
       platform: "linux",
-      env: { DISPLAY: ":0" },
+      env,
       spawn,
       tmpdir: () => "/tmp",
     });
@@ -712,7 +718,10 @@ describe("readClipboard — unsupported platforms", () => {
 });
 
 describe("readPrimarySelection", () => {
-  it("reads the PRIMARY selection via xclip on X11", async () => {
+  it.each([
+    { DISPLAY: ":0" },
+    { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" },
+  ])("reads the PRIMARY selection via xclip with %j", async (env) => {
     const { spawn, calls } = makeSpawnFake([
       { cmd: "which", args: ["xclip"], code: 0 },
       {
@@ -724,7 +733,7 @@ describe("readPrimarySelection", () => {
     ]);
     const result = await readPrimarySelection({
       platform: "linux",
-      env: { DISPLAY: ":0" },
+      env,
       spawn,
       tmpdir: () => "/tmp",
     });
@@ -745,5 +754,54 @@ describe("readPrimarySelection", () => {
       tmpdir: () => "/tmp",
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("Linux clipboard backend fallback", () => {
+  const env = { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" };
+
+  it("uses wl-copy when xclip is not installed", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 1 },
+      { cmd: "which", args: ["wl-copy"], code: 0 },
+      { cmd: "wl-copy", args: [], code: 0 },
+      { cmd: "wl-copy", args: ["--primary"], code: 0 },
+    ]);
+    const result = await writeClipboard("text", { platform: "linux", env, spawn });
+    expect(result).toEqual({ ok: true, method: "wl-copy" });
+    expect(calls.map((call) => [call.cmd, call.args])).toEqual([
+      ["which", ["xclip"]],
+      ["which", ["wl-copy"]],
+      ["wl-copy", []],
+      ["wl-copy", ["--primary"]],
+    ]);
+  });
+
+  it("uses wl-paste when xclip is not installed", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 1 },
+      { cmd: "which", args: ["wl-paste"], code: 0 },
+      { cmd: "wl-paste", args: ["--list-types"], code: 0 },
+      { cmd: "wl-paste", args: ["-n"], code: 0, stdout: Buffer.from("text") },
+    ]);
+    const result = await readClipboard({ platform: "linux", env, spawn });
+    expect(result).toEqual({ ok: true, kind: "text", text: "text" });
+    expect(calls.map((call) => [call.cmd, call.args])).toEqual([
+      ["which", ["xclip"]],
+      ["which", ["wl-paste"]],
+      ["wl-paste", ["--list-types"]],
+      ["wl-paste", ["-n"]],
+    ]);
+  });
+
+  it("uses wl-paste for PRIMARY when xclip is not installed", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 1 },
+      { cmd: "which", args: ["wl-paste"], code: 0 },
+      { cmd: "wl-paste", args: ["--primary", "-n"], code: 0, stdout: Buffer.from("text") },
+    ]);
+    const result = await readPrimarySelection({ platform: "linux", env, spawn });
+    expect(result).toEqual({ ok: true, kind: "text", text: "text" });
+    expect(calls.at(-1)?.args).toEqual(["--primary", "-n"]);
   });
 });

@@ -345,12 +345,11 @@ export function schemeBackground(scheme: ColorScheme): Color {
   return scheme === "dark" ? rgb(0, 0, 0) : rgb(255, 255, 255);
 }
 
-// An `ESC ]` with no terminator yet at the end of a read: the rest of a reply
-// that tmux or the terminal wrote in pieces. ESC alone is the Escape key and is
-// never held.
-const OSC_TAIL = /\u001b\](?:[^\u0007\u001b]*\u001b?)?$/;
-const MAX_OSC_CARRY = 64;
-const OSC_CARRY_MS = 50;
+// Hold incomplete OSC replies and scheme reports, but not a bare Escape key.
+const REPLY_TAIL =
+  /\u001b\](?:[^\u0007\u001b]*\u001b?)?$|\u001b\[(?:\?(?:9(?:9(?:7(?:;\d*)?)?)?)?)?$/;
+const MAX_REPLY_CARRY = 64;
+const REPLY_CARRY_MS = 50;
 
 /** The one method of terminal-kit's we have to wrap. */
 interface StdinDecoder {
@@ -392,7 +391,10 @@ export function installReplyFilter(
   term: unknown,
   handlers: ReplyHandlers = {},
 ): void {
-  if (term === null || typeof term !== "object") {
+  if (
+    term === null ||
+    (typeof term !== "object" && typeof term !== "function")
+  ) {
     return;
   }
   const t = term as StdinDecoder;
@@ -413,8 +415,8 @@ export function installReplyFilter(
       text = carry + text;
       carry = "";
     }
-    const tail = OSC_TAIL.exec(text);
-    if (tail !== null && text.length - tail.index <= MAX_OSC_CARRY) {
+    const tail = REPLY_TAIL.exec(text);
+    if (tail !== null && text.length - tail.index <= MAX_REPLY_CARRY) {
       carry = text.slice(tail.index);
       text = text.slice(0, tail.index);
       carryTimer = setTimeout(() => {
@@ -422,7 +424,7 @@ export function installReplyFilter(
         const held = carry;
         carry = "";
         original.call(self, Buffer.from(held, "latin1"));
-      }, OSC_CARRY_MS);
+      }, REPLY_CARRY_MS);
       carryTimer.unref?.();
       if (text.length === 0) {
         return;
