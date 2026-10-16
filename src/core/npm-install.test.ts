@@ -137,6 +137,32 @@ mkdirSync("node_modules/.bin", { recursive: true });
     expect(a).toContain(`node${process.versions.modules}`);
   });
 
+  it("runs npm in a dir with its own package.json so npm can't resolve an ancestor project", async () => {
+    await writeFakeCommand(
+      pathSandbox!,
+      "npm",
+      `import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+if (!existsSync("package.json")) {
+  process.stderr.write("no package.json in cwd\\n");
+  process.exit(1);
+}
+mkdirSync("node_modules/.bin", { recursive: true });
+writeFileSync("node_modules/.bin/rooted-bin", "", { mode: 0o755 });
+`,
+    );
+    process.env.PATH = sandboxedPath();
+    const binPath = await ensureNpmPackage({
+      agentId: "rooted-pkg",
+      version: "1.0.0",
+      packageSpec: "rooted-pkg@1.0.0",
+      bin: "rooted-bin",
+    });
+    const installDir = path.dirname(path.dirname(path.dirname(binPath)));
+    await expect(
+      fs.access(path.join(installDir, "package.json")),
+    ).resolves.toBeUndefined();
+  });
+
   it("emits install_start then installed via onProgress on a successful install", async () => {
     // Fake npm that creates the expected bin so ensureNpmPackage's
     // post-install check passes — we only care about the progress

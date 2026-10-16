@@ -128,6 +128,13 @@ async function installInto(args: {
       version: args.version,
       packageSpec: args.packageSpec,
     });
+    // Without a package.json here npm walks up to the nearest ancestor
+    // project (a stray ~/package.json or ~/node_modules) and installs
+    // there, exiting 0 with nothing in tempDir.
+    await fsp.writeFile(
+      path.join(tempDir, "package.json"),
+      '{"private":true}\n',
+    );
     await runNpmInstall({
       packageSpec: args.packageSpec,
       cwd: tempDir,
