@@ -379,6 +379,19 @@ describe("buildHydraSessionMeta", () => {
     expect(extractHydraMeta({ "hydra-acp": old }).armedTaskList).toBeUndefined();
   });
 
+  it("carries endUnobservable through the armed task list", () => {
+    const meta = buildHydraSessionMeta(baseEntry, {
+      armedTaskList: [
+        { label: "build", since: 1_700_000_000_000, endUnobservable: true },
+        { label: "claude job", since: 1_700_000_000_001, endUnobservable: false },
+      ],
+    });
+    expect(extractHydraMeta({ "hydra-acp": meta }).armedTaskList).toEqual([
+      { label: "build", since: 1_700_000_000_000, endUnobservable: true },
+      { label: "claude job", since: 1_700_000_000_001 },
+    ]);
+  });
+
   // A malformed entry must not void the whole list: a partial list still
   // beats falling back to a bare count.
   it("drops unusable armed entries rather than the whole list", () => {

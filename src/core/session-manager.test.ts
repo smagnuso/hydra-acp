@@ -4074,6 +4074,38 @@ describe("SessionManager.syncFromAgent", () => {
     expect(synced[0]?.upstreamSessionId).toBe("u_new");
   });
 
+  it("reports each live session's upstream updatedAt back to it", async () => {
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            {
+              sessionId: "u_live",
+              cwd: "/projects/a",
+              updatedAt: "2026-10-16T07:40:00.000Z",
+            },
+            { sessionId: "u_other", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+    const noted = vi.fn();
+    const sessions = (manager as unknown as {
+      sessions: Map<string, unknown>;
+    }).sessions;
+    sessions.set("hydra_session_live", {
+      agentId: "claude-code",
+      upstreamSessionId: "u_live",
+      noteUpstreamUpdatedAt: noted,
+    });
+
+    await manager.syncFromAgent("claude-code");
+
+    expect(noted).toHaveBeenCalledTimes(1);
+    expect(noted).toHaveBeenCalledWith("2026-10-16T07:40:00.000Z");
+  });
+
   it("skips upstream sessions a local record has already retired", async () => {
     // Every swap (compaction, workspace enter/leave, agent switch)
     // retires one upstream session and mints another, and the agent

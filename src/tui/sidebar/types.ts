@@ -90,6 +90,8 @@ export interface SidebarArmedTask {
   taskId?: string;
   // "local_bash" and friends. Absent on edge-inferred entries.
   taskType?: string;
+  // The agent never reports this job ending, so it may already be over.
+  endUnobservable?: true;
   // When the daemon first saw THIS job, for its own elapsed column. Not
   // shared with the others: two jobs armed in the same turn can still be
   // seconds apart, and they finish independently.

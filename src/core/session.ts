@@ -1098,6 +1098,11 @@ export class Session {
       endUnobservable?: true;
     }
   >();
+  // The agent's own updatedAt (epoch ms) for this session as of the last
+  // turn end while an endUnobservable task was armed. The agent's clock on
+  // both sides of the comparison, so no skew tolerance is needed.
+  private upstreamBaselineMs: number | undefined;
+  private upstreamBaselineGen = 0;
   // Last {count, since} pushed to clients, so a mutation that doesn't move
   // the rendered state (re-arming a task already counted) stays silent.
   private lastArmedBroadcast: { key: string; since: number | undefined } |
@@ -4339,6 +4344,7 @@ export class Session {
       taskId?: string;
       taskType?: string;
       since: number;
+      endUnobservable?: true;
     }
   > {
     if (this.sawBackgroundTaskLevel) {
@@ -4354,6 +4360,7 @@ export class Session {
       label: t.label,
       ...(t.taskId !== undefined ? { taskId: t.taskId } : {}),
       since: t.armedAt,
+      ...(t.endUnobservable === true ? { endUnobservable: true as const } : {}),
     }));
   }
 
@@ -4524,6 +4531,7 @@ export class Session {
       }
     }
     this.armedTasks.clear();
+    this.upstreamBaselineMs = undefined;
     this.logger?.info(
       `session ${this.sessionId} discarded ${labels.length} armed task(s) on ${reason}: ${labels.join(", ")}`,
     );
@@ -7135,6 +7143,93 @@ export class Session {
     }
     this._lastTurnEndedAt = now;
     this.fireReadState();
+    this.captureUpstreamBaseline();
+  }
+
+  private hasEndUnobservableTask(): boolean {
+    for (const task of this.armedTasks.values()) {
+      if (task.endUnobservable === true) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Read the agent's updatedAt for this session when a turn ends with a
+  // task armed whose end the agent never reports. Best-effort and silent:
+  // without a baseline noteUpstreamUpdatedAt simply never clears anything.
+  private captureUpstreamBaseline(): void {
+    const gen = ++this.upstreamBaselineGen;
+    if (!this.hasEndUnobservableTask()) {
+      this.upstreamBaselineMs = undefined;
+      return;
+    }
+    void this.fetchUpstreamUpdatedAt()
+      .then((ms) => {
+        if (
+          ms === undefined ||
+          gen !== this.upstreamBaselineGen ||
+          this.promptInFlight ||
+          this.unsolicitedTurn !== undefined
+        ) {
+          return;
+        }
+        this.upstreamBaselineMs = ms;
+      })
+      .catch(() => undefined);
+  }
+
+  private async fetchUpstreamUpdatedAt(): Promise<number | undefined> {
+    const result = await this.agent.connection.request<{
+      sessions?: Array<{ sessionId?: unknown; updatedAt?: unknown }>;
+    }>("session/list", { cwd: this.cwd });
+    const row = result?.sessions?.find(
+      (r) => r.sessionId === this.upstreamSessionId,
+    );
+    const ms = typeof row?.updatedAt === "string"
+      ? Date.parse(row.updatedAt)
+      : NaN;
+    return Number.isNaN(ms) ? undefined : ms;
+  }
+
+  /**
+   * The agent's updatedAt for this session, as seen by the periodic agent
+   * sync. Newer than the baseline with no prompt of ours in flight means the
+   * agent wrote to the session by itself after its turn ended: a
+   * backgrounded job finished and woke it. That is the only end signal
+   * these tasks ever give, so it clears the ones whose end is otherwise
+   * unobservable.
+   *
+   * A write that is not a wakeup (a title regenerated after the turn) clears
+   * early. That errs toward dropping a badge, never toward a permanent one.
+   */
+  noteUpstreamUpdatedAt(updatedAt: string | undefined): void {
+    if (
+      updatedAt === undefined ||
+      this.upstreamBaselineMs === undefined ||
+      this.promptInFlight ||
+      this.unsolicitedTurn !== undefined
+    ) {
+      return;
+    }
+    const ms = Date.parse(updatedAt);
+    if (Number.isNaN(ms) || ms <= this.upstreamBaselineMs) {
+      return;
+    }
+    let cleared = 0;
+    for (const [id, task] of this.armedTasks) {
+      if (task.endUnobservable === true) {
+        this.armedTasks.delete(id);
+        cleared += 1;
+      }
+    }
+    this.upstreamBaselineMs = undefined;
+    if (cleared > 0) {
+      this.logger?.info(
+        `session ${this.sessionId} cleared ${cleared} armed task(s): agent updated the session after its turn ended`,
+      );
+      this.onArmedTasksChanged();
+    }
   }
 
   private fireReadState(): void {

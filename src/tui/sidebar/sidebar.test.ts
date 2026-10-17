@@ -162,6 +162,41 @@ describe("activity gadget", () => {
     expect(lines[0]!.body).not.toContain("idle");
   });
 
+  it("says started, not waiting, when every armed job is one whose end is never reported", () => {
+    const base = {
+      armedSince: 1_000_000 - 92_000,
+      lastTurnEndedAt: 1_000_000 - 250_000,
+    };
+    const task = { label: "cmake --build", since: 1_000_000 - 92_000 };
+    const started = activityGadget.render(
+      snap({ ...base, armedTasks: [{ ...task, endUnobservable: true }] }),
+      ctx(),
+    );
+    expect(started[0]!.body).toContain("started");
+    expect(started[0]!.body).not.toContain("waiting");
+    expect(started[0]!.body).toContain("1m 32s");
+
+    const mixed = activityGadget.render(
+      snap({
+        ...base,
+        armedTasks: [{ ...task, endUnobservable: true }, { ...task }],
+      }),
+      ctx(),
+    );
+    expect(mixed[0]!.body).toContain("waiting");
+  });
+
+  it("re-renders the activity row when the armed set flips to started", () => {
+    const base = { armedSince: 1_000_000 - 5_000 };
+    const task = { label: "x", since: 1_000_000 - 5_000 };
+    expect(activityGadget.versionKey(snap({ ...base, armedTasks: [task] }), ctx())).not.toBe(
+      activityGadget.versionKey(
+        snap({ ...base, armedTasks: [{ ...task, endUnobservable: true }] }),
+        ctx(),
+      ),
+    );
+  });
+
   it("prefers thinking over waiting when a turn is in flight", () => {
     const lines = activityGadget.render(
       snap({ busySince: 1_000_000 - 1_000, armedSince: 1_000_000 - 600_000 }),

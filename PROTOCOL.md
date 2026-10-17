@@ -2777,6 +2777,13 @@ Each entry carries its own `since`, so a client can render a per-task elapsed
 and not just the aggregate. Top-level `since` is the minimum across
 `tasks[].since`, so the two never disagree.
 
+An edge-sourced entry may also carry `"endUnobservable": true`: the agent
+never reports this job ending (opencode's backgrounded shell), so the entry can
+outlive the job. Clients should render it as "started" rather than as a
+promise that the agent will wake itself up. The daemon clears it when the
+agent's own `updatedAt` for the session moves past the value read at the last
+turn end, as seen by the periodic agent sync; until then it stays.
+
 Because `toolCallId` is absent on level-sourced entries, **key UI on `taskId`**
 and treat `toolCallId` as an optional bonus for annotating an
 already-rendered tool call.

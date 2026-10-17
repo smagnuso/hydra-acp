@@ -4796,9 +4796,13 @@ export class SessionManager {
     storeKeys.set(agentId, selfKey);
 
     const existing = new Set<string>();
+    const liveByUpstream = new Map<string, Session>();
     for (const live of this.sessions.values()) {
       const key = await this.agentStoreKey(live.agentId, storeKeys);
       existing.add(`${key}::${live.upstreamSessionId}`);
+      if (key === selfKey) {
+        liveByUpstream.set(live.upstreamSessionId, live);
+      }
     }
     const stored = await this.store.list().catch(() => []);
     for (const rec of stored) {
@@ -4842,6 +4846,9 @@ export class SessionManager {
     const synced: SessionRecord[] = [];
     let skipped = 0;
     for (const entry of entries) {
+      liveByUpstream.get(entry.sessionId)?.noteUpstreamUpdatedAt(
+        entry.updatedAt,
+      );
       const dedupeKey = `${selfKey}::${entry.sessionId}`;
       if (existing.has(dedupeKey)) {
         skipped += 1;

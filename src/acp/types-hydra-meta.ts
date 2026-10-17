@@ -175,6 +175,12 @@ export interface HydraArmedTask {
   /** Edge-sourced entries only; joins to a rendered tool-call block. */
   toolCallId?: string;
   /**
+   * The agent never reports this job ending (opencode's backgrounded shell),
+   * so the entry can outlive the job. Render it as "started", not as a
+   * promise that the agent will wake itself up.
+   */
+  endUnobservable?: true;
+  /**
    * When the daemon first saw THIS job, for a per-task elapsed readout.
    * Not the agent's own start time: the level carries none, so this is
    * later by the delivery latency (milliseconds in practice).
@@ -548,6 +554,7 @@ export function extractHydraMeta(
         ...(typeof t.taskId === "string" ? { taskId: t.taskId } : {}),
         ...(typeof t.taskType === "string" ? { taskType: t.taskType } : {}),
         ...(typeof t.toolCallId === "string" ? { toolCallId: t.toolCallId } : {}),
+        ...(t.endUnobservable === true ? { endUnobservable: true as const } : {}),
       });
     }
     out.armedTaskList = armed;

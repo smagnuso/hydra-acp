@@ -419,6 +419,7 @@ function toSidebarArmedTasks(raw: unknown[]): SidebarArmedTask[] {
       since: t.since,
       ...(typeof t.taskId === "string" ? { taskId: t.taskId } : {}),
       ...(typeof t.taskType === "string" ? { taskType: t.taskType } : {}),
+      ...(t.endUnobservable === true ? { endUnobservable: true as const } : {}),
     });
   }
   return out;

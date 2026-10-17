@@ -186,6 +186,13 @@ function labelValue(
 // coarser wastes refreshes.
 const IDLE_STEP_MS = 5_000;
 
+// True when every armed job is one whose end the agent never reports, so the
+// row can say "started" and not promise a wakeup that may already have passed.
+function onlyUnobservableTasks(s: SidebarSnapshot): boolean {
+  return s.armedTasks.length > 0 &&
+    s.armedTasks.every((t) => t.endUnobservable === true);
+}
+
 export const activityGadget: Gadget = {
   id: "activity",
   relevant: () => true,
@@ -194,7 +201,9 @@ export const activityGadget: Gadget = {
       return `busy:${Math.floor((s.now - s.busySince) / 1000)}`;
     }
     if (s.armedSince !== null) {
-      return `running:${Math.floor((s.now - s.armedSince) / 1000)}`;
+      return `${onlyUnobservableTasks(s) ? "started" : "running"}:${
+        Math.floor((s.now - s.armedSince) / 1000)
+      }`;
     }
     if (s.lastTurnEndedAt !== null) {
       // Quantized, so the key changes exactly as often as the display does
@@ -222,7 +231,11 @@ export const activityGadget: Gadget = {
     if (s.armedSince !== null) {
       return [
         row(
-          labelValue("◐ waiting", shortDuration(s.now - s.armedSince), ctx),
+          labelValue(
+            onlyUnobservableTasks(s) ? "◐ started" : "◐ waiting",
+            shortDuration(s.now - s.armedSince),
+            ctx,
+          ),
           "status-active",
         ),
       ];
