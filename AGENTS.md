@@ -189,6 +189,16 @@ Before trusting a capture:
   doing nothing, and the turn surviving to T+92s. The TUI cannot compensate:
   its escalation ladder lives inside `turnInFlight`, which is null for any
   turn this client did not originate.
+- **Never clear armed background tasks on a timer or TTL.** Long-lived tasks
+  (servers, watchers, long builds) are legitimate and run for hours; any
+  timeout expires them while they are alive, so the badge lies in the other
+  direction and the user loses track of real work. This is a hard
+  requirement, not a tradeoff to revisit. Entries whose end the agent never
+  reports (opencode backgrounded shells, `endUnobservable`) may only be
+  cleared by an observed signal: the agent waking by itself
+  (`noteUpstreamUpdatedAt`), a `TaskStop`, a resumption discharge, or an
+  agent switch. A stuck badge from a job that died silently is the known
+  cost; fix it with a better signal, never a clock.
 
 ## Updating this file
 
