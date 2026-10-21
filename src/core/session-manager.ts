@@ -18,6 +18,7 @@ import {
   type AgentInstallProgressCallback,
   type SpawnPlan,
 } from "./registry.js";
+import { PhaseTimer } from "./phase-timer.js";
 import { withSelfSessionEnv } from "./scrub-env.js";
 import {
   HYDRA_SESSION_PREFIX,
@@ -201,6 +202,8 @@ function createHeadlessLoopbackStream(): MessageStream {
 export interface CreateSessionParams {
   cwd: string;
   agentId: string;
+  // Caller-owned latency recorder; create() appends its phases to it.
+  timer?: PhaseTimer;
   mcpServers?: unknown[];
   title?: string;
   agentArgs?: string[];
@@ -1189,6 +1192,10 @@ export class SessionManager {
     };
   }
 
+  logInfo(msg: string): void {
+    this.logger?.info(msg);
+  }
+
   async create(params: CreateSessionParams): Promise<Session> {
     // Canonicalize the caller-supplied agentId to the registry's id
     // (e.g. "claude-agent-acp" from a shim → "claude-acp", "claude"
@@ -1197,10 +1204,12 @@ export class SessionManager {
     // regardless of which alias the caller typed. Mirrors Registry.getAgent's
     // resolution ladder; if getAgent returns nothing we leave the id
     // alone and let bootstrapAgent surface the AgentNotInstalled error.
+    const timer = params.timer ?? new PhaseTimer();
     const canonical = await this.registry.getAgent(params.agentId);
     if (canonical && canonical.id !== params.agentId) {
       params = { ...params, agentId: canonical.id };
     }
+    timer.mark("create.canonicalize");
     // Mint the id before the agent spawns rather than letting Session
     // mint it afterwards. The agent's environment is fixed at exec, so
     // "tell the agent which session it is" only works if we already
@@ -1213,7 +1222,9 @@ export class SessionManager {
     // in the same place with no extra plumbing.
     const resolved = await this.resolveWorkspace(params);
     const effectiveCwd = resolved.cwd;
+    timer.mark("create.workspace");
     const fresh = await this.bootstrapAgent({
+      timer,
       agentId: params.agentId,
       cwd: effectiveCwd,
       agentArgs: params.agentArgs,
@@ -1253,6 +1264,7 @@ export class SessionManager {
       }
       fresh.agentCapabilities = caps as AgentCapabilities;
     }
+    timer.mark("create.transformers");
     const session: Session = new Session({
       sessionId,
       cwd: effectiveCwd,
@@ -1321,6 +1333,7 @@ export class SessionManager {
       clearRollbackBreadcrumbHook: () =>
         void this.mutateRecord(session.sessionId, {}, ["rollbackBreadcrumb"]).catch(() => undefined),
     });
+    timer.mark("create.session-ctor");
     // Ask the provider what is odd about this particular workspace and
     // hand it to the session for the orientation preamble. Conditional
     // by construction (the provider inspects before it speaks), so a
@@ -1345,6 +1358,7 @@ export class SessionManager {
       }
     }
     await this.attachManagerHooks(session);
+    timer.mark("create.persist");
     return session;
   }
 
@@ -5251,6 +5265,7 @@ export class SessionManager {
     // the child as HYDRA_ACP_SESSION so anything the agent shells out to
     // can identify itself without being told.
     selfSessionId?: string;
+    timer?: PhaseTimer;
   }): Promise<{
     agent: AgentInstance;
     upstreamSessionId: string;
@@ -5263,6 +5278,7 @@ export class SessionManager {
     initialConfigOptions?: ConfigOption[];
     modelVerb?: ModelVerb;
   }> {
+    const timer = params.timer;
     const agentDef = await this.registry.getAgent(params.agentId);
     if (!agentDef) {
       const err = new Error(
@@ -5271,10 +5287,12 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
+    timer?.mark("boot.resolve-agent");
     const plan = await planSpawn(agentDef, params.agentArgs ?? [], {
       npmRegistry: this.npmRegistry,
       onInstallProgress: params.onInstallProgress,
     });
+    timer?.mark("boot.plan-spawn");
     const bootstrapEnv = withSelfSessionEnv(
       params.selfSessionId,
       params.forwardedEnv,
@@ -5285,6 +5303,7 @@ export class SessionManager {
       plan,
       ...(bootstrapEnv ? { extraEnv: bootstrapEnv } : {}),
     });
+    timer?.mark("boot.spawn");
     try {
       const initResult = await agent.connection.request<Record<string, unknown>>(
         "initialize",
@@ -5299,6 +5318,7 @@ export class SessionManager {
         | undefined;
       agent.authMethods = parseAuthMethods(initResult.authMethods);
       agent.steeringSupported = parseSteeringSupported(initResult);
+      timer?.mark("boot.initialize");
       const newMeta = buildAgentSessionMeta(agentDef);
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
@@ -5308,6 +5328,7 @@ export class SessionManager {
           ...(newMeta && { _meta: newMeta }),
         },
       );
+      timer?.mark("boot.session-new");
       const sessionIdRaw = newResult.sessionId;
       if (typeof sessionIdRaw !== "string") {
         throw new Error(
@@ -5402,6 +5423,7 @@ export class SessionManager {
           );
         }
       }
+      timer?.mark("boot.seed-model");
       const initialModes = extractInitialModes(newResult);
       let initialMode = extractInitialCurrentMode(newResult);
 
@@ -5437,6 +5459,7 @@ export class SessionManager {
         }
       }
 
+      timer?.mark("boot.seed-mode");
       // Seed everything else (effort, etc.) last, after mode settles —
       // an agent-defined dimension's advertised option set can itself be
       // rebuilt per model (e.g. claude-acp's effort levels), so resolve
@@ -5505,6 +5528,7 @@ export class SessionManager {
         }
       }
 
+      timer?.mark("boot.seed-config");
       // Seeding can make the agent emit config_option_update frames that
       // carry the pre-seed values (opencode's model switch reports
       // effort="none"). Replayed after wiring they would clobber the seeded

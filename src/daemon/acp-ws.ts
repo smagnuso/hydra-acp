@@ -76,6 +76,7 @@ import * as path from "node:path";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 import { mintExtensionMcpDescriptors, buildMintMcpServersForSwap } from "./extension-mcp-mint.js";
 import { normalizeSentBy } from "./sent-by.js";
+import { PhaseTimer } from "../core/phase-timer.js";
 import {
   MAX_MESSAGE_DEPTH,
   registerBlockingEdge,
@@ -1507,6 +1508,7 @@ export function registerAcpWsEndpoint(
     connection.onRequest("logout", async (raw) => handleLogout(raw, deps));
 
     connection.onRequest("session/new", async (raw) => {
+      const timer = new PhaseTimer();
       const params = SessionNewParams.parse(raw);
       const hydraMeta = extractHydraMeta(
         (raw as { _meta?: Record<string, unknown> } | undefined)?._meta,
@@ -1610,9 +1612,11 @@ export function registerAcpWsEndpoint(
         stdinEnabled: hydraMeta.mcpStdin === true,
         deps,
       });
+      timer.mark("ws.prepare");
       let session: Session;
       try {
         session = await deps.manager.create({
+          timer,
           cwd: params.cwd,
           agentId: resolvedAgentId,
           mcpServers: augmentedMcpServers,
@@ -1682,6 +1686,7 @@ export function registerAcpWsEndpoint(
       // chain get a chance to inspect the session and opt in (via
       // hydra-acp/transformer/attach) BEFORE the agent starts
       // producing events.
+      timer.mark("ws.bind-mcp");
       broadcastSessionStarting(session.sessionId, deps);
       // From here on, the session is live and has bindings (stdin token,
       // extension MCP) wired to its onClose. If any of the remaining
@@ -1709,6 +1714,10 @@ export function registerAcpWsEndpoint(
         clientId: client.clientId,
         readonly: false,
       });
+      timer.mark("ws.attach");
+      deps.manager.logInfo(
+        `session/new timing agent=${resolvedAgentId} session=${session.sessionId} ${timer.summary()}`,
+      );
       // Defer until after the response goes out. On session/new the
       // client only learns the new sessionId from the response, so
       // session/update notifications fired *before* the response would
