@@ -98,6 +98,7 @@ export async function promptForImportCwd(
     }
   };
   let errorLine: string | null = null;
+  let matchesLine: string | null = null;
   let busy = false;
   let layout: BoxLayout | null = null;
   // Screen coord bookkeeping for the mouse handler. `hintRowY` is the
@@ -243,6 +244,14 @@ export async function promptForImportCwd(
     if (!layout) {
       return;
     }
+    const matchRow = layout.contentY + inputRow() + 1;
+    term.moveTo(layout.contentX, matchRow).eraseLineAfter();
+    term.moveTo(layout.x + layout.w - 1, matchRow);
+    paint(term, "box-border", "│");
+    if (matchesLine !== null) {
+      term.moveTo(layout.contentX, matchRow);
+      paint(term, "modal-hint", ` ${truncate(matchesLine, layout.contentW - 2)}`);
+    }
     const errRow = inputRow() + 2;
     term.moveTo(layout.contentX, layout.contentY + errRow).eraseLineAfter();
     term.moveTo(layout.x + layout.w - 1, layout.contentY + errRow);
@@ -310,27 +319,33 @@ export async function promptForImportCwd(
       }
       if (name === "TAB") {
         busy = true;
-        void completeLocalPath(editor.text).then((result) => {
+        const head = editor.text.slice(0, editor.cursor);
+        const tail = editor.text.slice(editor.cursor);
+        void completeLocalPath(head).then((result) => {
           busy = false;
           if (result.matches.length === 0) {
             return;
           }
-          let next: string;
+          let done: string;
           if (result.matches.length === 1) {
-            next = result.prefix + result.matches[0]!;
+            done = result.prefix + result.matches[0]!;
           } else {
             const lcp = longestCommonPrefix(result.matches);
             if (lcp.length <= result.basePrefix.length) {
+              matchesLine = result.matches.join("  ");
+              repaintInput();
               return;
             }
-            next = result.prefix + lcp;
+            done = result.prefix + lcp;
           }
-          if (next === editor.text) {
+          if (done + tail === editor.text) {
             return;
           }
-          editor.setText(next, { recordUndo: true });
+          editor.setText(done + tail, { recordUndo: true });
+          editor.setCursor(done.length);
           commitShadow();
           errorLine = null;
+          matchesLine = null;
           repaintInput();
         });
         return;
@@ -338,6 +353,7 @@ export async function promptForImportCwd(
       if (editor.handleKey(name, data?.isCharacter === true)) {
         commitShadow();
         errorLine = null;
+        matchesLine = null;
         repaintInput();
         return;
       }

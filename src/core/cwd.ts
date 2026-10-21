@@ -208,7 +208,19 @@ export async function completeLocalPath(
   let entries: { name: string; isDir: boolean }[];
   try {
     const list = await fs.readdir(resolvedDir, { withFileTypes: true });
-    entries = list.map((e) => ({ name: e.name, isDir: e.isDirectory() }));
+    entries = await Promise.all(
+      list.map(async (e) => {
+        let isDir = e.isDirectory();
+        if (!isDir && e.isSymbolicLink()) {
+          try {
+            isDir = (await fs.stat(path.join(resolvedDir, e.name))).isDirectory();
+          } catch {
+            // dangling link stays a plain entry
+          }
+        }
+        return { name: e.name, isDir };
+      }),
+    );
   } catch {
     return { prefix, basePrefix, matches: [] };
   }
