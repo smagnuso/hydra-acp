@@ -3,6 +3,7 @@
 // user and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
+import { FocusTracker } from "./focus-tracker.js";
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1216,18 +1217,9 @@ export class Screen {
   // support 1004 never emit FOCUS_IN/OUT — we'd lock ourselves out
   // otherwise. Wheel and motion still pass through (natural scroll
   // works even on an unfocused window in most desktops).
-  private terminalFocused = true;
   private readonly terminalFocusListeners = new Set<(focused: boolean) => void>();
   private readonly inputListeners = new Set<() => void>();
-  // Wall-clock ms of the most recent FOCUS_IN. The terminal typically
-  // emits FOCUS_IN BEFORE the click that caused it, so simply checking
-  // terminalFocused at press time is too late: the press already looks
-  // focused. We instead drop every press within FOCUS_GRACE_MS of a
-  // FOCUS_IN, which discards the focusing click without affecting
-  // subsequent intentional clicks. 200ms is comfortably above the wire
-  // latency between the two events (sub-ms in practice) and well below
-  // any deliberate user double-click cadence.
-  private lastFocusInAt = 0;
+  private readonly focus = new FocusTracker();
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
   // Chord state for multi-keystroke bindings (Ctrl+X Ctrl+E, …). Every
@@ -1728,9 +1720,9 @@ export class Screen {
     writeDebugLine({
       src: "input-suspect",
       reason,
-      focused: this.terminalFocused,
+      focused: this.focus.focused,
       sinceFocusInMs:
-        this.lastFocusInAt === 0 ? null : Date.now() - this.lastFocusInAt,
+        this.focus.msSinceFocusIn(),
       survivor: reason === "survived" ? printable(text) : undefined,
       reads,
     });
@@ -1800,33 +1792,15 @@ export class Screen {
     // The terminal can interleave them with normal input (e.g. a click
     // that focuses the window arrives as FOCUS_IN followed by the mouse
     // report) so we update state and pass the remaining bytes through.
-    if (text.includes(FOCUS_IN) || text.includes(FOCUS_OUT)) {
-      const prevFocused = this.terminalFocused;
-      while (true) {
-        const inIdx = text.indexOf(FOCUS_IN);
-        const outIdx = text.indexOf(FOCUS_OUT);
-        const which =
-          inIdx === -1 ? outIdx :
-          outIdx === -1 ? inIdx :
-          Math.min(inIdx, outIdx);
-        if (which === -1) {
-          break;
-        }
-        const isIn = which === inIdx;
-        this.terminalFocused = isIn;
-        if (isIn) {
-          this.lastFocusInAt = Date.now();
-        }
-        text = text.slice(0, which) + text.slice(which + FOCUS_IN.length);
-      }
-      if (this.terminalFocused !== prevFocused) {
-        // Repaint so hovered blocks/banner-hits drop their bright
-        // highlight while the terminal isn't focused (matches the
-        // picker's focus-loss behavior).
-        this.scheduleRepaint();
-        for (const listener of this.terminalFocusListeners) {
-          listener(this.terminalFocused);
-        }
+    const focusResult = this.focus.consume(text);
+    text = focusResult.text;
+    if (focusResult.changed) {
+      // Repaint so hovered blocks/banner-hits drop their bright
+      // highlight while the terminal isn't focused (matches the
+      // picker's focus-loss behavior).
+      this.scheduleRepaint();
+      for (const listener of this.terminalFocusListeners) {
+        listener(this.focus.focused);
       }
     }
     if (text.length === 0) {
@@ -2302,7 +2276,7 @@ export class Screen {
   // Whether the terminal has focus, per DECSET 1004. True when the terminal
   // never reports focus, since there is then nothing to go on.
   isTerminalFocused(): boolean {
-    return this.terminalFocused;
+    return this.focus.focused;
   }
 
   onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
@@ -4140,12 +4114,9 @@ export class Screen {
     // focus shouldn't also fire a banner action / block click /
     // selection start. Motion and drag still flow through so the
     // pointer-shape diff stays accurate. The first FOCUS_IN that
-    // follows the focusing click will flip terminalFocused back to
+    // follows the focusing click will flip focus back to
     // true for the next event.
-    const FOCUS_GRACE_MS = 200;
-    const recentlyFocused =
-      this.terminalFocused && Date.now() - this.lastFocusInAt < FOCUS_GRACE_MS;
-    const unfocused = this.terminalFocused === false || recentlyFocused;
+    const unfocused = this.focus.shouldDropButtonEvent();
     if (
       unfocused &&
       (name.endsWith("_PRESSED") ||
@@ -5913,6 +5884,7 @@ export class Screen {
       // between drag and release — silently do nothing.
       return;
     }
+    this.focus.noteOwnCopy();
     void writeClipboard(text, { target: this.selectionClipboard }).then(
       (result) => {
         if (result.ok) {
@@ -6962,7 +6934,7 @@ export class Screen {
       banner: this.banner,
       scrollOffset: this.scrollOffset,
       transient: this.bannerRightContent(),
-      hovered: this.terminalFocused ? this.hoveredBarHit : null,
+      hovered: this.focus.focused ? this.hoveredBarHit : null,
       hintsRevealed: this.hintsRevealed(),
       scriptOutputs: this.scriptOutputs,
     };
@@ -7005,7 +6977,7 @@ export class Screen {
   // the same reason `hovered` is: an unfocused terminal's last known
   // pointer position says nothing about where it is now.
   private hintsRevealed(): boolean {
-    if (!this.terminalFocused) {
+    if (!this.focus.focused) {
       return false;
     }
     return this.hintHoverReveal || this.hintKeyReveal;
@@ -7067,7 +7039,7 @@ export class Screen {
       banner: { status, currentMode: undefined, hint: [], queued: 0 },
       scrollOffset: 0,
       transient: null,
-      hovered: this.terminalFocused ? this.hoveredBarHit : null,
+      hovered: this.focus.focused ? this.hoveredBarHit : null,
       // The overlay frame reuses the composer.top slot config, which has
       // no helpHint field; an empty hint list already resolves to nothing.
       hintsRevealed: false,
@@ -7114,7 +7086,7 @@ export class Screen {
     if (slot === "composerBottom") {
       this.hintZoneStart = this.hintZoneStartFor(w, side, ctx, forced, result);
     }
-    const hovered = this.terminalFocused ? this.hoveredBarHit : null;
+    const hovered = this.focus.focused ? this.hoveredBarHit : null;
     // Derived from the placed chunks rather than hand-listed state, so
     // adding a field can't silently leave a row stale. Hover is part of
     // it: without that the row would not repaint as the pointer moves.
@@ -7347,6 +7319,7 @@ export class Screen {
       return;
     }
     if (action === "copy") {
+      this.focus.noteOwnCopy();
       void writeClipboard(value, { target: this.selectionClipboard }).then(
         (result) => {
           this.notify(
@@ -7464,7 +7437,7 @@ export class Screen {
         sliceIdx <= runLastIdx;
       const inHoverScope = keyedInScope || inRunGap;
       const hovered =
-        this.terminalFocused &&
+        this.focus.focused &&
         inHoverScope &&
         // When the hovered row carries a subKey, only rows with the same
         // subKey light up. Lines that opt out of subKey scoping (header
@@ -8428,6 +8401,7 @@ export class Screen {
     if (text.length === 0) {
       return;
     }
+    this.focus.noteOwnCopy();
     void writeClipboard(text, { target: this.selectionClipboard }).then(
       (result) => {
         if (result.ok) {
