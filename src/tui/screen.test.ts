@@ -3326,7 +3326,7 @@ describe("Screen block-click routing", () => {
     // to a wrapped continuation row on the same source line (y+1) and
     // single-clicks there was clearly targeting a new spot; upgrading
     // to whole-line select would silently paint content they didn't
-    // triple-click. Triple requires strict cell equality.
+    // triple-click. Triple tolerates horizontal jitter only; the row must match.
     const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
     // Long enough to wrap so y+1 stays on the same source line.
     screen.appendLine({
@@ -3343,12 +3343,24 @@ describe("Screen block-click routing", () => {
     expect(afterDouble.length).toBeGreaterThan(0);
     expect(afterDouble.length).toBeLessThan(20);
     // Third click one row down on the wrapped continuation. Same source
-    // line, so the id-check alone would still pass; strict cell equality
+    // line, so the id-check alone would still pass; the exact row match
     // is what breaks the chain here.
     dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
     dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
     // Plain click: prior selection dismissed, no new selection.
     expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("a third click one column off on the same row still selects the whole line", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha beta gamma" });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 9, y });
+    expect(screen.getSelectionText()).toBe("alpha beta gamma");
   });
 
   it("scrolling between double- and third-click breaks the chain (no phantom triple)", () => {

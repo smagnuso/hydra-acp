@@ -1636,7 +1636,7 @@ export async function pickSession(
     const isTripleClickCandidate =
       isChainCandidate &&
       last!.count === 2 &&
-      cell.x === last!.x &&
+      Math.abs(cell.x - last!.x) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
       cell.y === last!.y;
     if (isTripleClickCandidate) {
       promptPendingClickCount = 3;
@@ -4360,7 +4360,7 @@ export async function pickSession(
         if (
           isChainCandidate &&
           last!.count === 2 &&
-          cell.x === last!.x &&
+          Math.abs(cell.x - last!.x) <= PROMPT_DOUBLE_CLICK_MAX_DIST &&
           cell.y === last!.y
         ) {
           promptPendingClickCount = 3;

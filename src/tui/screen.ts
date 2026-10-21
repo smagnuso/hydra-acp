@@ -4543,17 +4543,16 @@ export class Screen {
       // chain unless the click really did land in the same spot.
       last.sourceLineId !== null &&
       last.sourceLineId === anchor.sourceLineId;
-    // Third same-cell click inside the timing window → whole-line
-    // select. Requires strict cell equality (not just jitter tolerance):
-    // a double-click that survives adjacent-cell jitter is fine, but a
-    // triple has to land in the exact same spot the double did or the
-    // user has clearly moved on. Also caps the chain at three so a stray
+    // Third same-row click inside the timing window → whole-line
+    // select. Horizontal jitter is tolerated like the double's, but the
+    // row must match exactly: a click one row down on a wrapped line
+    // means the user has moved on. Also caps the chain at three so a stray
     // fourth press falls through to the plain-click path (which clears
     // the selection).
     const isTripleClickCandidate =
       isChainCandidate &&
       last!.count === 2 &&
-      cell.x === last!.x &&
+      Math.abs(cell.x - last!.x) <= DOUBLE_CLICK_MAX_DIST &&
       cell.y === last!.y;
     if (isTripleClickCandidate) {
       this.pendingClickCount = 3;
@@ -8305,7 +8304,7 @@ export class Screen {
     const isTripleClickCandidate =
       isChainCandidate &&
       last!.count === 2 &&
-      cell.x === last!.x &&
+      Math.abs(cell.x - last!.x) <= DOUBLE_CLICK_MAX_DIST &&
       cell.y === last!.y;
     if (isTripleClickCandidate) {
       this.promptPendingClickCount = 3;
