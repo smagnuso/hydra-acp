@@ -2072,11 +2072,39 @@ async function runSession(
     if (!event) {
       return;
     }
+    if (
+      pendingSteers.length > 0 &&
+      (event.kind === "agent-text" ||
+        event.kind === "agent-thought" ||
+        event.kind === "tool-call" ||
+        event.kind === "turn-complete")
+    ) {
+      flushPendingSteers();
+    }
     if (applyRenderEvent) {
       applyRenderEvent(event, rawUpdate, recordedAt);
     } else {
       bufferedEvents.push({ event, rawUpdate, recordedAt });
     }
+  };
+
+  // Steers the agent accepted but has not visibly acted on yet. They show
+  // as queued chips and reach scrollback on the first agent activity after
+  // them: an agent blocked in one long tool call cannot read a steer until
+  // the call returns, and an immediate echo made that look like a reply.
+  const pendingSteers: PendingEcho[] = [];
+  const flushPendingSteers = (): void => {
+    const flushing = pendingSteers.splice(0);
+    for (const echo of flushing) {
+      echo.flushed = true;
+      appendRender({
+        kind: "user-text",
+        text: echo.displayText,
+        attachments: echo.attachments,
+      });
+      currentTurnEcho = echo;
+    }
+    refreshQueueDisplay();
   };
 
   // Last worker task id observed when opening an agent/thought/tool block.
@@ -7131,10 +7159,14 @@ async function runSession(
 
   const refreshQueueDisplay = (): void => {
     const entries = [...queueCache.values()];
-    const displayTexts = entries.map(formatQueueChipText);
+    const displayTexts = [
+      ...entries.map(formatQueueChipText),
+      ...pendingSteers.map((e) => sanitizeSingleLine(e.displayText)),
+    ];
+    const queued = displayTexts.length;
     screen.setQueuedPrompts(displayTexts);
-    screen.setBanner({ queued: entries.length });
-    screen.setSidebarSnapshot({ queued: entries.length });
+    screen.setBanner({ queued });
+    screen.setSidebarSnapshot({ queued });
     dispatcher.setQueue(entries.map((e) => e.text));
   };
 
@@ -7354,13 +7386,8 @@ async function runSession(
           if (idx >= 0) {
             pendingEchoes.splice(idx, 1);
           }
-          echo.flushed = true;
-          appendRender({
-            kind: "user-text",
-            text: echo.displayText,
-            attachments: echo.attachments,
-          });
-          currentTurnEcho = echo;
+          pendingSteers.push(echo);
+          refreshQueueDisplay();
           return;
         }
         if (res.outcome === "startedNewTurn") {
@@ -9584,7 +9611,7 @@ async function runSession(
     screen.setSidebarSnapshot({
       busySince: sessionBusySince,
       lastTurnEndedAt: lastTurnEndedAt,
-      queued: queueCache.size,
+      queued: queueCache.size + pendingSteers.length,
       plan: planEntriesForSidebar(),
       editedFiles: editedFilesForSidebar(),
       running: runningTools(toolCallOrder, toolStates, resolvedCwd),
