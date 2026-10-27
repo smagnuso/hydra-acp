@@ -29,6 +29,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "new",
   "no-color",
   "no-dangerously-skip-permissions",
+  "no-fold",
   "no-from-note",
   "no-pager",
   // `daemon listen`: write config without restarting a running daemon.

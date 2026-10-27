@@ -1,3 +1,4 @@
+import { extractPatchedFiles } from "../../core/tool-edit.js";
 import { describe, expect, it } from "vitest";
 import {
   collapseEditedFiles,
@@ -374,6 +375,30 @@ describe("editedFilesFromTool", () => {
         REPO,
       ),
     ).toEqual([{ path: at("a.ts"), added: undefined, removed: undefined }]);
+  });
+});
+
+describe("a multi-file patch from the newer opencode shape", () => {
+  it("lists every file and keeps the call's counts", () => {
+    const update = {
+      rawOutput: {
+        metadata: {
+          files: [
+            { file: "src/a.ts", patch: "@@ -1 +1 @@\n-a\n+b\n", additions: 1, deletions: 1 },
+            { file: "src/b.ts", patch: "@@ -0,0 +1,2 @@\n+x\n+y\n", additions: 2, deletions: 0 },
+            { file: "src/c.ts", patch: "@@ -1 +0,0 @@\n-z\n", additions: 0, deletions: 1 },
+          ],
+        },
+      },
+    };
+    const patchedFiles = extractPatchedFiles(update);
+    expect(
+      editedFilesFromTool({ rawKind: "edit", status: "completed", patchedFiles }, undefined, "/r"),
+    ).toEqual([
+      { path: "/r/src/a.ts", added: 1, removed: 1 },
+      { path: "/r/src/b.ts", added: 2, removed: 0 },
+      { path: "/r/src/c.ts", added: 0, removed: 1 },
+    ]);
   });
 });
 

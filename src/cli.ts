@@ -605,6 +605,7 @@ async function main(): Promise<void> {
           json: flags.json === true,
           diff: flags.diff === true,
           fold: flags.fold === true,
+          steps: flags["no-fold"] === true,
           noColor: flags["no-color"] === true,
           noPager: flags["no-pager"] === true,
         });
@@ -616,6 +617,7 @@ async function main(): Promise<void> {
           noColor: flags["no-color"] === true,
           noPager: flags["no-pager"] === true,
           fold: flags.fold === true,
+          steps: flags["no-fold"] === true,
         });
         return;
       }
@@ -1427,14 +1429,14 @@ function printHelp(subcommand?: string): void {
     [SESSION, "                                     --dir scopes the listing to a directory and everything under it (bare --dir means the current directory; ~ and relative paths accepted). Isolated sessions match on their source tree as well as their workspace."],
     [SESSION, "                                     --include-non-interactive surfaces ancillary (e.g. `hydra cat`) or never-prompted sessions while keeping the cold cap (a narrower --all)."],
     [SESSION, "                                     --columns picks which columns show and their order, e.g. --columns=session,state,title,cost (valid: session,upstream,host,state,agent,model,age,cwd,title,cost). UPSTREAM/HOST/MODEL hidden by default; COST is the trailing column; overrides config.tui.sessionColumns."],
-    [SESSION, "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]"],
+    [SESSION, "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-fold] [--no-color] [--no-pager]"],
     [SESSION, "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold)."],
     [SESSION, "  hydra-acp session changes [<path>] [--files] [--json] [--host=<host>] [--columns=<list>]"],
     [SESSION, "                                     Which sessions changed files under <path> (default: the current directory). A path that exists on disk is resolved; anything else is matched as a run of whole path segments, so `changes app.ts` finds it wherever it lives."],
     [SESSION, "                                     --files expands each row to its complete file list with per-file edit counts (the row itself samples up to 5). Unlike `list`, imported and non-interactive sessions are included by default and there is no cold cap — narrow with --host."],
     [SESSION, "                                     Blind spots: deletes and shell-driven edits (sed -i, git checkout, mv) carry no edit payload, so they never appear. Same `edit:` search available in the TUI picker's ^F."],
-    [SESSION, "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]"],
-    [SESSION, "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk."],
+    [SESSION, "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold] [--no-fold]"],
+    [SESSION, "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk. Edits an agent records as whole files (opencode) are always composed into one diff per file; --no-fold shows each recorded step."],
     [SESSION, "  hydra-acp session kill <id>        Demote a warm session to cold (keeps the on-disk record)"],
     [SESSION, "  hydra-acp session delete <id>      Delete a session entirely (live or cold). Reverse with `session undelete`."],
     [SESSION, "  hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--keep-undecided] [--json]"],

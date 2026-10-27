@@ -188,7 +188,9 @@ export function extractPatchedFiles(update: unknown): PatchedFile[] {
       continue;
     }
     const e = entry as Record<string, unknown>;
-    if (typeof e.filePath !== "string" || e.filePath.length === 0) {
+    // opencode names the file `filePath` in one version and `file` in another.
+    const path = typeof e.filePath === "string" && e.filePath.length > 0 ? e.filePath : e.file;
+    if (typeof path !== "string" || path.length === 0) {
       continue;
     }
     const patch = e.patch;
@@ -197,7 +199,7 @@ export function extractPatchedFiles(update: unknown): PatchedFile[] {
         ? (patch as { __hydraBlob?: unknown; bytes?: unknown })
         : undefined;
     out.push({
-      path: e.filePath,
+      path,
       ...(typeof e.additions === "number" ? { added: e.additions } : {}),
       ...(typeof e.deletions === "number" ? { removed: e.deletions } : {}),
       ...(typeof patch === "string" ? { patch } : {}),

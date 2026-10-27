@@ -367,18 +367,20 @@ hydra-acp session share [<id>] [--host <name>]
                                             # print a hydra:// URL the recipient can paste
                                             # into --session (defaults to the most-recent
                                             # session for cwd)
-hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]
+hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-fold] [--no-color] [--no-pager]
                                             # aggregate one session: turn count, tool histogram,
                                             # files touched, cost/duration, synopsis.
                                             # --diff appends the session diff under the summary
                                             # and pages the whole thing on a TTY; honors --fold.
-hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]
+hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold] [--no-fold]
                                             # git-diff-shaped view of every file the session
                                             # edited, reconstructed from history (no git, no fs).
                                             # Pages through $HYDRA_ACP_PAGER → $PAGER → less on a TTY
                                             # (LESS=FRX default); --no-pager bypasses.
                                             # --fold collapses sequential hunks that rewrite the
                                             # same region (agent thrash) into one net-effect hunk.
+                                            # Whole-file edits (opencode) are always composed into one
+                                            # diff per file; --no-fold shows every recorded step.
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp session delete <id>               # delete a session entirely (live or cold)
 hydra-acp session undelete [<id>...]        # no ids: list deleted sessions; with ids (hydra or upstream id): restore them

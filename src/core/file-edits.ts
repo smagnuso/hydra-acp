@@ -23,7 +23,12 @@ export interface FileEdit {
   new?: EditBody;
   // Multi-file patch tools carry a unified diff per file instead.
   patch?: EditBody;
+  // What old and new cover: the whole file, or only the edited snippet. Absent
+  // when the update does not say, which a diff block alone does not.
+  scope?: EditScope;
 }
+
+export type EditScope = "file" | "snippet";
 
 export function readEditBody(value: unknown): EditBody | undefined {
   if (typeof value === "string") {
@@ -153,17 +158,38 @@ export function patchFileEdits(update: Record<string, unknown>): FileEdit[] {
 export function extractFileEdits(update: Record<string, unknown>): FileEdit[] {
   const multi = multiEditEdits(update);
   if (multi.length > 0) {
-    return multi;
+    return multi.map((edit) => ({ ...edit, scope: "snippet" as const }));
   }
   const blocks = diffBlockEdits(update).filter((edit) => edit.path !== undefined);
   if (blocks.length > 0) {
-    return blocks;
+    const scope = diffBlockScope(update);
+    return scope === undefined ? blocks : blocks.map((edit) => ({ ...edit, scope }));
   }
   const single = rawInputEdit(update);
   if (single?.path !== undefined) {
-    return [single];
+    return [{ ...single, scope: single.old?.text === "" ? "file" : "snippet" }];
   }
-  return patchFileEdits(update);
+  return patchFileEdits(update).map((edit) => ({ ...edit, scope: "snippet" as const }));
+}
+
+// A diff block is the same carrier for an Edit (snippet) and for an agent that
+// reports the whole file; the update's other fields say which.
+function diffBlockScope(update: Record<string, unknown>): EditScope | undefined {
+  const r = rawInputOf(update);
+  if (r && (r.old_string !== undefined || r.new_string !== undefined)) {
+    return "snippet";
+  }
+  if (r && r.content !== undefined) {
+    return "file";
+  }
+  return hasPatchMetadata(update) ? "file" : undefined;
+}
+
+// opencode's apply_patch lists its files in rawOutput.metadata.files, whatever
+// fields each entry has, and reports each file's whole before and after.
+function hasPatchMetadata(update: Record<string, unknown>): boolean {
+  const rawOutput = update.rawOutput as { metadata?: { files?: unknown } } | null | undefined;
+  return Array.isArray(rawOutput?.metadata?.files);
 }
 
 // Paths of every file the update changed, from any carrier, deduped.

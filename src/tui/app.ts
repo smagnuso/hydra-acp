@@ -9090,12 +9090,14 @@ async function runSession(
   // each block keeps its own click override and retained payload.
   const maybeRenderEditDiff = (toolCallId: string): void => {
     const state = toolStates.get(toolCallId);
-    renderEditDiffFor(toolCallId, state?.editDiff, state?.status);
-    if (state?.patchedFiles !== undefined) {
-      patchedFileDiffs(state.patchedFiles).forEach((diff, i) => {
-        renderEditDiffFor(`${toolCallId}#${i}`, diff, state.status);
-      });
+    // The call's diff block is only its first file; the patch list names them all.
+    const patched = state?.patchedFiles !== undefined ? patchedFileDiffs(state.patchedFiles) : [];
+    if (patched.length === 0) {
+      renderEditDiffFor(toolCallId, state?.editDiff, state?.status);
     }
+    patched.forEach((diff, i) => {
+      renderEditDiffFor(`${toolCallId}#${i}`, diff, state?.status);
+    });
   };
 
   const renderEditDiffFor = (

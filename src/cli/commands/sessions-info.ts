@@ -23,7 +23,7 @@ import {
 } from "../../core/history-aggregate.js";
 import {
   aggregateFileEdits,
-  foldHunks,
+  foldForDisplay,
   type FileEditAggregate,
 } from "../../core/history-edits.js";
 import { openPager } from "../pager.js";
@@ -41,6 +41,7 @@ export interface SessionsInfoOptions {
   // diff command's --fold / --no-color / --no-pager surface.
   diff?: boolean;
   fold?: boolean;
+  steps?: boolean;
   noColor?: boolean;
   noPager?: boolean;
 }
@@ -164,10 +165,7 @@ export async function runSessionsInfo(
   let diffFiles: FileEditAggregate[] | null = null;
   if (includeDiff) {
     const rawFiles = aggregateFileEdits(bundle.history);
-    diffFiles =
-      opts.fold === true
-        ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
-        : rawFiles;
+    diffFiles = opts.fold === true ? foldForDisplay(rawFiles, { fold: true, steps: true }) : rawFiles;
   }
   if (opts.json) {
     const payload: Record<string, unknown> = { ...data };
@@ -185,7 +183,7 @@ export async function runSessionsInfo(
     const pager = openPager({ disabled: opts.noPager === true });
     pager.stream.write(formatSummary(data, opts.verbose === true, displayPath));
     pager.stream.write("\n");
-    pager.stream.write(renderDiff(diffFiles ?? [], useColor, displayPathForDiff));
+    pager.stream.write(renderDiff(foldForDisplay(diffFiles ?? [], opts), useColor, displayPathForDiff));
     await pager.flush();
     return;
   }

@@ -759,7 +759,8 @@ Reconstructed per-file diff for a session — the same aggregation `hydra sessio
 **Response — `200 OK`**
 
 - `Content-Type: application/json`
-- Body is an array of `{ path, hunks: [{ oldText, newText }], created }` — identical to what `hydra session diff --json` emits.
+- Body is an array of `{ path, hunks: [{ oldText, newText, scope? }], created }` — identical to what `hydra session diff --json` emits.
+- `scope` says what `oldText` and `newText` cover: `"file"` when they are the whole file (Write, and agents such as opencode that report whole files, so one file's hunks are consecutive snapshots of it), `"snippet"` when they are only the edited text (Claude `Edit`/`MultiEdit`, patch hunks). It is absent when the recorded update does not say. A client composes `"file"` hunks into one change from the first `oldText` to the last `newText`.
 
 **Response — `404 Not Found`** when the session id is unknown.
 

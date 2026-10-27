@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { aggregateFileEdits, foldHunks } from "./history-edits.js";
+import { aggregateFileEdits, foldForDisplay, foldHunks, foldWholeFileHunks } from "./history-edits.js";
 
 let nextId = 0;
 function newId(): string {
@@ -13,6 +13,7 @@ interface Update {
   name?: string;
   rawInput?: unknown;
   content?: unknown;
+  rawOutput?: unknown;
 }
 
 function entry(update: Update) {
@@ -85,14 +86,14 @@ describe("aggregateFileEdits", () => {
   it("extracts a single Edit as one hunk", () => {
     const result = aggregateFileEdits([editCall("/a.ts", "old", "new")]);
     expect(result).toEqual([
-      { path: "/a.ts", hunks: [{ oldText: "old", newText: "new" }], created: false },
+      { path: "/a.ts", hunks: [{ oldText: "old", newText: "new", scope: "snippet" }], created: false },
     ]);
   });
 
   it("treats Write (empty oldText) as created", () => {
     const result = aggregateFileEdits([writeCall("/a.ts", "body")]);
     expect(result).toEqual([
-      { path: "/a.ts", hunks: [{ oldText: "", newText: "body" }], created: true },
+      { path: "/a.ts", hunks: [{ oldText: "", newText: "body", scope: "file" }], created: true },
     ]);
   });
 
@@ -105,9 +106,9 @@ describe("aggregateFileEdits", () => {
     expect(result).toHaveLength(1);
     expect(result[0]!.path).toBe("/a.ts");
     expect(result[0]!.hunks).toEqual([
-      { oldText: "one", newText: "ONE" },
-      { oldText: "two", newText: "TWO" },
-      { oldText: "three", newText: "THREE" },
+      { oldText: "one", newText: "ONE", scope: "snippet" },
+      { oldText: "two", newText: "TWO", scope: "snippet" },
+      { oldText: "three", newText: "THREE", scope: "snippet" },
     ]);
   });
 
@@ -125,6 +126,21 @@ describe("aggregateFileEdits", () => {
     ]);
     expect(result).toHaveLength(1);
     expect(result[0]!.hunks).toHaveLength(1);
+  });
+
+  it("takes a hunk's scope from a later update of the same call", () => {
+    const id = "tc-late";
+    const block = [{ type: "diff", path: "/a.ts", oldText: "v0\n", newText: "v1\n" }];
+    const result = aggregateFileEdits([
+      entry({ sessionUpdate: "tool_call", toolCallId: id, content: block }),
+      entry({
+        sessionUpdate: "tool_call_update",
+        toolCallId: id,
+        content: block,
+        rawOutput: { metadata: { files: [{ filePath: "/a.ts", patch: "@@ -1 +1 @@\n-v0\n+v1\n" }] } },
+      }),
+    ]);
+    expect(result[0]!.hunks).toEqual([{ oldText: "v0\n", newText: "v1\n", scope: "file" }]);
   });
 
   it("keeps two distinct toolCallIds on the same file as two hunks", () => {
@@ -153,9 +169,9 @@ describe("aggregateFileEdits", () => {
     ]);
     expect(result).toHaveLength(1);
     expect(result[0]!.hunks).toEqual([
-      { oldText: "a", newText: "A" },
-      { oldText: "b", newText: "B" },
-      { oldText: "c", newText: "C" },
+      { oldText: "a", newText: "A", scope: "snippet" },
+      { oldText: "b", newText: "B", scope: "snippet" },
+      { oldText: "c", newText: "C", scope: "snippet" },
     ]);
   });
 
@@ -320,9 +336,48 @@ describe("foldHunks", () => {
       },
     ]);
     expect(files).toEqual([
-      { path: "/r/a.cpp", hunks: [{ oldText: "old\n", newText: "new\n" }], created: false },
-      { path: "/r/new.js", hunks: [{ oldText: "", newText: "fresh\n" }], created: true },
+      { path: "/r/a.cpp", hunks: [{ oldText: "old\n", newText: "new\n", scope: "snippet" }], created: false },
+      { path: "/r/new.js", hunks: [{ oldText: "", newText: "fresh\n", scope: "snippet" }], created: true },
     ]);
   });
 });
 
+
+describe("foldWholeFileHunks", () => {
+  it("composes whole-file hunks into the first before and last after", () => {
+    expect(
+      foldWholeFileHunks([
+        { oldText: "a\n", newText: "b\n", scope: "file" },
+        { oldText: "b\n", newText: "c\n", scope: "file" },
+        { oldText: "x", newText: "y", scope: "snippet" },
+        { oldText: "a\n", newText: "d\n", scope: "file" },
+      ]),
+    ).toEqual([
+      { oldText: "a\n", newText: "d\n", scope: "file" },
+      { oldText: "x", newText: "y", scope: "snippet" },
+    ]);
+  });
+
+  it("leaves snippet and untagged hunks alone", () => {
+    const hunks = [
+      { oldText: "a", newText: "b", scope: "snippet" as const },
+      { oldText: "b", newText: "c" },
+    ];
+    expect(foldWholeFileHunks(hunks)).toEqual(hunks);
+  });
+
+  it("keeps every step with steps: true", () => {
+    const files = [
+      {
+        path: "/a",
+        created: false,
+        hunks: [
+          { oldText: "a\n", newText: "b\n", scope: "file" as const },
+          { oldText: "b\n", newText: "c\n", scope: "file" as const },
+        ],
+      },
+    ];
+    expect(foldForDisplay(files, { steps: true })[0]!.hunks).toHaveLength(2);
+    expect(foldForDisplay(files, {})[0]!.hunks).toHaveLength(1);
+  });
+});

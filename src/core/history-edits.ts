@@ -8,6 +8,8 @@
 // snippets into one whole-file before/after: oldText/newText for the
 // Edit tool are partial snippets (the `old_string` / `new_string`
 // params), so chaining them assumes a coherence the data doesn't have.
+// Each hunk says which it is in `scope`; only "file" hunks, where an agent
+// reports the whole file each time, compose (foldWholeFileHunks).
 // One file with N edits → N hunks under a single file header. Writes
 // (oldText="") still render as a single hunk that's all additions.
 //
@@ -20,7 +22,7 @@
 // Deletes are NOT represented: nothing on the wire marks a file as
 // removed. A file the session deleted will simply not appear in the
 // diff output.
-import { editTexts, extractFileEdits } from "./file-edits.js";
+import { editTexts, extractFileEdits, type EditScope } from "./file-edits.js";
 
 type HistoryEntryLike = {
   method?: unknown;
@@ -34,6 +36,9 @@ type HistoryEntryLike = {
 export interface FileHunk {
   oldText: string;
   newText: string;
+  // Whether oldText and newText are the whole file or only the edited
+  // snippet. Absent when the recorded update does not tell.
+  scope?: EditScope;
 }
 
 export interface FileEditAggregate {
@@ -49,6 +54,7 @@ interface RawEdit {
   path: string;
   oldText: string;
   newText: string;
+  scope?: EditScope;
 }
 
 export function aggregateFileEdits(
@@ -57,6 +63,7 @@ export function aggregateFileEdits(
   // Per toolCallId, the list of raw edits we've already counted, so a
   // tool_call_update that re-asserts the same payload doesn't double up.
   const seenByCall = new Map<string, RawEdit[]>();
+  const hunkOf = new Map<RawEdit, FileHunk>();
   // Insertion order = first-touch order for the file.
   const byPath = new Map<string, { hunks: FileHunk[]; created: boolean }>();
 
@@ -85,15 +92,21 @@ export function aggregateFileEdits(
       const prior = seenByCall.get(toolCallId) ?? [];
       const remaining: RawEdit[] = [];
       for (const e of edits) {
-        if (
-          !prior.some(
-            (p) =>
-              p.path === e.path &&
-              p.oldText === e.oldText &&
-              p.newText === e.newText,
-          )
-        ) {
+        const same = prior.find(
+          (p) =>
+            p.path === e.path &&
+            p.oldText === e.oldText &&
+            p.newText === e.newText,
+        );
+        if (same === undefined) {
           remaining.push(e);
+        } else if (same.scope === undefined && e.scope !== undefined) {
+          // The call's first update may not carry what a later one does.
+          same.scope = e.scope;
+          const hunk = hunkOf.get(same);
+          if (hunk) {
+            hunk.scope = e.scope;
+          }
         }
       }
       if (remaining.length === 0) {
@@ -103,7 +116,7 @@ export function aggregateFileEdits(
       toApply = remaining;
     }
     for (const e of toApply) {
-      mergeEdit(byPath, e);
+      hunkOf.set(e, mergeEdit(byPath, e));
     }
   }
 
@@ -143,25 +156,68 @@ export function foldHunks(hunks: FileHunk[]): FileHunk[] {
       continue;
     }
     const earlier = out[matchedIdx]!;
-    out.splice(matchedIdx, 1, { oldText: earlier.oldText, newText: next.newText });
+    out.splice(matchedIdx, 1, {
+      oldText: earlier.oldText,
+      newText: next.newText,
+      ...(earlier.scope !== undefined && earlier.scope === next.scope ? { scope: earlier.scope } : {}),
+    });
   }
   return out;
+}
+
+// Hunks that each carry the whole file are steps of one file's history, not
+// separate changes: compose them into the first before and the last after.
+// Snippet and untagged hunks are left alone.
+export function foldWholeFileHunks(hunks: FileHunk[]): FileHunk[] {
+  const whole = hunks.filter((hunk) => hunk.scope === "file");
+  const first = whole[0];
+  const last = whole[whole.length - 1];
+  if (!first || !last || whole.length < 2) {
+    return hunks;
+  }
+  const composed: FileHunk = { oldText: first.oldText, newText: last.newText, scope: "file" };
+  const out: FileHunk[] = [];
+  for (const hunk of hunks) {
+    if (hunk.scope !== "file") {
+      out.push(hunk);
+    } else if (hunk === first) {
+      out.push(composed);
+    }
+  }
+  return out;
+}
+
+// What the CLI shows: whole-file steps composed unless the caller wants every
+// recorded step, and --fold also composes chained snippets.
+export function foldForDisplay(
+  files: FileEditAggregate[],
+  opts: { fold?: boolean; steps?: boolean },
+): FileEditAggregate[] {
+  return files.map((f) => {
+    const whole = opts.steps === true ? f.hunks : foldWholeFileHunks(f.hunks);
+    return { ...f, hunks: opts.fold === true ? foldHunks(whole) : whole };
+  });
 }
 
 function mergeEdit(
   byPath: Map<string, { hunks: FileHunk[]; created: boolean }>,
   edit: RawEdit,
-): void {
-  const hunk: FileHunk = { oldText: edit.oldText, newText: edit.newText };
+): FileHunk {
+  const hunk: FileHunk = {
+    oldText: edit.oldText,
+    newText: edit.newText,
+    ...(edit.scope !== undefined ? { scope: edit.scope } : {}),
+  };
   const existing = byPath.get(edit.path);
   if (existing === undefined) {
     byPath.set(edit.path, {
       hunks: [hunk],
       created: edit.oldText.length === 0,
     });
-    return;
+    return hunk;
   }
   existing.hunks.push(hunk);
+  return hunk;
 }
 
 // Every (path, oldText, newText) triple in one update, from whichever
@@ -171,7 +227,11 @@ function extractRawEdits(update: Record<string, unknown>): RawEdit[] {
   const out: RawEdit[] = [];
   for (const edit of extractFileEdits(update)) {
     if (edit.path !== undefined) {
-      out.push({ path: edit.path, ...editTexts(edit) });
+      out.push({
+        path: edit.path,
+        ...editTexts(edit),
+        ...(edit.scope !== undefined ? { scope: edit.scope } : {}),
+      });
     }
   }
   return out;

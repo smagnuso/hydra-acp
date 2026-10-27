@@ -9,7 +9,8 @@
 // individual edit. We do NOT try to collapse multiple Edit snippets
 // into a single whole-file before/after — the Edit tool's oldText is a
 // substring of the original file, not the original file itself, so
-// chaining snippets across edits produces nonsense. Showing them
+// chaining snippets across edits produces nonsense. Hunks tagged
+// scope "file" are whole-file snapshots and are composed. Showing the rest
 // sequentially mirrors how `git diff` already displays multiple hunks
 // per file.
 //
@@ -23,7 +24,7 @@ import { daemonFetch } from "./_shared.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import {
   aggregateFileEdits,
-  foldHunks,
+  foldForDisplay,
   type FileEditAggregate,
 } from "../../core/history-edits.js";
 import { buildUnifiedDiff } from "../../tui/format.js";
@@ -42,6 +43,8 @@ export interface SessionsDiffOptions {
   // net-effect hunk. Opt-in because the intermediate hunks are
   // sometimes exactly what the reader wants to see.
   fold?: boolean;
+  // Show every recorded whole-file step instead of composing them.
+  steps?: boolean;
 }
 
 export async function runSessionsDiff(
@@ -96,10 +99,7 @@ export async function runSessionsDiff(
       process.exit(1);
     }
     const rawFiles = aggregateFileEdits(bundle.history);
-    files =
-      opts.fold === true
-        ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
-        : rawFiles;
+    files = opts.fold === true ? foldForDisplay(rawFiles, { fold: true, steps: true }) : rawFiles;
   } else {
     process.stderr.write(`Daemon returned HTTP ${diffRes.status}\n`);
     process.exit(1);
@@ -115,7 +115,7 @@ export async function runSessionsDiff(
   const pager = openPager({ disabled: opts.noPager === true });
   const onTTY = process.stdout.isTTY === true;
   const useColor = !opts.noColor && onTTY;
-  pager.stream.write(renderDiff(files, useColor, displayPath));
+  pager.stream.write(renderDiff(foldForDisplay(files, opts), useColor, displayPath));
   await pager.flush();
 }
 
@@ -164,7 +164,9 @@ interface PreparedHunk {
 function prepareVisibleHunks(f: FileEditAggregate): PreparedHunk[] {
   const out: PreparedHunk[] = [];
   for (const hunk of f.hunks) {
-    const body = buildUnifiedDiff(hunk, { maxLines: Infinity });
+    // A composed whole-file change is shown with context around its changes, not the whole file.
+    const wholeFile = hunk.scope === "file" && hunk.oldText !== "";
+    const body = buildUnifiedDiff(hunk, { maxLines: Infinity, ...(wholeFile ? { contextLines: 3 } : {}) });
     if (!hasVisibleChange(body)) {
       continue;
     }
