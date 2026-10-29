@@ -20,6 +20,7 @@ const generateChainToken = customAlphabet(HYDRA_ID_ALPHABET, 16);
 
 // Maximum number of history entries scanned when checking for open tool-call
 // chains before a swap. Bounds I/O cost.
+const AGENT_SESSION_CLOSE_TIMEOUT_MS = 2000;
 const QUIESCE_TAIL_SCAN_ENTRIES = 20;
 
 // Default number of recent turns to include in compaction seeds and fork
@@ -6259,8 +6260,26 @@ export class Session {
       clearTimeout(claim.timer);
     }
     this.pendingClaims.clear();
+    await this.requestAgentSessionClose();
     await this.agent.kill().catch(() => undefined);
     this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
+  }
+
+  // Best effort: give the agent a chance to free its session before the
+  // process is killed. Bounded so a wedged agent cannot stall the close.
+  private async requestAgentSessionClose(): Promise<void> {
+    if (this.agentCapabilities?.sessionCapabilities?.close === undefined) {
+      return;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, AGENT_SESSION_CLOSE_TIMEOUT_MS);
+    });
+    const request = this.agent.connection
+      .request("session/close", { sessionId: this.upstreamSessionId })
+      .then(() => undefined, () => undefined);
+    await Promise.race([request, timeout]);
+    clearTimeout(timer);
   }
 
   onClose(handler: (opts: { deleteRecord: boolean }) => void): () => void {
