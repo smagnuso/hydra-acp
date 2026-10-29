@@ -393,11 +393,11 @@ describe("a multi-file patch from the newer opencode shape", () => {
     };
     const patchedFiles = extractPatchedFiles(update);
     expect(
-      editedFilesFromTool({ rawKind: "edit", status: "completed", patchedFiles }, undefined, "/r"),
+      editedFilesFromTool({ rawKind: "edit", status: "completed", patchedFiles }, undefined, REPO),
     ).toEqual([
-      { path: "/r/src/a.ts", added: 1, removed: 1 },
-      { path: "/r/src/b.ts", added: 2, removed: 0 },
-      { path: "/r/src/c.ts", added: 0, removed: 1 },
+      { path: at("src", "a.ts"), added: 1, removed: 1 },
+      { path: at("src", "b.ts"), added: 2, removed: 0 },
+      { path: at("src", "c.ts"), added: 0, removed: 1 },
     ]);
   });
 });
