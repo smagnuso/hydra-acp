@@ -7924,6 +7924,10 @@ async function runSession(
       userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
     }
 
+    // Our own prompt revives a cold session. Left armed, the watch sees
+    // that revival as somebody else's and replays our prompt back to us.
+    const wasColdWatching = coldWatchTimer !== null;
+    stopColdWatch();
     adjustPendingTurns(1, "self");
     // Stash the user-text echo for later flush. Hold a reference so
     // we can splice this entry out on error even if other prompts
@@ -8026,6 +8030,9 @@ async function runSession(
       }
       if (echo.messageId !== undefined) {
         ownPendingByMid.delete(echo.messageId);
+      }
+      if (wasColdWatching) {
+        startColdWatch();
       }
       // A force-stop tears the agent down, so the in-flight prompt may
       // reject with a transport error before the daemon's cancelled
