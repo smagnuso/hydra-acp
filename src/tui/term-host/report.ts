@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------
 
 import * as path from "node:path";
+import { clearProgramStatus, programStatusEnabled, publishProgramStatus } from "../program-status.js";
 import { terminalHost } from "./index.js";
 import { restoreTabLabel, syncTabLabel, TRANSIENT_TAB_LABEL } from "./label-sync.js";
 import type { AgentActivity, TerminalHostSnapshot, TurnOrigin } from "./types.js";
@@ -240,11 +241,17 @@ function snapshot(): TerminalHostSnapshot {
 
 // Emit only what actually changed. Called after every funnel patch.
 function flush(): void {
+  // Same startup guard as the host report below: no state to publish until
+  // we know which session we're showing.
+  if (!live.sessionId) {
+    return;
+  }
+  publishProgramStatus(live.suspended ? "unknown" : deriveState());
   const host = terminalHost();
   // Don't claim the pane until we know which session we're showing —
   // otherwise a banner tick during startup would register a titleless agent
   // on the pane.
-  if (!host || !live.sessionId) {
+  if (!host) {
     return;
   }
 
@@ -298,7 +305,7 @@ function flush(): void {
 
 /** Tap for Screen.setSessionbar — identity, title, model, cost. */
 export function reportSessionbar(view: SessionbarView): void {
-  if (!terminalHost()) {
+  if (!terminalHost() && !programStatusEnabled()) {
     return;
   }
   // Turn provenance is the one field that survives its own turn, so it is
@@ -321,7 +328,7 @@ export function reportSessionbar(view: SessionbarView): void {
 
 /** Tap for Screen.setBanner — activity state and queue depth. */
 export function reportBanner(view: BannerView): void {
-  if (!terminalHost()) {
+  if (!terminalHost() && !programStatusEnabled()) {
     return;
   }
   // Arm or disarm the unreachable hold on the TRANSITION, reading the state
@@ -375,11 +382,12 @@ export function reportTurn(view: TurnView): void {
 
 /** Mark the reporter suspended (picker up / screen stopped) or live again. */
 export function setReportSuspended(suspended: boolean): void {
-  if (!terminalHost() || live.suspended === suspended) {
+  if ((!terminalHost() && !programStatusEnabled()) || live.suspended === suspended) {
     return;
   }
   live.suspended = suspended;
   if (suspended) {
+    clearProgramStatus();
     suspendReport();
     return;
   }
@@ -429,7 +437,7 @@ function suspendReport(): void {
 
 /** Tap for Screen.setPermissionPrompt — the blocked state. */
 export function reportPermission(active: boolean): void {
-  if (!terminalHost()) {
+  if (!terminalHost() && !programStatusEnabled()) {
     return;
   }
   live.permission = active;
@@ -447,6 +455,7 @@ export function reportPermission(active: boolean): void {
  * and an un-awaited write would race process teardown.
  */
 export async function releaseTerminalHost(): Promise<void> {
+  clearProgramStatus();
   const host = terminalHost();
   if (!host) {
     return;
