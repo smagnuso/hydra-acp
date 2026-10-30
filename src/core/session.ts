@@ -698,6 +698,11 @@ const ONE_SHOT_LEVEL_TASK_TYPES = new Set(["local_bash"]);
 // waiting.
 const UNSOLICITED_HOLD_POLL_MS = 1_000;
 
+// How often to re-read the agent's updatedAt while an end-unobservable task
+// is armed. Only decides how soon an observed wakeup is noticed; nothing is
+// ever cleared because time passed.
+const UPSTREAM_POLL_MS = 10_000;
+
 // Two flavors of queue entry share the same FIFO. User-prompt entries
 // are wire-visible (every transition fires a hydra-acp/prompt_queue_*
 // broadcast); internal entries (title regen, agent switch, import seed)
@@ -1104,6 +1109,7 @@ export class Session {
   // both sides of the comparison, so no skew tolerance is needed.
   private upstreamBaselineMs: number | undefined;
   private upstreamBaselineGen = 0;
+  private upstreamPollTimer: NodeJS.Timeout | undefined;
   // Last {count, since} pushed to clients, so a mutation that doesn't move
   // the rendered state (re-arming a task already counted) stays silent.
   private lastArmedBroadcast: { key: string; since: number | undefined } |
@@ -6256,6 +6262,7 @@ export class Session {
     }
     this.cancelIdleTimer();
     this.cancelOrphanTimer();
+    clearTimeout(this.upstreamPollTimer);
     for (const claim of this.pendingClaims.values()) {
       clearTimeout(claim.timer);
     }
@@ -7194,8 +7201,44 @@ export class Session {
           return;
         }
         this.upstreamBaselineMs = ms;
+        this.scheduleUpstreamPoll(gen);
       })
       .catch(() => undefined);
+  }
+
+  // The periodic agent sync only reaches a given agent about once an hour,
+  // so without this a wakeup goes unnoticed for that long.
+  private scheduleUpstreamPoll(gen: number): void {
+    clearTimeout(this.upstreamPollTimer);
+    this.upstreamPollTimer = setTimeout(() => {
+      this.upstreamPollTimer = undefined;
+      void this.pollUpstream(gen);
+    }, UPSTREAM_POLL_MS);
+    this.upstreamPollTimer.unref();
+  }
+
+  private async pollUpstream(gen: number): Promise<void> {
+    if (!this.upstreamPollLive(gen)) {
+      return;
+    }
+    const ms = await this.fetchUpstreamUpdatedAt().catch(() => undefined);
+    if (!this.upstreamPollLive(gen)) {
+      return;
+    }
+    if (ms !== undefined) {
+      this.applyUpstreamUpdatedAt(ms);
+    }
+    if (this.upstreamPollLive(gen)) {
+      this.scheduleUpstreamPoll(gen);
+    }
+  }
+
+  private upstreamPollLive(gen: number): boolean {
+    return gen === this.upstreamBaselineGen &&
+      this.upstreamBaselineMs !== undefined &&
+      !this.closing &&
+      !this.closed &&
+      this.hasEndUnobservableTask();
   }
 
   private async fetchUpstreamUpdatedAt(): Promise<number | undefined> {
@@ -7223,16 +7266,19 @@ export class Session {
    * early. That errs toward dropping a badge, never toward a permanent one.
    */
   noteUpstreamUpdatedAt(updatedAt: string | undefined): void {
+    const ms = updatedAt === undefined ? NaN : Date.parse(updatedAt);
+    if (!Number.isNaN(ms)) {
+      this.applyUpstreamUpdatedAt(ms);
+    }
+  }
+
+  private applyUpstreamUpdatedAt(ms: number): void {
     if (
-      updatedAt === undefined ||
       this.upstreamBaselineMs === undefined ||
+      ms <= this.upstreamBaselineMs ||
       this.promptInFlight ||
       this.unsolicitedTurn !== undefined
     ) {
-      return;
-    }
-    const ms = Date.parse(updatedAt);
-    if (Number.isNaN(ms) || ms <= this.upstreamBaselineMs) {
       return;
     }
     let cleared = 0;

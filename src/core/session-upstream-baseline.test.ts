@@ -1,7 +1,7 @@
 // A task whose end the agent never reports (opencode's backgrounded shell)
 // is cleared only when the agent's own updatedAt moves past the value read
 // at the last turn end, as the periodic agent sync observes it.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { Session } from "./session.js";
 import { HistoryStore } from "./history-store.js";
 import { makeMockAgent } from "../__tests__/test-utils.js";
@@ -162,5 +162,50 @@ describe("Session.noteUpstreamUpdatedAt", () => {
     );
     expect(byId.get("tc-oc")?.endUnobservable).toBe(true);
     expect(byId.get("tc-claude")).not.toHaveProperty("endUnobservable");
+  });
+});
+
+describe("upstream poll while an end-unobservable task is armed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function armAndEnd(updatedAt: () => string) {
+    const made = makeSession(() => listing(updatedAt())());
+    await trigger(made.mock, armOpencodeShell);
+    await endTurn(made.session);
+    return made;
+  }
+
+  it("clears the task once the agent's updatedAt moves, without waiting for a sync", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let current = BASELINE;
+    const { session } = await armAndEnd(() => current);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+
+    current = LATER;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(session.armedBackgroundTasks).toEqual([]);
+  });
+
+  it("never clears a task just because time passed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { session } = await armAndEnd(() => BASELINE);
+
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    expect(session.armedBackgroundTasks).toHaveLength(1);
+  });
+
+  it("stops polling once the session closes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { mock, session } = await armAndEnd(() => BASELINE);
+    const lists = () =>
+      (mock.agent.connection.request as unknown as ReturnType<typeof vi.fn>)
+        .mock.calls.filter(([m]) => m === "session/list").length;
+
+    await session.close();
+    const before = lists();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lists()).toBe(before);
   });
 });
