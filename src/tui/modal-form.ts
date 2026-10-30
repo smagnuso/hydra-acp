@@ -58,6 +58,9 @@ export interface FormState {
   // Total terminal rows the modal may occupy, title and hint included.
   // Undefined lets the renderer pick its default.
   maxRows?: number;
+  // Present on a filterable chooser: typing narrows `rows` (the caller does
+  // the narrowing) and digits / `s` / `d` stop being hotkeys.
+  filter?: string;
 }
 
 export type FormKeyResult =
@@ -74,7 +77,8 @@ export type FormKeyResult =
   | { type: "save"; row: number }
   | { type: "dismiss"; row: number }
   | { type: "close" }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  | { type: "filter"; filter: string };
 
 // KeyName → the terminal-kit key names LineEditor.handleKey speaks.
 // Enter / Escape / ^C are absent deliberately: they belong to the form, not
@@ -132,6 +136,13 @@ export function clampCursor(state: FormState): number {
 // intercept BEFORE this runs; everything reaching here is form vocabulary.
 export function handleFormKey(state: FormState, ev: KeyEvent): FormKeyResult {
   const rows = state.rows;
+  const filter = state.filter;
+  if (filter !== undefined) {
+    const result = handleFilterKey(state, filter, ev);
+    if (result !== null) {
+      return result;
+    }
+  }
   if (rows.length === 0) {
     return { type: "noop" };
   }
@@ -167,6 +178,9 @@ export function handleFormKey(state: FormState, ev: KeyEvent): FormKeyResult {
       : { type: "noop" };
   }
   if (ev.type === "char") {
+    if (filter !== undefined) {
+      return { type: "noop" };
+    }
     if (/^[1-9]$/.test(ev.ch)) {
       const idx = Number.parseInt(ev.ch, 10) - 1;
       return idx < rows.length
@@ -195,12 +209,63 @@ export function handleFormKey(state: FormState, ev: KeyEvent): FormKeyResult {
         : { type: "noop" };
     // Cheap long-list navigation: with a 50-model chooser, ↑/↓ and the
     // 1-9 jumps only reach so far.
+    case "page-up":
+      return { type: "row", row: Math.max(0, cursor - formPageSize(state)) };
+    case "page-down":
+      return {
+        type: "row",
+        row: Math.min(rows.length - 1, cursor + formPageSize(state)),
+      };
     case "home":
       return { type: "row", row: 0 };
     case "end":
       return { type: "row", row: rows.length - 1 };
     default:
       return { type: "noop" };
+  }
+}
+
+// Rows a PgUp / PgDn moves: the list window the screen will give this form
+// (maxRows less title and hint), less one so a row of context carries over.
+function formPageSize(state: FormState): number {
+  return Math.max(1, (state.maxRows ?? 12) - 3);
+}
+
+// Typing into a filterable form. Null means the key is not the filter's and
+// falls through to the normal vocabulary; this runs before the empty-rows
+// bail so a filter matching nothing can still be edited or cleared.
+function handleFilterKey(
+  state: FormState,
+  filter: string,
+  ev: KeyEvent,
+): FormKeyResult | null {
+  if (ev.type === "char") {
+    return { type: "filter", filter: filter + ev.ch };
+  }
+  if (ev.type === "paste") {
+    return {
+      type: "filter",
+      filter: filter + ev.text.replace(/[\r\n\t]+/g, " "),
+    };
+  }
+  if (ev.type !== "key") {
+    return null;
+  }
+  switch (ev.name) {
+    case "backspace":
+      return filter === ""
+        ? { type: "noop" }
+        : { type: "filter", filter: filter.slice(0, -1) };
+    case "ctrl-u":
+      return filter === "" ? { type: "noop" } : { type: "filter", filter: "" };
+    case "escape":
+      return filter === "" ? null : { type: "filter", filter: "" };
+    case "ctrl-s":
+      return state.rows.length === 0
+        ? { type: "noop" }
+        : { type: "save", row: clampCursor(state) };
+    default:
+      return null;
   }
 }
 

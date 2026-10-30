@@ -117,3 +117,17 @@ describe("cycleConfigValue", () => {
     expect(cycleConfigValue({ ...model, options: [] }, "x", 1)).toBe("x");
   });
 });
+
+describe("buildChooserForm filter", () => {
+  it("narrows by label or id, case-insensitively, and shows the count", () => {
+    const f = buildChooserForm(model, "SON");
+    expect(f.rows.map((r) => r.id)).toEqual(["sonnet"]);
+    expect(f.title).toBe("Model (1/3) /SON");
+    expect(f.cursor).toBe(0);
+    expect(f.filter).toBe("SON");
+  });
+
+  it("yields no rows for a filter that matches nothing", () => {
+    expect(buildChooserForm(model, "zzz").rows).toEqual([]);
+  });
+});

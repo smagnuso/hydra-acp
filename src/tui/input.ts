@@ -24,6 +24,8 @@ export type KeyName =
   | "right"
   | "home"
   | "end"
+  | "page-up"
+  | "page-down"
   | "backspace"
   | "alt-backspace"
   | "delete"
@@ -610,6 +612,9 @@ export class InputDispatcher {
         return this.handleHome();
       case "end":
         return this.handleEnd();
+      case "page-up":
+      case "page-down":
+        return [];
       case "ctrl-b":
         this.moveLeft();
         return [];

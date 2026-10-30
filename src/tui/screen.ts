@@ -3997,6 +3997,11 @@ export class Screen {
     }
     // Keyboard scroll-back navigation. Mouse wheel is handled separately
     // via the "mouse" event channel — see handleMouse.
+    if (this.formPrompt !== null && (name === "PAGE_UP" || name === "PAGE_DOWN")) {
+      this.chordMatcher.clear();
+      this.onKey([{ type: "key", name: name === "PAGE_UP" ? "page-up" : "page-down" }]);
+      return;
+    }
     if (name === "PAGE_UP") {
       this.chordMatcher.clear();
       this.scrollBy(this.scrollPageSize());

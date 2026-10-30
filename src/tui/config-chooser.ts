@@ -36,10 +36,23 @@ export function currentValueLabel(opt: ConfigOption): string {
   return valueLabel(opt, opt.currentValue);
 }
 
-export function buildChooserForm(opt: ConfigOption): FormState {
+export function buildChooserForm(opt: ConfigOption, filter = ""): FormState {
+  const needle = filter.toLowerCase();
+  const shown =
+    needle === ""
+      ? opt.options
+      : opt.options.filter(
+          (v) =>
+            v.value.toLowerCase().includes(needle) ||
+            (v.name ?? "").toLowerCase().includes(needle),
+        );
+  const count =
+    shown.length === opt.options.length
+      ? `${opt.options.length}`
+      : `${shown.length}/${opt.options.length}`;
   return {
-    title: `${opt.name} (${opt.options.length})`,
-    rows: opt.options.map((v) => ({
+    title: `${opt.name} (${count})${filter === "" ? "" : ` /${filter}`}`,
+    rows: shown.map((v) => ({
       id: v.value,
       kind: "choice" as const,
       label: v.name || v.value,
@@ -48,18 +61,24 @@ export function buildChooserForm(opt: ConfigOption): FormState {
       ...(v.value === opt.currentValue ? { current: true } : {}),
     })),
     // Open on the live value: it's the row the user is reasoning from, and
-    // on a long list it puts the window somewhere useful.
-    cursor: Math.max(
-      0,
-      opt.options.findIndex((v) => v.value === opt.currentValue),
-    ),
+    // on a long list it puts the window somewhere useful. A filter starts
+    // the cursor at the top hit instead.
+    cursor:
+      filter === ""
+        ? Math.max(
+            0,
+            opt.options.findIndex((v) => v.value === opt.currentValue),
+          )
+        : 0,
     hints: [
-      { label: "↑/↓ choose" },
+      { label: "type to filter" },
+      { label: "↑/↓ PgUp/PgDn choose" },
       { label: "⏎ switch", action: "commit" },
-      { label: "s save & apply", action: "save" },
+      { label: "^S save & apply", action: "save" },
       { label: "Esc close", action: "close" },
     ],
     maxRows: CHOOSER_MAX_ROWS,
+    filter,
   };
 }
 

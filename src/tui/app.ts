@@ -5843,6 +5843,16 @@ async function runSession(
       case "row":
         setForm("chooser", { ...state, cursor: result.row });
         return;
+      case "filter": {
+        const opt =
+          target.kind === "values"
+            ? agentConfigOptions.find((o) => o.id === target.configId)
+            : undefined;
+        if (opt) {
+          setForm("chooser", buildChooserForm(opt, result.filter));
+        }
+        return;
+      }
       // ←/→ (and a row click) only reach a select row, which is the index.
       case "cycle": {
         const opt = optionAt(result.row);

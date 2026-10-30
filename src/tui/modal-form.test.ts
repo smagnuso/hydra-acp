@@ -611,3 +611,48 @@ describe("Screen form prompt", () => {
     expect(r.screen.formHitAt(2, 21)).toEqual({ kind: "row", row: 0 });
   });
 });
+
+describe("filterable form", () => {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    id: `r${i}`,
+    kind: "choice" as const,
+    label: `row ${i}`,
+  }));
+  const form = (filter: string, cursor = 0, count = 40) => ({
+    title: "t",
+    rows: rows.slice(0, count),
+    cursor,
+    hints: [],
+    maxRows: 16,
+    filter,
+  });
+  const ch = (c: string): KeyEvent => ({ type: "char", ch: c });
+  const key = (name: KeyName): KeyEvent => ({ type: "key", name });
+
+  it("turns characters into filter text instead of hotkeys", () => {
+    expect(handleFormKey(form(""), ch("s"))).toEqual({ type: "filter", filter: "s" });
+    expect(handleFormKey(form("so"), ch("3"))).toEqual({ type: "filter", filter: "so3" });
+  });
+
+  it("backspace trims, ctrl-u and esc clear, esc on empty closes", () => {
+    expect(handleFormKey(form("ab"), key("backspace"))).toEqual({ type: "filter", filter: "a" });
+    expect(handleFormKey(form("ab"), key("ctrl-u"))).toEqual({ type: "filter", filter: "" });
+    expect(handleFormKey(form("ab"), key("escape"))).toEqual({ type: "filter", filter: "" });
+    expect(handleFormKey(form(""), key("escape"))).toEqual({ type: "close" });
+  });
+
+  it("ctrl-s saves the cursor row", () => {
+    expect(handleFormKey(form("", 4), key("ctrl-s"))).toEqual({ type: "save", row: 4 });
+  });
+
+  it("stays editable with zero matching rows", () => {
+    expect(handleFormKey(form("zz", 0, 0), key("backspace"))).toEqual({ type: "filter", filter: "z" });
+    expect(handleFormKey(form("zz", 0, 0), key("escape"))).toEqual({ type: "filter", filter: "" });
+  });
+
+  it("pages by the visible window and clamps at the ends", () => {
+    expect(handleFormKey(form("", 0), key("page-down"))).toEqual({ type: "row", row: 13 });
+    expect(handleFormKey(form("", 38), key("page-down"))).toEqual({ type: "row", row: 39 });
+    expect(handleFormKey(form("", 5), key("page-up"))).toEqual({ type: "row", row: 0 });
+  });
+});
