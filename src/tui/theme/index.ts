@@ -1027,6 +1027,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // role: fg / muted / active / warn / active / error / cold
   "status-ready": { layers: [...roles.fg] },
   "status-active": { layers: [...roles.active] },
+  "status-active-current": { layers: [...roles.active, underline] },
   // Blocked on the user: an outstanding permission request or agent
   // question. The row cannot advance until you do something, which is what
   // separates it from `status-active` (the session is working, leave it
@@ -1076,6 +1077,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // something to match. Those labels were reading as scaffolding because they
   // were literally styled as it.
   "sidebar-value": { layers: [...roles.fg] },
+  "sidebar-value-current": { layers: [...roles.fg, underline] },
 
   // The quiescent arm of a state enum whose other arms are
   // tool-status-running / -fail / -cancelled: idle, ready, awaiting approval,

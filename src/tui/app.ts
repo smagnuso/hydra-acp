@@ -9307,7 +9307,7 @@ async function runSession(
 
   // ── live sessions ────────────────────────────────────────────────────
   //
-  // Which OTHER live sessions exist and whether any is blocked on the user.
+  // Which live sessions exist and whether any is blocked on the user.
   // Polled (status=warm, so the daemon answers from memory) rather than
   // pushed:
   // the daemon's cross-session lifecycle events go to transformers only,
@@ -9324,12 +9324,9 @@ async function runSession(
         const live = await listSessions(target, { status: "warm" });
         const entries: SidebarLiveSession[] = [];
         for (const s of live) {
-          // This session is the activity gadget's job, one block up.
-          if (s.sessionId === resolvedSessionId) {
-            continue;
-          }
           entries.push({
             sessionId: s.sessionId,
+            current: s.sessionId === resolvedSessionId,
             // Titles are what the picker shows and what the user named the
             // work; the short id is only a fallback for the untitled.
             label:

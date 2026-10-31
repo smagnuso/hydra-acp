@@ -806,7 +806,7 @@ export function formatCpu(fraction: number | undefined): string {
   return text.padStart(CPU_FIELD_WIDTH);
 }
 
-// Other live sessions: whether each is working, and whether any of them is
+// Live sessions: whether each is working, and whether any of them is
 // blocked on you. Two independent axes, shown as a two-cell marker at the
 // right edge of the row.
 //
@@ -861,7 +861,7 @@ export const sessionsGadget: Gadget = {
     s.liveSessions
       .map(
         (p) =>
-          `${p.blocked ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}` +
+          `${p.blocked ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}${p.current ? "c" : ""}` +
           `:${p.sessionId}:${p.label}`,
       )
       .join("\u0000"),
@@ -887,7 +887,7 @@ export const sessionsGadget: Gadget = {
       );
       const gap = Math.max(1, ctx.width - cellWidth(label) - markerWidth);
       return {
-        prefix: `${label}${" ".repeat(gap)}`,
+        prefix: label,
         // A label is a value — a session's name — so by default it reads like
         // the agent and model values in the info gadget rather than like
         // scaffolding. Working is the exception: a session doing something is
@@ -910,8 +910,14 @@ export const sessionsGadget: Gadget = {
         // alone: `status-blocked` is its own yellow, so the one row that
         // needs you is separable from the ones that do not without hunting
         // for a ◦.
-        prefixStyle: working ? "status-active" : "sidebar-value",
-        body: marker,
+        prefixStyle: working
+          ? entry.current
+            ? "status-active-current"
+            : "status-active"
+          : entry.current
+            ? "sidebar-value-current"
+            : "sidebar-value",
+        body: `${" ".repeat(gap)}${marker}`,
         // Shares status-active with the banner and the activity gadget, so
         // the three surfaces cannot drift apart. Blocked has its own token
         // and its own colour: it is the one state here that needs the user,
@@ -923,7 +929,9 @@ export const sessionsGadget: Gadget = {
           : entry.blocked
             ? "status-blocked"
             : "status-idle",
-        doubleAction: { action: "open-session", value: entry.sessionId },
+        ...(entry.current
+          ? {}
+          : { doubleAction: { action: "open-session", value: entry.sessionId } }),
         item: true,
       } satisfies SidebarLine;
     });

@@ -1451,10 +1451,16 @@ describe("quantizeDuration", () => {
 describe("sessions gadget", () => {
   const live = (
     label: string,
-    opts: { busy?: boolean; armed?: boolean; blocked?: boolean } = {},
+    opts: {
+      busy?: boolean;
+      armed?: boolean;
+      blocked?: boolean;
+      current?: boolean;
+    } = {},
   ): SidebarLiveSession => ({
     sessionId: `hydra_session_${label}`,
     label,
+    current: opts.current === true,
     busy: opts.busy === true,
     armed: opts.armed === true,
     blocked: opts.blocked === true,
@@ -1483,7 +1489,7 @@ describe("sessions gadget", () => {
     // The two-cell marker IS the body; the label rides in the prefix so the
     // marker can be coloured on its own.
     const marker = (name: string): string =>
-      lines.find((l) => (l.prefix ?? "").includes(name))!.body;
+      lines.find((l) => (l.prefix ?? "").includes(name))!.body.slice(-2);
     expect(marker("both")).toBe("◦●");
     expect(marker("justbusy")).toBe(" ●");
     expect(marker("justwaiting")).toBe("◦○");
@@ -1498,15 +1504,15 @@ describe("sessions gadget", () => {
     const row = (e: SidebarLiveSession) =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
     const armed = row(live("armed", { armed: true }));
-    expect(armed.body).toBe(" ◐");
+    expect(armed.body.slice(-2)).toBe(" ◐");
     expect(armed.bodyStyle).toBe("status-active");
     expect(armed.prefixStyle).toBe("status-active");
     // Same accent as a mid-turn session, different shape.
     const busy = row(live("busy", { busy: true }));
     expect(armed.bodyStyle).toBe(busy.bodyStyle);
-    expect(armed.body).not.toBe(busy.body);
+    expect(armed.body.slice(-2)).not.toBe(busy.body.slice(-2));
     // The waiting cell is independent of it, like it is of busy.
-    expect(row(live("both", { armed: true, blocked: true })).body).toBe("◦◐");
+    expect(row(live("both", { armed: true, blocked: true })).body.slice(-2)).toBe("◦◐");
   });
 
   // A turn in flight outranks a mere armed task, and an armed task outranks
@@ -1534,6 +1540,15 @@ describe("sessions gadget", () => {
     ]);
   });
 
+  it("underlines the current session's label, quiet or working", () => {
+    const style = (e: SidebarLiveSession): string | undefined =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.prefixStyle;
+    expect(style(live("me", { current: true }))).toBe("sidebar-value-current");
+    expect(style(live("me", { current: true, busy: true }))).toBe(
+      "status-active-current",
+    );
+  });
+
   // Labels stay flush left, like every other gadget's rows — the markers
   // hang off the right instead of indenting the block. And the marker slot
   // is two cells whether or not the ◦ is there, so the bubbles line up.
@@ -1544,7 +1559,7 @@ describe("sessions gadget", () => {
     );
     for (const line of lines) {
       expect(line.prefix!.startsWith(" ")).toBe(false);
-      expect(stringWidth(line.body)).toBe(2);
+      expect(stringWidth(line.body.slice(-2))).toBe(2);
       expect(stringWidth(rowText(line))).toBe(26);
     }
   });
@@ -1581,7 +1596,7 @@ describe("sessions gadget", () => {
       live("b", { busy: true }),
       live("r", { armed: true }),
       live("w", { blocked: true }),
-    ].map((e) => `${row(e).body}|${row(e).bodyStyle}`);
+    ].map((e) => `${row(e).body.slice(-2)}|${row(e).bodyStyle}`);
     expect(new Set(states).size).toBe(states.length);
   });
 

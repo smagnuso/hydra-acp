@@ -153,6 +153,9 @@ export type Style =
   // body colour, deliberately — a value is content, and only the label beside it
   // is scaffolding.
   | "sidebar-value"
+  // The same, underlined: the row for the session this TUI is attached to.
+  | "sidebar-value-current"
+  | "status-active-current"
   | "code"
   | "heading-1"
   | "heading-2"

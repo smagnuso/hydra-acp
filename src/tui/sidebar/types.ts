@@ -290,7 +290,8 @@ export interface SidebarLine extends FormattedLine {
   gutter?: string;
 }
 
-// One other live session, as the `sessions` gadget shows it.
+// One live session, as the `sessions` gadget shows it. Includes the one
+// this TUI is attached to, so every session shows the same list.
 export interface SidebarLiveSession {
   // Full session id. Doubles as the double-click target: the row carries
   // `hydra://sessions/<id>`, which routes through the same dispatch a
@@ -298,6 +299,9 @@ export interface SidebarLiveSession {
   sessionId: string;
   // Title if the session has one, else a short id — never empty.
   label: string;
+  // The session this TUI is attached to. Marked in the row and not a
+  // switch target.
+  current?: boolean;
   // Mid-turn. Independent of `waiting`, which is the whole reason these are
   // two fields and not one enum: a session can be working AND blocked on a
   // permission prompt, and collapsing that to a single value has to discard
