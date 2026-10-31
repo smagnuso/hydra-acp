@@ -25,6 +25,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import type {
   ExtensionMcpRegistry,
@@ -288,6 +289,20 @@ export function registerExtensionMcpRoutes(
     // tools/call; the builder gets a resolver and awaits there.
 
     const extName = (req.params as { name: string }).name;
+    // A client that lost its Mcp-Session-Id (reconnect, restart) re-sends
+    // initialize; the SDK rejects that on an initialized transport forever.
+    if (
+      req.method === "POST" &&
+      req.headers["mcp-session-id"] === undefined &&
+      isInitializeRequest(req.body)
+    ) {
+      const scope = built.get(token);
+      const stale = scope?.get(extName);
+      if (stale?.transport.sessionId !== undefined) {
+        scope?.delete(extName);
+        void disposeBuiltPair(stale);
+      }
+    }
     const transport = await ensureTransport(token, extName);
     if (transport === undefined) {
       reply.code(404).send({ error: `unknown mcp server: ${extName}` });

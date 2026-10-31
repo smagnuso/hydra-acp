@@ -242,6 +242,18 @@ describe("extension MCP route — happy path", () => {
     const r = await client!.callTool({ name: "ping", arguments: {} });
     expect(r.isError).toBe(true);
   });
+
+  it("a reconnecting client on the same token can re-initialize", async () => {
+    const second = new Client({ name: "test2", version: "0.0.1" });
+    await second.connect(
+      new StreamableHTTPClientTransport(new URL(`${h!.baseUrl}/mcp/memory`), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    const r = await second.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["ping"]);
+    await second.close().catch(() => undefined);
+  });
 });
 
 describe("extension MCP route — hot reload eviction", () => {
