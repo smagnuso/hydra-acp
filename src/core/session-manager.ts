@@ -8298,8 +8298,16 @@ export class SessionManager {
       return;
     }
     if (targetAgentId) {
-      const cleared = payload.phase === "failed";
-      live.broadcastPendingAgentSwap(cleared ? null : targetAgentId);
+      if (payload.phase === "failed") {
+        live.broadcastPendingAgentSwap(null);
+        return;
+      }
+      // "converged" lands after the swap already cleared the indicator;
+      // re-broadcasting the target would strand "switching to X".
+      if (payload.phase === "converged") {
+        return;
+      }
+      live.broadcastPendingAgentSwap(targetAgentId);
       return;
     }
     live.broadcastCompactionPhase(payload);
