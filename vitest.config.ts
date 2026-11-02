@@ -22,13 +22,16 @@ import { defineConfig } from "vitest/config";
 const cpus = os.availableParallelism?.() ?? os.cpus().length;
 const maxThreads = Math.max(2, Math.min(8, cpus));
 
+// Spawning git is several times slower on Windows runners, so the git-heavy files run close to the default limit there.
+const timeoutMs = process.platform === "win32" ? 30_000 : 10_000;
+
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "node",
     setupFiles: ["./vitest.setup.ts"],
-    testTimeout: 10_000,
-    hookTimeout: 10_000,
+    testTimeout: timeoutMs,
+    hookTimeout: timeoutMs,
     pool: "threads",
     poolOptions: {
       threads: {
