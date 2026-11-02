@@ -8534,7 +8534,9 @@ export class Session {
       return { stopReason: "end_turn" };
     }
     this.scheduleCompactionHook({ targetAgentId: newAgentId });
-    const busy = this.promptInFlight || this.unsolicitedTurn !== undefined;
+    // agentTurnInFlight, not promptInFlight: the latter is held by this
+    // command's own queue entry, which would always read as a turn.
+    const busy = this.agentTurnInFlight || this.unsolicitedTurn !== undefined;
     this.emitExtensionReply(
       busy
         ? `Agent switch to ${newAgentId} scheduled. A turn is still in flight — the rotation lands on the next idle edge; cancel the turn to make that happen now.`

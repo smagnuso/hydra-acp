@@ -3562,6 +3562,8 @@ describe("Session", () => {
           ).includes("Agent switch to new scheduled"),
       );
       expect(banner).toBeDefined();
+      // The command's own queue entry must not read as a turn in flight.
+      expect(JSON.stringify(banner)).not.toContain("still in flight");
     });
 
     it("setAgent schedules the switch while a turn is wedged in flight", async () => {
