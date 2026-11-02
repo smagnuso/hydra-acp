@@ -667,8 +667,24 @@ export class InputDispatcher {
         return [{ type: "redraw" }];
       case "ctrl-p":
         return [{ type: "switch-session" }];
-      case "ctrl-t":
+      case "ctrl-t": {
+        // Mid-line (with a char on both sides of the cursor) ^t is
+        // transpose-chars; at line start/end or on an empty line it keeps
+        // toggling thoughts.
+        const line = this.currentLine();
+        if (this.col > 0 && this.col < line.length) {
+          this.recordEdit();
+          this.setCurrentLine(
+            line.slice(0, this.col - 1) +
+              line[this.col] +
+              line[this.col - 1] +
+              line.slice(this.col + 1),
+          );
+          this.col += 1;
+          return [];
+        }
         return [{ type: "toggle-thoughts" }];
+      }
       case "alt-n":
       case "alt-tab":
         return [{ type: "next-live-session" }];

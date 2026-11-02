@@ -238,6 +238,20 @@ describe("InputDispatcher", () => {
     expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);
   });
 
+  it("Ctrl+T transposes mid-line, toggles thoughts at edges and when empty", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("ctrl-t")])).toEqual([{ type: "toggle-thoughts" }]);
+    feed(d, [{ type: "paste", text: "abcd" }]);
+    expect(feed(d, [k("ctrl-t")])).toEqual([{ type: "toggle-thoughts" }]);
+    expect(d.state().buffer).toEqual(["abcd"]);
+    feed(d, [k("home")]);
+    expect(feed(d, [k("ctrl-t")])).toEqual([{ type: "toggle-thoughts" }]);
+    feed(d, [k("right"), k("right")]);
+    expect(feed(d, [k("ctrl-t")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["acbd"]);
+    expect(d.state().col).toBe(3);
+  });
+
   it("Ctrl+D at end of last line does not exit while text remains", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "abc" }]);

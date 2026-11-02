@@ -1052,7 +1052,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^P", "switch session (picker)"],
   ["Alt+N / Alt+Tab", "next warm session"],
   ["Alt+P", "previous warm session"],
-  ["^T", "show / hide thoughts"],
+  ["^T", "transpose chars mid-line; otherwise show / hide thoughts"],
   ["^S", "show / hide sidebar (with an empty draft; amends otherwise)"],
   ["^V", "paste image from clipboard"],
   ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter · sidebar)"],

@@ -4730,8 +4730,12 @@ export async function pickSession(
         // the InputDispatcher a few lines down and never reach that
         // switch, so a handler there is unreachable from the composer —
         // and ^t would instead land on the dispatcher as a readline
-        // transpose-chars.
-        if (name === "CTRL_T") {
+        // transpose-chars. Mid-line in the composer it IS transpose-chars,
+        // so that case falls through to the dispatcher.
+        const tState = composer.state();
+        const tLine = tState.buffer[tState.row] ?? "";
+        const tMidLine = tState.col > 0 && tState.col < tLine.length;
+        if (name === "CTRL_T" && !tMidLine) {
           if (canOpenTab()) {
             void performNewInNewTab();
           }
