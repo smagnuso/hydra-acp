@@ -2618,6 +2618,10 @@ export class Session {
     this.agentMeta = fresh.agentMeta;
     this.agentCapabilities = fresh.agentCapabilities;
     this.resetModelVerb(fresh.modelVerb);
+    // The new process has ended no turn yet, so its startup chatter (pi-acp
+    // prints a banner) is not a resumption. Left set, that output opens an
+    // unsolicited turn that only claude-acp's origin stamp can close.
+    this.sawTurnComplete = false;
 
     if (crossAgent) {
       this.agentId = targetAgentId;

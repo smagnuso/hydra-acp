@@ -1485,4 +1485,31 @@ describe("armed background tasks across a rotation", () => {
     expect(session.armedBackgroundTasks).toHaveLength(0);
     expect(session.armedSince).toBeUndefined();
   });
+
+  it("does not open an unsolicited turn for the new agent's startup output", async () => {
+    const { spawnReplacementAgent, oldMock, newMock } = makeSpawnMock({ agentId: "a1" });
+
+    const session = new Session({
+      sessionId: "hydra_swap_startup_chatter",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      historyStore: new HistoryStore(),
+      spawnReplacementAgent,
+    });
+    (session as unknown as { sawTurnComplete: boolean }).sawTurnComplete = true;
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+    newMock.triggerNotification("session/update", {
+      sessionId: session.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Skills\n- /x/SKILL.md" },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(session.isQuiescedSync()).toBe(true);
+  });
 });
