@@ -1097,7 +1097,7 @@ The following session-update kinds may be queried. The list is additive — new 
 | `tool_call` | Tool call placed |
 | `tool_call_update` | Tool call updated (status, args, result refs) |
 | `prompt_received` | User turn boundary marker |
-| `turn_complete` | Assistant turn boundary marker |
+| `turn_complete` | Assistant turn boundary marker. When the turn ended because the agent's `session/prompt` failed (`stopReason: "error"`), carries `errorMessage`: the agent's error text, verbatim, capped at 2000 chars. Absent when the agent gave no message. |
 | `permission_resolved` | Permission request resolved |
 
 Other kinds (notably `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`, `plan`, `_hydra_current_model_update`, etc.) may exist on disk but are **not** queryable via this endpoint. Requesting one returns `400`. Rationale: chunk kinds can stream megabytes per session and need a separate pagination/byte-cap decision; state-snapshot kinds are already served via `meta.json` + attach-time synthesis.

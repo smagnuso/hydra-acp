@@ -150,6 +150,10 @@ export function renderTranscript(
       }
     } else if (kind === "turn_complete") {
       flushAssistant();
+      const errorMessage = (update as { errorMessage?: unknown }).errorMessage;
+      if (typeof errorMessage === "string" && errorMessage.length > 0) {
+        lines.push(`Error: turn failed: ${errorMessage}`);
+      }
     }
   }
   flushAssistant();

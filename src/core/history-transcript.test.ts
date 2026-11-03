@@ -419,3 +419,24 @@ describe("renderTranscript", () => {
     expect(renderTranscript([])).toBe("");
   });
 });
+
+describe("renderTranscript turn errors", () => {
+  it("keeps the agent's error text so a takeover agent can see why a turn died", () => {
+    const out = renderTranscript([
+      userPrompt("run it"),
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "turn_complete",
+            stopReason: "error",
+            errorMessage: "content flagged by provider",
+          },
+        },
+        recordedAt: 2,
+      },
+    ] as never);
+    expect(out).toContain("User: run it");
+    expect(out).toContain("Error: turn failed: content flagged by provider");
+  });
+});

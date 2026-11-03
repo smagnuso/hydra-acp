@@ -157,7 +157,12 @@ export type RenderEvent =
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean; amended?: boolean }
   | { kind: "mode-changed"; mode: string }
   | { kind: "model-changed"; model: string; availableModels?: string[] }
-  | { kind: "turn-complete"; stopReason?: string; amended?: boolean }
+  | {
+      kind: "turn-complete";
+      stopReason?: string;
+      errorMessage?: string;
+      amended?: boolean;
+    }
   | {
       kind: "usage-update";
       used?: number;
@@ -1146,6 +1151,10 @@ function mapTurnComplete(u: UpdateLike): RenderEvent {
   const out: RenderEvent = { kind: "turn-complete" };
   if (stopReason !== undefined) {
     out.stopReason = stopReason;
+  }
+  const errorMessage = readString(u, "errorMessage");
+  if (errorMessage !== undefined) {
+    out.errorMessage = errorMessage;
   }
   if (amended) {
     out.amended = true;

@@ -217,3 +217,28 @@ describe("Session prompt recovery from a transient auth failure", () => {
     expect(promptCalls()).toBe(1);
   });
 });
+
+describe("Session records the agent's error on turn_complete", () => {
+  it("stores the prompt failure text verbatim", async () => {
+    const { mock } = makeFlakyAgent({
+      failures: 1,
+      error: () => new Error("content flagged by provider"),
+    });
+    const session = makeSession({ agent: mock.agent, sessionId: "hydra_err_1" });
+    const client = makeClient();
+    session.attach(client, "full");
+
+    await expect(
+      session.prompt(client.clientId, { prompt: [{ type: "text", text: "hi" }] }),
+    ).rejects.toThrow("content flagged by provider");
+
+    const snap = await session.getHistorySnapshot();
+    const turn = snap
+      .map((e) => (e.params as { update?: Record<string, unknown> }).update)
+      .find((u) => u?.sessionUpdate === "turn_complete");
+    expect(turn).toMatchObject({
+      stopReason: "error",
+      errorMessage: "content flagged by provider",
+    });
+  });
+});

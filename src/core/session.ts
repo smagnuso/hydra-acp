@@ -3969,6 +3969,7 @@ export class Session {
     response: unknown,
     promptMessageId?: string,
     includeOriginator?: boolean,
+    errorMessage?: string,
   ): void {
     const stopReason =
       response &&
@@ -3983,6 +3984,9 @@ export class Session {
     };
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
+    }
+    if (errorMessage !== undefined) {
+      update.errorMessage = errorMessage;
     }
     // A salvaged turn is indistinguishable from a clean one on the wire
     // otherwise, and turn_complete is one of the few things that IS written
@@ -10874,6 +10878,7 @@ export class Session {
             { stopReason: "error" },
             entry.messageId,
             this.originatorNeedsTurnComplete(entry),
+            turnErrorMessage(err),
           );
         }
         this.clearAmendIfMatches(entry.messageId);
@@ -10948,6 +10953,7 @@ export class Session {
           { stopReason: "error" },
           entry.messageId,
           this.originatorNeedsTurnComplete(entry),
+          turnErrorMessage(err),
         );
       }
       this.clearAmendIfMatches(entry.messageId);
@@ -11042,6 +11048,20 @@ export class Session {
       this.amendInProgress = undefined;
     }
   }
+}
+
+const TURN_ERROR_MESSAGE_MAX = 2000;
+
+// The agent's own words for why a prompt failed, kept verbatim so the
+// transcript says why a turn ended in error. Undefined when there is none.
+function turnErrorMessage(err: unknown): string | undefined {
+  const message = (err as { message?: unknown } | null)?.message;
+  if (typeof message !== "string" || message.trim().length === 0) {
+    return undefined;
+  }
+  return message.length > TURN_ERROR_MESSAGE_MAX
+    ? `${message.slice(0, TURN_ERROR_MESSAGE_MAX)}...`
+    : message;
 }
 
 // Agent-side ways of saying "I no longer have that session, and I did not
