@@ -1,0 +1,40 @@
+name: rerun-unacquired
+
+# GitHub sometimes never assigns a hosted runner (mostly macOS). The job is
+# cancelled after about 15 minutes with no steps run, and the failed
+# all-checks job turns the whole run red. Re-run those legs once.
+#
+# A leg that ran and failed is deliberately left alone, so real failures and
+# flaky tests stay visible instead of being retried into green.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  rerun:
+    # Attempt 1 only, so a second outage cannot loop.
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt == 1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run when only never-started jobs failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100")
+          # all-checks is the aggregate and fails whenever a leg does, so it says nothing about why.
+          failed=$(jq '[.jobs[] | select(.conclusion == "failure" and .name != "all-checks")] | length' <<<"$jobs")
+          unacquired=$(jq '[.jobs[] | select(.conclusion == "cancelled" and (.steps | length) == 0)] | length' <<<"$jobs")
+          echo "jobs that ran and failed: $failed; jobs never given a runner: $unacquired"
+          if [ "$failed" != "0" ] || [ "$unacquired" = "0" ]; then
+            echo "not re-running"
+            exit 0
+          fi
+          gh run rerun "$RUN_ID" --failed
