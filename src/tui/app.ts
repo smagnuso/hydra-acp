@@ -9340,6 +9340,7 @@ async function runSession(
             busy: s.busy === true,
             armed: (s.armedTasks ?? 0) > 0,
             blocked: s.awaitingInput === true,
+            unread: s.unread === true,
           });
         }
         screen.setSidebarSnapshot({ liveSessions: entries });

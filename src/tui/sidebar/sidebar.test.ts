@@ -1456,11 +1456,13 @@ describe("sessions gadget", () => {
       armed?: boolean;
       blocked?: boolean;
       current?: boolean;
+      unread?: boolean;
     } = {},
   ): SidebarLiveSession => ({
     sessionId: `hydra_session_${label}`,
     label,
     current: opts.current === true,
+    unread: opts.unread === true,
     busy: opts.busy === true,
     armed: opts.armed === true,
     blocked: opts.blocked === true,
@@ -1538,6 +1540,14 @@ describe("sessions gadget", () => {
       "justarmed",
       "quiet",
     ]);
+  });
+
+  it("marks a quiet unread session with its own dot", () => {
+    const marker = (e: SidebarLiveSession): string =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.body.slice(-1);
+    expect(marker(live("a", { unread: true }))).toBe("◉");
+    expect(marker(live("a"))).toBe("○");
+    expect(marker(live("a", { unread: true, busy: true }))).toBe("●");
   });
 
   it("underlines the current session's label, quiet or working", () => {

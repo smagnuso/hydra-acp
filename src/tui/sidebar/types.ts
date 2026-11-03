@@ -321,6 +321,8 @@ export interface SidebarLiveSession {
   // still `awaitingInput`; this is the display-side name. See
   // Session.awaitingInput.
   blocked: boolean;
+  // Finished a turn nobody has looked at yet. Only shown while quiet.
+  unread?: boolean;
 }
 
 export interface Gadget {

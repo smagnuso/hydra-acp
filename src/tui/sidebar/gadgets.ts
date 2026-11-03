@@ -838,6 +838,7 @@ const BUSY_MARK = "●";
 const RUNNING_MARK = "◐";
 const IDLE_MARK = "○";
 const BLOCKED_MARK = "◦";
+const UNREAD_MARK = "◉";
 
 export const sessionsGadget: Gadget = {
   id: "sessions",
@@ -861,7 +862,7 @@ export const sessionsGadget: Gadget = {
     s.liveSessions
       .map(
         (p) =>
-          `${p.blocked ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}${p.current ? "c" : ""}` +
+          `${p.blocked ? "w" : ""}${p.busy ? "b" : ""}${p.armed ? "r" : ""}${p.current ? "c" : ""}${p.unread ? "u" : ""}` +
           `:${p.sessionId}:${p.label}`,
       )
       .join("\u0000"),
@@ -878,7 +879,13 @@ export const sessionsGadget: Gadget = {
     return sorted.map((entry) => {
       const working = entry.busy || entry.armed;
       const marker = `${entry.blocked ? BLOCKED_MARK : " "}${
-        entry.busy ? BUSY_MARK : entry.armed ? RUNNING_MARK : IDLE_MARK
+        entry.busy
+          ? BUSY_MARK
+          : entry.armed
+            ? RUNNING_MARK
+            : entry.unread
+              ? UNREAD_MARK
+              : IDLE_MARK
       }`;
       const markerWidth = cellWidth(marker);
       const label = truncate(
