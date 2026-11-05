@@ -260,6 +260,9 @@ export async function startDaemon(
   const extensionCommands = new ExtensionCommandRegistry();
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
+    ...(config.daemon.backgroundTaskTracking !== undefined
+      ? { backgroundTaskTracking: config.daemon.backgroundTaskTracking }
+      : {}),
     orphanTimeoutMs: config.daemon.nonInteractiveOrphanTimeoutSeconds * 1_000,
     sessionDefaults: config.sessionDefaults,
     synopsisAgent: config.synopsisAgent,

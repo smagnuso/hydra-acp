@@ -149,6 +149,7 @@ export const DAEMON_CONFIG_TIERS: {
   // SessionManager's options. Each is live-able with modest work.
   logLevel: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   sessionIdleTimeoutSeconds: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
+  backgroundTaskTracking: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   nonInteractiveOrphanTimeoutSeconds: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   sessionHistoryMaxEntries: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   sessionHistoryArchiveMaxBytes: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },

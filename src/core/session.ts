@@ -257,6 +257,9 @@ export interface SessionInit {
   modelVerb?: ModelVerb;
   agentArgs?: string[];
   idleTimeoutMs?: number;
+  // true: track every agent's background-task signals. false: track none.
+  // undefined (auto): claude's only; opencode's never report an end.
+  backgroundTaskTracking?: boolean;
   // Fast reap window for a session that has zero attached clients AND
   // has never been promoted to interactive (no real prompt ever landed).
   // See scheduleOrphanCheck. 0/undefined disables the fast path; such a
@@ -1181,6 +1184,7 @@ export class Session {
       }
     | undefined;
   private idleTimeoutMs: number;
+  private readonly backgroundTaskTracking: boolean | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
   // Fast-reap timer for an orphaned non-interactive session — see
   // scheduleOrphanCheck/checkOrphan near the idle-timer cluster below.
@@ -1586,6 +1590,7 @@ export class Session {
       this.agentAdvertisedConfigOptions = [...init.agentConfigOptions];
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
+    this.backgroundTaskTracking = init.backgroundTaskTracking;
     this.orphanTimeoutMs = init.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     // Wire the transformer-chain `session.idle` lifecycle event onto the
@@ -4213,12 +4218,18 @@ export class Session {
     const claudeMeta = extractClaudeCodeMeta(update._meta);
     this.rememberToolLabel(toolCallId, update, rawInput, claudeMeta);
     this.noteBackgroundTaskStopped(update, rawInput, claudeMeta);
-    const opencodeShellId = extractOpencodeShellId(update.rawOutput);
+    if (this.backgroundTaskTracking === false) {
+      return;
+    }
+    const trackUnobservable = this.backgroundTaskTracking === true;
+    const opencodeShellId = trackUnobservable
+      ? extractOpencodeShellId(update.rawOutput)
+      : undefined;
     const taskId = typeof claudeMeta?.toolResponse?.taskId === "string"
       ? claudeMeta.toolResponse.taskId
       : opencodeShellId ?? extractBackgroundBashTaskId(update.rawOutput);
     const opencodeBackground = opencodeShellId !== undefined ||
-      rawInput?.background === true;
+      (trackUnobservable && rawInput?.background === true);
     const isBackground = taskId !== undefined || opencodeBackground ||
       (rawInput !== undefined && rawInput.run_in_background === true);
     if (!isBackground) {
@@ -4280,6 +4291,9 @@ export class Session {
    * and the two id spaces are only incidentally related.
    */
   private applyBackgroundTaskLevel(params: unknown): void {
+    if (this.backgroundTaskTracking === false) {
+      return;
+    }
     const message = (params as { message?: Record<string, unknown> } | undefined)
       ?.message;
     if (!message || message.subtype !== "background_tasks_changed") {

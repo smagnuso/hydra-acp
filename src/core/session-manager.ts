@@ -417,6 +417,8 @@ export interface SessionListDelta extends SessionListing {
 
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
+  // See DaemonConfig.backgroundTaskTracking; undefined is auto.
+  backgroundTaskTracking?: boolean;
   // Fast-reap window for a session with zero attached clients that has
   // never been promoted to interactive — see Session.scheduleOrphanCheck.
   orphanTimeoutMs?: number;
@@ -514,6 +516,7 @@ export class SessionManager {
   private tombstones: TombstoneStore;
   private histories: HistoryStore;
   private idleTimeoutMs: number;
+  private backgroundTaskTracking: boolean | undefined;
   private orphanTimeoutMs: number;
   private sessionDefaults: Record<string, Record<string, string>>;
   private synopsisAgent?: string;
@@ -595,6 +598,7 @@ export class SessionManager {
     });
     this.workspaceSnapshotsDisabled = options.disableWorkspaceSnapshots === true;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.backgroundTaskTracking = options.backgroundTaskTracking;
     this.orphanTimeoutMs = options.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.sessionDefaults = options.sessionDefaults ?? {};
@@ -1281,6 +1285,9 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      ...(this.backgroundTaskTracking !== undefined
+        ? { backgroundTaskTracking: this.backgroundTaskTracking }
+        : {}),
       orphanTimeoutMs: this.orphanTimeoutMs,
       idleEventTimeoutMs: this.idleEventTimeoutMs,
       logger: this.logger,
@@ -1623,6 +1630,9 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      ...(this.backgroundTaskTracking !== undefined
+        ? { backgroundTaskTracking: this.backgroundTaskTracking }
+        : {}),
       orphanTimeoutMs: this.orphanTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
@@ -1793,6 +1803,9 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      ...(this.backgroundTaskTracking !== undefined
+        ? { backgroundTaskTracking: this.backgroundTaskTracking }
+        : {}),
       orphanTimeoutMs: this.orphanTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>

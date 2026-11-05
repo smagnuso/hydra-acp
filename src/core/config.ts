@@ -25,6 +25,11 @@ const DaemonConfig = z.object({
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),
+  // Armed background-task tracking (the "job still running" badge). Unset
+  // is auto: claude's signals are tracked, opencode's are not, because an
+  // opencode shell job never reports its end and its badge sticks. true
+  // tracks every agent's signals; false tracks none.
+  backgroundTaskTracking: z.boolean().optional(),
   // A session that has never received a real prompt (interactive !==
   // true) and currently has zero attached clients is reaped after this
   // much quiet time instead of waiting the full sessionIdleTimeoutSeconds

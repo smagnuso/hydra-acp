@@ -678,7 +678,7 @@ describe("cancelled turns close their own tool chain", () => {
       rawOutput: { metadata: { status: "running", shellID: "sh_1" } },
     });
 
-    function makeSession(id: string) {
+    function makeSession(id: string, backgroundTaskTracking: boolean | "auto" = true) {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
       const session = new Session({
         sessionId: `hydra_session_${id}`,
@@ -687,9 +687,45 @@ describe("cancelled turns close their own tool chain", () => {
         agent: mock.agent,
         upstreamSessionId: `u-${id}`,
         historyStore: new HistoryStore(),
+        ...(backgroundTaskTracking !== "auto" ? { backgroundTaskTracking } : {}),
       });
       return { mock, session };
     }
+
+    it("does not arm in auto mode, where only claude's signals are tracked", async () => {
+      const { mock, session } = makeSession("oc-auto", "auto");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, armOpencodeShell("tc-auto"));
+
+      expect(session.armedBackgroundTasks).toEqual([]);
+    });
+
+    it("still arms a claude run_in_background Bash in auto mode", async () => {
+      const { mock, session } = makeSession("cl-auto", "auto");
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-cl",
+        title: "sleep 60",
+        rawInput: { command: "sleep 60", run_in_background: true },
+      });
+
+      expect(session.armedBackgroundTasks).toHaveLength(1);
+    });
+
+    it("arms nothing when tracking is explicitly off, claude included", async () => {
+      const { mock, session } = makeSession("cl-off", false);
+      await triggerUpdate(mock, promptReceivedEntry());
+      await triggerUpdate(mock, armOpencodeShell("tc-off1"));
+      await triggerUpdate(mock, {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-off2",
+        title: "sleep 60",
+        rawInput: { command: "sleep 60", run_in_background: true },
+      });
+
+      expect(session.armedBackgroundTasks).toEqual([]);
+    });
 
     it("arms on rawInput.background and shows the shell id", async () => {
       const { mock, session } = makeSession("oc1");

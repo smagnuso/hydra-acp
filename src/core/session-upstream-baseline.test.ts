@@ -24,6 +24,7 @@ function makeSession(listResult: () => unknown) {
     agent: mock.agent,
     upstreamSessionId: "u_agent",
     historyStore: new HistoryStore(),
+    backgroundTaskTracking: true,
   });
   return { mock, session };
 }

@@ -31,14 +31,15 @@ describe("config tier table", () => {
   });
 
   it("classifies exactly the daemon section's keys", () => {
-    // `tls` and `publicHost` are optional and absent from a defaulted
-    // config, so they're asserted against the table rather than the value.
+    // `tls`, `publicHost` and `backgroundTaskTracking` are optional and
+    // absent from a defaulted config, so they're asserted against the table
+    // rather than the value.
     const present = Object.keys(baseConfig().daemon);
     for (const key of present) {
       expect(Object.keys(DAEMON_CONFIG_TIERS)).toContain(key);
     }
     for (const key of Object.keys(DAEMON_CONFIG_TIERS)) {
-      expect([...present, "tls", "publicHost"]).toContain(key);
+      expect([...present, "tls", "publicHost", "backgroundTaskTracking"]).toContain(key);
     }
   });
 
