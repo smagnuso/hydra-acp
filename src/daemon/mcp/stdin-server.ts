@@ -22,7 +22,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Session } from "../../core/session.js";
 import type { StreamGrepOptions as RawStreamGrepOptions } from "../../core/stream-buffer.js";
-import { mcpJsonResult } from "./helpers.js";
+import {
+  disposeBuiltPair,
+  isStaleReinitialize,
+  mcpJsonResult,
+} from "./helpers.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
@@ -267,6 +271,31 @@ export function registerStdinMcpRoutes(
   // per harness because they re-register.
   const builtPerToken = new Map<string, BuiltPair>();
 
+  const building = new Map<string, Promise<BuiltPair>>();
+  const disposerRegistered = new Set<string>();
+
+  async function buildPair(token: string, session: Session): Promise<BuiltPair> {
+    const server = buildMcpServer(session);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+    await server.connect(transport);
+    const pair: BuiltPair = { server, transport };
+    builtPerToken.set(token, pair);
+    if (!disposerRegistered.has(token)) {
+      disposerRegistered.add(token);
+      tokenRegistry.addDisposer(token, async () => {
+        disposerRegistered.delete(token);
+        const current = builtPerToken.get(token);
+        builtPerToken.delete(token);
+        if (current !== undefined) {
+          await disposeBuiltPair(current);
+        }
+      });
+    }
+    return pair;
+  }
+
   async function ensureTransport(
     token: string,
     session: Session,
@@ -275,30 +304,15 @@ export function registerStdinMcpRoutes(
     if (existing !== undefined) {
       return existing.transport;
     }
-    const server = buildMcpServer(session);
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-    await server.connect(transport);
-    const pair: BuiltPair = { server, transport };
-    builtPerToken.set(token, pair);
-    // Tear down on session end. Closing an already-closed transport or
-    // server is harmless (the SDK swallows it), but we still wrap in
-    // try/catch so a single failure doesn't leak the cache entry.
-    tokenRegistry.addDisposer(token, async () => {
-      builtPerToken.delete(token);
-      try {
-        await transport.close();
-      } catch {
-        // intentional
-      }
-      try {
-        await server.close();
-      } catch {
-        // intentional
-      }
-    });
-    return transport;
+    // Share one in-flight build so concurrent initializes can't leak a pair.
+    let pending = building.get(token);
+    if (pending === undefined) {
+      pending = buildPair(token, session).finally(() => {
+        building.delete(token);
+      });
+      building.set(token, pending);
+    }
+    return (await pending).transport;
   }
 
   async function handle(
@@ -335,6 +349,11 @@ export function registerStdinMcpRoutes(
         return;
       }
       session = resolved;
+    }
+    const stale = builtPerToken.get(token);
+    if (stale !== undefined && isStaleReinitialize(req, stale)) {
+      builtPerToken.delete(token);
+      void disposeBuiltPair(stale);
     }
     const transport = await ensureTransport(token, session);
     reply.hijack();

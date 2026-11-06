@@ -51,7 +51,12 @@ import {
   readToolOutputText,
   renderTranscript,
 } from "../../core/history-transcript.js";
-import { classifyUpdate, mcpJsonResult } from "./helpers.js";
+import {
+  classifyUpdate,
+  disposeBuiltPair,
+  isStaleReinitialize,
+  mcpJsonResult,
+} from "./helpers.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
@@ -663,6 +668,31 @@ export function registerRecallMcpRoutes(
 ): void {
   const builtPerToken = new Map<string, BuiltPair>();
 
+  const building = new Map<string, Promise<BuiltPair>>();
+  const disposerRegistered = new Set<string>();
+
+  async function buildPair(token: string, getSession: () => Promise<Session>): Promise<BuiltPair> {
+    const server = buildRecallMcpServer(getSession);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+    await server.connect(transport);
+    const pair: BuiltPair = { server, transport };
+    builtPerToken.set(token, pair);
+    if (!disposerRegistered.has(token)) {
+      disposerRegistered.add(token);
+      tokenRegistry.addDisposer(token, async () => {
+        disposerRegistered.delete(token);
+        const current = builtPerToken.get(token);
+        builtPerToken.delete(token);
+        if (current !== undefined) {
+          await disposeBuiltPair(current);
+        }
+      });
+    }
+    return pair;
+  }
+
   async function ensureTransport(
     token: string,
     getSession: () => Promise<Session>,
@@ -671,27 +701,15 @@ export function registerRecallMcpRoutes(
     if (existing !== undefined) {
       return existing.transport;
     }
-    const server = buildRecallMcpServer(getSession);
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-    await server.connect(transport);
-    const pair: BuiltPair = { server, transport };
-    builtPerToken.set(token, pair);
-    tokenRegistry.addDisposer(token, async () => {
-      builtPerToken.delete(token);
-      try {
-        await transport.close();
-      } catch {
-        // intentional
-      }
-      try {
-        await server.close();
-      } catch {
-        // intentional
-      }
-    });
-    return transport;
+    // Share one in-flight build so concurrent initializes can't leak a pair.
+    let pending = building.get(token);
+    if (pending === undefined) {
+      pending = buildPair(token, getSession).finally(() => {
+        building.delete(token);
+      });
+      building.set(token, pending);
+    }
+    return (await pending).transport;
   }
 
   async function handle(
@@ -735,6 +753,11 @@ export function registerRecallMcpRoutes(
       }
       return resolved;
     };
+    const stale = builtPerToken.get(token);
+    if (stale !== undefined && isStaleReinitialize(req, stale)) {
+      builtPerToken.delete(token);
+      void disposeBuiltPair(stale);
+    }
     const transport = await ensureTransport(token, getSession);
     reply.hijack();
     await transport.handleRequest(req.raw, reply.raw, req.body);

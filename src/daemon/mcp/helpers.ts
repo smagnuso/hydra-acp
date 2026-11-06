@@ -1,4 +1,39 @@
+import type { FastifyRequest } from "fastify";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { HistoryEntry } from "../../core/history-store.js";
+
+export interface ClosableMcpPair {
+  server: { close(): Promise<void> };
+  transport: { close(): Promise<void>; sessionId?: string };
+}
+
+// A transport accepts exactly one `initialize`. A client that rebuilds its
+// MCP client (reconnect budget spent, lost Mcp-Session-Id) re-sends it, and
+// an already-initialized cached transport would refuse forever.
+export function isStaleReinitialize(
+  req: FastifyRequest,
+  cached: ClosableMcpPair | undefined,
+): boolean {
+  return (
+    req.method === "POST" &&
+    req.headers["mcp-session-id"] === undefined &&
+    isInitializeRequest(req.body) &&
+    cached?.transport.sessionId !== undefined
+  );
+}
+
+export async function disposeBuiltPair(pair: ClosableMcpPair): Promise<void> {
+  try {
+    await pair.transport.close();
+  } catch {
+    // intentional: closing an already-closed transport is fine
+  }
+  try {
+    await pair.server.close();
+  } catch {
+    // intentional
+  }
+}
 
 export function* iterSessionUpdates(
   history: ReadonlyArray<unknown>,

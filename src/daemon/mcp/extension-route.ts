@@ -25,7 +25,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import type {
   ExtensionMcpRegistry,
@@ -33,6 +32,7 @@ import type {
 } from "../../core/extension-mcp.js";
 import { extractBearer } from "./bearer.js";
 import { buildExtensionServer } from "./build-extension-server.js";
+import { disposeBuiltPair, isStaleReinitialize } from "./helpers.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
 // Control surface returned by registerExtensionMcpRoutes. Wired into
@@ -80,19 +80,6 @@ export function registerExtensionMcpRoutes(
   // end → close everything that session built) or by extName (extension
   // re-register/disconnect → close everything pinned to that extension).
   const built = new Map<string, Map<string, BuiltPair>>();
-
-  async function disposeBuiltPair(pair: BuiltPair): Promise<void> {
-    try {
-      await pair.transport.close();
-    } catch {
-      // intentional: closing an already-closed transport is fine
-    }
-    try {
-      await pair.server.close();
-    } catch {
-      // intentional
-    }
-  }
 
   // Tear down all built transports for an extension across every token.
   // Fires on hot reload (onChange register/clear) so the agent
@@ -289,19 +276,11 @@ export function registerExtensionMcpRoutes(
     // tools/call; the builder gets a resolver and awaits there.
 
     const extName = (req.params as { name: string }).name;
-    // A client that lost its Mcp-Session-Id (reconnect, restart) re-sends
-    // initialize; the SDK rejects that on an initialized transport forever.
-    if (
-      req.method === "POST" &&
-      req.headers["mcp-session-id"] === undefined &&
-      isInitializeRequest(req.body)
-    ) {
-      const scope = built.get(token);
-      const stale = scope?.get(extName);
-      if (stale?.transport.sessionId !== undefined) {
-        scope?.delete(extName);
-        void disposeBuiltPair(stale);
-      }
+    const scope = built.get(token);
+    const stale = scope?.get(extName);
+    if (stale !== undefined && isStaleReinitialize(req, stale)) {
+      scope?.delete(extName);
+      void disposeBuiltPair(stale);
     }
     const transport = await ensureTransport(token, extName);
     if (transport === undefined) {

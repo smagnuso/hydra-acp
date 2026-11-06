@@ -352,3 +352,54 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.matches[0]!.after?.map((a) => a.line)).toEqual(["L3"]);
 });
 });
+
+describe("stdin-server route, client re-initialize", () => {
+  let h: Harness | null = null;
+
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+
+  afterEach(async () => {
+    if (h) {
+      await h.app.close().catch(() => undefined);
+      h = null;
+    }
+  });
+
+  async function initialize(token: string): Promise<Response> {
+    return fetch(`${h!.baseUrl}/mcp/hydra-acp-stdin`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "0.0.1" },
+        },
+      }),
+    });
+  }
+
+  it("a second initialize on the same token gets a fresh session", async () => {
+    const token = "reinit-token";
+    h!.registry.bind(token, makeStreamSession());
+    const first = await initialize(token);
+    expect(first.status).toBe(200);
+    const second = await initialize(token);
+    expect(second.status).toBe(200);
+    const a = first.headers.get("mcp-session-id");
+    const b = second.headers.get("mcp-session-id");
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(b).not.toBe(a);
+  });
+
+});
