@@ -25,6 +25,9 @@ const maxThreads = Math.max(2, Math.min(8, cpus));
 // Spawning git is several times slower on Windows runners, so the git-heavy files run close to the default limit there.
 const timeoutMs = process.platform === "win32" ? 30_000 : 10_000;
 
+// Windows runners occasionally stall for tens of seconds and the worktree tests then time out or hit EBUSY; one retry there, vitest still lists each retried test.
+const retries = process.platform === "win32" && process.env.CI ? 1 : 0;
+
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
@@ -32,6 +35,7 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     testTimeout: timeoutMs,
     hookTimeout: timeoutMs,
+    retry: retries,
     pool: "threads",
     poolOptions: {
       threads: {

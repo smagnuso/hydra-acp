@@ -110,6 +110,17 @@ beforeEach(() => {
   process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = "1";
 });
 
+// Vitest says nothing about a test that failed and then passed on retry, so annotate each failed attempt on the run.
+beforeEach(({ task, onTestFailed }) => {
+  if (process.platform !== "win32" || !process.env.CI) {
+    return;
+  }
+  onTestFailed(() => {
+    const attempt = (task.result?.retryCount ?? 0) + 1;
+    console.log(`::warning title=Windows test failed::${task.file?.name ?? ""} > ${task.name} (attempt ${attempt})`);
+  });
+});
+
 // Retries back off linearly (50ms, 100ms, ...), so N retries can stall a
 // test for 25*N*(N+1) ms, and the swallowed error hides why. Set
 // HYDRA_ACP_TEST_CLEANUP_LOG to a directory to get one JSON line per sweep
