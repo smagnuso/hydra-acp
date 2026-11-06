@@ -742,6 +742,23 @@ interface ParseMarkdownOpts {
   maxWidth?: number;
 }
 
+// A raw tab only moves the terminal cursor, so the cells it skips keep
+// whatever an earlier frame drew there. Expand to tab stops before layout.
+function expandTabs(line: string, tabSize = 4): string {
+  if (!line.includes("\t")) {
+    return line;
+  }
+  let out = "";
+  for (const ch of line) {
+    if (ch === "\t") {
+      out += " ".repeat(tabSize - (out.length % tabSize));
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 // Block-level markdown → FormattedLines. Each newline-separated line is
 // classified once and emitted with a matching style. Inline marks for bold +
 // code are applied to prose and list items (see applyInlineMarkup); they are
@@ -766,7 +783,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   // which would otherwise land between the gutter and the first word ("  "
   // + " word" → "   word") and push the first line one column right of the
   // (whitespace-trimmed) continuation rows.
-  const lines = text.replace(/^\s+/, "").split("\n");
+  const lines = text.replace(/^\s+/, "").split("\n").map((l) => expandTabs(l));
   let inCode = false;
   let codeLang = "";
   let codeHeader = "";
@@ -1692,7 +1709,7 @@ function formatBlock(
   // Mirror parseMarkdown: strip leading whitespace so a streamed/replayed
   // body that begins with a space doesn't push the first line one column
   // past the gutter and out of alignment with later rows.
-  const lines = text.replace(/^\s+/, "").split("\n");
+  const lines = text.replace(/^\s+/, "").split("\n").map((l) => expandTabs(l));
   const out: FormattedLine[] = [];
   if (sentBy) {
     out.push({

@@ -36,6 +36,16 @@ function stripSgr(text: string): string {
 const ESC = "";
 
 describe("parseAgentMarkdown", () => {
+  it("expands tabs inside code fences so no raw tab reaches the terminal", () => {
+    const lines = parseAgentMarkdown("```jsonc\n{\n\t\"a\": 1,\n\t\t\"b\": 2,\n}\n```");
+    const bodies = lines.map((l) => l.body);
+    for (const b of bodies) {
+      expect(b).not.toContain("\t");
+    }
+    expect(bodies).toContain('    "a": 1,');
+    expect(bodies).toContain('        "b": 2,');
+  });
+
   it("renders prose lines with agent style and no ansi flag", () => {
     const lines = parseAgentMarkdown("hello world\nhow are you");
     expect(lines).toHaveLength(2);
