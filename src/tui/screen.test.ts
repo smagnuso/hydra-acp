@@ -1352,6 +1352,30 @@ describe("Screen lifecycle", () => {
     expect(out).toContain("\x1b]9;4;3\x1b\\");
     expect(out).toContain("\x1b]9;4;0\x1b\\");
   });
+
+  it("shows a solid paused bar while a permission prompt waits, then restores the pulse", () => {
+    const screen = makeScreen({ progressIndicator: true });
+    screen.start();
+    const original = process.stdout.write.bind(process.stdout);
+    const chunks: string[] = [];
+    process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+      chunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("binary"));
+      return original(chunk as Parameters<typeof original>[0], ...(rest as []));
+    }) as typeof process.stdout.write;
+    try {
+      screen.setBanner({ status: "busy", elapsedMs: 0 });
+      screen.setPermissionPrompt({ title: "Run?", options: [{ label: "Allow" }], selectedIndex: 0 });
+      // The app re-pushes the spec on every arrow key; that must not re-emit.
+      screen.setPermissionPrompt({ title: "Run?", options: [{ label: "Allow" }], selectedIndex: 0 });
+      // The banner ticking underneath must not displace the paused bar.
+      screen.setBanner({ status: "busy", elapsedMs: 1000 });
+      screen.setPermissionPrompt(null);
+    } finally {
+      process.stdout.write = original;
+    }
+    const writes = chunks.join("").match(/\x1b\]9;4;[^\x1b]*\x1b\\/g) ?? [];
+    expect(writes).toEqual(["\x1b]9;4;3\x1b\\", "\x1b]9;4;4;100\x1b\\", "\x1b]9;4;3\x1b\\"]);
+  });
 });
 
 describe("Selective Mouse Reporting probe + wheel", () => {

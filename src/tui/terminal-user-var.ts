@@ -271,10 +271,40 @@ export function publishReportedCwd(cwd: string): void {
   // spelling it the POSIX way silently disabled OSC 7 cwd reporting
   // entirely on Windows, where every absolute path starts with a drive
   // letter.
-  if (!path.isAbsolute(cwd) || !process.stdout.isTTY) {
+  const absolute =
+    process.platform === "win32" ? path.win32.isAbsolute(cwd) : path.isAbsolute(cwd);
+  if (!absolute || !process.stdout.isTTY) {
     return;
   }
   process.stdout.write(`${OSC}7;${fileUriForCwd(cwd)}${ST}`);
+  if (conemuCwdReportingHost(process.env, process.platform) && isSafeConemuPath(cwd)) {
+    process.stdout.write(`${OSC}9;9;"${cwd}"${ST}`);
+  }
+}
+
+// Windows Terminal ignores OSC 7 entirely and takes the pane's directory
+// from the ConEmu spelling, OSC 9;9. That is what "duplicate tab" and "split
+// pane" start in. Verified against Terminal 1.25: OSC 7 left a duplicated tab
+// in its launch directory, OSC 9;9 moved it. Gated on the hosts that speak it
+// because OSC 9 is a desktop-notification code elsewhere (iTerm2 would show
+// `9;"C:\..."` as the notification text).
+export function conemuCwdReportingHost(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32") {
+    return false;
+  }
+  return (
+    (env["WT_SESSION"] !== undefined && env["WT_SESSION"] !== "") ||
+    (env["ConEmuPID"] !== undefined && env["ConEmuPID"] !== "")
+  );
+}
+
+// The path rides inside double quotes in an OSC payload, so a quote or any
+// control character would end the sequence or the quoting early.
+function isSafeConemuPath(p: string): boolean {
+  return !/["\x00-\x1f\x7f]/.test(p);
 }
 
 // Point the host back at this process's real directory on the way out, so a

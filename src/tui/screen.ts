@@ -1290,11 +1290,11 @@ export class Screen {
   private selectiveMouseSupported = false;
   private selectiveMouseProbing = false;
   private selectiveMouseProbeTimer: NodeJS.Timeout | null = null;
-  // Last OSC 9;4 state we wrote (3 = indeterminate, 0 = remove). Used to
-  // suppress redundant writes when setBanner runs but `status` didn't
-  // actually change, and to re-emit on start() if a picker round-trip
-  // cleared the host terminal's indicator.
-  private lastProgressState: 0 | 3 = 0;
+  // Last OSC 9;4 state we wrote (4 = paused/warning, 3 = indeterminate,
+  // 0 = remove). Used to suppress redundant writes when setBanner runs but
+  // `status` didn't actually change, and to re-emit on start() if a picker
+  // round-trip cleared the host terminal's indicator.
+  private lastProgressState: 0 | 3 | 4 = 0;
 
   // View-only mode. Set once at construction. When true, promptRows()
   // returns 0 (composer collapses, scrollback expands), drawPrompt()
@@ -1450,7 +1450,7 @@ export class Screen {
     // forcing a fresh write when status is still "busy" gets the
     // taskbar pulsing again.
     this.lastProgressState = 0;
-    this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
+    this.syncProgressIndicator();
     this.repaint();
   }
 
@@ -2729,7 +2729,7 @@ export class Screen {
 
   setBanner(banner: Partial<BannerState>): void {
     this.banner = { ...this.banner, ...banner };
-    this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
+    this.syncProgressIndicator();
     // Same idea as writeProgressIndicator, different consumer. This runs
     // at 1Hz while a turn is in flight (the elapsed clock), so the report
     // reporter dedupes on derived state rather than on being called.
@@ -2772,12 +2772,23 @@ export class Screen {
   }
 
   // OSC 9;4 progress-bar control. State 3 = indeterminate (pulsing
-  // taskbar / dock badge while a turn is running); state 0 = remove.
-  // ConEmu-flavor sequence — supported by Windows Terminal, WezTerm,
-  // Ghostty, Konsole, Black Box, Rio, and others; ignored harmlessly
-  // by terminals that don't implement it. Disabled entirely when
-  // tui.progressIndicator is false.
-  private writeProgressIndicator(state: 0 | 3): void {
+  // taskbar / dock badge while a turn is running); state 4 = paused, drawn
+  // as a solid amber bar, used while a permission prompt is waiting on the
+  // user; state 0 = remove. ConEmu-flavor sequence, supported by Windows
+  // Terminal, WezTerm, Ghostty, Konsole, Black Box, Rio, and others;
+  // ignored harmlessly by terminals that don't implement it. Windows
+  // Terminal 1.25 raised no toast for OSC 9, 777 or 99, so the amber bar is
+  // the "needs you" signal that reaches the taskbar while the window is in
+  // the background. Disabled entirely when tui.progressIndicator is false.
+  private syncProgressIndicator(): void {
+    if (this.permissionPrompt !== null) {
+      this.writeProgressIndicator(4);
+      return;
+    }
+    this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
+  }
+
+  private writeProgressIndicator(state: 0 | 3 | 4): void {
     if (!this.started) {
       return;
     }
@@ -2788,7 +2799,8 @@ export class Screen {
       return;
     }
     this.lastProgressState = state;
-    process.stdout.write(`\x1b]9;4;${state}\x1b\\`);
+    // A paused bar with no value renders empty; 100 fills it.
+    process.stdout.write(`\x1b]9;4;${state === 4 ? "4;100" : state}\x1b\\`);
   }
 
   // Transient right-side banner message. Cleared automatically after
@@ -3633,6 +3645,7 @@ export class Screen {
     // A host renders it as `blocked`, which is what drives its attention
     // rollup.
     reportPermission(this.permissionPrompt !== null);
+    this.syncProgressIndicator();
     this.repaint();
   }
 

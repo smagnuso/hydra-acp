@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { fileUriForCwd } from "./format.js";
-import { publishReportedCwd, restoreReportedCwd } from "./terminal-user-var.js";
+import { conemuCwdReportingHost, publishReportedCwd, restoreReportedCwd } from "./terminal-user-var.js";
+import { onPlatform } from "../core/platform-stub.js";
 
 // Capture raw stdout so the assertions are on the actual escape bytes a
 // host multiplexer would parse, not on an abstraction over them.
@@ -115,5 +116,56 @@ describe("restoreReportedCwd", () => {
   it("reports this process's real directory", () => {
     const out = captureStdout(() => restoreReportedCwd());
     expect(out).toBe(`\x1b]7;${fileUriForCwd(process.cwd())}\x1b\\`);
+  });
+});
+
+describe("OSC 9;9 cwd for Windows Terminal", () => {
+  const savedWt = process.env["WT_SESSION"];
+  const savedConEmu = process.env["ConEmuPID"];
+  afterEach(() => {
+    for (const [k, v] of [["WT_SESSION", savedWt], ["ConEmuPID", savedConEmu]] as const) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
+    }
+  });
+
+  it("is spoken only by Windows Terminal and ConEmu on win32", () => {
+    expect(conemuCwdReportingHost({ WT_SESSION: "abc" }, "win32")).toBe(true);
+    expect(conemuCwdReportingHost({ ConEmuPID: "123" }, "win32")).toBe(true);
+    expect(conemuCwdReportingHost({}, "win32")).toBe(false);
+    expect(conemuCwdReportingHost({ WT_SESSION: "" }, "win32")).toBe(false);
+    // OSC 9 is a notification code elsewhere: never off Windows.
+    expect(conemuCwdReportingHost({ WT_SESSION: "abc" }, "linux")).toBe(false);
+  });
+
+  it("writes OSC 7 and then a quoted OSC 9;9", async () => {
+    process.env["WT_SESSION"] = "abc";
+    delete process.env["ConEmuPID"];
+    const out = await onPlatform("win32", () =>
+      captureStdout(() => publishReportedCwd("C:\\Users\\Sam\\my proj")),
+    );
+    expect(out).toBe(
+      "\x1b]7;file:///C:/Users/Sam/my%20proj\x1b\\" + '\x1b]9;9;"C:\\Users\\Sam\\my proj"\x1b\\',
+    );
+  });
+
+  it("writes only OSC 7 outside those hosts", async () => {
+    delete process.env["WT_SESSION"];
+    delete process.env["ConEmuPID"];
+    const out = await onPlatform("win32", () =>
+      captureStdout(() => publishReportedCwd("C:\\Users\\Sam")),
+    );
+    expect(out).toBe("\x1b]7;file:///C:/Users/Sam\x1b\\");
+  });
+
+  it("skips OSC 9;9 for a path that would break out of the quoting", async () => {
+    process.env["WT_SESSION"] = "abc";
+    const out = await onPlatform("win32", () =>
+      captureStdout(() => publishReportedCwd('C:\\a"b')),
+    );
+    expect(out).not.toContain("\x1b]9;9");
   });
 });
