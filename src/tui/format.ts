@@ -134,6 +134,7 @@ export type Style =
   | "status-idle"
   | "status-active"
   | "status-blocked"
+  | "status-unread"
   | "status-queued"
   | "status-alert"
   | "status-cold"

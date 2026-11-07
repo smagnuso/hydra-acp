@@ -1500,13 +1500,14 @@ describe("sessions gadget", () => {
 
   // A session that armed a background task and handed the turn back is
   // still working: `hydra session list` and the picker both call it BUSY.
-  // Here it gets its own glyph but busy's colour, so it reads as active at a
-  // glance without claiming a turn is in flight.
+  // Here it gets its own glyph (a bullet, smaller than busy's dot) but busy's
+  // colour, so it reads as active at a glance without claiming a turn is in
+  // flight.
   it("marks a session with an armed background task as working", () => {
     const row = (e: SidebarLiveSession) =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
     const armed = row(live("armed", { armed: true }));
-    expect(armed.body.slice(-2)).toBe(" ▸");
+    expect(armed.body.slice(-2)).toBe(" •");
     expect(armed.bodyStyle).toBe("status-active");
     expect(armed.prefixStyle).toBe("status-active");
     // Same accent as a mid-turn session, different shape.
@@ -1514,7 +1515,7 @@ describe("sessions gadget", () => {
     expect(armed.bodyStyle).toBe(busy.bodyStyle);
     expect(armed.body.slice(-2)).not.toBe(busy.body.slice(-2));
     // The waiting cell is independent of it, like it is of busy.
-    expect(row(live("both", { armed: true, blocked: true })).body.slice(-2)).toBe("◦▸");
+    expect(row(live("both", { armed: true, blocked: true })).body.slice(-2)).toBe("◦•");
   });
 
   // A turn in flight outranks a mere armed task, and an armed task outranks
@@ -1542,12 +1543,20 @@ describe("sessions gadget", () => {
     ]);
   });
 
-  it("marks a quiet unread session with its own dot", () => {
-    const marker = (e: SidebarLiveSession): string =>
-      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.body.slice(-1);
-    expect(marker(live("a", { unread: true }))).toBe("•");
+  // Unread is busy's filled dot in its own colour: shape says "something is
+  // here", hue says which kind. A working session keeps the yellow one.
+  it("marks a quiet unread session with a blue filled dot", () => {
+    const row = (e: SidebarLiveSession) =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
+    const marker = (e: SidebarLiveSession): string => row(e).body.slice(-1);
+    expect(marker(live("a", { unread: true }))).toBe("●");
+    expect(row(live("a", { unread: true })).bodyStyle).toBe("status-unread");
     expect(marker(live("a"))).toBe("○");
+    expect(row(live("a")).bodyStyle).toBe("status-idle");
     expect(marker(live("a", { unread: true, busy: true }))).toBe("●");
+    expect(row(live("a", { unread: true, busy: true })).bodyStyle).toBe("status-active");
+    // Blocked outranks unread for colour, as it does for everything else.
+    expect(row(live("a", { unread: true, blocked: true })).bodyStyle).toBe("status-blocked");
   });
 
   it("underlines the current session's label, quiet or working", () => {

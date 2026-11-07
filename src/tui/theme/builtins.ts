@@ -705,6 +705,9 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
       // separates by 54 under simulation; yellow manages 135.
       active: fgRole(OKABE_ITO.yellow),
       cold: fgRole(OKABE_ITO.reddishPurple),
+      // Sky blue against `active`'s yellow: the unread dot and the busy dot are
+      // the same glyph, so this pair is all that separates them.
+      unread: fgRole(OKABE_ITO.skyBlue),
       // A diff is the densest red/green in the app, and the one place the two
       // colours sit adjacent line by line.
       diffAdded: fgRole(OKABE_ITO.skyBlue),
@@ -749,6 +752,8 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
       warn: ansiRole(15),
       ok: ansiRole(7),
       cold: ansiRole(7),
+      // Quieter than `active` (15), so busy and unread still differ in weight.
+      unread: ansiRole(7),
       accent: ansiRole(15),
       info: ansiRole(7),
       reference: ansiRole(15),

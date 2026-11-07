@@ -232,7 +232,7 @@ export const activityGadget: Gadget = {
       return [
         row(
           labelValue(
-            onlyUnobservableTasks(s) ? "▸ started" : "▸ waiting",
+            onlyUnobservableTasks(s) ? "• started" : "• waiting",
             shortDuration(s.now - s.armedSince),
             ctx,
           ),
@@ -810,14 +810,19 @@ export function formatCpu(fraction: number | undefined): string {
 // blocked on you. Two independent axes, shown as a two-cell marker at the
 // right edge of the row.
 //
-//   ● working / ▸ background task running / ○ quiet — the same three glyphs
-//   the activity gadget uses at the top of this very column ("● thinking" /
-//   "▸ waiting" / "○ idle"), so a glyph means the same thing whether it
-//   describes this session or another. ▸ shares ●'s yellow: both are the
-//   session doing work, and the shape carries the difference (a turn is in
+//   ● working / • background task running / ○ quiet — the same glyphs the
+//   activity gadget uses at the top of this very column ("● thinking" /
+//   "• waiting" / "○ idle"), so a glyph means the same thing whether it
+//   describes this session or another. • shares ●'s yellow: both are the
+//   session doing work, and the size carries the difference (a turn is in
 //   flight vs. the agent handed the turn back but armed a job that can wake
 //   it up). Without it an armed session read as quiet here while `hydra
-//   session list` and the picker called it BUSY.
+//   session list` and the picker called it BUSY. It is a bullet rather than
+//   the ▸ the transcript uses for "click to expand".
+//
+//   ● in blue when a quiet session has something you have not read. The same
+//   glyph as working, so the hue alone says which; a working session shows
+//   the yellow one, since a turn in flight is the louder fact.
 //
 //   ◦ in the cell to its left when something is blocked on you, blank
 //   otherwise. Matches the picker's and `hydra session list`'s "WARM◦",
@@ -835,10 +840,10 @@ export function formatCpu(fraction: number | undefined): string {
 // filesystem paths anyway (see rowLinkSpans) — the row stays
 // double-clickable through openPath.
 const BUSY_MARK = "●";
-const RUNNING_MARK = "▸";
+const RUNNING_MARK = "•";
 const IDLE_MARK = "○";
 const BLOCKED_MARK = "◦";
-const UNREAD_MARK = "•";
+const UNREAD_MARK = "●";
 
 export const sessionsGadget: Gadget = {
   id: "sessions",
@@ -935,7 +940,9 @@ export const sessionsGadget: Gadget = {
           ? "status-active"
           : entry.blocked
             ? "status-blocked"
-            : "status-idle",
+            : entry.unread
+              ? "status-unread"
+              : "status-idle",
         ...(entry.current
           ? {}
           : { doubleAction: { action: "open-session", value: entry.sessionId } }),

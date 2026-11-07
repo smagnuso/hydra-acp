@@ -439,6 +439,9 @@ function buildRoles() {
   error: [fgL(palette.brightRed)],
   errorSoft: [fgL(palette.red)],
   cold: [fgL(palette.brightMagenta)],
+  // A session has something for you to read. Bright blue, the one hue here
+  // that stays clear of `active`'s yellow for every common colour vision type.
+  unread: [fgL(palette.brightBlue)],
 
   // Git working-tree status. Its own family rather than borrowing ok / reference /
   // muted, for the reason syntax has its own: those three are a CLASSIFICATION of
@@ -1007,7 +1010,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // flight — which spans reasoning, text streaming AND tool execution, since
   // it is driven by pendingTurns going 0->1 — but it also covers a background
   // task the agent armed and handed the turn back on, which both the activity
-  // gadget ("▸ waiting") and the live-session rows paint with it. The glyph
+  // gadget ("• waiting") and the live-session rows paint with it. The glyph
   // carries which of the two it is; the colour only says "still going".
   // It is deliberately not called "thinking": that is only the label
   // the activity gadget prints, and naming the token after it would invite
@@ -1043,6 +1046,10 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // Prompts typed but not yet sent. Not active — pending — but it earns the
   // accent because it is outstanding work the user should notice.
   "status-queued": { layers: [...roles.active] },
+  // A session that finished something you have not looked at yet. Same glyph
+  // as `status-active` (a filled dot); the hue says "come read this" where
+  // yellow says "still going".
+  "status-unread": { layers: [...roles.unread] },
   "status-alert": { layers: [...roles.error] },
   "status-cold": { layers: [...roles.cold] },
 

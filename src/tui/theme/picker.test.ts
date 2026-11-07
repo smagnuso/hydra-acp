@@ -132,6 +132,18 @@ describe("mono", () => {
     // Failure keeps its bold.
     expect(failed).toContain("\x1b[1m");
   });
+
+  // The unread dot and the busy dot are the same glyph, so colour is all that
+  // separates them. That has to hold in every theme, mono included.
+  it("keeps the unread marker distinct from busy and idle in every builtin", async () => {
+    const list = await listThemes(await mkdtemp(join(tmpdir(), "t-")));
+    for (const theme of list) {
+      setTheme(theme.palette, theme.overrides);
+      const unread = resolveStyle("status-unread", "truecolor").open;
+      expect(unread, theme.name).not.toBe(resolveStyle("status-active", "truecolor").open);
+      expect(unread, theme.name).not.toBe(resolveStyle("status-idle", "truecolor").open);
+    }
+  });
 });
 
 describe("stepTheme", () => {
