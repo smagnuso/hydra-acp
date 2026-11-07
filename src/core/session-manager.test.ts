@@ -54,6 +54,26 @@ function fakeRegistry(agents: RegistryAgent[]): Registry {
   } as unknown as Registry;
 }
 
+describe("SessionManager.create cwd", () => {
+  it("expands a leading ~ before the agent is spawned", async () => {
+    const seen: string[] = [];
+    const manager = new TrackedSessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      (opts: { cwd: string }) => {
+        seen.push(opts.cwd);
+        const m = makeMockAgent({ agentId: "claude-code", cwd: opts.cwd });
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_new" });
+        return m.agent;
+      },
+    );
+    await manager.create({ cwd: "~/proj", agentId: "claude-code" });
+    expect(seen).toEqual([path.join(os.homedir(), "proj")]);
+  });
+});
+
 describe("SessionManager.resurrect", () => {
   let mocks: MockAgentControls[];
   let mockIndex: number;

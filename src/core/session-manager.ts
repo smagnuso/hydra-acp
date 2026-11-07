@@ -1201,7 +1201,7 @@ export class SessionManager {
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
-    params = { ...params, cwd: nativeCwd(params.cwd) };
+    params = { ...params, cwd: nativeCwd(expandHome(params.cwd)) };
     // Canonicalize the caller-supplied agentId to the registry's id
     // (e.g. "claude-agent-acp" from a shim → "claude-acp", "claude"
     // from --agent fuzzy match → "claude-acp") so the persisted session
@@ -7153,7 +7153,7 @@ export class SessionManager {
     // derivation fails we fall back to the parent's SOURCE tree
     // (unisolated but safe) and never to its workspace: landing there is
     // the exact bug this guards against.
-    let forkCwd = opts.cwd === undefined ? undefined : nativeCwd(opts.cwd);
+    let forkCwd = opts.cwd === undefined ? undefined : nativeCwd(expandHome(opts.cwd));
     let forkWorkspace: PersistedWorkspace | undefined;
     if (opts.cwd === undefined && sourceRecord.workspace !== undefined) {
       const derived = await this.deriveForkWorkspace(
