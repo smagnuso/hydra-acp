@@ -7,6 +7,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { expandHome } from "./config.js";
+import {
+  isPathSeparator,
+  lastPathSeparator,
+  separatorFor,
+} from "./pathsep.js";
 
 // Ido/`substitute-in-file-name`-style "guess what you meant" collapsing:
 // typing "~" right after a "/" (with nothing but another "/" or end of
@@ -56,15 +61,17 @@ function driveLetterBoundary(text: string): number {
 export function pathShadowBoundary(text: string): number {
   let trigger = -1;
   for (let i = 0; i < text.length - 1; i++) {
-    if (text[i] !== "/") {
+    if (!isPathSeparator(text[i])) {
       continue;
     }
     const next = text[i + 1];
-    if (next === "/") {
+    // Only "//" doubles as "start over from root": a doubled backslash opens
+    // a UNC path on Windows, so it is not a gesture.
+    if (next === "/" && text[i] === "/") {
       trigger = i;
     } else if (next === "~") {
       const after = text[i + 2];
-      if (after === "/" || after === undefined) {
+      if (isPathSeparator(after) || after === undefined) {
         trigger = i;
       }
     }
@@ -88,11 +95,11 @@ export function pathShadowBoundary(text: string): number {
 export function pathShadowCommitBoundary(text: string): number {
   let boundary = 0;
   for (let i = 0; i < text.length - 1; i++) {
-    if (text[i] !== "/") {
+    if (!isPathSeparator(text[i])) {
       continue;
     }
     const next = text[i + 1];
-    if (next === "/") {
+    if (next === "/" && text[i] === "/") {
       let end = i;
       while (text[end] === "/") {
         end++;
@@ -100,7 +107,7 @@ export function pathShadowCommitBoundary(text: string): number {
       if (end - i >= 3 && end - 1 > boundary) {
         boundary = end - 1;
       }
-    } else if (next === "~" && text[i + 2] === "/") {
+    } else if (next === "~" && isPathSeparator(text[i + 2])) {
       if (i + 1 > boundary) {
         boundary = i + 1;
       }
@@ -191,7 +198,7 @@ export async function completeLocalPath(
   rawInput: string,
 ): Promise<PathCompletion> {
   const input = collapseTypedPath(rawInput);
-  const lastSlash = input.lastIndexOf("/");
+  const lastSlash = lastPathSeparator(input);
   let prefix: string;
   let basePrefix: string;
   let dirForRead: string;
@@ -202,7 +209,7 @@ export async function completeLocalPath(
   } else {
     prefix = input.slice(0, lastSlash + 1);
     basePrefix = input.slice(lastSlash + 1);
-    dirForRead = lastSlash === 0 ? "/" : prefix;
+    dirForRead = lastSlash === 0 ? (input[0] as string) : prefix;
   }
   const resolvedDir = path.resolve(expandHome(dirForRead));
   let entries: { name: string; isDir: boolean }[];
@@ -225,10 +232,14 @@ export async function completeLocalPath(
     return { prefix, basePrefix, matches: [] };
   }
   const showHidden = basePrefix.startsWith(".");
+  // Windows filenames are case-insensitive, so "pro" completes "Program Files".
+  const fold = (x: string): string =>
+    process.platform === "win32" ? x.toLowerCase() : x;
+  const sep = separatorFor(prefix);
   const matches = entries
-    .filter((e) => e.name.startsWith(basePrefix))
+    .filter((e) => fold(e.name).startsWith(fold(basePrefix)))
     .filter((e) => showHidden || !e.name.startsWith("."))
-    .map((e) => (e.isDir ? `${e.name}/` : e.name))
+    .map((e) => (e.isDir ? `${e.name}${sep}` : e.name))
     .sort();
   return { prefix, basePrefix, matches };
 }

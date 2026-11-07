@@ -9,6 +9,7 @@ import {
   pickInitialLocalCwd,
   validateLocalCwd,
 } from "./cwd.js";
+import { onPlatform } from "./platform-stub.js";
 
 // Table verified against GNU Emacs 29.3's `substitute-in-file-name`,
 // which implements the same "guess what you meant" collapsing that
@@ -269,5 +270,67 @@ describe("completeLocalPath", () => {
     expect(result.prefix).toBe(`${tmpDir}/`);
     expect(result.basePrefix).toBe("ap");
     expect(result.matches).toEqual(["apple/", "apricot.txt"]);
+  });
+});
+
+describe("Windows path separators", () => {
+  it("treats \\~\\ as start over from home, like /~/", async () => {
+    await onPlatform("win32", () => {
+      expect(pathShadowBoundary("C:\\foo\\~\\")).toBe(7);
+      expect(pathShadowCommitBoundary("x\\~\\")).toBe(2);
+    });
+    await onPlatform("linux", () => {
+      expect(pathShadowBoundary("C:\\foo\\~\\")).toBe(0);
+      expect(pathShadowCommitBoundary("x\\~\\")).toBe(0);
+    });
+  });
+
+  it("does not treat a doubled backslash as start over from root (UNC paths)", async () => {
+    await onPlatform("win32", () => {
+      expect(pathShadowBoundary("\\\\server\\share")).toBe(0);
+    });
+  });
+
+  it("splits completion input on a backslash on Windows only", async () => {
+    await onPlatform("win32", async () => {
+      const r = await completeLocalPath("C:\\Users\\Sam\\Do");
+      expect(r.prefix).toBe("C:\\Users\\Sam\\");
+      expect(r.basePrefix).toBe("Do");
+      const mixed = await completeLocalPath("C:/Users\\Sam/Do");
+      expect(mixed.prefix).toBe("C:/Users\\Sam/");
+      expect(mixed.basePrefix).toBe("Do");
+    });
+    await onPlatform("linux", async () => {
+      const r = await completeLocalPath("C:\\Users\\Sam\\Do");
+      expect(r.prefix).toBe("");
+      expect(r.basePrefix).toBe("C:\\Users\\Sam\\Do");
+    });
+  });
+
+  describe("completion matching", () => {
+    let tmpDir: string;
+
+    beforeAll(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cwd-win-"));
+      await fs.mkdir(path.join(tmpDir, "Programs"));
+    });
+
+    afterAll(async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it("matches case-insensitively on Windows and keeps the typed separator", async () => {
+      await onPlatform("win32", async () => {
+        const r = await completeLocalPath(`${tmpDir}/pro`);
+        expect(r.matches).toEqual(["Programs/"]);
+      });
+    });
+
+    it("stays case-sensitive on POSIX", async () => {
+      await onPlatform("linux", async () => {
+        const r = await completeLocalPath(`${tmpDir}/pro`);
+        expect(r.matches).toEqual([]);
+      });
+    });
   });
 });

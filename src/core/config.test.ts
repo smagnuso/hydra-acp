@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { onPlatform } from "./platform-stub.js";
 import { homedir } from "node:os";
 import * as fs from "node:fs/promises";
 import {
@@ -489,6 +490,16 @@ describe("expandHome", () => {
 
   it("does not expand a tilde mid-string", () => {
     expect(expandHome("/tmp/~oddname")).toBe("/tmp/~oddname");
+  });
+
+  it("expands ~\\foo and $HOME\\foo on Windows only", async () => {
+    await onPlatform("win32", () => {
+      expect(expandHome("~\\dev\\foo")).toBe(`${home}\\dev\\foo`);
+      expect(expandHome("$HOME\\dev")).toBe(`${home}\\dev`);
+    });
+    await onPlatform("linux", () => {
+      expect(expandHome("~\\dev")).toBe("~\\dev");
+    });
   });
 });
 

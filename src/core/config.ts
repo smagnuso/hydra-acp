@@ -1344,5 +1344,13 @@ export function expandHome(p: string): string {
   if (p.startsWith("$HOME/")) {
     return homedir() + p.slice("$HOME".length);
   }
+  if (process.platform === "win32") {
+    if (p.startsWith("~\\")) {
+      return homedir() + p.slice(1);
+    }
+    if (p.startsWith("$HOME\\")) {
+      return homedir() + p.slice("$HOME".length);
+    }
+  }
   return p;
 }

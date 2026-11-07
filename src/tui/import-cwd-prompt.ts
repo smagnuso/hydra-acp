@@ -13,6 +13,7 @@
 import type { Terminal } from "terminal-kit";
 import * as os from "node:os";
 import { shortenHomePath } from "../core/paths.js";
+import { isPathSeparator, nativeSeparator } from "../core/pathsep.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import {
   completeLocalPath,
@@ -79,12 +80,16 @@ export async function promptForImportCwd(
       ]
     : [];
 
-  // A directory path always ends in "/" here (matching Emacs's
+  // A directory path always ends in a separator here (matching Emacs's
   // `default-directory` convention) so that typing a bare "~" or a
   // second "/" right away is enough to trigger the shadow below — the
-  // user shouldn't have to type a separating "/" themselves first.
+  // user shouldn't have to type a separating "/" themselves first. The
+  // separator is the platform's own, and a path that already ends in
+  // either kind is left alone.
   const editor = new LineEditor(
-    defaultCwd.endsWith("/") ? defaultCwd : defaultCwd + "/",
+    isPathSeparator(defaultCwd[defaultCwd.length - 1])
+      ? defaultCwd
+      : defaultCwd + nativeSeparator(),
   );
   // Once a shadow trigger is unambiguous — a real "/" after "~", or a
   // doubled "//" — actually drop the shadowed prefix instead of leaving

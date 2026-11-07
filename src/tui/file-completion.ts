@@ -10,6 +10,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import {
+  isPathSeparator,
+  lastPathSeparator,
+  separatorFor,
+} from "../core/pathsep.js";
 import { longestCommonPrefix } from "./completion.js";
 
 // The whitespace-delimited run ending at the cursor, plus the column it
@@ -46,7 +51,7 @@ export function looksLikePath(token: string): boolean {
   if (token.length === 0) {
     return false;
   }
-  if (token.includes("/")) {
+  if (token.includes("/") || (process.platform === "win32" && token.includes("\\"))) {
     return true;
   }
   return token === "~" || token === "." || token === "..";
@@ -67,7 +72,7 @@ function escapeToken(token: string): string {
 // completing. "src/fo" → { dirPrefix: "src/", base: "fo" }; "fo" →
 // { dirPrefix: "", base: "fo" }.
 function splitToken(token: string): { dirPrefix: string; base: string } {
-  const slash = token.lastIndexOf("/");
+  const slash = lastPathSeparator(token);
   if (slash === -1) {
     return { dirPrefix: "", base: token };
   }
@@ -78,7 +83,7 @@ function splitToken(token: string): { dirPrefix: string; base: string } {
 // expanding a leading ~ and anchoring relative prefixes at `cwd`.
 function resolveDir(dirPrefix: string, cwd: string): string {
   let p = dirPrefix.length === 0 ? "." : dirPrefix;
-  if (p === "~" || p.startsWith("~/")) {
+  if (p === "~" || (p[0] === "~" && isPathSeparator(p[1]))) {
     p = os.homedir() + p.slice(1);
   }
   return path.isAbsolute(p) ? p : path.resolve(cwd, p);
@@ -139,17 +144,21 @@ export function completePathToken(
   }
   // Hide dotfiles unless the user has started typing the leading dot.
   const showHidden = base.startsWith(".");
+  const fold = (x: string): string =>
+    process.platform === "win32" ? x.toLowerCase() : x;
   const matched = entries.filter(
     (e) =>
-      e.name.startsWith(base) && (showHidden || !e.name.startsWith(".")),
+      fold(e.name).startsWith(fold(base)) &&
+      (showHidden || !e.name.startsWith(".")),
   );
   if (matched.length === 0) {
     return null;
   }
-  const candidates = matched.map((e) => (e.isDir ? e.name + "/" : e.name));
+  const sep = separatorFor(dirPrefix);
+  const candidates = matched.map((e) => (e.isDir ? e.name + sep : e.name));
   if (matched.length === 1) {
     const only = matched[0]!;
-    const completedBase = only.isDir ? only.name + "/" : only.name;
+    const completedBase = only.isDir ? only.name + sep : only.name;
     return {
       replacement: escapeToken(dirPrefix + completedBase),
       candidates,

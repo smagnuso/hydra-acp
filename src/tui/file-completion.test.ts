@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { onPlatform } from "../core/platform-stub.js";
 import {
   completePathToken,
   extractPathToken,
@@ -145,5 +146,57 @@ describe("completePathToken", () => {
     expect(
       completePathToken("./my\\ d", "/cwd", dir([{ name: "my dir", isDir: true }])),
     ).toEqual({ replacement: "./my\\ dir/", candidates: ["my dir/"] });
+  });
+});
+
+describe("Windows path completion", () => {
+  const dir = (entries: DirEntry[]) => () => entries;
+
+  it("treats a token containing a backslash as a path on Windows only", async () => {
+    await onPlatform("win32", () => {
+      expect(looksLikePath("src\\fo")).toBe(true);
+    });
+    await onPlatform("linux", () => {
+      expect(looksLikePath("src\\fo")).toBe(false);
+    });
+  });
+
+  it("completes after a backslash and keeps the backslash style", async () => {
+    await onPlatform("win32", () => {
+      expect(
+        completePathToken("src\\fo", "C:\\proj", dir([{ name: "foo", isDir: true }])),
+      ).toEqual({ replacement: "src\\foo\\", candidates: ["foo\\"] });
+    });
+  });
+
+  it("keeps a forward slash when that is what was typed", async () => {
+    await onPlatform("win32", () => {
+      expect(
+        completePathToken("src/fo", "C:\\proj", dir([{ name: "foo", isDir: true }])),
+      ).toEqual({ replacement: "src/foo/", candidates: ["foo/"] });
+    });
+  });
+
+  it("matches names case-insensitively on Windows", async () => {
+    await onPlatform("win32", () => {
+      expect(
+        completePathToken("src\\mak", "C:\\proj", dir([{ name: "Makefile", isDir: false }])),
+      ).toEqual({ replacement: "src\\Makefile", candidates: ["Makefile"] });
+    });
+  });
+
+  it("still escapes a space with a backslash", async () => {
+    await onPlatform("win32", () => {
+      expect(
+        completePathToken(
+          "C:\\Program\\ Fi",
+          "C:\\proj",
+          dir([{ name: "Program Files", isDir: true }]),
+        ),
+      ).toEqual({
+        replacement: "C:\\Program\\ Files\\",
+        candidates: ["Program Files\\"],
+      });
+    });
   });
 });
