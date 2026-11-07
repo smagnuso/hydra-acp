@@ -650,8 +650,46 @@ describe("writeClipboard", () => {
     }
   });
 
-  it("returns a structured error on Windows when no TTY is available", async () => {
-    const { spawn } = makeSpawnFake([]);
+  it("writes through clip.exe on Windows as UTF-16LE with a BOM", async () => {
+    // clip.exe decodes stdin in the OEM code page, so UTF-8 comes out as
+    // mojibake. The BOM is what makes it treat the payload as Unicode.
+    const sink: Buffer[] = [];
+    const { spawn } = makeSpawnFake([
+      { cmd: "clip.exe", args: [], code: 0, stdinSink: sink },
+    ]);
+    const text = "h\u00e9llo \u2713 \u65e5\u672c \u{1F642}\nsecond";
+    const result = await writeClipboard(text, {
+      platform: "win32",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: () => false,
+    });
+    expect(result.ok && result.method).toBe("clip");
+    const sent = Buffer.concat(sink);
+    expect([...sent.subarray(0, 2)]).toEqual([0xff, 0xfe]);
+    expect(sent.subarray(2).toString("utf16le")).toBe(text);
+  });
+
+  it("falls back to OSC 52 on Windows when clip.exe fails", async () => {
+    const { spawn } = makeSpawnFake([{ cmd: "clip.exe", args: [], code: 1 }]);
+    let captured = "";
+    const result = await writeClipboard("fallback", {
+      platform: "win32",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: (d) => {
+        captured = d;
+        return true;
+      },
+    });
+    expect(result.ok && result.method).toBe("osc52");
+    expect(captured).toContain(Buffer.from("fallback").toString("base64"));
+  });
+
+  it("reports clip.exe as the failure on Windows when nothing else can copy", async () => {
+    const { spawn } = makeSpawnFake([{ cmd: "clip.exe", args: [], code: 1 }]);
     const result = await writeClipboard("x", {
       platform: "win32",
       env: {},
@@ -661,7 +699,7 @@ describe("writeClipboard", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/win32/);
+      expect(result.reason).toMatch(/clip\.exe/);
     }
   });
 
@@ -702,18 +740,112 @@ describe("writeClipboard", () => {
 });
 
 describe("readClipboard — unsupported platforms", () => {
-  it("returns a structured error on Windows (not yet supported)", async () => {
+  it("returns a structured error on an unknown platform", async () => {
     const { spawn } = makeSpawnFake([]);
     const result = await readClipboard({
-      platform: "win32",
+      platform: "freebsd",
       env: {},
       spawn,
       tmpdir: () => "/tmp",
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/win32/);
+      expect(result.reason).toMatch(/freebsd/);
     }
+  });
+});
+
+describe("readClipboard — Windows", () => {
+  const win = (spawn: SpawnLike, tmp: string) => ({
+    platform: "win32" as const,
+    env: {},
+    spawn,
+    tmpdir: () => tmp,
+  });
+
+  it("reads text through PowerShell in an STA, normalizing CRLF", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      {
+        cmd: "powershell.exe",
+        args: [],
+        code: 0,
+        stdout: Buffer.from("h\u00e9llo\r\nsecond \u65e5\u672c", "utf-8"),
+      },
+    ]);
+    const result = await readClipboard(win(spawn, "/tmp"));
+    expect(result).toEqual({
+      ok: true,
+      kind: "text",
+      text: "h\u00e9llo\nsecond \u65e5\u672c",
+    });
+    expect(calls[0]!.args).toContain("-STA");
+    expect(calls[0]!.args).toContain("-NoProfile");
+  });
+
+  it("returns an image attachment when PowerShell saved a PNG", async () => {
+    const dir = await freshTmpdir();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const { spawn } = makeSpawnFake([{ cmd: "powershell.exe", args: [], code: 10 }]);
+    const staged: SpawnLike = (cmd, args, options) => {
+      const script = args[args.length - 1] ?? "";
+      const m = script.match(/\.Save\('([^']+)'/);
+      if (m?.[1]) {
+        writeFileSync(m[1], png);
+      }
+      return spawn(cmd, args, options);
+    };
+    const result = await readClipboard(win(staged, dir));
+    expect(result.ok).toBe(true);
+    if (result.ok && result.kind === "image") {
+      expect(result.attachment.mimeType).toBe("image/png");
+      expect(Buffer.from(result.attachment.data, "base64")).toEqual(png);
+    } else {
+      throw new Error("expected an image");
+    }
+  });
+
+  it("finds PowerShell and clip.exe through SystemRoot, not PATH", async () => {
+    const ps = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    const clip = "C:\\Windows\\System32\\clip.exe";
+    const read = makeSpawnFake([{ cmd: ps, args: [], code: 0, stdout: Buffer.from("x") }]);
+    await readClipboard({
+      platform: "win32",
+      env: { SystemRoot: "C:\\Windows" },
+      spawn: read.spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(read.calls[0]!.cmd).toBe(ps);
+    const write = makeSpawnFake([{ cmd: clip, args: [], code: 0 }]);
+    const result = await writeClipboard("x", {
+      platform: "win32",
+      env: { SystemRoot: "C:\\Windows" },
+      spawn: write.spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: () => false,
+    });
+    expect(result.ok && result.method).toBe("clip");
+    expect(write.calls[0]!.cmd).toBe(clip);
+  });
+
+  it("reports an empty clipboard", async () => {
+    const { spawn } = makeSpawnFake([{ cmd: "powershell.exe", args: [], code: 11 }]);
+    const result = await readClipboard(win(spawn, "/tmp"));
+    expect(result).toEqual({ ok: false, reason: "clipboard is empty" });
+  });
+
+  it("reports a failed read when PowerShell exits non-zero", async () => {
+    const { spawn } = makeSpawnFake([{ cmd: "powershell.exe", args: [], code: 1 }]);
+    const result = await readClipboard(win(spawn, "/tmp"));
+    expect(result).toEqual({ ok: false, reason: "clipboard read failed" });
+  });
+
+  it("does not look for an image when pasting the selection", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "powershell.exe", args: [], code: 0, stdout: Buffer.from("sel") },
+    ]);
+    const result = await readPrimarySelection(win(spawn, "/tmp"));
+    expect(result).toEqual({ ok: true, kind: "text", text: "sel" });
+    expect(calls[0]!.args[calls[0]!.args.length - 1]).not.toContain("GetImage");
   });
 });
 

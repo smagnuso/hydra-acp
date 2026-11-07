@@ -17,7 +17,10 @@
 //     clipboard, exits 0 and dumps the *text* — so we must gate the
 //     image fetch on an explicit advertisement to avoid base64-ing
 //     plain text into a fake PNG attachment.
-//   - Windows: not yet supported; returns a structured error.
+//   - Windows: writes through `clip.exe`; reads through Windows PowerShell
+//     (image first, via System.Windows.Forms, then text). Neither needs
+//     the terminal's cooperation, so they work in the classic console
+//     host, which ignores OSC 52.
 //
 // The spawn fn is injectable so tests can mock platform tools without
 // touching the real process tree.
@@ -87,6 +90,9 @@ export async function readClipboard(
   if (env.platform === "linux") {
     return readLinux(env);
   }
+  if (env.platform === "win32") {
+    return readWindows(env, false);
+  }
   return {
     ok: false,
     reason: `clipboard paste is not supported on ${env.platform}`,
@@ -101,6 +107,9 @@ export async function readPrimarySelection(
   envIn: Partial<ClipboardEnv> = {},
 ): Promise<ClipboardReadResult> {
   const env: ClipboardEnv = { ...defaultEnv, ...envIn };
+  if (env.platform === "win32") {
+    return readWindows(env, true);
+  }
   let cmd: string;
   let args: string[];
   if (env.platform === "darwin") {
@@ -141,6 +150,7 @@ export type ClipboardWriteMethod =
   | "pbcopy"
   | "wl-copy"
   | "xclip"
+  | "clip"
   | "osc52";
 
 export type ClipboardWriteResult =
@@ -237,6 +247,25 @@ async function writeNative(
       reason:
         "install wl-clipboard (Wayland) or xclip (X11) to copy to the clipboard",
     };
+  }
+  if (env.platform === "win32") {
+    // clip.exe reads stdin in the console's OEM code page, so UTF-8 comes
+    // out as mojibake. UTF-16LE with a BOM is the encoding it honors.
+    const payload = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(text, "utf16le"),
+    ]);
+    try {
+      await runWithStdin(
+        env.spawn,
+        windowsSystemTool(env, "clip.exe"),
+        [],
+        payload,
+      );
+      return { ok: true, method: "clip" };
+    } catch {
+      return { ok: false, reason: "clip.exe failed" };
+    }
   }
   return {
     ok: false,
@@ -378,6 +407,83 @@ async function readMacOS(env: ClipboardEnv): Promise<ClipboardReadResult> {
   } catch {
     return { ok: false, reason: "clipboard read failed" };
   }
+}
+
+// A system tool by absolute path, so a user PATH that omits System32 or the
+// PowerShell directory (some Git Bash and MSYS setups) does not break copy
+// and paste. Falls back to the bare name when SystemRoot is not set.
+function windowsSystemTool(env: ClipboardEnv, ...rel: string[]): string {
+  const root = env.env.SystemRoot ?? env.env.windir;
+  if (!root) {
+    return rel[rel.length - 1] as string;
+  }
+  return path.win32.join(root, "System32", ...rel);
+}
+
+const WIN_EXIT_IMAGE = 10;
+const WIN_EXIT_EMPTY = 11;
+
+// Image first (saved as PNG to a temp file), then text, in one PowerShell
+// start-up: it costs far more than the work. -STA is required because the
+// Clipboard class refuses to run on a multi-threaded apartment. Text goes
+// out as UTF-8 without a BOM so the bytes decode the same way as the other
+// platforms.
+function windowsReadScript(tmpPath: string, textOnly: boolean): string {
+  const quoted = tmpPath.replace(/'/g, "''");
+  const image = textOnly
+    ? ""
+    : `$i=[System.Windows.Forms.Clipboard]::GetImage();` +
+      `if($i){$i.Save('${quoted}',[System.Drawing.Imaging.ImageFormat]::Png);exit ${WIN_EXIT_IMAGE}};`;
+  return (
+    `Add-Type -AssemblyName System.Windows.Forms,System.Drawing;${image}` +
+    `$t=[System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText);` +
+    `if([string]::IsNullOrEmpty($t)){exit ${WIN_EXIT_EMPTY}};` +
+    `[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);` +
+    `[Console]::Out.Write($t)`
+  );
+}
+
+async function readWindows(
+  env: ClipboardEnv,
+  textOnly: boolean,
+): Promise<ClipboardReadResult> {
+  const tmpPath = path.join(
+    env.tmpdir(),
+    `hydra-clipboard-${Date.now()}-${process.pid}.png`,
+  );
+  let result: { code: number; out: Buffer };
+  try {
+    result = await runCaptureResult(
+      env.spawn,
+      windowsSystemTool(env, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-Command",
+        windowsReadScript(tmpPath, textOnly),
+      ],
+    );
+  } catch {
+    return { ok: false, reason: "clipboard read failed" };
+  }
+  if (result.code === WIN_EXIT_IMAGE) {
+    return readFileAsAttachment(tmpPath, true);
+  }
+  if (result.code === WIN_EXIT_EMPTY) {
+    return {
+      ok: false,
+      reason: textOnly ? "selection is empty" : "clipboard is empty",
+    };
+  }
+  if (result.code !== 0) {
+    return { ok: false, reason: "clipboard read failed" };
+  }
+  return {
+    ok: true,
+    kind: "text",
+    text: normalizeText(result.out.toString("utf-8")),
+  };
 }
 
 async function readLinux(env: ClipboardEnv): Promise<ClipboardReadResult> {
@@ -612,11 +718,11 @@ function runWithStdin(
 // both the process close event AND the stdout end event have fired
 // — without that, a fast-closing process can race ahead of the
 // stdout drain and lose trailing bytes.
-function runCapture(
+function runCaptureResult(
   spawn: SpawnLike,
   cmd: string,
   args: string[],
-): Promise<Buffer> {
+): Promise<{ code: number; out: Buffer }> {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);
     const chunks: Buffer[] = [];
@@ -629,11 +735,7 @@ function runCapture(
         return;
       }
       settled = true;
-      if (closedCode === 0) {
-        resolve(Buffer.concat(chunks));
-      } else {
-        reject(new Error(`${cmd} exited ${closedCode}`));
-      }
+      resolve({ code: closedCode, out: Buffer.concat(chunks) });
     };
 
     proc.stdout?.on("data", (chunk: Buffer | string) => {
@@ -656,4 +758,17 @@ function runCapture(
       settle();
     });
   });
+}
+
+// runCaptureResult, rejecting on a non-zero exit.
+async function runCapture(
+  spawn: SpawnLike,
+  cmd: string,
+  args: string[],
+): Promise<Buffer> {
+  const { code, out } = await runCaptureResult(spawn, cmd, args);
+  if (code !== 0) {
+    throw new Error(`${cmd} exited ${code}`);
+  }
+  return out;
 }
