@@ -205,7 +205,12 @@ export class AgentInstance {
       // one more session-boundary away keeps it alive across terminal
       // restarts. The daemon still owns the pipes, so this.kill()
       // continues to terminate it cleanly on idle/close.
-      detached: true,
+      //
+      // Not on Windows: there `detached` means DETACHED_PROCESS, and Windows
+      // ignores CREATE_NO_WINDOW when that is set, so windowsHide above did
+      // nothing and a .cmd agent shim opened a visible console window for
+      // cmd.exe, which needs one because the daemon has none.
+      detached: process.platform !== "win32",
     });
     // detached:true alone makes Node's event loop wait for the child. We
     // own the lifecycle explicitly via kill() and the connection's stdio,
