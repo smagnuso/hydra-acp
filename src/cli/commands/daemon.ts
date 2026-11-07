@@ -9,7 +9,13 @@ import {
 } from "../../core/daemon-pidfile.js";
 import { loadConfig, loadGlobalConfig } from "../../core/config.js";
 import { ensureServiceToken } from "../../core/service-token.js";
-import { startDaemon } from "../../daemon/server.js";
+import { shutdownDaemonProcess } from "../../daemon/process-shutdown.js";
+import { startDaemon, type DaemonHandle } from "../../daemon/server.js";
+import {
+  realStopDeps,
+  stopDaemonProcess,
+  type StopOutcome,
+} from "../../core/daemon-stop.js";
 import {
   fetchDaemonHealth,
   pingHealth,
@@ -46,46 +52,21 @@ export async function runDaemonStart(
     // Rename here so `killall hydra-acp-daemon` finds the real daemon and
     // `killall hydra-tui` leaves it alone.
     process.title = "hydra-acp-daemon";
-    const handle = await startDaemon(config, serviceToken);
+    // The handle exists only once startDaemon returns, so the API route
+    // reaches the exit sequence through this slot.
+    let handle: DaemonHandle | undefined;
+    const stop = (): void => {
+      if (handle) {
+        void shutdownDaemonProcess(handle);
+      }
+    };
+    handle = await startDaemon(config, serviceToken, { requestShutdown: stop });
     process.stdout.write(
       `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
     );
 
-    const SHUTDOWN_HARD_TIMEOUT_MS = 10_000;
-    let shuttingDown = false;
-    const shutdown = async (): Promise<void> => {
-      // Second SIGTERM/SIGINT while a graceful shutdown is in flight
-      // means the operator gave up waiting — exit immediately so they
-      // can recover without resorting to SIGKILL.
-      if (shuttingDown) {
-        process.stderr.write("Second signal received; exiting immediately.\n");
-        process.exit(1);
-      }
-      shuttingDown = true;
-      process.stdout.write("Shutting down...\n");
-      // Safety net: if a shutdown step hangs (extension child ignoring
-      // SIGTERM, lingering WebSocket keeping app.close() pending, etc.)
-      // force-exit so `hydra daemon restart` doesn't strand the
-      // operator with a half-dead daemon.
-      const killer = setTimeout(() => {
-        process.stderr.write(
-          `Graceful shutdown did not complete within ${SHUTDOWN_HARD_TIMEOUT_MS}ms; forcing exit.\n`,
-        );
-        process.exit(1);
-      }, SHUTDOWN_HARD_TIMEOUT_MS);
-      killer.unref();
-      try {
-        await handle.shutdown();
-      } catch (err) {
-        process.stderr.write(
-          `shutdown failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
-      }
-      clearTimeout(killer);
-      process.exit(0);
-    };
-    process.on("SIGINT", () => void shutdown());
-    process.on("SIGTERM", () => void shutdown());
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
     // Ignore SIGHUP — the daemon must survive terminal closes. Terminal
     // emulators (e.g. iTerm2) send SIGHUP to all descendant processes when
     // a window closes, even across session boundaries; Node.js's default
@@ -111,10 +92,23 @@ export async function runDaemonStop(): Promise<void> {
     return;
   }
   try {
-    process.kill(info.pid, "SIGTERM");
-    process.stdout.write(`Sent SIGTERM to daemon pid ${info.pid}\n`);
+    const outcome = await stopDaemonProcess(info.pid, realStopDeps());
+    process.stdout.write(`${describeStop(info.pid, outcome)}\n`);
   } catch (err) {
     process.stderr.write(`Failed to signal daemon: ${(err as Error).message}\n`);
+  }
+}
+
+function describeStop(pid: number, outcome: StopOutcome): string {
+  switch (outcome.how) {
+    case "signalled":
+      return `Sent SIGTERM to daemon pid ${pid}`;
+    case "graceful":
+      return `Stopped daemon pid ${pid}`;
+    case "forced":
+      return outcome.reason === "timeout"
+        ? `Daemon pid ${pid} did not exit when asked; terminated it and its agents`
+        : `Terminated daemon pid ${pid} and its agents (it could not be asked to shut down cleanly)`;
   }
 }
 
@@ -124,15 +118,16 @@ export async function runDaemonRestart(): Promise<void> {
   const info = await readPidFile();
   if (info && isProcessAlive(info.pid)) {
     process.stdout.write(`Stopping daemon pid ${info.pid}...\n`);
+    let outcome: StopOutcome;
     try {
-      process.kill(info.pid, "SIGTERM");
+      outcome = await stopDaemonProcess(info.pid, realStopDeps());
     } catch (err) {
       process.stderr.write(
         `Failed to signal daemon: ${(err as Error).message}\n`,
       );
       process.exit(1);
     }
-    if (!(await waitForExit(info.pid))) {
+    if (outcome.how !== "graceful" && !(await waitForExit(info.pid))) {
       process.stderr.write(
         `Daemon pid ${info.pid} did not exit after SIGTERM; aborting restart.\n`,
       );

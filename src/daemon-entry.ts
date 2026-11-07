@@ -10,7 +10,8 @@
 import { loadGlobalConfig } from "./core/config.js";
 import { recordDaemonBootFailure } from "./core/daemon-boot-log.js";
 import { ensureServiceToken } from "./core/service-token.js";
-import { startDaemon } from "./daemon/server.js";
+import { shutdownDaemonProcess } from "./daemon/process-shutdown.js";
+import { startDaemon, type DaemonHandle } from "./daemon/server.js";
 
 async function main(): Promise<void> {
   process.title = "hydra-acp-daemon";
@@ -23,39 +24,22 @@ async function main(): Promise<void> {
   // meant to cross the boundary.
   const config = await loadGlobalConfig();
   const serviceToken = await ensureServiceToken();
-  const handle = await startDaemon(config, serviceToken);
+  // The API route and the signals both reach the same exit sequence. The
+  // handle exists only once startDaemon returns, so the route reaches it
+  // through this slot.
+  let handle: DaemonHandle | undefined;
+  const stop = (): void => {
+    if (handle) {
+      void shutdownDaemonProcess(handle);
+    }
+  };
+  handle = await startDaemon(config, serviceToken, { requestShutdown: stop });
   process.stdout.write(
     `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
   );
 
-  const SHUTDOWN_HARD_TIMEOUT_MS = 10_000;
-  let shuttingDown = false;
-  const shutdown = async (): Promise<void> => {
-    if (shuttingDown) {
-      process.stderr.write("Second signal received; exiting immediately.\n");
-      process.exit(1);
-    }
-    shuttingDown = true;
-    process.stdout.write("Shutting down...\n");
-    const killer = setTimeout(() => {
-      process.stderr.write(
-        `Graceful shutdown did not complete within ${SHUTDOWN_HARD_TIMEOUT_MS}ms; forcing exit.\n`,
-      );
-      process.exit(1);
-    }, SHUTDOWN_HARD_TIMEOUT_MS);
-    killer.unref();
-    try {
-      await handle.shutdown();
-    } catch (err) {
-      process.stderr.write(
-        `shutdown failed: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
-    clearTimeout(killer);
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
   // Ignore SIGHUP so terminal-window close doesn't orphan agents.
   process.on("SIGHUP", () => undefined);
 }

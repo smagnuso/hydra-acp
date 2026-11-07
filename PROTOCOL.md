@@ -333,6 +333,24 @@ Facts about the running daemon and its machine, as opposed to `GET /v1/config`, 
 
 `hydraVersion` repeats `/v1/health`'s `version`, which stays for the CLI's unauthenticated version check.
 
+#### `POST /v1/daemon/shutdown`
+
+Asks the daemon to shut itself down gracefully: close sessions, flush history and meta writes, stop extensions, transformers and agents, and remove the pidfile. It exists because Windows has no way to ask a process to stop. `process.kill(pid, "SIGTERM")` there is an immediate `TerminateProcess`, so none of that ran: sessions were not closed, history and meta writes were not flushed, and the pidfile was left behind. `hydra-acp daemon stop` and `restart` use this on Windows, and fall back to `taskkill /T` when it is refused or the daemon does not exit. POSIX keeps using `SIGTERM`, which already runs the same shutdown.
+
+Only the service token may call it; session and script tokens get `403`. No request body.
+
+**Response: `202 Accepted`**
+
+```jsonc
+{ "status": "shutting-down" }
+```
+
+The reply is sent first and the shutdown starts a moment later, so the connection is not cut mid-response. The process exits once the shutdown finishes, forcing it at 10 seconds if a step hangs.
+
+- `403` for any token other than the service token.
+- `501` from a daemon that is not a standalone process (an embedded or test daemon), which must not exit its host.
+- A daemon older than this endpoint answers `404`; callers should treat that like a refusal and fall back to a signal.
+
 ### Sessions
 
 **Federated session ids.** A `sessionId` of the form `name:localId` (see `formatForeignSessionId` in `core/foreign-session-id.ts`) names a session owned by the federated peer registered under `name` (see [Remotes](#remotes)) rather than this daemon. Any route below shaped `/v1/sessions/:id...` transparently forwards to that peer using this daemon's own stored peer credential when given such an id — the caller never needs its own credential for the peer, and never sees the peer's raw host/port. Unrecognized/local-looking ids (no colon) are handled locally first, as always. Only on a confirmed local miss (this daemon has no session under that raw id) does `session/attach` and every `/v1/sessions/:id...` route fall back to checking whether exactly one federated peer has a session under that same raw id — via the already-warm `ForeignSessionCache`, so this costs nothing beyond the miss check itself for the normal, locally-resolvable case. Zero matches falls through to the ordinary "not found" error; more than one (practically unreachable given the id alphabet, but a defined outcome) answers with an error naming every matching remote instead of guessing. A match forwards exactly as if the caller had typed `<name>:<id>` in the first place. An entry merged in from a peer (see `GET /v1/sessions` below) also carries `"remote": "<name>"`. This is deliberately a different field from `importedFromMachine` (set on a cold bundle-imported record — see `POST /v1/sessions/import`): `remote` marks a *live* session that stays live on the peer, `importedFromMachine` marks a static copy sitting locally; a client that folds both into one "which host" picker/dropdown still needs to branch on which field is set before deciding what clicking the entry should do.

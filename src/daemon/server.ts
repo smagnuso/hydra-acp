@@ -88,9 +88,17 @@ export interface DaemonHandle {
   shutdown: () => Promise<void>;
 }
 
+export interface StartDaemonOptions {
+  // Called when a client asks the daemon to stop over the API. Only the
+  // CLI's foreground daemon supplies it, since stopping means exiting the
+  // process.
+  requestShutdown?: () => void;
+}
+
 export async function startDaemon(
   config: HydraConfig,
   serviceToken: string,
+  options: StartDaemonOptions = {},
 ): Promise<DaemonHandle> {
   ensureLoopbackOrTls(config);
 
@@ -304,7 +312,7 @@ export async function startDaemon(
     () => driftedKeys,
   );
   const startedAt = new Date().toISOString();
-  registerSystemRoutes(app, startedAt);
+  registerSystemRoutes(app, startedAt, options.requestShutdown);
   const mcpTokenRegistry = new McpTokenRegistry();
   const extensionMcp = new ExtensionMcpRegistry();
   // Captured lazily by handlers that need to mint MCP descriptors.
