@@ -199,6 +199,18 @@ Before trusting a capture:
   (`noteUpstreamUpdatedAt`), a `TaskStop`, a resumption discharge, or an
   agent switch. A stuck badge from a job that died silently is the known
   cost; fix it with a better signal, never a clock.
+- **UI glyphs must be single-cell and present in the standard console
+  fonts.** Emoji are two cells wide, ignore the theme and `NO_COLOR`, and
+  render as boxes or with the wrong width in the classic Windows console.
+  Many symbols that look ordinary (`⚠ ⟳ ✓ ✗ ❯ ⏸ ⌃ ⏎`) are also missing from
+  Consolas and Cascadia Mono, so Windows falls back to a different font with
+  different metrics. Stick to ASCII plus the WGL4 set: box drawing,
+  `● ○ • ◦ ▲ ► ◄ ■ █ » ↑ √ ×`. Anything width-sensitive, such as padding by
+  `.length`, undercounts a wide glyph. `__tests__/no-wide-emoji.test.ts`
+  fails on emoji-presentation characters in source, but it cannot catch a
+  non-emoji symbol a font lacks, so check a new symbol in the classic
+  console as well as Windows Terminal before relying on it. Agent and user
+  text is shown as written and is not covered.
 
 ## Updating this file
 
