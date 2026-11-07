@@ -3,8 +3,7 @@ import * as os from "node:os";
 
 const ROOT_ENV = "HYDRA_ACP_HOME";
 
-export function shortenHomePath(p: string): string {
-  const home = os.homedir();
+export function shortenHomePath(p: string, home: string = os.homedir()): string {
   if (!home) {
     return p;
   }
@@ -15,8 +14,9 @@ export function shortenHomePath(p: string): string {
   // path.sep silently stopped shortening those, so every such path
   // rendered as a full absolute path instead of `~/...`.
   //
-  // Normalizing preserves length, so the suffix is still sliced out of
-  // the original and keeps whatever separators the caller used.
+  // Normalizing preserves length, so the suffix is sliced out of the
+  // original, then given native separators on Windows so the same
+  // directory always reads `~\dev\proj`, never `~/dev\proj`.
   const normalize = (s: string): string =>
     process.platform === "win32" ? s.replace(/\\/g, "/").toLowerCase() : s;
   const normalizedHome = normalize(home);
@@ -25,7 +25,8 @@ export function shortenHomePath(p: string): string {
     return "~";
   }
   if (normalizedPath.startsWith(normalizedHome + "/")) {
-    return "~" + p.slice(home.length);
+    const rest = p.slice(home.length);
+    return "~" + (process.platform === "win32" ? rest.replace(/\//g, "\\") : rest);
   }
   return p;
 }

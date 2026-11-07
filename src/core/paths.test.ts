@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { hydraHome, detectTestRunner, isPathInside, nativeCwd, pathKey, samePath } from "./paths.js";
+import { hydraHome, detectTestRunner, isPathInside, nativeCwd, pathKey, samePath, shortenHomePath } from "./paths.js";
 import { onPlatform } from "./platform-stub.js";
 import * as path from "node:path";
 
@@ -158,6 +158,26 @@ describe("nativeCwd", () => {
     await onPlatform("linux", () => {
       expect(nativeCwd("/a/b/")).toBe("/a/b/");
       expect(nativeCwd("/a\\b")).toBe("/a\\b");
+    });
+  });
+});
+
+describe("shortenHomePath", () => {
+  const H = "C:\\Users\\Sam";
+
+  it("renders every spelling of a Windows home path with native separators", async () => {
+    await onPlatform("win32", () => {
+      expect(shortenHomePath("C:\\Users\\Sam", H)).toBe("~");
+      expect(shortenHomePath("c:/users/sam/dev/proj", H)).toBe("~\\dev\\proj");
+      expect(shortenHomePath("C:\\Users\\Sam/dev\\proj", H)).toBe("~\\dev\\proj");
+      expect(shortenHomePath("C:\\Users\\Samuel\\x", H)).toBe("C:\\Users\\Samuel\\x");
+    });
+  });
+
+  it("keeps the suffix as-is off Windows", async () => {
+    await onPlatform("linux", () => {
+      expect(shortenHomePath("/home/sam/dev/proj", "/home/sam")).toBe("~/dev/proj");
+      expect(shortenHomePath("/home/sam/a\\b", "/home/sam")).toBe("~/a\\b");
     });
   });
 });
