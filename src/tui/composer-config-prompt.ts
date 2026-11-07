@@ -56,7 +56,7 @@ export async function promptForComposerConfig(
     }
     const row = rows[i]!;
     const value = composerConfigLabel(state, row);
-    const text = ` ${i === cursor ? "❯" : " "} ${padRight(ROW_TITLES[row], 7)} ‹ ${value} ›`;
+    const text = ` ${i === cursor ? "›" : " "} ${padRight(ROW_TITLES[row], 7)} ‹ ${value} ›`;
     term.moveTo(layout.contentX, layout.contentY + 1 + i);
     const line = padRight(truncate(text, layout.contentW), layout.contentW);
     paint(term, i === cursor ? "list-selected" : "content", line);
@@ -79,7 +79,7 @@ export async function promptForComposerConfig(
       term,
       "modal-hint",
       padRight(
-        truncate(" ↑/↓ row · ←/→ change · ⏎ apply · s apply & save agent · Esc cancel", layout.contentW),
+        truncate(" ↑/↓ row · ←/→ change · Enter apply · s apply & save agent · Esc cancel", layout.contentW),
         layout.contentW,
       ),
     );

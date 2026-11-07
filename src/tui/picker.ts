@@ -698,7 +698,7 @@ export async function pickSession(
         visible.length === 0
           ? "no matches"
           : `${visible.length} match${visible.length === 1 ? "" : "es"}`;
-      const plain = `/${searchTerm}▉ ${matches} · ^c clears`;
+      const plain = `/${searchTerm}█ ${matches} · ^c clears`;
       return {
         plain,
         render: () => {
@@ -1865,7 +1865,7 @@ export async function pickSession(
   //   row findBoxRows+2  ╰─────────────────╯
   //   row findBoxRows+3  (blank)
   //   row findBoxRows+4  SESSION STATE AGE CWD TITLE…   ← findHeaderRow()
-  //   row findBoxRows+5  ❯ session-id  cold  Title   ← findResultsStartRow()
+  //   row findBoxRows+5  › session-id  cold  Title   ← findResultsStartRow()
   //   ...
   //   last               indicator
   //
@@ -2145,7 +2145,7 @@ export async function pickSession(
   const paintFindResultA = (idx: number, focused: boolean): void => {
     const { line1, focusedRow } = findResultData(idx, focused);
     if (focusedRow) {
-      paint(term, "list-selected", `❯ ${line1}`);
+      paint(term, "list-selected", `› ${line1}`);
     } else {
       paint(term, "content", `  ${line1}`);
     }

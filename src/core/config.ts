@@ -379,7 +379,7 @@ const TuiConfig = z.object({
   //
   //   composer.top    ── Busy 1m2s · a1b2c3 · 2 queued ──── 12.4k/200k · $0.31 ──
   //   <the prompt itself>
-  //   composer.bottom ─────────────────────── ⇧⇥ mode · ^p pick · ^g guide ──
+  //   composer.bottom ─────────────────────── S-Tab mode · ^p pick · ^g guide ──
   //
   // Each side is an ordered list of fields; see BarSlotEntry above.
   // Fields with nothing to report (no title, nothing queued, not

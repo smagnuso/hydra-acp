@@ -168,7 +168,7 @@ describe("background-task level signal", () => {
   });
 
   // Updating internal state is only half the job: a client that already
-  // painted "◐ waiting" is push-driven and will keep painting it until the
+  // painted "◊ waiting" is push-driven and will keep painting it until the
   // daemon says otherwise. The ending has to reach the wire.
   it("tells attached clients when the level moves, including down to zero", () => {
     const { session, mock } = makeSession();

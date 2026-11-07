@@ -118,7 +118,7 @@ export async function promptForAgent(
     // Row 0 = intro (contentY), row 1 = blank, row 2 = first list row.
     const rowOnScreen = layout.contentY + 2 + (i - windowStart);
     term.moveTo(layout.contentX, rowOnScreen);
-    const pointer = i === selected ? "❯" : " ";
+    const pointer = i === selected ? "›" : " ";
     const desc = agent.description ?? agent.name;
     const idPart = ` ${pointer} ${agent.id}`;
     if (i === selected) {

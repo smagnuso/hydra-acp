@@ -121,11 +121,11 @@ export interface HintItem {
 // usefulness on a narrow terminal. `mode` carries the current mode as a
 // suffix when there is one.
 export const DEFAULT_HINT_ITEMS: readonly HintItem[] = [
-  { id: "mode", label: "⇧⇥ mode", action: "toggle-mode" },
-  { id: "options", label: "⌃O options", action: "toggle-options" },
-  { id: "pick", label: "⌃P pick", action: "switch-session" },
-  { id: "guide", label: "⌃G guide", action: "show-help" },
-  { id: "detach", label: "⌃D detach", action: "detach" },
+  { id: "mode", label: "S-Tab mode", action: "toggle-mode" },
+  { id: "options", label: "^O options", action: "toggle-options" },
+  { id: "pick", label: "^P pick", action: "switch-session" },
+  { id: "guide", label: "^G guide", action: "show-help" },
+  { id: "detach", label: "^D detach", action: "detach" },
 ];
 
 export interface BannerInfo {

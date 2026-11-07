@@ -453,9 +453,9 @@ describe("parseAgentMarkdown", () => {
     expect(lines[2]?.body).not.toContain("*italic cell*");
   });
 
-  it("aligns columns when cells contain wide glyphs (✓ check mark)", () => {
+  it("aligns columns when cells contain wide glyphs (√ check mark)", () => {
     const lines = parseAgentMarkdown(
-      "| feature | ok |\n|---|---|\n| basic | ✓ |\n| longer feature name | ✓ |",
+      "| feature | ok |\n|---|---|\n| basic | √ |\n| longer feature name | √ |",
     );
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
@@ -1010,7 +1010,7 @@ describe("formatEditDiffBlock", () => {
     );
     const bodies = lines.map((l) => l.body);
     expect(bodies).toContain("▾ Edited /repo/foo.ts (~2 KB)");
-    expect(bodies).toContain("⋯ fetching diff…");
+    expect(bodies).toContain("… fetching diff…");
   });
 
   it("renders a failure line for a deferred diff whose fetch failed", () => {
@@ -1024,7 +1024,7 @@ describe("formatEditDiffBlock", () => {
       "diff",
       { deferredStatus: "error" },
     );
-    const err = lines.find((l) => l.body === "⚠ failed to load diff");
+    const err = lines.find((l) => l.body === "▲ failed to load diff");
     expect(err).toBeDefined();
     expect(err?.bodyStyle).toBe("tool-status-fail");
     expect(lines.map((l) => l.body)).toContain(
@@ -1105,7 +1105,7 @@ describe("buildUnifiedDiff", () => {
     const rows = out.split("\n");
     // gap + 3 ctx + (- +) + 3 ctx + gap = 10 rows.
     expect(rows).toEqual([
-      "  ⋯ 12 unchanged lines",
+      "  … 12 unchanged lines",
       "  line 12",
       "  line 13",
       "  line 14",
@@ -1114,7 +1114,7 @@ describe("buildUnifiedDiff", () => {
       "  line 16",
       "  line 17",
       "  line 18",
-      "  ⋯ 11 unchanged lines",
+      "  … 11 unchanged lines",
     ]);
   });
 
@@ -1129,7 +1129,7 @@ describe("buildUnifiedDiff", () => {
     );
     // 9 unchanged context lines + 1 removed + 1 added, no gap markers.
     expect(out.split("\n")).toHaveLength(11);
-    expect(out).not.toContain("⋯");
+    expect(out).not.toContain("…");
   });
 
   it("returns an empty body for a no-op edit when hunking", () => {
@@ -1188,18 +1188,18 @@ describe("formatExitPlanMode", () => {
     });
   });
 
-  it("appends ✓ Approved on completed status", () => {
+  it("appends √ Approved on completed status", () => {
     const lines = formatExitPlanMode({ plan: "body", status: "completed" });
     expect(lines.at(-1)).toMatchObject({
-      body: "✓ Approved",
+      body: "√ Approved",
       bodyStyle: "tool-status-ok",
     });
   });
 
-  it("appends ✗ Rejected on rejected status", () => {
+  it("appends × Rejected on rejected status", () => {
     const lines = formatExitPlanMode({ plan: "body", status: "rejected" });
     expect(lines.at(-1)).toMatchObject({
-      body: "✗ Rejected",
+      body: "× Rejected",
       bodyStyle: "tool-status-fail",
     });
   });
@@ -1207,7 +1207,7 @@ describe("formatExitPlanMode", () => {
   it("omits the footer when status is unset", () => {
     const lines = formatExitPlanMode({ plan: "body" });
     expect(lines.some((l) => l.body === "awaiting approval…")).toBe(false);
-    expect(lines.some((l) => l.body.startsWith("✓") || l.body.startsWith("✗")))
+    expect(lines.some((l) => l.body.startsWith("√") || l.body.startsWith("×")))
       .toBe(false);
   });
 });

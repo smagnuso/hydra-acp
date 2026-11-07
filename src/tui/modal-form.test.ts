@@ -49,7 +49,7 @@ function form(rows: FormRow[], cursor = 0): FormState {
 
 const HINTS: FormHintSpec[] = [
   { label: "↑/↓ row" },
-  { label: "⏎ go", action: "commit" },
+  { label: "Enter go", action: "commit" },
   { label: "s save", action: "save" },
   { label: "Esc close", action: "close" },
 ];
@@ -280,34 +280,34 @@ describe("layoutFormHints", () => {
     const { text, spans } = layoutFormHints(
       [
         { label: "↑/↓ row" },
-        { label: "⏎ next", action: "commit" },
+        { label: "Enter next", action: "commit" },
         { label: "Esc close", action: "close" },
       ],
       80,
     );
-    expect(text).toBe("↑/↓ row · ⏎ next · Esc close");
+    expect(text).toBe("↑/↓ row · Enter next · Esc close");
     // The row is painted with one leading space, so column 1 is that space
     // and "↑/↓ row" starts at 2.
     expect(spans).toEqual([
-      { start: 12, end: 17, action: "commit" },
-      { start: 21, end: 29, action: "close" },
+      { start: 12, end: 21, action: "commit" },
+      { start: 25, end: 33, action: "close" },
     ]);
     // Spans line up with where the text actually lands on screen.
     const painted = ` ${text}`;
-    expect(painted.slice(11, 17)).toBe("⏎ next");
-    expect(painted.slice(20, 29)).toBe("Esc close");
+    expect(painted.slice(11, 21)).toBe("Enter next");
+    expect(painted.slice(24, 33)).toBe("Esc close");
   });
 
   it("drops segments that would not fit rather than half-painting them", () => {
     const { text, spans } = layoutFormHints(
       [
-        { label: "⏎ go", action: "commit" },
+        { label: "Enter go", action: "commit" },
         { label: "Esc close", action: "close" },
       ],
       10,
     );
-    expect(text).toBe("⏎ go");
-    expect(spans).toEqual([{ start: 2, end: 5, action: "commit" }]);
+    expect(text).toBe("Enter go");
+    expect(spans).toEqual([{ start: 2, end: 9, action: "commit" }]);
   });
 });
 
@@ -411,7 +411,7 @@ describe("layoutFormRows", () => {
     );
     // Unselected rows pay for the cursor column so the numbers line up.
     expect(rows[0]!.body).toBe("   1. Tools         expanded");
-    expect(rows[1]!.body).toBe(" ❯ 2. File updates  diff");
+    expect(rows[1]!.body).toBe(" › 2. File updates  diff");
     expect(rows[1]!.selected).toBe(true);
   });
 
@@ -452,7 +452,7 @@ describe("layoutFormRows", () => {
       0,
       10,
     );
-    expect(rows[0]!.prefix).toBe(" ❯ title: ");
+    expect(rows[0]!.prefix).toBe(" › title: ");
     expect(rows[0]!.field).toBe("hi");
     expect(rows[0]!.caretCol).toBe(13);
   });
@@ -504,15 +504,15 @@ describe("Screen form prompt", () => {
       rows: [{ kind: "text", label: "title:", text: "new name", cursor: 8 }],
       selectedIndex: 0,
       hints: [
-        { label: "⏎ save", action: "commit" },
+        { label: "Enter save", action: "commit" },
         { label: "Esc cancel", action: "close" },
       ],
     });
     expect(r.promptRows).toBe(3);
     // The bottom rule and the sessionbar sit below the modal.
     expect(r.row(20).trimEnd()).toBe(" ▪ Rename session");
-    expect(r.row(21).trimEnd()).toBe(" ❯ title: new name");
-    expect(r.row(22).trimEnd()).toBe(" ⏎ save · Esc cancel");
+    expect(r.row(21).trimEnd()).toBe(" › title: new name");
+    expect(r.row(22).trimEnd()).toBe(" Enter save · Esc cancel");
   });
 
   it("scrolls a long chooser and counts position in the title", () => {
@@ -534,7 +534,7 @@ describe("Screen form prompt", () => {
     expect(squashed(15)).toContain("▪ Model (31/40)");
     // Window of 6 centred on index 30 → 28..33, not truncated at the tenth.
     expect(squashed(16)).toBe("29. model-28");
-    expect(squashed(18)).toBe("❯ 31. model-30");
+    expect(squashed(18)).toBe("› 31. model-30");
     expect(squashed(21)).toBe("34. model-33");
   });
 
@@ -559,7 +559,7 @@ describe("Screen form prompt", () => {
       selectedIndex: 0,
       hints: [
         { label: "↑/↓ row" },
-        { label: "⏎ next", action: "commit" },
+        { label: "Enter next", action: "commit" },
         { label: "Esc close", action: "close" },
       ],
     });
@@ -575,7 +575,7 @@ describe("Screen form prompt", () => {
     // The inert legend is not clickable; the two action words are.
     const hintRow = r.row(22);
     expect(r.screen.formHitAt(hintRow.indexOf("↑/↓") + 1, 22)).toBe(null);
-    expect(r.screen.formHitAt(hintRow.indexOf("⏎ next") + 1, 22)).toEqual({
+    expect(r.screen.formHitAt(hintRow.indexOf("Enter next") + 1, 22)).toEqual({
       kind: "hint",
       action: "commit",
     });
@@ -594,9 +594,9 @@ describe("Screen form prompt", () => {
       hints: [],
     });
     const row = r.row(21);
-    // " ❯ t: " is 6 columns, so the field starts at column 7 and, with the
+    // " › t: " is 6 columns, so the field starts at column 7 and, with the
     // whole value fitting in 80 columns, column 7 is text[0].
-    expect(row).toContain(" ❯ t: 0123456789abcdefghij");
+    expect(row).toContain(" › t: 0123456789abcdefghij");
     expect(r.screen.formHitAt(7, 21)).toEqual({
       kind: "row",
       row: 0,

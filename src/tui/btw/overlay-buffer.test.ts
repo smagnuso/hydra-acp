@@ -88,7 +88,7 @@ describe("BtwOverlayBuffer", () => {
 
       expect(buf.getLines()).toHaveLength(1);
       expect(linesOf(buf)[0]).toContain("bash");
-      expect(linesOf(buf)[0]).toContain("◐");
+      expect(linesOf(buf)[0]).toContain("◊");
 
       // Update with refined title and running status
       buf.append({
@@ -127,7 +127,7 @@ describe("BtwOverlayBuffer", () => {
 
       const lines = linesOf(buf);
       expect(lines).toHaveLength(1);
-      expect(lines[0]).toContain("✓");
+      expect(lines[0]).toContain("√");
     });
 
     it("renders failure with error text", () => {
@@ -149,9 +149,9 @@ describe("BtwOverlayBuffer", () => {
 
       const lines = linesOf(buf);
       // tool_call_update replaces the initial rendering: failed tool with
-      // error renders as ✗ row + indented error row = 2 lines total.
+      // error renders as × row + indented error row = 2 lines total.
       expect(lines).toHaveLength(2);
-      expect(lines[0]).toContain("✗");
+      expect(lines[0]).toContain("×");
       expect(lines[0]).toContain("Task");
       expect(lines[1]).toBe("     timeout");
     });

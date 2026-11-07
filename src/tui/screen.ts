@@ -380,9 +380,9 @@ export interface PermissionPromptSpec {
 // One row of a form modal. See modal-form.ts for the state machine that
 // drives these and for what each kind means to the user.
 //
-//   select  ` ❯ 1. Label          value`   (^O, ^Q)
-//   choice  ` ❯ 1. • Label         note`   (a chooser; • marks the live one)
-//   text    ` ❯ label: field`              (the title rename)
+//   select  ` › 1. Label          value`   (^O, ^Q)
+//   choice  ` › 1. • Label         note`   (a chooser; • marks the live one)
+//   text    ` › label: field`              (the title rename)
 export type FormRowSpec =
   | { kind: "select"; label: string; value: string }
   | { kind: "choice"; label: string; note?: string; current?: boolean }
@@ -563,7 +563,7 @@ const PERMISSION_CLICK_ARM_MS = 350;
 // clickable words are typed rather than sniffed out of prose.
 const PERMISSION_HINTS: readonly FormHintSpec[] = [
   { label: "↑/↓ choose" },
-  { label: "⏎ submit", action: "commit" },
+  { label: "Enter submit", action: "commit" },
   { label: "Esc cancel", action: "cancel" },
   { label: "1-9 quick-pick" },
 ];
@@ -571,7 +571,7 @@ const PERMISSION_HINTS: readonly FormHintSpec[] = [
 // Same, for the compaction modal.
 const COMPACTION_HINTS: readonly FormHintSpec[] = [
   { label: "↑/↓ choose" },
-  { label: "⏎ submit", action: "commit" },
+  { label: "Enter submit", action: "commit" },
   { label: "Esc cancel", action: "cancel" },
   { label: "y/n quick-pick" },
 ];
@@ -8479,7 +8479,7 @@ export class Screen {
     // The prompt area is always painted bright — typing always routes to
     // the main input regardless of pane focus, so dimming the prompt would
     // misleadingly suggest typing is disabled. The focus indicator lives
-    // on the overlay header (▶ prefix) instead.
+    // on the overlay header (► prefix) instead.
     const overlayFocused = false;
     for (let i = 0; i < layout.rendered; i++) {
       const vr = visualRows[layout.windowStart + i];
@@ -8885,7 +8885,7 @@ export class Screen {
         continue;
       }
       const isSel = i === spec.selectedIndex;
-      const marker = isSel ? "❯" : " ";
+      const marker = isSel ? "›" : " ";
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
       this.permissionRowHits.set(row, i);
       writeRow(`perm|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
@@ -9057,7 +9057,7 @@ export class Screen {
         this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       const row = Math.min(selectedRow, lastUsableRow);
       // Only a text row wants a caret, and it goes where typing will land.
-      // On a list row the ❯ marker and the row highlight already say what
+      // On a list row the › marker and the row highlight already say what
       // is selected, so a block parked in the margin is just an artifact.
       const layouts = layoutFormRows(spec, this.term.width, start, visible);
       const active = layouts.find((l) => l.selected);
@@ -11078,7 +11078,7 @@ export interface FormRowLayout {
 // widget was originally built for.
 const DEFAULT_FORM_HINTS: readonly FormHintSpec[] = [
   { label: "↑/↓ choose" },
-  { label: "⏎ this session", action: "commit" },
+  { label: "Enter this session", action: "commit" },
   { label: "s save default", action: "save" },
   { label: "Esc close", action: "close" },
 ];
@@ -11148,7 +11148,7 @@ export function layoutFormRows(
       continue;
     }
     const selected = i === spec.selectedIndex;
-    const cursorMark = selected ? "❯" : " ";
+    const cursorMark = selected ? "›" : " ";
     const num = numbered ? `${i + 1}. `.padStart(numWidth) : "";
     if (r.kind === "text") {
       const prefix = truncate(` ${cursorMark} ${num}${r.label} `, usable);
@@ -11242,7 +11242,7 @@ export function windowTextField(
 
 function firstLine(text: string): string {
   const idx = text.indexOf("\n");
-  return idx === -1 ? text : `${text.slice(0, idx)} ↵`;
+  return idx === -1 ? text : `${text.slice(0, idx)} ¶`;
 }
 
 export function mapKeyName(name: string): KeyName | null {

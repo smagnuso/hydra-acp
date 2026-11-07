@@ -24,7 +24,7 @@ export interface FieldDef {
   /**
    * Opt out of "one field, one shed unit" and emit several. Used by
    * `helpHint`, whose chunks are independently meaningful: a narrow
-   * terminal should drop "^d detach" and keep "⇧⇥ mode", not blank the
+   * terminal should drop "^d detach" and keep "S-Tab mode", not blank the
    * whole row. When present this wins over `resolve`.
    */
   resolveGroups?(ctx: FieldContext): FieldGroup[] | null;
@@ -452,7 +452,7 @@ export const FIELDS: Record<string, FieldDef> = {
           ]
         : null,
   },
-  // The keybinding cheatsheet on the bottom composer rule ("⇧⇥ mode ·
+  // The keybinding cheatsheet on the bottom composer rule ("S-Tab mode ·
   // ^p pick · ^g guide · ^d detach"). Named helpHint, not hint, to keep
   // it distinct from the banner's raw `hint` string it is derived from.
   helpHint: {

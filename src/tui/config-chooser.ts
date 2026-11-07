@@ -73,7 +73,7 @@ export function buildChooserForm(opt: ConfigOption, filter = ""): FormState {
     hints: [
       { label: "type to filter" },
       { label: "↑/↓ PgUp/PgDn choose" },
-      { label: "⏎ switch", action: "commit" },
+      { label: "Enter switch", action: "commit" },
       { label: "^S save & apply", action: "save" },
       { label: "Esc close", action: "close" },
     ],
@@ -113,7 +113,7 @@ export function buildConfigIndexForm(
       { label: "↑/↓ row" },
       { label: "←/→ choose" },
       { label: "s save & apply", action: "save" },
-      { label: "⏎ apply", action: "commit" },
+      { label: "Enter apply", action: "commit" },
       // Esc discards, which is what Esc means everywhere else in the TUI.
       // ^C does the same and is left off the row for space.
       { label: "Esc cancel", action: "cancel" },

@@ -2138,7 +2138,7 @@ describe("Screen block-click routing", () => {
   it("notifyWhenVisible fires onBlockVisible once for an on-screen block", () => {
     const shown: string[] = [];
     const screen = makeTallScreen({ onBlockVisible: (k) => shown.push(k) });
-    screen.upsertLines("editdiff:abc", [{ body: "⋯ fetching diff…" }]);
+    screen.upsertLines("editdiff:abc", [{ body: "… fetching diff…" }]);
     screen.notifyWhenVisible("editdiff:abc");
     draw(screen);
     expect(shown).toEqual(["editdiff:abc"]);
@@ -2150,7 +2150,7 @@ describe("Screen block-click routing", () => {
   it("notifyWhenVisible does not fire while the block is scrolled out of view", () => {
     const shown: string[] = [];
     const screen = makeTallScreen({ onBlockVisible: (k) => shown.push(k) });
-    screen.upsertLines("editdiff:abc", [{ body: "⋯ fetching diff…" }]);
+    screen.upsertLines("editdiff:abc", [{ body: "… fetching diff…" }]);
     screen.notifyWhenVisible("editdiff:abc");
     // Push the block far above the bottom-anchored visible window.
     for (let i = 0; i < 100; i++) {
@@ -4474,7 +4474,7 @@ describe("Screen scroll by turn", () => {
   ): void {
     for (let p = 0; p < (opts.promptRows ?? 1); p++) {
       screen.appendLines([
-        { prefix: "▎ ", prefixStyle: "user", body: `u${n}${p}`, bodyStyle: "user" },
+        { prefix: "│ ", prefixStyle: "user", body: `u${n}${p}`, bodyStyle: "user" },
       ]);
     }
     for (let i = 0; i < (opts.bodyRows ?? 6); i++) {
@@ -4721,7 +4721,7 @@ describe("Screen.scrollToTurnAt", () => {
     for (const [n, recordedAt] of stamps.entries()) {
       screen.appendLines([
         {
-          prefix: "▎ ",
+          prefix: "│ ",
           prefixStyle: "user",
           body: `u${n}`,
           bodyStyle: "user",
@@ -4917,7 +4917,7 @@ describe("Screen turn-jump slide", () => {
     const screen = makeScreen({ turnSlide: true });
     for (let t = 0; t < 6; t++) {
       screen.appendLines([
-        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+        { prefix: "│ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
       ]);
       for (let i = 0; i < 40; i++) {
         screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);
@@ -4946,7 +4946,7 @@ describe("Screen turn-jump slide", () => {
     const screen = makeScreen({ turnSlide: true });
     for (let t = 0; t < 6; t++) {
       screen.appendLines([
-        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+        { prefix: "│ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
       ]);
       for (let i = 0; i < 40; i++) {
         screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);
@@ -4968,7 +4968,7 @@ describe("Screen turn keys under key repeat", () => {
     const screen = makeScreen({ turnSlide });
     for (let t = 0; t < 8; t++) {
       screen.appendLines([
-        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+        { prefix: "│ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
       ]);
       for (let i = 0; i < 40; i++) {
         screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);

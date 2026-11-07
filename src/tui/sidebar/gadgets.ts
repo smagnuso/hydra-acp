@@ -62,17 +62,17 @@ export function compactCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-// Unicode eighths bar. Fractional fill uses partial blocks so a 20-cell
-// bar still moves visibly on a 1% context change.
+// Unicode halves bar. A half block marks the fractional cell. Finer eighth
+// blocks would move more smoothly, but Consolas has none of them, so they
+// drew as empty boxes in the classic Windows console.
 export function meterBar(fraction: number, width: number): string {
   if (width <= 0) {
     return "";
   }
   const clamped = Math.max(0, Math.min(1, fraction));
-  const eighths = Math.round(clamped * width * 8);
-  const full = Math.floor(eighths / 8);
-  const rem = eighths % 8;
-  const partial = rem === 0 ? "" : "▏▎▍▌▋▊▉"[rem - 1]!;
+  const halves = Math.round(clamped * width * 2);
+  const full = Math.floor(halves / 2);
+  const partial = halves % 2 === 0 ? "" : "▌";
   const filled = "█".repeat(Math.min(width, full)) + (full < width ? partial : "");
   return filled + "·".repeat(Math.max(0, width - full - (partial ? 1 : 0)));
 }
@@ -232,7 +232,7 @@ export const activityGadget: Gadget = {
       return [
         row(
           labelValue(
-            onlyUnobservableTasks(s) ? "◐ started" : "◐ waiting",
+            onlyUnobservableTasks(s) ? "◊ started" : "◊ waiting",
             shortDuration(s.now - s.armedSince),
             ctx,
           ),
@@ -312,7 +312,7 @@ export const tasksGadget: Gadget = {
     const lines: SidebarLine[] = [];
     for (const task of s.armedTasks.slice(0, SIDEBAR_PAGE_SIZE)) {
       const elapsed = shortDuration(Math.max(0, s.now - task.since));
-      const head = "◐ ";
+      const head = "◊ ";
       const budget = ctx.width - cellWidth(head) - cellWidth(elapsed) - 1;
       // The label is agent-authored prose of arbitrary length, so it is the
       // part that gives. Falls back to the type ("local_bash") when the
@@ -492,7 +492,7 @@ export const todoGadget: Gadget = {
     // truncating here would hide entries the user has no way to reach.
     for (const entry of planDisplayOrder(s.plan)) {
       const glyph =
-        entry.status === "completed" ? "✓" : entry.status === "in_progress" ? "▸" : "·";
+        entry.status === "completed" ? "√" : entry.status === "in_progress" ? "▸" : "·";
       const style =
         entry.status === "completed"
           ? "plan-done"
@@ -810,10 +810,10 @@ export function formatCpu(fraction: number | undefined): string {
 // blocked on you. Two independent axes, shown as a two-cell marker at the
 // right edge of the row.
 //
-//   ● working / ◐ background task running / ○ quiet — the same three glyphs
+//   ● working / ◊ background task running / ○ quiet — the same three glyphs
 //   the activity gadget uses at the top of this very column ("● thinking" /
-//   "◐ waiting" / "○ idle"), so a glyph means the same thing whether it
-//   describes this session or another. ◐ shares ●'s yellow: both are the
+//   "◊ waiting" / "○ idle"), so a glyph means the same thing whether it
+//   describes this session or another. ◊ shares ●'s yellow: both are the
 //   session doing work, and the shape carries the difference (a turn is in
 //   flight vs. the agent handed the turn back but armed a job that can wake
 //   it up). Without it an armed session read as quiet here while `hydra
@@ -835,10 +835,10 @@ export function formatCpu(fraction: number | undefined): string {
 // filesystem paths anyway (see rowLinkSpans) — the row stays
 // double-clickable through openPath.
 const BUSY_MARK = "●";
-const RUNNING_MARK = "◐";
+const RUNNING_MARK = "◊";
 const IDLE_MARK = "○";
 const BLOCKED_MARK = "◦";
-const UNREAD_MARK = "◉";
+const UNREAD_MARK = "■";
 
 export const sessionsGadget: Gadget = {
   id: "sessions",

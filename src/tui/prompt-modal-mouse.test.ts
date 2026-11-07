@@ -104,7 +104,7 @@ describe("compaction modal mouse", () => {
     expect(c.screen.compactionHitAt(6, c.rowOf(0) - 1)).toBe(null);
     const hint = c.row(c.hintRow);
     expect(
-      c.screen.compactionHitAt(hint.indexOf("⏎ submit") + 1, c.hintRow),
+      c.screen.compactionHitAt(hint.indexOf("Enter submit") + 1, c.hintRow),
     ).toEqual({ kind: "hint", action: "commit" });
     expect(
       c.screen.compactionHitAt(hint.indexOf("Esc cancel") + 2, c.hintRow),

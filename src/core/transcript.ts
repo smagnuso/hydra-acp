@@ -8,7 +8,7 @@ import { stripHydraSessionPrefix } from "./session.js";
 import { lifetimeCostOf } from "./usage-collapse.js";
 
 export interface TranscriptOptions {
-  // Include tool-call activity as a bulleted "- ✓ Read foo.ts" list per
+  // Include tool-call activity as a bulleted "- √ Read foo.ts" list per
   // turn. Default false — most transcripts read cleaner as pure
   // prose, matching the TUI's collapsed-tools default. Set true to
   // restore the bulleted tool list.
@@ -471,14 +471,14 @@ function formatToolLine(state: ToolFinalState): string {
 function statusGlyph(status: string): string {
   switch (status) {
     case "completed":
-      return "✓";
+      return "√";
     case "failed":
-      return "✗";
+      return "×";
     case "cancelled":
     case "rejected":
-      return "⊘";
+      return "÷";
     case "in_progress":
-      return "↻";
+      return "▸";
     default:
       return "·";
   }

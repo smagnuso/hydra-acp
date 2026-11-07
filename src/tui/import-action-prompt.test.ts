@@ -108,7 +108,7 @@ describe("renderTitleStrip", () => {
 
 // Minimal terminal double: records every painted string against the row
 // it was moved to, which is all the mouse tests need to locate the
-// choice rows and read back which one carries the ❯ pointer.
+// choice rows and read back which one carries the › pointer.
 type Listener = (...args: unknown[]) => void;
 
 function makeTerm(): {
@@ -162,7 +162,7 @@ function makeTerm(): {
 }
 
 // Row of the first painted line containing `needle`, and which choice
-// currently carries the ❯ pointer. Shared by both modals' mouse tests.
+// currently carries the › pointer. Shared by both modals' mouse tests.
 function readers(painted: { row: number; text: string }[]): {
   rowOf: (needle: string) => number;
   selectedLabel: (labels: string[]) => string | undefined;
@@ -178,7 +178,7 @@ function readers(painted: { row: number; text: string }[]): {
     selectedLabel: (labels) => {
       for (let i = painted.length - 1; i >= 0; i--) {
         const entry = painted[i];
-        if (entry && entry.text.includes("❯")) {
+        if (entry && entry.text.includes("›")) {
           return labels.find((l) => entry.text.includes(l));
         }
       }

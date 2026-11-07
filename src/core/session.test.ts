@@ -7204,12 +7204,12 @@ describe("Session", () => {
       const text = extractTextMessage(stream);
       expect(text).toBeDefined();
       // All three seeded options plus the hydra-native agent option,
-      // each rendered with `id  (Name) — ▶ currentValue` headers.
+      // each rendered with `id  (Name) — ► currentValue` headers.
       expect(text).toContain("model  (Model) — \u25b6 ncp-anthropic/claude-opus-4-7");
       expect(text).toContain("mode  (Session Mode) — \u25b6 plan");
       expect(text).toContain("effort — \u25b6 low");
       expect(text).toContain("agent  (Agent) — \u25b6");
-      // Choice rows: current marked ▶, others ·, with the human name shown.
+      // Choice rows: current marked ►, others ·, with the human name shown.
       expect(text).toContain("\u25b6 plan               Plan");
       expect(text).toContain("\u00b7 default            Default");
       expect(text).toContain("\u25b6 low     Low");

@@ -93,7 +93,7 @@ describe("buildConfigIndexForm", () => {
       "commit",
       "cancel",
     ]);
-    expect(hints.find((h) => h.action === "commit")?.label).toBe("⏎ apply");
+    expect(hints.find((h) => h.action === "commit")?.label).toBe("Enter apply");
     expect(hints.find((h) => h.action === "cancel")?.label).toBe("Esc cancel");
   });
 

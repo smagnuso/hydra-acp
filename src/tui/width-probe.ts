@@ -38,11 +38,11 @@ const CPR_QUERY = "\u001b[6n";
  *
  * Not a survey of the Ambiguous block — these are the specific characters the
  * chrome is built out of, so a wrong answer about any one of them is a visible
- * bug. Box-drawing (`─` `│`) rules and sidebar gutters, the eighth-block
- * (`▏`) and middle-dot (`·`) that make up the context bar, the ellipsis (`…`)
- * every truncate appends, and the todo status marks (`✓` `▸`).
+ * bug. Box-drawing (`─` `│`) rules and sidebar gutters, the middle-dot (`·`)
+ * that fills the context bar, the ellipsis (`…`) every truncate appends, the
+ * todo status marks (`√` `▸`), and the warning (`▲`) and busy (`●`) marks.
  */
-export const PROBE_GLYPHS = ["─", "│", "·", "▏", "…", "✓", "▸"] as const;
+export const PROBE_GLYPHS = ["─", "│", "·", "…", "√", "▲", "●", "▸"] as const;
 
 /** Per-glyph measured widths, keyed by the glyph. */
 export type GlyphWidths = Record<string, number>;
@@ -67,7 +67,7 @@ export interface WidthProbeResult {
  * erase, leaving the cursor at column 1 of a now-blank line, so the next thing
  * to write overwrites it and the probe leaves no visible trace. The erase is
  * written unconditionally — a terminal that ignores CPR still must not be left
- * with `─│·▏…✓▸` printed on it.
+ * with `─│·…√▲●▸` printed on it.
  */
 export function buildProbeSequence(
   glyphs: readonly string[] = PROBE_GLYPHS,

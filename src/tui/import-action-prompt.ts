@@ -402,7 +402,7 @@ function paintChoiceLabel(
   label: string,
   isSelected: boolean,
 ): void {
-  const pointer = isSelected ? "❯" : " ";
+  const pointer = isSelected ? "›" : " ";
   const text = padRight(` ${pointer} ${label}`, layout.contentW);
   term.moveTo(layout.contentX, rowOnScreen);
   paint(term, isSelected ? "list-selected" : "content", text);

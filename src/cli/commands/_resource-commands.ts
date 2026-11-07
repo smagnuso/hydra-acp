@@ -136,7 +136,7 @@ export function createResourceCommands(kind: ResourceKind): ResourceCommands {
     }
     for (const e of items) {
       if (e.failureReason) {
-        process.stdout.write(`  ↳ ${e.name}: ${e.failureReason}\n`);
+        process.stdout.write(`  └ ${e.name}: ${e.failureReason}\n`);
       }
     }
   }

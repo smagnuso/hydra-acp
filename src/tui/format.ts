@@ -246,7 +246,7 @@ export function formatEvent(
     case "user-text": {
       const lines = formatBlock(
         event.text,
-        "▎ ",
+        "│ ",
         "user",
         undefined,
         event.sentBy,
@@ -260,7 +260,7 @@ export function formatEvent(
       if (event.attachments && event.attachments.length > 0) {
         for (const a of event.attachments) {
           lines.push({
-            prefix: "▎ ",
+            prefix: "│ ",
             prefixStyle: "user",
             body: `📎 ${a.name ?? "image"}`,
             bodyStyle: "user",
@@ -1713,7 +1713,7 @@ function formatBlock(
   const out: FormattedLine[] = [];
   if (sentBy) {
     out.push({
-      prefix: "↳ ",
+      prefix: "└ ",
       prefixStyle: "muted",
       body: `from ${sentBy}`,
       bodyStyle: "muted",
@@ -1809,7 +1809,7 @@ export interface ToolLineState {
   status: string;
   // Optional error text from a `failed` update. When present, rendered as
   // an indented continuation line under the tool row so the user sees
-  // *why* the tool failed instead of just a red ✗.
+  // *why* the tool failed instead of just a red ×.
   errorText?: string;
   // In-memory record of the edit payload for this tool call (Edit /
   // Write / str_replace). Not consumed by formatToolLine — the scrollback
@@ -1875,7 +1875,7 @@ export function truncateResultText(raw: string): { text: string; truncated: bool
 // One tool call → one or more FormattedLines. The primary row is the
 // icon + title (combined from initialTitle and latestTitle when the
 // update refined the label). On failure, a second indented line carries
-// the error text so a small red ✗ doesn't hide the actual cause.
+// the error text so a small red × doesn't hide the actual cause.
 //
 // `now` is the wall-clock used to compute a still-running tool's live
 // duration; it's threaded in (rather than read here) so the function stays
@@ -2219,12 +2219,12 @@ export function formatEditDiffBlock(
         opts.deferredStatus === "error"
           ? {
               prefix: "  ",
-              body: "⚠ failed to load diff",
+              body: "▲ failed to load diff",
               bodyStyle: "tool-status-fail",
             }
           : {
               prefix: "  ",
-              body: "⋯ fetching diff…",
+              body: "… fetching diff…",
               bodyStyle: "status-idle",
             },
       );
@@ -2272,7 +2272,7 @@ export interface BuildUnifiedDiffOptions {
   // Unchanged context lines kept around each change. Defaults to the
   // module-level diffContextLines (Infinity unless setDiffContextLines was
   // called). Finite values collapse the runs of unchanged lines between
-  // hunks into a "⋯ N unchanged lines" marker, so a 1-line edit in a big
+  // hunks into a "… N unchanged lines" marker, so a 1-line edit in a big
   // file (e.g. an ACP full-file diff) renders a small hunk, not the whole
   // file.
   contextLines?: number;
@@ -2335,7 +2335,7 @@ export function buildUnifiedDiff(
         j++;
       }
       const skipped = j - i;
-      display.push(`  ⋯ ${skipped} unchanged line${skipped === 1 ? "" : "s"}`);
+      display.push(`  … ${skipped} unchanged line${skipped === 1 ? "" : "s"}`);
       i = j;
     }
   }
@@ -2377,14 +2377,14 @@ function toolStatusIcon(status: string): string {
     case "completed":
     case "succeeded":
     case "ok":
-      return "✓";
+      return "√";
     case "failed":
     case "error":
-      return "✗";
+      return "×";
     case "rejected":
-      return "⊘";
+      return "÷";
     case "cancelled":
-      return "⊝";
+      return "−";
     case "in_progress":
     case "running":
     case "updated":
@@ -2392,11 +2392,11 @@ function toolStatusIcon(status: string): string {
     default:
       // Same spinner glyph for queued vs. running — bodyStyle distinguishes
       // them visually (dim vs. bold).
-      return "◐";
+      return "◊";
   }
 }
 
-// Icon color tracks the icon's meaning, not the line's emphasis: the ◐
+// Icon color tracks the icon's meaning, not the line's emphasis: the ◊
 // stays yellow (matching the busy banner / plan accent) for both queued
 // and running, so any tool with work pending reads as "active" at a glance.
 function toolIconStyle(status: string): Style {
@@ -2429,7 +2429,7 @@ export interface ExitPlanState {
 export function formatExitPlanMode(state: ExitPlanState): FormattedLine[] {
   const lines: FormattedLine[] = [
     {
-      prefix: "▣ ",
+      prefix: "■ ",
       prefixStyle: "plan",
       body: "Plan",
       bodyStyle: "plan",
@@ -2453,7 +2453,7 @@ function exitPlanFooter(status: string): FormattedLine | null {
     case "ok":
       return {
         prefix: "  ",
-        body: "✓ Approved",
+        body: "√ Approved",
         bodyStyle: "tool-status-ok",
       };
     case "failed":
@@ -2461,13 +2461,13 @@ function exitPlanFooter(status: string): FormattedLine | null {
     case "rejected":
       return {
         prefix: "  ",
-        body: "✗ Rejected",
+        body: "× Rejected",
         bodyStyle: "tool-status-fail",
       };
     case "cancelled":
       return {
         prefix: "  ",
-        body: "⊝ Cancelled",
+        body: "− Cancelled",
         bodyStyle: "tool-status-cancelled",
       };
     case "pending":
@@ -2582,7 +2582,7 @@ function formatPlan(
   }
   const lines: FormattedLine[] = [
     {
-      prefix: "▣ ",
+      prefix: "■ ",
       prefixStyle: headerStyle,
       body: headerBody,
       bodyStyle: headerStyle,

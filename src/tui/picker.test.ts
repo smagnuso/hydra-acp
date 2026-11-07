@@ -1755,7 +1755,7 @@ describe("pickSession: ^F find mode", () => {
     // The newly-hovered row picked up the focused-row marker and its
     // counter; the previously-selected row lost them.
     expect(out).toContain("beta needle line");
-    expect(out).toContain("❯ ");
+    expect(out).toContain("› ");
     // Hovering back up moves it again.
     drv.clearOutput();
     drv.mouse("MOUSE_MOTION", 10, FIRST_HIT_ROW);

@@ -129,7 +129,7 @@ describe("permission modal mouse", () => {
     expect(p.screen.isPermissionCell(p.rowOf(0) - 1)).toBe(true);
     expect(p.screen.permissionHitAt(6, p.rowOf(0) - 1)).toBe(null);
     const hint = p.row(p.hintRow);
-    expect(p.screen.permissionHitAt(hint.indexOf("⏎ submit") + 1, p.hintRow)).toEqual(
+    expect(p.screen.permissionHitAt(hint.indexOf("Enter submit") + 1, p.hintRow)).toEqual(
       { kind: "hint", action: "commit" },
     );
     expect(

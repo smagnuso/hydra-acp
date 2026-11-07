@@ -70,7 +70,7 @@ function render(
   });
   // No `hint` override: the shipped DEFAULT_HINT_ITEMS is what these
   // rows should be asserting against. The old fixture carried its own
-  // prose copy, which had drifted from the real glyphs (`^p` vs `⌃P`).
+  // prose copy, which had drifted from the real glyphs (`^p` vs `^P`).
   screen.setBanner({
     status: "busy",
     elapsedMs: 62_000,
@@ -130,7 +130,7 @@ describe("chrome bars", () => {
   it("bottom rule no longer emits a leading separator", () => {
     const r = render(120);
     expect(r.bottom).toBe(
-      "─────────────────────────────────────────────────────────────── ⇧⇥ mode · ⌃O options · ⌃P pick · ⌃G guide · ⌃D detach ──",
+      "──────────────────────────────────────────────────────────── S-Tab mode · ^O options · ^P pick · ^G guide · ^D detach ──",
     );
     expect(r.bottom).not.toContain("── · ");
   });
@@ -157,7 +157,7 @@ describe("chrome bars", () => {
 
   it("sheds hint chunks right-to-left rather than all at once", () => {
     const r = render(40);
-    expect(r.bottom).toContain("⇧⇥ mode");
+    expect(r.bottom).toContain("S-Tab mode");
     expect(r.bottom).not.toContain("detach");
   });
 
@@ -225,7 +225,7 @@ describe("chrome bars", () => {
   it("records click ranges for the hint chunks", () => {
     const w = 120;
     const r = render(w);
-    const col = r.bottom.indexOf("⌃P pick") + 1;
+    const col = r.bottom.indexOf("^P pick") + 1;
     expect(r.screen.bannerHitAt(col, 2)).toBe("pick");
     expect(r.screen.bannerHitAt(col, 1)).toBe(null);
     expect(r.screen.bannerHitAt(1, 2)).toBe(null);
@@ -301,7 +301,7 @@ describe("chrome bars", () => {
     cap.reset();
     (priv["painter"] as { clearCache(): void }).clearCache();
     priv.drawBar("composerBottom", 2);
-    expect(cap.row(2)).not.toContain("⌃P pick");
+    expect(cap.row(2)).not.toContain("^P pick");
     expect(cap.row(2)).toContain("needle");
   });
 
@@ -520,7 +520,7 @@ describe("help-hint onboarding", () => {
   }
 
   it("shows the hints while the session is still new", () => {
-    expect(harness({ exhausted: false }).bottom()).toContain("⌃O options");
+    expect(harness({ exhausted: false }).bottom()).toContain("^O options");
   });
 
   // Resolving to nothing rather than to a placeholder glyph is what keeps
@@ -528,7 +528,7 @@ describe("help-hint onboarding", () => {
   // the fill runs the whole width instead of leaving two holes in it.
   it("collapses to an unbroken rule, with no gap where the pads were", () => {
     const row = harness().bottom();
-    expect(row).not.toContain("⇧⇥ mode");
+    expect(row).not.toContain("S-Tab mode");
     expect(row).toBe("─".repeat(120));
   });
 
@@ -540,15 +540,15 @@ describe("help-hint onboarding", () => {
   it("brings them back for a Ctrl chord that maps to nothing", () => {
     const { priv, bottom } = harness();
     priv.handleKey("CTRL_LEFT", {});
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
   });
 
   it("retires the keyboard reveal once a prompt has been sent", () => {
     const { screen, priv, bottom } = harness();
     priv.handleKey("CTRL_LEFT", {});
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
     screen.clearHintReveal();
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
   });
 
   // A turn retires a parked pointer's reveal too, rather than leaving the
@@ -557,19 +557,19 @@ describe("help-hint onboarding", () => {
     const { screen, priv, bottom, inZone } = harness();
     bottom();
     priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
     screen.clearHintReveal();
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
     // Pointer never left the zone, so the next motion event there brings
     // the hints back — no stuck state.
     priv.handleMouse("MOUSE_MOTION", { x: inZone - 1, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
   });
 
   it("does not reveal for a chord that is bound to something", () => {
     const { priv, bottom } = harness();
     priv.handleKey("CTRL_P", {});
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
   });
 
   // Reveal is resolved by a span, not by hit region: once expanded, the pad
@@ -578,17 +578,17 @@ describe("help-hint onboarding", () => {
   it("reveals from any column in the zone, hit region or not", () => {
     const { priv, bottom, inZone } = harness();
     const collapsed = bottom();
-    expect(collapsed).not.toContain("⇧⇥ mode");
+    expect(collapsed).not.toContain("S-Tab mode");
 
     priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
     const expanded = bottom();
-    expect(expanded).toContain("⌃O options");
+    expect(expanded).toContain("^O options");
 
     // indexOf gives the 0-based index of the first hint glyph, which is
     // the 1-based column of the pad space in front of it.
-    const padColumn = expanded.indexOf("⇧⇥ mode");
+    const padColumn = expanded.indexOf("S-Tab mode");
     priv.handleMouse("MOUSE_MOTION", { x: padColumn, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
   });
 
   // The rest of the rule is a long way from the hints and is not a target
@@ -596,18 +596,18 @@ describe("help-hint onboarding", () => {
   it("ignores the fill and the left side of the rule", () => {
     const { priv, bottom, outOfZone, zoneStart } = harness();
     const collapsed = bottom();
-    expect(collapsed).not.toContain("⌃O options");
+    expect(collapsed).not.toContain("^O options");
 
     priv.handleMouse("MOUSE_MOTION", { x: outOfZone, y: ROW });
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
 
     // One column short of the zone still counts as outside it.
     const start = zoneStart();
     expect(start).not.toBeNull();
     priv.handleMouse("MOUSE_MOTION", { x: start! - 1, y: ROW });
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
     priv.handleMouse("MOUSE_MOTION", { x: start!, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
   });
 
   // A transient message displaces the whole right side for its duration, so
@@ -619,12 +619,12 @@ describe("help-hint onboarding", () => {
     expect(bottom()).toContain("needle");
     expect(zoneStart()).toBeNull();
     priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-    expect(bottom()).not.toContain("⌃O options");
+    expect(bottom()).not.toContain("^O options");
 
     screen.setBannerSearchIndicator(null);
     bottom();
     priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
   });
 
   // The zone is measured from the revealed layout, so it is already the
@@ -636,7 +636,7 @@ describe("help-hint onboarding", () => {
     bottom();
     const collapsedZone = zoneStart();
     priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-    expect(bottom()).toContain("⌃O options");
+    expect(bottom()).toContain("^O options");
     expect(zoneStart()).toBe(collapsedZone);
   });
 
@@ -648,11 +648,11 @@ describe("help-hint onboarding", () => {
       const { priv, bottom, inZone, outOfZone } = harness();
       bottom();
       priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
       priv.handleMouse("MOUSE_MOTION", { x: outOfZone, y: ROW });
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
       vi.runAllTimers();
-      expect(bottom()).not.toContain("⌃O options");
+      expect(bottom()).not.toContain("^O options");
     } finally {
       vi.useRealTimers();
     }
@@ -667,12 +667,12 @@ describe("help-hint onboarding", () => {
       const { priv, bottom, inZone } = harness();
       bottom();
       priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
       priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW + 1 });
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
       priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
       vi.runAllTimers();
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
     } finally {
       vi.useRealTimers();
     }
@@ -687,22 +687,22 @@ describe("help-hint onboarding", () => {
       const { screen, priv, bottom, inZone, outOfZone } = harness();
       bottom();
       priv.handleMouse("MOUSE_MOTION", { x: inZone, y: ROW });
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
       priv.handleMouse("MOUSE_MOTION", { x: outOfZone, y: ROW });
       screen.clearHintReveal();
       priv.handleKey("CTRL_LEFT", {});
       vi.runAllTimers();
-      expect(bottom()).toContain("⌃O options");
+      expect(bottom()).toContain("^O options");
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("keeps ⌃O when the row is too narrow for the whole list", () => {
+  it("keeps ^O when the row is too narrow for the whole list", () => {
     // Shed order is positional, so options sits second to survive.
     const row = harness({ exhausted: false, width: 40 }).bottom();
-    expect(row).toContain("⇧⇥ mode");
-    expect(row).toContain("⌃O options");
+    expect(row).toContain("S-Tab mode");
+    expect(row).toContain("^O options");
     expect(row).not.toContain("detach");
   });
 });
@@ -793,11 +793,11 @@ describe("chrome bar mouse", () => {
     const r = render(120);
     const at = (needle: string): string | undefined =>
       r.screen.barHitAt(r.bottom.indexOf(needle) + 1, 2)?.action;
-    expect(at("⇧⇥ mode")).toBe("toggle-mode");
-    expect(at("⌃O options")).toBe("toggle-options");
-    expect(at("⌃P pick")).toBe("switch-session");
-    expect(at("⌃G guide")).toBe("show-help");
-    expect(at("⌃D detach")).toBe("detach");
+    expect(at("S-Tab mode")).toBe("toggle-mode");
+    expect(at("^O options")).toBe("toggle-options");
+    expect(at("^P pick")).toBe("switch-session");
+    expect(at("^G guide")).toBe("show-help");
+    expect(at("^D detach")).toBe("detach");
   });
 
   it("returns null off any field", () => {
@@ -863,16 +863,16 @@ describe("chrome bar gestures", () => {
 
   it("fires the click action only when press and release agree", () => {
     const { r, priv, actions } = gestures();
-    const x = r.bottom.indexOf("⌃P pick") + 1;
+    const x = r.bottom.indexOf("^P pick") + 1;
     expect(priv.handleBarPress({ x, y: 2 })).toBe(true);
     expect(priv.handleBarRelease({ x, y: 2 })).toBe(true);
-    expect(actions).toEqual([["switch-session", "⌃P pick"]]);
+    expect(actions).toEqual([["switch-session", "^P pick"]]);
   });
 
   it("ignores a press-drag-release that lands on a different field", () => {
     const { r, priv, actions } = gestures();
-    const from = r.bottom.indexOf("⌃P pick") + 1;
-    const to = r.bottom.indexOf("⌃G guide") + 1;
+    const from = r.bottom.indexOf("^P pick") + 1;
+    const to = r.bottom.indexOf("^G guide") + 1;
     priv.handleBarPress({ x: from, y: 2 });
     expect(priv.handleBarRelease({ x: to, y: 2 })).toBe(false);
     expect(actions).toEqual([]);
@@ -930,15 +930,15 @@ describe("chrome bar gestures", () => {
 
   it("a double-click split across two different fields is two singles", () => {
     const { r, priv, actions } = gestures();
-    const pick = r.bottom.indexOf("⌃P pick") + 1;
-    const guide = r.bottom.indexOf("⌃G guide") + 1;
+    const pick = r.bottom.indexOf("^P pick") + 1;
+    const guide = r.bottom.indexOf("^G guide") + 1;
     priv.handleBarPress({ x: pick, y: 2 });
     priv.handleBarRelease({ x: pick, y: 2 });
     priv.handleBarPress({ x: guide, y: 2 });
     priv.handleBarRelease({ x: guide, y: 2 });
     expect(actions).toEqual([
-      ["switch-session", "⌃P pick"],
-      ["show-help", "⌃G guide"],
+      ["switch-session", "^P pick"],
+      ["show-help", "^G guide"],
     ]);
   });
 });

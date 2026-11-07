@@ -121,10 +121,10 @@ describe("bundleToMarkdown", () => {
       ]),
       { includeTools: true },
     );
-    expect(md).toContain("- ✓ Read src/foo.ts");
+    expect(md).toContain("- √ Read src/foo.ts");
   });
 
-  it("marks failed tool calls with ✗ and a status suffix (includeTools=true)", () => {
+  it("marks failed tool calls with × and a status suffix (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -137,10 +137,10 @@ describe("bundleToMarkdown", () => {
       ]),
       { includeTools: true },
     );
-    expect(md).toContain("- ✗ Bash boom _(failed)_");
+    expect(md).toContain("- × Bash boom _(failed)_");
   });
 
-  it("marks cancelled tool calls with ⊘ (includeTools=true)", () => {
+  it("marks cancelled tool calls with ÷ (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -153,7 +153,7 @@ describe("bundleToMarkdown", () => {
       ]),
       { includeTools: true },
     );
-    expect(md).toContain("- ⊘ WebFetch _(cancelled)_");
+    expect(md).toContain("- ÷ WebFetch _(cancelled)_");
   });
 
   it("coalesces consecutive tool calls into a tight bullet list (includeTools=true)", () => {
@@ -169,7 +169,7 @@ describe("bundleToMarkdown", () => {
       ]),
       { includeTools: true },
     );
-    expect(md).toContain("- ✓ Read a\n- ✓ Read b\n- ✓ Read c\n");
+    expect(md).toContain("- √ Read a\n- √ Read b\n- √ Read c\n");
   });
 
   it("omits tool activity by default", () => {
@@ -185,7 +185,7 @@ describe("bundleToMarkdown", () => {
       ]),
     );
     expect(md).not.toContain("Read src/foo.ts");
-    expect(md).not.toMatch(/[✓✗⊘]/);
+    expect(md).not.toMatch(/[√×÷]/);
   });
 
   it("omits agent thoughts by default", () => {

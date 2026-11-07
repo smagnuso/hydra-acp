@@ -469,7 +469,7 @@ export function buildAllQuestionsSpec(
       { label: "←/→ cycle" },
       { label: "d dismiss", action: "dismiss" },
       { label: "1-9 jump" },
-      { label: "⏎/Esc save", action: "commit" },
+      { label: "Enter/Esc save", action: "commit" },
       { label: "^C discard", action: "cancel" },
     ],
   };
@@ -2265,7 +2265,7 @@ async function runSession(
         stallNoticeShown = true;
         screenRef.appendLines([
           {
-            prefix: "⚠ ",
+            prefix: "▲ ",
             prefixStyle: "tool-status-fail",
             body:
               `no output for ${Math.round(idleMs / 60_000)}m and nothing ` +
@@ -2847,7 +2847,7 @@ async function runSession(
     if (p.reason === "unresponsive") {
       screenRef!.appendLines([
         {
-          prefix: "⚠ ",
+          prefix: "▲ ",
           prefixStyle: "tool-status-fail",
           body: `agent kept resuming after repeated cancels${detail} — hydra restarted it automatically.`,
           bodyStyle: "tool-status-fail",
@@ -2860,7 +2860,7 @@ async function runSession(
     const code = typeof p.code === "number" ? ` (${p.code})` : "";
     screenRef!.appendLines([
       {
-        prefix: "⚠ ",
+        prefix: "▲ ",
         prefixStyle: "tool-status-fail",
         body: `cancel rejected by agent${code}${detail} — this agent build may not support cancellation. Cancel again to force-stop (restarts the agent).`,
         bodyStyle: "tool-status-fail",
@@ -3080,7 +3080,7 @@ async function runSession(
             synthesisPollTimer = null;
           }
         } else if (data.forkSynthesisState === "failed") {
-          screen.setSynthesisIndicator("⚠ synthesis failed");
+          screen.setSynthesisIndicator("▲ synthesis failed");
           screen.notify("synthesis failed — fork still usable via recall", 8000);
           if (synthesisPollTimer !== null) {
             clearInterval(synthesisPollTimer);
@@ -3300,7 +3300,7 @@ async function runSession(
     pendingPermission = null;
     screen.setPermissionPrompt(null);
     // The tool-call row updates to "running" / "done" / "failed" in
-    // response to the decision, so a separate "✓ Allow" or "✗ Reject"
+    // response to the decision, so a separate "√ Allow" or "× Reject"
     // line in scrollback is redundant and sticky-feeling. Just dismiss
     // the modal and let the tool row carry the outcome.
     if (optionId === null) {
@@ -4841,7 +4841,7 @@ async function runSession(
         forceStopArmed = true;
         screenRef?.appendLines([
           {
-            prefix: "⚠ ",
+            prefix: "▲ ",
             prefixStyle: "tool-status-fail",
             body:
               "cancel not acknowledged by agent; the turn is still running. " +
@@ -4863,7 +4863,7 @@ async function runSession(
     if (screenRef !== null) {
       screenRef.appendLines([
         {
-          prefix: "⚠ ",
+          prefix: "▲ ",
           prefixStyle: "tool-status-fail",
           body:
             "force-stopping agent — turn aborted; resumes on your next message…",
@@ -5214,7 +5214,7 @@ async function runSession(
     hints: [
       { label: "↑/↓ row" },
       { label: "←/→ cycle" },
-      { label: "⏎ next", action: "commit" },
+      { label: "Enter next", action: "commit" },
       { label: "s save default", action: "save" },
       { label: "Esc close", action: "close" },
     ],
@@ -5628,7 +5628,7 @@ async function runSession(
         label: "title:",
         initial: seed,
         hints: [
-          { label: "⏎ save", action: "commit" },
+          { label: "Enter save", action: "commit" },
           { label: "Esc cancel", action: "close" },
         ],
       }),
@@ -7077,7 +7077,7 @@ async function runSession(
     const body = entry.attachmentCount > 0
       ? `${entry.text} · 📎×${entry.attachmentCount}`
       : entry.text;
-    return entry.held ? `⏸ ${body}` : body;
+    return entry.held ? `|| ${body}` : body;
   };
 
   // Convert a wire-shaped prompt array (the session/prompt prompt blocks)
@@ -7736,7 +7736,7 @@ async function runSession(
         // usage; the formatted string lands in the overlay header.
         const btwUsage: SessionListUsage = {};
         // Echo the user's prompt at the top of the overlay so it reads
-        // like a mini-conversation, rendered with the same "▎ " gutter
+        // like a mini-conversation, rendered with the same "│ " gutter
         // the main transcript uses for user messages. The daemon excludes
         // the originator from prompt_received broadcasts so the only way
         // this lands in the overlay is by us seeding it ourselves.
@@ -7977,7 +7977,7 @@ async function runSession(
         typeof screenRef !== "undefined" && screenRef !== null;
       if (!screenReady) return;
       screenRef!.appendLines([
-        { prefix: "⚠ ", prefixStyle: "tool-status-fail", body, bodyStyle: "tool-status-fail" },
+        { prefix: "▲ ", prefixStyle: "tool-status-fail", body, bodyStyle: "tool-status-fail" },
       ]);
     };
     let forceStopRequested = false;
@@ -8052,7 +8052,7 @@ async function runSession(
       if (forceStopRequested) {
         screen.appendLines([
           {
-            prefix: "⚠ ",
+            prefix: "▲ ",
             prefixStyle: "tool-status-fail",
             body: "turn force-stopped",
             bodyStyle: "tool-status-fail",
@@ -8061,7 +8061,7 @@ async function runSession(
       } else {
         screen.appendLines([
           {
-            prefix: "✗ ",
+            prefix: "× ",
             prefixStyle: "tool-status-fail",
             body: (err as Error).message,
             bodyStyle: "tool-status-fail",
@@ -10287,7 +10287,7 @@ async function runSession(
         // already conveys the action, no warning needed.
         screen.appendLines([
           {
-            prefix: "⚠ ",
+            prefix: "▲ ",
             prefixStyle: "tool-status-fail",
             body: `turn ended: ${effectiveStopReason}`,
             bodyStyle: "tool-status-fail",
@@ -10514,7 +10514,7 @@ async function runSession(
         screen.setSynthesisIndicator("synthesizing context…");
         startSynthesisPoll();
       } else if (data.forkSynthesisState === "failed") {
-        screen.setSynthesisIndicator("⚠ synthesis failed");
+        screen.setSynthesisIndicator("▲ synthesis failed");
         screen.notify("synthesis failed — fork still usable via recall", 8000);
       }
     } catch {
@@ -10879,7 +10879,7 @@ async function runSession(
       markToolsBlockRecoveryFailed();
       screen.appendLines([
         {
-          prefix: "⚠ ",
+          prefix: "▲ ",
           prefixStyle: "tool-status-fail",
           body: "reconnect couldn't replay events since last seen — scrollback may be incomplete",
           bodyStyle: "tool-status-fail",
