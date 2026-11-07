@@ -1308,92 +1308,6 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const target = opts.target ?? (await resolveLocalTarget(config));
   setLogMaxBytes(config.tui.logMaxBytes);
   setKeyTrace(config.tui.keyTrace === true);
-  // Ask the terminal about itself, before anything grabs the keyboard, since the
-  // answers arrive as input. One round trip carries both questions: OSC 11 for the
-  // background and OSC 4 for the sixteen ansi slots. Bounded by the probe's own
-  // timeout and never fatal — a terminal that does not answer leaves both
-  // undefined and the config/COLORFGBG chain takes over, which is what shipped
-  // before.
-  //
-  // Not skipped when tui.themeBackground is set: that outranks the sensed
-  // BACKGROUND, but says nothing about the palette, which the 4-bit quantiser
-  // wants either way.
-  const sensed = await senseTerminalColors();
-  // What the terminal made of its own ansi slots, so quantising down to 4 bits
-  // matches against real colours instead of xterm's defaults.
-  setSensedPalette(sensed.palette);
-  terminalForeground = sensed.foreground;
-  // The background is resolved BEFORE the theme is loaded, because with no theme
-  // configured it is what chooses one — see defaultThemeFor.
-  const sensedBackground = sensed.background;
-  // Problems from resolving the background are merged into the theme's below, so
-  // both surface through the same path once the transcript exists.
-  const backgroundProblems: string[] = [];
-  themeBackground = resolveThemeBackground(
-    config.tui.themeBackground,
-    backgroundProblems,
-    process.env,
-    sensedBackground,
-  );
-  // Apply the colour theme before anything draws. Problems are collected rather
-  // than thrown: a typo in a hand-edited theme should show up as a message in
-  // the transcript, not stop the TUI from starting.
-  //
-  // With nothing configured the background picks the theme: catppuccin mocha on a
-  // dark terminal, latte on a light one, and `terminal` when the background could
-  // not be determined, since deferring to the user's own palette is the only safe
-  // answer with nothing measured.
-  const autoThemeName =
-    config.tui.theme === undefined
-      ? defaultThemeFor(themeBackground)
-      : undefined;
-  const loadedTheme = await loadTheme(
-    autoThemeName ?? config.tui.theme,
-    paths.themesDir(),
-  );
-  loadedTheme.problems.unshift(...backgroundProblems);
-  // Same window, same reasoning: measured with a cursor position report before
-  // the keyboard is grabbed, because the reply arrives as input. Skipped when the
-  // user has stated a width explicitly, so nobody pays a round trip for an
-  // answer that resolveAmbiguousWide would outrank anyway.
-  if (config.tui.ambiguousWidth === "auto") {
-    const probe = await probeAmbiguousWidth();
-    probedAmbiguousWide = probe?.wide;
-    writeDebugLine({
-      src: "width-probe",
-      answered: probe !== undefined,
-      wide: probe?.wide,
-      widths: probe?.widths,
-    });
-  }
-  setTheme(loadedTheme.palette, {
-    ...loadedTheme.overrides,
-    background: themeBackground,
-    foreground: sensed.foreground,
-  });
-  // Resolved up front so the ^O picker can cycle synchronously.
-  themeChoices = await listThemes(paths.themesDir());
-  activeThemeName = loadedTheme.name;
-  // Stashed rather than reported here: the transcript does not exist yet, and
-  // stderr would be wiped by the alt-screen switch.
-  pendingThemeProblems = loadedTheme.problems;
-  // A separate list from the problems above because it is not an error: the theme
-  // loaded fine, it is just the wrong half of a pair for this terminal. Delivered
-  // to the banner rather than the transcript — see where this is drained.
-  pendingThemeNotices = [];
-  // The auto-selected theme is NOT announced. It was, for about ten minutes: the
-  // argument was that a default varying with the terminal changes your colours
-  // between machines with no visible cause. But the ^O picker already shows which
-  // theme is live, so the line was permanent chrome answering a question asked
-  // once. What is left here is only the case where something is actually wrong.
-  const mismatch = themeBackgroundMismatch(
-    loadedTheme.palette,
-    loadedTheme.name,
-    themeBackground,
-  );
-  if (mismatch !== undefined) {
-    pendingThemeNotices.push(mismatch);
-  }
   // Only autostart the daemon when it's on this machine. Remote
   // targets get a connection error from the WS layer if the daemon
   // isn't up, which is the right behavior (we can't reach across the
@@ -1519,6 +1433,94 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   };
   process.once("exit", altScreenCleanup);
+  // Runs inside the alt screen: with the cursor on the bottom row of the main
+  // buffer, Windows Terminal shifts the whole screen up a row after this.
+  // Ask the terminal about itself, before anything grabs the keyboard, since the
+  // answers arrive as input. One round trip carries both questions: OSC 11 for the
+  // background and OSC 4 for the sixteen ansi slots. Bounded by the probe's own
+  // timeout and never fatal — a terminal that does not answer leaves both
+  // undefined and the config/COLORFGBG chain takes over, which is what shipped
+  // before.
+  //
+  // Not skipped when tui.themeBackground is set: that outranks the sensed
+  // BACKGROUND, but says nothing about the palette, which the 4-bit quantiser
+  // wants either way.
+  const sensed = await senseTerminalColors();
+  // What the terminal made of its own ansi slots, so quantising down to 4 bits
+  // matches against real colours instead of xterm's defaults.
+  setSensedPalette(sensed.palette);
+  terminalForeground = sensed.foreground;
+  // The background is resolved BEFORE the theme is loaded, because with no theme
+  // configured it is what chooses one — see defaultThemeFor.
+  const sensedBackground = sensed.background;
+  // Problems from resolving the background are merged into the theme's below, so
+  // both surface through the same path once the transcript exists.
+  const backgroundProblems: string[] = [];
+  themeBackground = resolveThemeBackground(
+    config.tui.themeBackground,
+    backgroundProblems,
+    process.env,
+    sensedBackground,
+  );
+  // Apply the colour theme before anything draws. Problems are collected rather
+  // than thrown: a typo in a hand-edited theme should show up as a message in
+  // the transcript, not stop the TUI from starting.
+  //
+  // With nothing configured the background picks the theme: catppuccin mocha on a
+  // dark terminal, latte on a light one, and `terminal` when the background could
+  // not be determined, since deferring to the user's own palette is the only safe
+  // answer with nothing measured.
+  const autoThemeName =
+    config.tui.theme === undefined
+      ? defaultThemeFor(themeBackground)
+      : undefined;
+  const loadedTheme = await loadTheme(
+    autoThemeName ?? config.tui.theme,
+    paths.themesDir(),
+  );
+  loadedTheme.problems.unshift(...backgroundProblems);
+  // Same window, same reasoning: measured with a cursor position report before
+  // the keyboard is grabbed, because the reply arrives as input. Skipped when the
+  // user has stated a width explicitly, so nobody pays a round trip for an
+  // answer that resolveAmbiguousWide would outrank anyway.
+  if (config.tui.ambiguousWidth === "auto") {
+    const probe = await probeAmbiguousWidth();
+    probedAmbiguousWide = probe?.wide;
+    writeDebugLine({
+      src: "width-probe",
+      answered: probe !== undefined,
+      wide: probe?.wide,
+      widths: probe?.widths,
+    });
+  }
+  setTheme(loadedTheme.palette, {
+    ...loadedTheme.overrides,
+    background: themeBackground,
+    foreground: sensed.foreground,
+  });
+  // Resolved up front so the ^O picker can cycle synchronously.
+  themeChoices = await listThemes(paths.themesDir());
+  activeThemeName = loadedTheme.name;
+  // Stashed rather than reported here: the transcript does not exist yet, and
+  // stderr would be wiped by the alt-screen switch.
+  pendingThemeProblems = loadedTheme.problems;
+  // A separate list from the problems above because it is not an error: the theme
+  // loaded fine, it is just the wrong half of a pair for this terminal. Delivered
+  // to the banner rather than the transcript — see where this is drained.
+  pendingThemeNotices = [];
+  // The auto-selected theme is NOT announced. It was, for about ten minutes: the
+  // argument was that a default varying with the terminal changes your colours
+  // between machines with no visible cause. But the ^O picker already shows which
+  // theme is live, so the line was permanent chrome answering a question asked
+  // once. What is left here is only the case where something is actually wrong.
+  const mismatch = themeBackgroundMismatch(
+    loadedTheme.palette,
+    loadedTheme.name,
+    themeBackground,
+  );
+  if (mismatch !== undefined) {
+    pendingThemeNotices.push(mismatch);
+  }
   // Mint one "script"-kind daemon token per distinct composer-bar script
   // command, all grouped under one process-lifetime sessionLabel so a
   // single revoke call in the finally below cleans them all up. Computed
