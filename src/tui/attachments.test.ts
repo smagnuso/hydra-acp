@@ -7,7 +7,10 @@ import {
   parseDataUriImage,
   parseImageDropPaste,
 } from "./attachments.js";
-import { onPlatform } from "../core/platform-stub.js";
+import { onPlatform, pinPlatform } from "../core/platform-stub.js";
+
+// Asserts POSIX display (~ shortening, backslash escapes); Windows is covered in paths.test.
+pinPlatform("linux");
 
 describe("mimeFromExtension", () => {
   it("recognises common image extensions case-insensitively", () => {

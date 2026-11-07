@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { pinPlatform } from "../../core/platform-stub.js";
 import stringWidth from "string-width";
 import type { InputDispatcher } from "../input.js";
 import { Screen } from "../screen.js";
@@ -7,6 +8,9 @@ import { expandSide } from "./slots.js";
 import { DEFAULT_HINT_ITEMS } from "./types.js";
 import type { BarLayoutConfig } from "./types.js";
 import { makeCaptureTerm } from "./test-harness.js";
+
+// Asserts POSIX display (~ shortening, backslash escapes); Windows is covered in paths.test.
+pinPlatform("linux");
 
 const dispatcher = {
   state: () => ({

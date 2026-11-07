@@ -151,6 +151,8 @@ describe("nativeCwd", () => {
     await onPlatform("win32", () => {
       expect(nativeCwd("proj/sub")).toBe("proj/sub");
       expect(nativeCwd("C:rel")).toBe("C:rel");
+      expect(nativeCwd("/w")).toBe("/w");
+      expect(nativeCwd("\\w")).toBe("\\w");
     });
   });
 

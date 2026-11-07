@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { pinPlatform } from "../core/platform-stub.js";
 import { homedir } from "node:os";
 import { makeSessionPathDisplay } from "./session-path-display.js";
+
+// Asserts POSIX display (~ shortening, backslash escapes); Windows is covered in paths.test.
+pinPlatform("linux");
 
 describe("makeSessionPathDisplay", () => {
   it("renders a plain session's paths relative to its cwd", () => {

@@ -7,8 +7,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { onPlatform } from "../core/platform-stub.js";
+import { onPlatform, pinPlatform } from "../core/platform-stub.js";
 import { runForegroundChild, type SpawnFn } from "./foreground-run.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 interface Harness {
   log: string[];
@@ -180,7 +183,7 @@ describe("runForegroundChild with a Windows .cmd shim", () => {
   it("resolves the shim and runs it through the shell", async () => {
     const calls = await runShim("bin");
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.command.endsWith("myeditor.cmd")).toBe(true);
+    expect(calls[0]!.command).toMatch(/myeditor\.cmd$/i);
     expect(calls[0]!.options.shell).toBe(true);
     expect(calls[0]!.args).toEqual(["--wait", '"C:\\a b\\x.md"']);
   });
@@ -188,7 +191,7 @@ describe("runForegroundChild with a Windows .cmd shim", () => {
   it("quotes a shim path that contains a space", async () => {
     const calls = await runShim("my bin");
     expect(calls[0]!.command.startsWith('"')).toBe(true);
-    expect(calls[0]!.command.endsWith('myeditor.cmd"')).toBe(true);
+    expect(calls[0]!.command).toMatch(/myeditor\.cmd"$/i);
   });
 
   it("does not use the shell for an ordinary program", async () => {

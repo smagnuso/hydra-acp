@@ -42,9 +42,11 @@ export function samePath(a: string, b: string): boolean {
 // all are valid to the OS, but agents often key per-project state on the
 // string, so one spelling is stored. Separators, `.`/`..` and a trailing
 // separator are normalized; drive-letter case is kept as sent. Elsewhere, and
-// for anything that is not a Windows absolute path, the value is unchanged.
+// for anything that is not a drive-letter or UNC path, the value is unchanged.
+// A rooted path with no drive (`/w`, `\w`) is left alone: resolving it would
+// silently pin it to whichever drive this process happens to be on.
 export function nativeCwd(p: string): string {
-  if (process.platform !== "win32" || !path.win32.isAbsolute(p)) {
+  if (process.platform !== "win32" || !/^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/])/.test(p)) {
     return p;
   }
   return path.win32.resolve(p);

@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
+import { pinPlatform } from "../core/platform-stub.js";
 
 import {
   editTextInEditor,
@@ -11,6 +12,9 @@ import {
   type EditTextDeps,
 } from "./edit-in-editor.js";
 import type { SpawnFn } from "./foreground-run.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 describe("resolveEditorCommand", () => {
   it("prefers $HYDRA_EDITOR over $VISUAL and $EDITOR", () => {

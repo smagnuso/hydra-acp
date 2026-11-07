@@ -11,9 +11,12 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, spawn: spawnMock };
 });
 
-import { onPlatform } from "../core/platform-stub.js";
+import { onPlatform, pinPlatform } from "../core/platform-stub.js";
 import type { InputDispatcher } from "./input.js";
 import { Screen } from "./screen.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 function makeScreen(openFileCommand: string | readonly string[]): Screen {
   const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
@@ -93,7 +96,7 @@ describe("detached open-file launch", () => {
     });
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const [command, args, options] = spawnMock.mock.calls[0]!;
-    expect(String(command).endsWith("myeditor.cmd")).toBe(true);
+    expect(String(command)).toMatch(/myeditor\.cmd$/i);
     expect(args).toEqual([file]);
     expect(options).toMatchObject({
       detached: true,

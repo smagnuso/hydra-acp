@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { pinPlatform } from "../../core/platform-stub.js";
 import {
   colorEnabled,
   depthForStream,
   depthForTerminal,
 } from "./capability.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 const tty = { isTTY: true };
 const pipe = { isTTY: false };

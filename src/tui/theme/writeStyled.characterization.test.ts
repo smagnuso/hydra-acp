@@ -10,10 +10,14 @@
 // a failure go away without understanding which style changed and why.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pinPlatform } from "../../core/platform-stub.js";
 import { writeStyled } from "../screen.js";
 import type { Style } from "../format.js";
 import { createCapturingTerminal, visible, isolateColorEnv } from "./capture.js";
 import { bgGrayscale, styleCarriesInlineSgr } from "./index.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 // The `generic` passed below is meant to pin colour depth; ambient COLORTERM
 // would otherwise override it. See isolateColorEnv.

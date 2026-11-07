@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { pinPlatform } from "../../core/platform-stub.js";
 import * as os from "node:os";
 import { fileLines, resolveChangesTarget } from "./sessions-changes.js";
+
+// Asserts POSIX display (~ shortening, backslash escapes); Windows is covered in paths.test.
+pinPlatform("linux");
 
 const hit = (
   totalMatches: number,

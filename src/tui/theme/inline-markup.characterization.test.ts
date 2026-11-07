@@ -14,6 +14,7 @@
 // the migration changed what the user sees.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pinPlatform } from "../../core/platform-stub.js";
 import {
   parseAgentMarkdown,
   parseThoughtMarkdown,
@@ -22,6 +23,9 @@ import {
 import { writeBodyWithHighlight, writeStyled } from "../screen.js";
 import { createCapturingTerminal, visible, isolateColorEnv } from "./capture.js";
 import { buildSyntaxTheme } from "./index.js";
+
+// These suites assert POSIX behaviour; Windows-specific cases stub win32 themselves.
+pinPlatform("linux");
 
 // The `generic` passed below is meant to pin colour depth; ambient COLORTERM
 // would otherwise override it. See isolateColorEnv.

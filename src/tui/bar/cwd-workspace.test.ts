@@ -111,7 +111,7 @@ describe("cwd bar field", () => {
     );
     const text = left.flatMap((g) => g.chunks.map((c) => c.text)).join("");
     // Brackets wrap the field as a whole, not each group.
-    expect(text).toBe(`(~${path.sep}proj[feature-x])`);
+    expect(text).toBe(`(${SRC_DISPLAY}[feature-x])`);
     for (const g of left) {
       for (const c of g.chunks) {
         expect(c.token).toBe("rule-meta");

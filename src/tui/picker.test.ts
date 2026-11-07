@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { pinPlatform } from "../core/platform-stub.js";
 import type { Terminal } from "terminal-kit";
 
 // Observe the terminal-host hand-off without touching a transport.
@@ -120,6 +121,9 @@ import { DEFAULT_COLUMNS, toRow } from "../cli/session-row.js";
 import type { DiscoveredSession } from "./discovery.js";
 import type { HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
+
+// Asserts POSIX display (~ shortening, backslash escapes); Windows is covered in paths.test.
+pinPlatform("linux");
 
 function session(overrides: Partial<DiscoveredSession>): DiscoveredSession {
   return {
