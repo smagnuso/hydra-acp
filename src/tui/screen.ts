@@ -159,6 +159,28 @@ const WORD_EDGE_TRIM_RE = /[:\-]/;
 // hyphens, tildes, and pluses that appear in real paths. The optional
 // `:<linenumber>` suffix is matched separately after the token boundary.
 const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
+// Windows paths also use a backslash, which is a legal filename character
+// on POSIX and so only counts there as a separator.
+const WIN_PATH_TOKEN_RE = /[A-Za-z0-9_./\\\-~+@]/;
+
+// True when s[i] is the colon of a drive-letter prefix ("C:\" or "C:/"): a
+// lone letter, then ":", then a separator, with the letter not tacked onto a
+// longer word. The colon is not a path character, so without this a scan
+// stops there and drops the drive. Windows only; a colon is legal in a POSIX
+// filename and the scan must not eat one there.
+export function isDriveColonAt(s: string, i: number): boolean {
+  if (process.platform !== "win32" || s[i] !== ":") {
+    return false;
+  }
+  if (!/[A-Za-z]/.test(s[i - 1] ?? "")) {
+    return false;
+  }
+  if (s[i + 1] !== "\\" && s[i + 1] !== "/") {
+    return false;
+  }
+  const before = s[i - 2];
+  return before === undefined || !WIN_PATH_TOKEN_RE.test(before);
+}
 // Wider still: characters permitted anywhere in a URI (RFC 3986 unreserved
 // + reserved + percent-encoding + common query/fragment punctuation).
 // Used by the double-click URL-snap gesture to grab a whole bare URL.
@@ -5197,6 +5219,11 @@ export class Screen {
         if (cleanOffset >= link.start && cleanOffset < link.end) {
           const url = link.url;
           let raw = url.startsWith("file://") ? url.slice("file://".length) : url;
+          // file:///C:/x leaves "/C:/x", which Windows resolves as a rooted
+          // path on the current drive, not as drive C.
+          if (process.platform === "win32" && /^\/[A-Za-z]:[\\/]/.test(raw)) {
+            raw = raw.slice(1);
+          }
           // GitHub-style "#L<start>[-L<end>]" fragment (from the file-links
           // skill) → open at <start>. Strip it off the path so the token
           // stats cleanly; the range end is ignored (editors jump to one
@@ -5215,15 +5242,18 @@ export class Screen {
     if (cleanOffset >= clean.length) {
       idx = clean.length - 1;
     }
-    if (!PATH_TOKEN_RE.test(clean[idx]!)) {
+    const pathChar = process.platform === "win32" ? WIN_PATH_TOKEN_RE : PATH_TOKEN_RE;
+    const inToken = (i: number): boolean =>
+      pathChar.test(clean[i]!) || isDriveColonAt(clean, i);
+    if (!inToken(idx)) {
       return null;
     }
     let start = idx;
-    while (start > 0 && PATH_TOKEN_RE.test(clean[start - 1]!)) {
+    while (start > 0 && inToken(start - 1)) {
       start--;
     }
     let end = idx + 1;
-    while (end < clean.length && PATH_TOKEN_RE.test(clean[end]!)) {
+    while (end < clean.length && inToken(end)) {
       end++;
     }
     let raw = clean.slice(start, end);
@@ -5325,7 +5355,7 @@ export class Screen {
       // The only lever is not emitting the hyperlink at all.
       return isRemoteSession(this.sessionbar) ? null : url;
     }
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) {
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(url)) {
       // http, https, ssh, mailto, … — hand over verbatim.
       return url;
     }
@@ -5346,7 +5376,11 @@ export class Screen {
       return null;
     }
     let abs = bare;
-    if (bare === "~" || bare.startsWith("~/")) {
+    if (
+      bare === "~" ||
+      bare.startsWith("~/") ||
+      (process.platform === "win32" && bare.startsWith("~\\"))
+    ) {
       abs = bare === "~" ? homedir() : `${homedir()}/${bare.slice(2)}`;
     } else if (!isAbsolute(bare)) {
       abs = resolvePath(this.sessionbar.cwd, bare);
@@ -5384,7 +5418,11 @@ export class Screen {
 
   private resolvePathToken(raw: string): string | null {
     let expanded = raw;
-    if (expanded === "~" || expanded.startsWith("~/")) {
+    if (
+      expanded === "~" ||
+      expanded.startsWith("~/") ||
+      (process.platform === "win32" && expanded.startsWith("~\\"))
+    ) {
       expanded = expanded === "~" ? homedir() : `${homedir()}/${expanded.slice(2)}`;
     }
     const strongSignal = isAbsolute(expanded) || raw.startsWith("~");
