@@ -25,7 +25,7 @@ import {
 } from "../cli/session-row.js";
 import { localMachines } from "../core/machine.js";
 import { mergeInheritedAgentValues } from "../core/registry.js";
-import { paths, shortenHomePath } from "../core/paths.js";
+import { pathKey, paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import {
   loadConfig,
@@ -532,7 +532,8 @@ export async function pickSession(
   ): DiscoveredSession[] => {
     let base = sessions;
     if (prefs.filters.cwdOnly) {
-      base = base.filter((s) => s.cwd === currentCwd);
+      const want = pathKey(currentCwd);
+      base = base.filter((s) => pathKey(s.cwd) === want);
     }
     if (!prefs.filters.includeNonInteractive) {
       // Mirror the daemon's includeRow rule: only effective === true is

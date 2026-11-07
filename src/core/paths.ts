@@ -44,6 +44,33 @@ export function samePath(a: string, b: string): boolean {
   return normalize(a) === normalize(b);
 }
 
+// A key for comparing directory paths by string equality.
+//
+// On Windows the same directory is routinely written several ways: `C:\a\b`,
+// `c:\a\b`, `C:/a/b` and `C:\a\b\` all name it, depending on which shell or
+// editor reported it, so exact equality splits one project into several. The
+// key normalizes separators, drops a trailing one and folds case. Elsewhere it
+// only drops trailing slashes, because case is significant there and `..` is
+// not collapsed: callers pass paths a caller has already resolved, and
+// resolving here would need the process cwd on a hot path.
+export function pathKey(p: string): string {
+  if (process.platform === "win32") {
+    const key = path.win32.normalize(p).toLowerCase();
+    return key.length > 3 ? key.replace(/\\+$/, "") : key;
+  }
+  return p.length > 1 ? p.replace(/\/+$/, "") : p;
+}
+
+// True when `child` is `parent` or lies beneath it, by pathKey. A prefix test
+// on the raw strings would also match a sibling that merely starts the same
+// (`/work` and `/workspaces`), so the boundary is checked.
+export function isPathInside(child: string, parent: string): boolean {
+  const c = pathKey(child);
+  const base = pathKey(parent);
+  const sep = process.platform === "win32" ? "\\" : "/";
+  return c === base || c.startsWith(base.endsWith(sep) ? base : base + sep);
+}
+
 // Identify a test runner from process signals, or undefined for a real run.
 // Returns a label for the error message. Kept broad on purpose: a missed
 // runner means silent writes into the user's real ~/.hydra-acp.

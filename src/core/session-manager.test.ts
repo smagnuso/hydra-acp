@@ -6370,6 +6370,18 @@ describe("matchesCwdFilter", () => {
     expect(matchesCwdFilter("/home/u/pro", plain)).toBe(false);
   });
 
+  it("matches the same Windows directory however it is spelled", async () => {
+    const { onPlatform } = await import("./platform-stub.js");
+    await onPlatform("win32", () => {
+      const session = { cwd: "C:\\Users\\Sam\\proj" };
+      for (const want of ["c:\\users\\sam\\proj", "C:/Users/Sam/proj", "C:\\Users\\Sam\\proj\\"]) {
+        expect(matchesCwdFilter(want, session)).toBe(true);
+      }
+      expect(matchesCwdFilter("C:\\Users\\Sam\\proj2", session)).toBe(false);
+      expect(matchesCwdFilter("D:\\Users\\Sam\\proj", session)).toBe(false);
+    });
+  });
+
   it("tolerates a trailing separator on the query", () => {
     // A near-miss returns an empty list, which reads exactly like
     // "nothing is running here".

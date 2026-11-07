@@ -8,6 +8,7 @@
 // is identical — the daemon's CompositeTokenValidator accepts either
 // bearer kind.
 
+import { pathKey } from "../core/paths.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import type {
   SessionSearchResponse,
@@ -705,7 +706,8 @@ export function pickMostRecent(
   sessions: DiscoveredSession[],
   cwd: string,
 ): DiscoveredSession | null {
-  const matching = sessions.filter((s) => s.cwd === cwd);
+  const want = pathKey(cwd);
+  const matching = sessions.filter((s) => pathKey(s.cwd) === want);
   if (matching.length === 0) {
     return null;
   }

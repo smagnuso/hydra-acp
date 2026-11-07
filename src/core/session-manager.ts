@@ -97,7 +97,7 @@ import { turnEndIndex, updatesOf } from "./turn-boundary.js";
 import { countTurns } from "./history-aggregate.js";
 import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
 import { collectToolBlobHashes } from "./tool-content.js";
-import { paths, shortenHomePath } from "./paths.js";
+import { pathKey, paths, shortenHomePath } from "./paths.js";
 import { expandHome } from "./config.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
 import { encodeBundle, type Bundle } from "./bundle.js";
@@ -8591,16 +8591,12 @@ export function matchesCwdFilter(
   if (want === undefined || want.length === 0) {
     return true;
   }
-  const target = stripTrailingSep(want);
-  if (stripTrailingSep(session.cwd) === target) {
+  const target = pathKey(want);
+  if (pathKey(session.cwd) === target) {
     return true;
   }
   const source = session.workspace?.sourceCwd;
-  return source !== undefined && stripTrailingSep(source) === target;
-}
-
-function stripTrailingSep(p: string): string {
-  return p.length > 1 && p.endsWith("/") ? p.replace(/\/+$/, "") : p;
+  return source !== undefined && pathKey(source) === target;
 }
 
 export function mergeForPersistence(

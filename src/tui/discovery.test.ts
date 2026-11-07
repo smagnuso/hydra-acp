@@ -350,6 +350,19 @@ describe("pickMostRecent", () => {
     expect(pickMostRecent([coldNewer, live], "/x")).toBe(live);
   });
 
+  it("resumes the session for a Windows directory however its path is spelled", async () => {
+    const { onPlatform } = await import("../core/platform-stub.js");
+    await onPlatform("win32", () => {
+      // Recorded from one shell, asked for from another: a plain string
+      // compare would miss it and start a second session in the same place.
+      const recorded = mk("a", "c:\\t\\hydra", "2025-01-01", "warm");
+      for (const asked of ["C:\\t\\hydra", "C:/t/hydra", "C:\\t\\hydra\\"]) {
+        expect(pickMostRecent([recorded], asked)).toBe(recorded);
+      }
+      expect(pickMostRecent([recorded], "C:\\t\\other")).toBeNull();
+    });
+  });
+
   it("picks most recent within same status", () => {
     const older = mk("a", "/x", "2025-01-01", "warm");
     const newer = mk("b", "/x", "2025-02-01", "warm");

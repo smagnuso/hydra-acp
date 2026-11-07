@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_DAEMON_PORT, loadConfig } from "../../core/config.js";
+import { shortenHomePath } from "../../core/paths.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import {
   daemonFetch,
@@ -291,8 +292,7 @@ const CWD_MAX = 40;
 
 // ~-relative, and cut from the left so the leaf directory stays visible.
 function shortenCwd(cwd: string): string {
-  const home = os.homedir();
-  const rel = cwd === home || cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+  const rel = shortenHomePath(cwd);
   return rel.length > CWD_MAX ? `…${rel.slice(rel.length - (CWD_MAX - 1))}` : rel;
 }
 

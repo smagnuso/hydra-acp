@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { hydraHome, detectTestRunner, samePath } from "./paths.js";
+import { hydraHome, detectTestRunner, isPathInside, pathKey, samePath } from "./paths.js";
+import { onPlatform } from "./platform-stub.js";
 import * as path from "node:path";
 
 describe("hydraHome test-runner guard", () => {
@@ -74,5 +75,63 @@ describe("hydraHome test-runner guard", () => {
         }
       }
     }
+  });
+});
+
+describe("pathKey", () => {
+  it("gives every Windows spelling of one directory the same key", async () => {
+    await onPlatform("win32", () => {
+      const keys = new Set(
+        ["C:\\Users\\Sam\\proj", "c:\\users\\sam\\proj", "C:/Users/Sam/proj", "C:\\Users\\Sam\\proj\\", "C:/Users/Sam/proj/", "C:\\Users\\Sam\\.\\proj"].map(pathKey),
+      );
+      expect(keys.size).toBe(1);
+    });
+  });
+
+  it("keeps different Windows directories apart", async () => {
+    await onPlatform("win32", () => {
+      expect(pathKey("C:\\proj")).not.toBe(pathKey("D:\\proj"));
+      expect(pathKey("C:\\proj")).not.toBe(pathKey("C:\\proj2"));
+      expect(pathKey("\\\\server\\share\\a")).not.toBe(pathKey("\\\\server\\share\\b"));
+    });
+  });
+
+  it("keeps a drive root distinct from its bare-drive form", async () => {
+    await onPlatform("win32", () => {
+      expect(pathKey("C:\\")).toBe("c:\\");
+    });
+  });
+
+  it("only drops trailing slashes off Windows, and stays case-sensitive", async () => {
+    await onPlatform("linux", () => {
+      expect(pathKey("/home/u/proj/")).toBe("/home/u/proj");
+      expect(pathKey("/home/u/proj//")).toBe("/home/u/proj");
+      expect(pathKey("/")).toBe("/");
+      expect(pathKey("/Home/U")).not.toBe(pathKey("/home/u"));
+      expect(pathKey("C:\\proj")).toBe("C:\\proj");
+    });
+  });
+});
+
+describe("isPathInside", () => {
+  it("includes the directory itself and what lies beneath it", async () => {
+    await onPlatform("win32", () => {
+      expect(isPathInside("C:\\a\\b", "c:/a/b")).toBe(true);
+      expect(isPathInside("C:\\a\\b\\c\\d.ts", "C:\\A\\B")).toBe(true);
+    });
+    await onPlatform("linux", () => {
+      expect(isPathInside("/a/b", "/a/b/")).toBe(true);
+      expect(isPathInside("/a/b/c/d.ts", "/a/b")).toBe(true);
+    });
+  });
+
+  it("does not take a sibling that merely starts the same", async () => {
+    await onPlatform("win32", () => {
+      expect(isPathInside("C:\\work2\\x", "C:\\work")).toBe(false);
+    });
+    await onPlatform("linux", () => {
+      expect(isPathInside("/workspaces/x", "/work")).toBe(false);
+      expect(isPathInside("/A/b", "/a")).toBe(false);
+    });
   });
 });

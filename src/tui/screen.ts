@@ -46,7 +46,7 @@ import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { splitCommandLine } from "../core/command-line.js";
 import { resolveSpawnTarget } from "../core/windows-command.js";
-import { paths, shortenHomePath } from "../core/paths.js";
+import { isPathInside, pathKey, paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
 import {
@@ -5629,13 +5629,14 @@ export class Screen {
    * Returns the path to open, or null to refuse.
    */
   private reconcileWorkspacePath(file: string): string | null {
-    const root = joinPath(paths.home(), "workspaces") + sep;
-    const insideSomeWorkspace = file.startsWith(root);
+    const root = joinPath(paths.home(), "workspaces");
+    const insideSomeWorkspace =
+      isPathInside(file, root) && pathKey(file) !== pathKey(root);
     if (!insideSomeWorkspace) {
       return file;
     }
     const cwd = this.sessionbar.cwd;
-    if (cwd.length > 0 && (file === cwd || file.startsWith(cwd + sep))) {
+    if (cwd.length > 0 && isPathInside(file, cwd)) {
       // Our own current workspace: an ordinary open.
       return file;
     }
