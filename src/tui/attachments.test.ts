@@ -7,6 +7,7 @@ import {
   parseDataUriImage,
   parseImageDropPaste,
 } from "./attachments.js";
+import { onPlatform } from "../core/platform-stub.js";
 
 describe("mimeFromExtension", () => {
   it("recognises common image extensions case-insensitively", () => {
@@ -157,5 +158,73 @@ describe("parseDataUriImage", () => {
     expect(parseDataUriImage("data:image/png,not-base64")).toBeNull();
     expect(parseDataUriImage("not a data uri at all")).toBeNull();
     expect(parseDataUriImage("data:image/png;base64,!!!")).toBeNull();
+  });
+});
+
+describe("parseImageDropPaste on Windows", () => {
+  const win = <T>(fn: () => T): Promise<T> => onPlatform("win32", fn);
+
+  it("accepts a bare drive path, keeping its backslashes", async () => {
+    await win(() => {
+      expect(parseImageDropPaste("C:\\Users\\Sam\\cat.png")).toEqual([
+        "C:\\Users\\Sam\\cat.png",
+      ]);
+    });
+  });
+
+  it("accepts a double-quoted path with spaces, as a dropped file arrives", async () => {
+    await win(() => {
+      expect(parseImageDropPaste('"C:\\Users\\Sam\\My Pictures\\cat.png"')).toEqual([
+        "C:\\Users\\Sam\\My Pictures\\cat.png",
+      ]);
+    });
+  });
+
+  it("splits several dropped files, quoted or not", async () => {
+    await win(() => {
+      expect(parseImageDropPaste('C:\\a.png "C:\\b c.jpg" D:\\x\\d.webp')).toEqual([
+        "C:\\a.png",
+        "C:\\b c.jpg",
+        "D:\\x\\d.webp",
+      ]);
+    });
+  });
+
+  it("accepts forward-slash and UNC paths", async () => {
+    await win(() => {
+      expect(parseImageDropPaste("C:/Users/Sam/cat.png")).toEqual(["C:/Users/Sam/cat.png"]);
+      expect(parseImageDropPaste("\\\\server\\share\\cat.png")).toEqual([
+        "\\\\server\\share\\cat.png",
+      ]);
+    });
+  });
+
+  it("decodes file URIs, with and without a host", async () => {
+    await win(() => {
+      expect(parseImageDropPaste("file:///C:/Users/Sam/a%20b.png")).toEqual([
+        "C:/Users/Sam/a b.png",
+      ]);
+      expect(parseImageDropPaste("file://server/share/a.png")).toEqual(["//server/share/a.png"]);
+    });
+  });
+
+  it("still rejects non-images, relative paths and mixed text", async () => {
+    await win(() => {
+      expect(parseImageDropPaste("C:\\Users\\Sam\\notes.txt")).toBeNull();
+      expect(parseImageDropPaste("cat.png")).toBeNull();
+      expect(parseImageDropPaste("..\\cat.png")).toBeNull();
+      expect(parseImageDropPaste("see C:\\Users\\Sam\\cat.png please")).toBeNull();
+      expect(parseImageDropPaste("C:\\dir\\")).toBeNull();
+    });
+  });
+});
+
+describe("parseImageDropPaste off Windows", () => {
+  it("does not take a drive path as absolute, and keeps the escape rule", async () => {
+    await onPlatform("linux", () => {
+      expect(parseImageDropPaste("C:\\Users\\Sam\\cat.png")).toBeNull();
+      expect(parseImageDropPaste("C:/Users/Sam/cat.png")).toBeNull();
+      expect(parseImageDropPaste("/tmp/with\\ space.png")).toEqual(["/tmp/with space.png"]);
+    });
   });
 });

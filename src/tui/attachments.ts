@@ -68,6 +68,13 @@ export function formatSize(bytes: number): string {
   return `${bytes}B`;
 }
 
+function isAbsoluteDropPath(p: string, win: boolean): boolean {
+  if (p.startsWith("/")) {
+    return true;
+  }
+  return win && (/^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\"));
+}
+
 // Strict drag-and-drop image detector. Returns a non-empty array of
 // tokens when the entire pasted string is one or more whitespace-
 // separated tokens, each of which is one of:
@@ -82,7 +89,13 @@ export function formatSize(bytes: number): string {
 // app decodes them.
 //
 // Escaped spaces (backslash) are also accepted: "/a/foo\\ bar.png".
+//
+// On Windows a dropped file arrives as C:\a\foo.png, double-quoted when the
+// path has a space, and sometimes as C:/a/foo.png or a UNC path
+// (\\server\share\foo.png). A backslash there is the separator, not an
+// escape, and a drive letter or UNC prefix is what makes a path absolute.
 export function parseImageDropPaste(raw: string): string[] | null {
+  const win = process.platform === "win32";
   const text = raw.trim();
   if (text.length === 0) {
     return null;
@@ -111,7 +124,7 @@ export function parseImageDropPaste(raw: string): string[] | null {
       i++;
     } else {
       while (i < text.length && !/\s/.test(text[i] ?? "")) {
-        if (text[i] === "\\" && i + 1 < text.length) {
+        if (!win && text[i] === "\\" && i + 1 < text.length) {
           token += text[i + 1];
           i += 2;
         } else {
@@ -133,8 +146,17 @@ export function parseImageDropPaste(raw: string): string[] | null {
     let normalized = token;
     if (normalized.startsWith("file://")) {
       normalized = decodeURI(normalized.slice("file://".length));
+      if (win) {
+        if (/^\/[A-Za-z]:[\\/]/.test(normalized)) {
+          // file:///C:/a.png leaves "/C:/a.png".
+          normalized = normalized.slice(1);
+        } else if (!normalized.startsWith("/")) {
+          // file://server/share/a.png names a UNC share.
+          normalized = `//${normalized}`;
+        }
+      }
     }
-    if (!normalized.startsWith("/")) {
+    if (!isAbsoluteDropPath(normalized, win)) {
       return null;
     }
     if (!isSupportedImagePath(normalized)) {
