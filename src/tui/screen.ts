@@ -316,7 +316,7 @@ export interface ScreenOptions {
   turnSlide?: boolean;
   // View-only mode. When true: the composer pane is suppressed (all
   // prompt rows return to scrollback), the OSC window title carries
-  // " [VIEW ONLY]", and a "🔒 read-only" badge appears in the banner.
+  // " [VIEW ONLY]", and a "read-only" badge appears in the banner.
   // No keystroke can produce a prompt because the app's onKey gates
   // dispatcher.feed; the screen-side suppression is what removes the
   // visual affordance and frees the vertical real-estate.
@@ -3281,10 +3281,10 @@ export class Screen {
           : sb.term.length === 0
             ? ""
             : " 0/0";
-      return { text: `🔍 ${sb.term}${counter}`, kind: "search" };
+      return { text: `/ ${sb.term}${counter}`, kind: "search" };
     }
     if (this.bannerSearchIndicator !== null) {
-      return { text: `🔍 ${this.bannerSearchIndicator}`, kind: "search" };
+      return { text: `/ ${this.bannerSearchIndicator}`, kind: "search" };
     }
     if (this.bannerNotification !== null) {
       return { text: this.bannerNotification, kind: "notify" };
@@ -8023,7 +8023,7 @@ export class Screen {
 
   // Chip zone: one row per attached image, sitting between the queued
   // zone and the separator (closest to the user's draft). Each row
-  // shows "📎 <name> · <size>". Overflow collapses into a single
+  // shows "[img] <name> · <size>". Overflow collapses into a single
   // "+ N more attached" row.
   //
   // Text only, deliberately. This used to append a 1-cell iTerm2 OSC
@@ -8062,14 +8062,14 @@ export class Screen {
           : `chip|${w}|empty`;
       this.paintRow(row, sig, () => {
         if (isLast) {
-          paint(this.term, "modal-hint", `  📎 + ${overflow + 1} more attached`);
+          paint(this.term, "modal-hint", `  + ${overflow + 1} more attached`);
           return;
         }
         if (!att) {
           return;
         }
         this.term.noFormat("  ");
-        paint(this.term, "attachment", `📎 ${label}`);
+        paint(this.term, "attachment", `[img] ${label}`);
       });
     }
   }
@@ -8118,7 +8118,7 @@ export class Screen {
         if (text === undefined) {
           return;
         }
-        const rest = `⏳ ${summary}`;
+        const rest = `» ${summary}`;
         const padded = rest + " ".repeat(Math.max(0, w - 1 - rest.length));
         if (editing) {
           paint(this.term, "queue-cursor", "▸");
@@ -8822,7 +8822,7 @@ export class Screen {
       row += 1;
     };
     writeRow(`help|t|${w}|${spec.title}`, () => {
-      paint(this.term, "prompt-text", ` ❓ ${truncate(spec.title, w - 5)}`);
+      paint(this.term, "prompt-text", ` ? ${truncate(spec.title, w - 4)}`);
     });
     const keysWidth = Math.min(
       24,
@@ -8922,7 +8922,7 @@ export class Screen {
       row += 1;
     };
     writeRow(`perm|t|${w}|${spec.title}`, () => {
-      paint(this.term, "prompt-text", ` 🔒 ${truncate(spec.title, w - 5)}`);
+      paint(this.term, "prompt-text", ` ▲ ${truncate(spec.title, w - 4)}`);
     });
     const sub = spec.detail && spec.detail.length > 0
       ? spec.detail
@@ -9177,7 +9177,7 @@ export class Screen {
       // existing buffer unchanged, and their typing actually lands in
       // the banner search overlay. A visible cursor in either spot
       // would mislead, plus most terminals draw the cursor as a
-      // colored block which tinted the 🔍 emoji it sat on top of.
+      // colored block which tinted the search marker it sat on top of.
       this.term.hideCursor(true);
       return;
     }

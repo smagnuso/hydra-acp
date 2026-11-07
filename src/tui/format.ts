@@ -263,7 +263,7 @@ export function formatEvent(
           lines.push({
             prefix: "│ ",
             prefixStyle: "user",
-            body: `📎 ${a.name ?? "image"}`,
+            body: `[img] ${a.name ?? "image"}`,
             bodyStyle: "user",
             fillRow: true,
           });
@@ -2422,7 +2422,7 @@ export interface ExitPlanState {
   status?: string;
 }
 
-// Render Claude's ExitPlanMode plan as a scrollback block: a 📋 Plan header,
+// Render Claude's ExitPlanMode plan as a scrollback block: a ■ Plan header,
 // the markdown body parsed via parseAgentMarkdown (same renderer agent text
 // uses, so headers/bullets/fences are styled), and a trailing status line
 // reflecting the user's approval choice. Keyed by toolCallId via

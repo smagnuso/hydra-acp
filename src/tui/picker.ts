@@ -847,7 +847,7 @@ export async function pickSession(
     // trailing dashes before the corner glyph.
     const titleBudget = Math.max(10, termWidth - 8);
     const attachmentCount = composer.state().attachments.length;
-    const suffix = attachmentCount > 0 ? ` · 📎×${attachmentCount}` : "";
+    const suffix = attachmentCount > 0 ? ` · ${attachmentCount} img` : "";
     const titleBudgetForCwd = Math.max(10, titleBudget - suffix.length);
     composerTitle = formatComposerTitle(currentCwd, titleBudgetForCwd) + suffix;
     const state = composer.state();

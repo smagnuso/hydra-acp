@@ -196,7 +196,7 @@ const SOLARIZED_LIGHT = palette(
 
 // mono: no hue at all. Every slot is the terminal's own foreground, so the
 // distinctions that survive are the ones attributes already carry — bold for
-// emphasis and failure, dim for anything receding — plus the glyphs (● ○ ✓ ⚠).
+// emphasis and failure, dim for anything receding — plus the glyphs (● ○ √ ▲).
 //
 // This is why role overrides had to exist before mono could: a palette alone
 // makes error, ok and active the same colour and therefore indistinguishable.

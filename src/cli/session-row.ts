@@ -61,12 +61,12 @@ export interface SessionSummary {
   // "idle, will wake up" read very differently when scanning a list, and
   // only the first is safe to treat as finished.
   armedTasks?: number;
-  // Present when compaction is in progress. Drives the trailing ⟳ in
-  // the STATE cell (`WARM⟳`) so operators can spot mid-compaction
+  // Present when compaction is in progress. Drives the trailing • in
+  // the STATE cell (`WARM•`) so operators can spot mid-compaction
   // sessions at a glance without a per-session GET /compact/status call.
   compactionState?: unknown;
   // Present when this session is a fork whose synopsis is being generated
-  // in the background. Drives ✨ (running) or ⚠ (failed) in the STATE
+  // in the background. Drives • (running) or ▲ (failed) in the STATE
   // cell so operators can spot mid-synthesis forks at a glance.
   forkSynthesisState?: "running" | "failed";
 }
@@ -301,9 +301,10 @@ export function formatUpstreamCell(
 //
 // The remaining markers are background-work signals and are mutually
 // exclusive with `◦`, which outranks them because it is the one thing
-// the operator has to react to: `✨` fork synopsis synthesis running,
-// `⟳` background compaction running. Failed synthesis shows `⚠` below
-// every other signal so it stays visible regardless.
+// the operator has to react to: `•` fork synopsis synthesis or background
+// compaction running (the small dot the sidebar uses for work with no turn
+// in flight). Failed synthesis shows `▲` below every other signal so it
+// stays visible regardless.
 // The HEADER row reuses formatRow's plumbing but its `state` cell is
 // literal "STATE".
 function formatState(
@@ -328,18 +329,18 @@ function formatState(
   // the distinction (`busy` and `armedTasks` are separate fields); only
   // this cell collapses it.
   const base = busy || (armedTasks ?? 0) > 0 ? "BUSY" : "WARM";
-  const failed = forkSynthesisState === "failed" ? "\u26a0" : "";
+  const failed = forkSynthesisState === "failed" ? "\u25b2" : "";
   if (awaitingInput) {
     return `${base}\u25e6${failed}`;
   }
   if (forkSynthesisState === "running") {
-    return `${base}\u2728`;
+    return `${base}\u2022`;
   }
   if (failed) {
     return `${base}${failed}`;
   }
   if (compacting) {
-    return `${base}\u27f3`;
+    return `${base}\u2022`;
   }
   return base;
 }

@@ -896,7 +896,7 @@ describe("Screen banner right slot", () => {
     screen.updateScrollbackSearchTerm("match");
     const r = rightContent(screen);
     expect(r?.kind).toBe("search");
-    expect(r?.text).toBe("🔍 match 1/1");
+    expect(r?.text).toBe("/ match 1/1");
   });
 
   it("prompt-history indicator beats notification", () => {
@@ -905,7 +905,7 @@ describe("Screen banner right slot", () => {
     screen.setBannerSearchIndicator("prompt-q");
     const r = rightContent(screen);
     expect(r?.kind).toBe("search");
-    expect(r?.text).toBe("🔍 prompt-q");
+    expect(r?.text).toBe("/ prompt-q");
   });
 
   it("falls back to notification when no search active", () => {
@@ -928,7 +928,7 @@ describe("Screen banner right slot", () => {
     const screen = makeScreen();
     screen.notify("transient", 60_000);
     screen.setBannerSearchIndicator("q");
-    expect(rightContent(screen)?.text).toBe("🔍 q");
+    expect(rightContent(screen)?.text).toBe("/ q");
     screen.setBannerSearchIndicator(null);
     expect(rightContent(screen)?.text).toBe("transient");
   });
@@ -940,15 +940,15 @@ describe("Screen banner right slot", () => {
 
   it("compaction indicator appears in right slot at lowest priority", () => {
     const screen = makeScreen();
-    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
     const r = rightContent(screen);
     expect(r?.kind).toBe("compaction");
-    expect(r?.text).toBe("\u27f3 compacting...");
+    expect(r?.text).toBe("compacting...");
   });
 
   it("transient notify takes priority over compaction indicator", () => {
     const screen = makeScreen();
-    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
     screen.notify("model changed", 60_000);
     expect(rightContent(screen)?.kind).toBe("notify");
     expect(rightContent(screen)?.text).toBe("model changed");
@@ -956,17 +956,17 @@ describe("Screen banner right slot", () => {
 
   it("compaction indicator shows again after transient notify clears", async () => {
     const screen = makeScreen();
-    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
     screen.notify("model changed", 30);
     expect(rightContent(screen)?.kind).toBe("notify");
     await new Promise((res) => setTimeout(res, 60));
     expect(rightContent(screen)?.kind).toBe("compaction");
-    expect(rightContent(screen)?.text).toBe("\u27f3 compacting...");
+    expect(rightContent(screen)?.text).toBe("compacting...");
   });
 
   it("setCompactionIndicator null clears the indicator", () => {
     const screen = makeScreen();
-    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
     screen.setCompactionIndicator(null);
     expect(rightContent(screen)).toBe(null);
   });
@@ -975,12 +975,12 @@ describe("Screen banner right slot", () => {
     const screen = makeScreen();
 
     // started → show compacting
-    screen.setCompactionIndicator("\u27f3 compacting...");
-    expect(rightContent(screen)?.text).toBe("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
+    expect(rightContent(screen)?.text).toBe("compacting...");
 
     // deferred → show queued
-    screen.setCompactionIndicator("\u27f3 compaction queued (waiting for idle)");
-    expect(rightContent(screen)?.text).toBe("\u27f3 compaction queued (waiting for idle)");
+    screen.setCompactionIndicator("compaction queued (waiting for idle)");
+    expect(rightContent(screen)?.text).toBe("compaction queued (waiting for idle)");
 
     // swapped → clear indicator, brief notify
     screen.setCompactionIndicator(null);
@@ -992,7 +992,7 @@ describe("Screen banner right slot", () => {
 
   it("failed phase clears indicator and shows error notify", async () => {
     const screen = makeScreen();
-    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator("compacting...");
 
     screen.setCompactionIndicator(null);
     screen.notify("\u2717 compaction failed: deferral cap reached", 5000);

@@ -1601,7 +1601,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // whatever the in-session banner check already populated.
   const pendingUpdate = await getPendingUpdate();
   if (pendingUpdate) {
-    process.stderr.write(`✨ ${formatUpdateNoticeLine(pendingUpdate)}\n`);
+    process.stderr.write(`↑ ${formatUpdateNoticeLine(pendingUpdate)}\n`);
   }
   // Warn (post-TUI, in the host shell) when the running daemon is
   // stale: either older/newer than this CLI, or booted from a config
@@ -3351,7 +3351,7 @@ async function runSession(
     if (options.length === 0) {
       screen.appendLines([
         {
-          prefix: "🔒 ",
+          prefix: "▲ ",
           body: `Permission requested · ${title} · (no options offered, cancelling)`,
           bodyStyle: "tool-status-fail",
         },
@@ -4803,7 +4803,7 @@ async function runSession(
   void getPendingUpdate()
     .then((info) => {
       if (info) {
-        screen.notify(`✨ ${formatUpdateNoticeLine(info)}`, 30_000);
+        screen.notify(`↑ ${formatUpdateNoticeLine(info)}`, 30_000);
       }
     })
     .catch(() => undefined);
@@ -7075,7 +7075,7 @@ async function runSession(
 
   const formatQueueChipText = (entry: QueueChipEntry): string => {
     const body = entry.attachmentCount > 0
-      ? `${entry.text} · 📎×${entry.attachmentCount}`
+      ? `${entry.text} · ${entry.attachmentCount} img`
       : entry.text;
     return entry.held ? `|| ${body}` : body;
   };

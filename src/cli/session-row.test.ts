@@ -369,13 +369,13 @@ describe("toRow compaction badge in STATE column", () => {
     status: "warm" as const,
   };
 
-  it("renders WARM\u27f3 when compactionState is populated", () => {
+  it("renders WARM\u2022 when compactionState is populated", () => {
     const r = toRow({
       ...base,
       title: "Auth refactor",
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("WARM\u27f3");
+    expect(r.state).toBe("WARM\u2022");
     expect(r.title).toBe("Auth refactor");
   });
 
@@ -391,7 +391,26 @@ describe("toRow compaction badge in STATE column", () => {
       busy: true,
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("BUSY\u27f3");
+    expect(r.state).toBe("BUSY\u2022");
+  });
+
+  // Synopsis synthesis and compaction are both background work with no turn in
+  // flight, so they share the sidebar's small dot rather than each getting a
+  // glyph that a Windows console may not have.
+  it("marks a fork synopsis running with the same dot as compaction", () => {
+    const r = toRow({ ...base, forkSynthesisState: "running" });
+    expect(r.state).toBe("WARM\u2022");
+  });
+
+  it("marks a failed fork synopsis with a warning triangle that outranks the dot", () => {
+    expect(toRow({ ...base, forkSynthesisState: "failed" }).state).toBe("WARM\u25b2");
+    expect(
+      toRow({
+        ...base,
+        forkSynthesisState: "failed",
+        compactionState: { status: "running", requestedAt: Date.now() },
+      }).state,
+    ).toBe("WARM\u25b2");
   });
 
   it("awaitingInput takes precedence over compacting", () => {

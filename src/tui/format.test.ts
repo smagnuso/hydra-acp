@@ -601,8 +601,8 @@ describe("formatEvent — user-text with attachments", () => {
     });
     expect(lines).toHaveLength(3);
     expect(lines[0]?.body).toBe("look at this");
-    expect(lines[1]?.body).toBe("📎 a.png");
-    expect(lines[2]?.body).toBe("📎 b.jpg");
+    expect(lines[1]?.body).toBe("[img] a.png");
+    expect(lines[2]?.body).toBe("[img] b.jpg");
   });
 
   it("emits the text body unchanged when there are no attachments", () => {

@@ -1532,7 +1532,7 @@ async function maybePrintUpdateNotice(): Promise<void> {
   try {
     const info = await getPendingUpdate();
     if (info) {
-      process.stderr.write(`✨ ${formatUpdateNoticeLine(info)}\n`);
+      process.stderr.write(`↑ ${formatUpdateNoticeLine(info)}\n`);
     }
   } catch {
     // Update check is best-effort; never let it disrupt the exit code.
