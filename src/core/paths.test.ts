@@ -163,21 +163,20 @@ describe("nativeCwd", () => {
 });
 
 describe("shortenHomePath", () => {
-  const H = "C:\\Users\\Sam";
-
-  it("renders every spelling of a Windows home path with native separators", async () => {
-    await onPlatform("win32", () => {
-      expect(shortenHomePath("C:\\Users\\Sam", H)).toBe("~");
-      expect(shortenHomePath("c:/users/sam/dev/proj", H)).toBe("~\\dev\\proj");
-      expect(shortenHomePath("C:\\Users\\Sam/dev\\proj", H)).toBe("~\\dev\\proj");
-      expect(shortenHomePath("C:\\Users\\Samuel\\x", H)).toBe("C:\\Users\\Samuel\\x");
+  it("abbreviates the home directory off Windows", async () => {
+    await onPlatform("linux", () => {
+      expect(shortenHomePath("/home/sam", "/home/sam")).toBe("~");
+      expect(shortenHomePath("/home/sam/dev/proj", "/home/sam")).toBe("~/dev/proj");
+      expect(shortenHomePath("/home/sam/a\\b", "/home/sam")).toBe("~/a\\b");
+      expect(shortenHomePath("/home/samuel/x", "/home/sam")).toBe("/home/samuel/x");
     });
   });
 
-  it("keeps the suffix as-is off Windows", async () => {
-    await onPlatform("linux", () => {
-      expect(shortenHomePath("/home/sam/dev/proj", "/home/sam")).toBe("~/dev/proj");
-      expect(shortenHomePath("/home/sam/a\\b", "/home/sam")).toBe("~/a\\b");
+  it("leaves paths whole on Windows, where ~ is not understood outside PowerShell", async () => {
+    await onPlatform("win32", () => {
+      expect(shortenHomePath("C:\\Users\\Sam", "C:\\Users\\Sam")).toBe("C:\\Users\\Sam");
+      expect(shortenHomePath("C:\\Users\\Sam\\dev", "C:\\Users\\Sam")).toBe("C:\\Users\\Sam\\dev");
+      expect(shortenHomePath("c:/users/sam/dev", "C:\\Users\\Sam")).toBe("c:/users/sam/dev");
     });
   });
 });

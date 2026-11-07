@@ -200,7 +200,7 @@ describe("parseAgentMarkdown", () => {
     expect(lines[1]?.ansi).toBe(true);
   });
 
-  it("contracts a home-prefixed citation path to ~ in the header", () => {
+  it.skipIf(process.platform === "win32")("contracts a home-prefixed citation path to ~ in the header", () => {
     const home = homedir();
     const lines = parseAgentMarkdown(
       `\`\`\`10:12:${home}/dev/proj/a.ts\nconst x = 1;\n\`\`\``,
@@ -221,7 +221,7 @@ describe("parseAgentMarkdown", () => {
     expect(header.body).not.toContain(ESC);
   });
 
-  it("links a home-prefixed citation header with a ~ url", () => {
+  it.skipIf(process.platform === "win32")("links a home-prefixed citation header with a ~ url", () => {
     const home = homedir();
     const lines = parseAgentMarkdown(
       `\`\`\`10:12:${home}/dev/proj/a.ts\nconst x = 1;\n\`\`\``,
@@ -1032,7 +1032,7 @@ describe("formatEditDiffBlock", () => {
     );
   });
 
-  it("contracts a home-prefixed path to ~ in the header", () => {
+  it.skipIf(process.platform === "win32")("contracts a home-prefixed path to ~ in the header", () => {
     const home = homedir();
     const lines = formatEditDiffBlock(
       { path: `${home}/dev/proj/foo.ts`, oldText: "x", newText: "y" },

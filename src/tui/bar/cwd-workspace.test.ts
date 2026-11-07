@@ -8,8 +8,9 @@ import type { FieldContext } from "./types.js";
 
 // Under the real home, so shortenHomePath actually abbreviates — it is a
 // no-op on paths outside it, which would silently defeat the display
-// assertions below.
+// assertions below. (It is also a no-op on Windows; see SRC_DISPLAY.)
 const SRC = path.join(os.homedir(), "proj");
+const SRC_DISPLAY = process.platform === "win32" ? SRC : "~/proj";
 const WS = path.join(os.homedir(), ".hydra-acp/workspaces/ab12/feature-x");
 
 function ctx(session: Partial<FieldContext["session"]>): FieldContext {
@@ -38,7 +39,7 @@ describe("cwd bar field", () => {
   it("shows one openable span for an ordinary session", () => {
     const out = groups({ cwd: SRC });
     expect(out).toHaveLength(1);
-    expect(out[0]?.chunks[0]?.text).toBe(`~${path.sep}proj`);
+    expect(out[0]?.chunks[0]?.text).toBe(SRC_DISPLAY);
     // The double-click value is the ABSOLUTE path, not the ~-abbreviated
     // display form.
     expect(out[0]?.chunks[0]?.value).toBe(SRC);
@@ -49,7 +50,7 @@ describe("cwd bar field", () => {
     expect(out.map((g) => g.id)).toEqual(["cwd", "cwdWorkspace"]);
     // Each span opens what its text names, so neither has to lie about
     // where a double-click goes.
-    expect(out[0]?.chunks[0]?.text).toBe(`~${path.sep}proj`);
+    expect(out[0]?.chunks[0]?.text).toBe(SRC_DISPLAY);
     expect(out[0]?.chunks[0]?.value).toBe(SRC);
     expect(out[1]?.chunks[0]?.text).toBe("[feature-x]");
     expect(out[1]?.chunks[0]?.value).toBe(WS);
@@ -62,7 +63,7 @@ describe("cwd bar field", () => {
 
   it("never hands a formatted display string to the open action", () => {
     // Regression. The label used to be baked into `cwd` upstream, so the
-    // double-click tried to open `~${path.sep}proj [feature-x]` as a directory.
+    // double-click tried to open `~/proj [feature-x]` as a directory.
     for (const g of groups(isolated)) {
       for (const chunk of g.chunks) {
         expect(chunk.value).not.toMatch(/[[\]]/);

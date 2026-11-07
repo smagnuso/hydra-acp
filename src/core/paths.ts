@@ -3,30 +3,22 @@ import * as os from "node:os";
 
 const ROOT_ENV = "HYDRA_ACP_HOME";
 
+// Abbreviate the home directory to `~` for display.
+//
+// Not done on Windows: `~` is a shell convention there (PowerShell expands
+// it, cmd and Explorer do not), and these strings get copied out of the TUI
+// into whatever the user has open, so an abbreviated path would fail to
+// paste into most Windows tools. The full path is the one every Windows
+// program accepts.
 export function shortenHomePath(p: string, home: string = os.homedir()): string {
-  if (!home) {
+  if (process.platform === "win32" || !home) {
     return p;
   }
-  // Separator- and case-insensitive on Windows. A path under the home
-  // directory routinely arrives there with BOTH separators in one string
-  // (`C:\Users\x/dev/proj`) because git reports forward slashes on
-  // Windows and agents pass those through verbatim. Matching only on
-  // path.sep silently stopped shortening those, so every such path
-  // rendered as a full absolute path instead of `~/...`.
-  //
-  // Normalizing preserves length, so the suffix is sliced out of the
-  // original, then given native separators on Windows so the same
-  // directory always reads `~\dev\proj`, never `~/dev\proj`.
-  const normalize = (s: string): string =>
-    process.platform === "win32" ? s.replace(/\\/g, "/").toLowerCase() : s;
-  const normalizedHome = normalize(home);
-  const normalizedPath = normalize(p);
-  if (normalizedPath === normalizedHome) {
+  if (p === home) {
     return "~";
   }
-  if (normalizedPath.startsWith(normalizedHome + "/")) {
-    const rest = p.slice(home.length);
-    return "~" + (process.platform === "win32" ? rest.replace(/\//g, "\\") : rest);
+  if (p.startsWith(home + "/")) {
+    return "~" + p.slice(home.length);
   }
   return p;
 }
