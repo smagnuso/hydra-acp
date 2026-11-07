@@ -222,3 +222,29 @@ describe("depthForTerminal honours COLORTERM on top of terminal-kit", () => {
     ).toBe("none");
   });
 });
+
+describe("depthForTerminal on Windows", () => {
+  const unknownTerm = { esc: { color256: { na: true }, color24bits: { na: true } } };
+
+  it("treats Windows Terminal as truecolor despite terminal-kit and no COLORTERM", () => {
+    expect(
+      depthForTerminal(unknownTerm, { WT_SESSION: "abc" }, "win32"),
+    ).toBe("truecolor");
+  });
+
+  it("treats a native win32 console with no TERM as truecolor", () => {
+    expect(depthForTerminal(unknownTerm, {}, "win32")).toBe("truecolor");
+  });
+
+  it("does not upgrade a win32 process that sets a TERM (msys, ssh)", () => {
+    expect(
+      depthForTerminal(unknownTerm, { TERM: "xterm" }, "win32"),
+    ).toBe("ansi16");
+  });
+
+  it("still honours NO_COLOR", () => {
+    expect(
+      depthForTerminal(unknownTerm, { WT_SESSION: "abc", NO_COLOR: "1" }, "win32"),
+    ).toBe("none");
+  });
+});

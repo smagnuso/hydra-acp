@@ -67,10 +67,26 @@ function forcedOn(env: Env): boolean {
   return v !== undefined && v !== "0" && v !== "false";
 }
 
+/**
+ * Windows Terminal and Win10+ conhost do 24-bit colour but set neither
+ * COLORTERM nor a TERM, so the env sniff below would land on 16 colours and
+ * quantize the whole theme to magenta/cyan. WT_SESSION is Windows Terminal's
+ * own marker; a win32 process with no TERM is a native console.
+ */
+function modernWindowsConsole(env: Env, platform: string): boolean {
+  if (env.WT_SESSION !== undefined && env.WT_SESSION !== "") {
+    return true;
+  }
+  return platform === "win32" && (env.TERM ?? "") === "";
+}
+
 /** Depth implied by TERM / COLORTERM alone, ignoring TTY and NO_COLOR. */
-function depthFromEnv(env: Env): ColorDepth {
+function depthFromEnv(env: Env, platform: string = process.platform): ColorDepth {
   const colorterm = (env.COLORTERM ?? "").toLowerCase();
   if (colorterm === "truecolor" || colorterm === "24bit") {
+    return "truecolor";
+  }
+  if (modernWindowsConsole(env, platform)) {
     return "truecolor";
   }
   const term = (env.TERM ?? "").toLowerCase();
@@ -197,9 +213,15 @@ interface TerminalCaps {
 export function depthForTerminal(
   term: unknown,
   env: Env = process.env,
+  platform: string = process.platform,
 ): ColorDepth {
   if (noColor(env)) {
     return "none";
+  }
+  // terminal-kit cannot identify a Windows console (no TERM), so its answer
+  // and ceiling are meaningless there.
+  if (modernWindowsConsole(env, platform)) {
+    return "truecolor";
   }
   // Tolerate a null/undefined terminal: this runs on every write, and
   // throwing here would take the TUI down over a capability probe.
