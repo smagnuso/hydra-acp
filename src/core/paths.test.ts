@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { hydraHome, detectTestRunner, isPathInside, pathKey, samePath } from "./paths.js";
+import { hydraHome, detectTestRunner, isPathInside, nativeCwd, pathKey, samePath } from "./paths.js";
 import { onPlatform } from "./platform-stub.js";
 import * as path from "node:path";
 
@@ -132,6 +132,32 @@ describe("isPathInside", () => {
     await onPlatform("linux", () => {
       expect(isPathInside("/workspaces/x", "/work")).toBe(false);
       expect(isPathInside("/A/b", "/a")).toBe(false);
+    });
+  });
+});
+
+describe("nativeCwd", () => {
+  it("normalizes a Windows cwd to one spelling and keeps drive case", async () => {
+    await onPlatform("win32", () => {
+      expect(nativeCwd("C:/Users/Sam/proj/")).toBe("C:\\Users\\Sam\\proj");
+      expect(nativeCwd("c:\\a\\..\\b")).toBe("c:\\b");
+      expect(nativeCwd("C:\\a/b\\c")).toBe("C:\\a\\b\\c");
+      expect(nativeCwd("C:\\")).toBe("C:\\");
+      expect(nativeCwd("\\\\server\\share\\x\\")).toBe("\\\\server\\share\\x");
+    });
+  });
+
+  it("leaves non-absolute Windows input alone", async () => {
+    await onPlatform("win32", () => {
+      expect(nativeCwd("proj/sub")).toBe("proj/sub");
+      expect(nativeCwd("C:rel")).toBe("C:rel");
+    });
+  });
+
+  it("is the identity off Windows, where a backslash is a real filename character", async () => {
+    await onPlatform("linux", () => {
+      expect(nativeCwd("/a/b/")).toBe("/a/b/");
+      expect(nativeCwd("/a\\b")).toBe("/a\\b");
     });
   });
 });

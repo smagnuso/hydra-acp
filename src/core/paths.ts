@@ -44,6 +44,19 @@ export function samePath(a: string, b: string): boolean {
   return normalize(a) === normalize(b);
 }
 
+// The form of a caller-supplied cwd that the agent and the session record
+// should carry. On Windows a client may send `C:/a\b/` or `c:\a\..\b`;
+// all are valid to the OS, but agents often key per-project state on the
+// string, so one spelling is stored. Separators, `.`/`..` and a trailing
+// separator are normalized; drive-letter case is kept as sent. Elsewhere, and
+// for anything that is not a Windows absolute path, the value is unchanged.
+export function nativeCwd(p: string): string {
+  if (process.platform !== "win32" || !path.win32.isAbsolute(p)) {
+    return p;
+  }
+  return path.win32.resolve(p);
+}
+
 // A key for comparing directory paths by string equality.
 //
 // On Windows the same directory is routinely written several ways: `C:\a\b`,
