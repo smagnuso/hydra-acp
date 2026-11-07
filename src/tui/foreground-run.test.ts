@@ -3,6 +3,11 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { onPlatform } from "../core/platform-stub.js";
 import { runForegroundChild, type SpawnFn } from "./foreground-run.js";
 
 interface Harness {
@@ -143,5 +148,55 @@ describe("runForegroundChild", () => {
     } finally {
       process.off("SIGINT", ours);
     }
+  });
+});
+
+describe("runForegroundChild with a Windows .cmd shim", () => {
+  // `code`, `cursor` and `subl` are .cmd files on Windows, which spawn()
+  // cannot run by bare name or without cmd.exe.
+  async function runShim(dirName: string): Promise<Harness["calls"]> {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-fg-")) + "/" + dirName;
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "myeditor.cmd"), "@echo off\n");
+    const previous = process.env["PATH"];
+    process.env["PATH"] = dir;
+    try {
+      return await onPlatform("win32", async () => {
+        const h = harness();
+        const done = runForegroundChild(
+          { program: "myeditor", args: ["--wait", "C:\\a b\\x.md"] },
+          h.deps,
+        );
+        h.child.emit("exit", 0);
+        await done;
+        return h.calls;
+      });
+    } finally {
+      process.env["PATH"] = previous;
+    }
+  }
+
+  it("resolves the shim and runs it through the shell", async () => {
+    const calls = await runShim("bin");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command.endsWith("myeditor.cmd")).toBe(true);
+    expect(calls[0]!.options.shell).toBe(true);
+    expect(calls[0]!.args).toEqual(["--wait", '"C:\\a b\\x.md"']);
+  });
+
+  it("quotes a shim path that contains a space", async () => {
+    const calls = await runShim("my bin");
+    expect(calls[0]!.command.startsWith('"')).toBe(true);
+    expect(calls[0]!.command.endsWith('myeditor.cmd"')).toBe(true);
+  });
+
+  it("does not use the shell for an ordinary program", async () => {
+    const h = harness();
+    const done = runForegroundChild({ program: "vim", args: ["x"] }, h.deps);
+    h.child.emit("exit", 0);
+    await done;
+    expect(h.calls[0]!.options.shell).toBeUndefined();
+    expect(h.calls[0]!.command).toBe("vim");
   });
 });

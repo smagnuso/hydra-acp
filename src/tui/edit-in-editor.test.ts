@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   editTextInEditor,
+  normalizeEditedText,
   resolveEditorCommand,
   type EditTextDeps,
 } from "./edit-in-editor.js";
@@ -41,6 +42,32 @@ describe("resolveEditorCommand", () => {
 
   it("returns null when none are set", () => {
     expect(resolveEditorCommand({})).toBeNull();
+  });
+
+  it("keeps a quoted Windows editor path with spaces as one program", () => {
+    expect(
+      resolveEditorCommand({
+        EDITOR: '"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" --wait',
+      }),
+    ).toEqual(["C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd", "--wait"]);
+  });
+});
+
+describe("normalizeEditedText", () => {
+  it("turns CRLF into LF so Notepad does not leave a carriage return on every line", () => {
+    expect(normalizeEditedText("one\r\ntwo\r\nthree\r\n")).toBe("one\ntwo\nthree");
+  });
+
+  it("drops a leading byte-order mark", () => {
+    expect(normalizeEditedText("\uFEFFhello\r\n")).toBe("hello");
+  });
+
+  it("treats a lone CR as a line break and still strips only one final newline", () => {
+    expect(normalizeEditedText("a\rb\n\n")).toBe("a\nb\n");
+  });
+
+  it("leaves text without trailing newline alone", () => {
+    expect(normalizeEditedText("plain")).toBe("plain");
   });
 });
 
@@ -124,6 +151,13 @@ describe("editTextInEditor", () => {
     const done = editTextInEditor("original", { ...h.deps, env: { EDITOR: "vim" } });
     h.child.emit("exit", 1);
     await expect(done).resolves.toBeNull();
+  });
+
+  it("returns Notepad-style CRLF text with plain newlines", async () => {
+    const h = harness("first line\r\nsecond line\r\n");
+    const done = editTextInEditor("x", { ...h.deps, env: { EDITOR: "notepad" } });
+    h.child.emit("exit", 0);
+    await expect(done).resolves.toBe("first line\nsecond line");
   });
 
   it("strips exactly one trailing newline", async () => {

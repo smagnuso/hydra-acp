@@ -7,6 +7,7 @@
 // /dev/null on all three fds, so it draws nothing and dies.
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { resolveSpawnTarget } from "../core/windows-command.js";
 import { CLEAR_SCREEN_HOME } from "./ansi.js";
 
 export type SpawnFn = (
@@ -118,9 +119,13 @@ export async function runForegroundChild(
       resolve(outcome);
     };
     try {
-      const child = spawnFn(spec.program, spec.args, {
+      // A .cmd shim (`code`, `cursor`) needs cmd.exe on Windows; identity
+      // everywhere else. The console is inherited, so nothing to hide.
+      const target = resolveSpawnTarget(spec.program, spec.args);
+      const child = spawnFn(target.command, target.args, {
         stdio: "inherit",
         cwd: spec.cwd,
+        ...(target.shell ? { shell: true } : {}),
       });
       child.on("exit", (code) => settle({ exitCode: code }));
       child.on("error", (err) => settle({ exitCode: null, error: err }));

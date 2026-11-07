@@ -44,6 +44,8 @@ import { emptySnapshot } from "./sidebar/types.js";
 import type { SidebarBorder, SidebarSnapshot } from "./sidebar/types.js";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
+import { splitCommandLine } from "../core/command-line.js";
+import { resolveSpawnTarget } from "../core/windows-command.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
@@ -1348,18 +1350,15 @@ export class Screen {
     this.inAppSelectionEnabled = opts.inAppSelection ?? this.mouseEnabled;
     this.selectionClipboard = opts.selectionClipboard ?? "both";
     // Normalize the openFileCommand union to a non-empty argv (or null
-    // when disabled). String form is shell-style split on whitespace —
-    // good enough for editor invocations without quoted spaces; users
-    // who need a literal space in an arg pass the array form instead.
+    // when disabled). The string form is split on whitespace outside
+    // quotes, so a quoted editor path with spaces stays one token; the
+    // array form is taken as given.
     // Purely option-driven: the $HYDRA_EDITOR / $VISUAL / $EDITOR fallback is resolved by
     // resolveOpenFileCommand at the config-wiring layer, not here, so
     // Screen's behavior doesn't shift with the ambient environment (it
     // gates the click-debounce path, which tests and users both notice).
     const ofc = opts.openFileCommand;
-    const ofcArgv =
-      typeof ofc === "string"
-        ? ofc.split(/\s+/).filter((s) => s.length > 0)
-        : ofc;
+    const ofcArgv = typeof ofc === "string" ? splitCommandLine(ofc) : ofc;
     this.openFileCommand = ofcArgv && ofcArgv.length > 0 ? ofcArgv : null;
     this.openFileForeground =
       opts.openFileInTerminal ?? opts.openFileSource === "env";
@@ -5724,10 +5723,16 @@ export class Screen {
       return true;
     }
     try {
-      const child = spawn(plan.program, plan.args, {
+      // `code` and friends are .cmd shims on Windows, which spawn() cannot
+      // launch by bare name. The shim runs under cmd.exe, so hide the console
+      // it would otherwise flash; a direct .exe is a GUI app whose window
+      // must not be hidden.
+      const target = resolveSpawnTarget(plan.program, plan.args);
+      const child = spawn(target.command, target.args, {
         detached: true,
         stdio: "ignore",
         cwd: this.spawnCwd(),
+        ...(target.shell ? { shell: true, windowsHide: true } : {}),
       });
       child.on("error", (err) => {
         this.notify(`open file failed: ${(err as Error).message}`);

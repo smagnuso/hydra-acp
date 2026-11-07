@@ -5,6 +5,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { splitCommandLine } from "../core/command-line.js";
 import {
   runForegroundChild,
   type ForegroundDeps,
@@ -25,8 +26,17 @@ export function resolveEditorCommand(
   if (fromEnv === undefined) {
     return null;
   }
-  const argv = fromEnv.split(/\s+/).filter((s) => s.length > 0);
+  const argv = splitCommandLine(fromEnv);
   return argv.length > 0 ? argv : null;
+}
+
+// What the editor saved, as composer text. Notepad writes CRLF (and older
+// versions a byte-order mark), either of which would otherwise leave a stray
+// carriage return on every line of the prompt. An editor appends one final
+// newline of its own, which is not part of what the user typed.
+export function normalizeEditedText(raw: string): string {
+  const text = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
 export interface EditTextDeps extends ForegroundDeps {
@@ -65,8 +75,7 @@ export async function editTextInEditor(
     ) {
       return null;
     }
-    const edited = readFileSync(file, "utf8");
-    return edited.endsWith("\n") ? edited.slice(0, -1) : edited;
+    return normalizeEditedText(readFileSync(file, "utf8"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
