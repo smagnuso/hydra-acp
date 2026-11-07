@@ -2757,7 +2757,7 @@ export class Session {
     // which is before startWorkspace has written the cwd/binding record
     // — so it claimed a move that nothing on disk yet justified.
     // Background work does not survive the rotation, and the user has no
-    // other way to find that out: the "◊ waiting" indicator simply stops,
+    // other way to find that out: the "▸ waiting" indicator simply stops,
     // which reads as "it finished". Naming the tasks is the difference
     // between a monitor that reported and a monitor that was killed
     // mid-watch. Listed rather than counted because the label is what
@@ -4519,7 +4519,7 @@ export class Session {
    * comes from it, and a TaskStop is a tool call made by it. Replacing it
    * severs both, so an arming that survives a rotation can never leave the
    * map again. The observable result is a session stuck reporting
-   * "◊ waiting" with a timer climbing from an `armedSince` in the previous
+   * "▸ waiting" with a timer climbing from an `armedSince` in the previous
    * agent's life, forever, for work nothing is doing.
    *
    * Distinct from the unfixable case documented on
@@ -8112,7 +8112,7 @@ export class Session {
         const lines = sessions.map((s) => {
           const id = s.sessionId.replace(/^hydra_session_/, "").slice(0, 12);
           const model = s.currentModel ? ` · ${s.currentModel}` : "";
-          const marker = s.sessionId === this.sessionId ? " ‹" : "";
+          const marker = s.sessionId === this.sessionId ? " ◄" : "";
           const title = s.title ? `  ${s.title}` : "";
           return `\`${id}\`  ${s.cwd}${model}${marker}${title}`;
         });

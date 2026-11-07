@@ -88,7 +88,7 @@ describe("BtwOverlayBuffer", () => {
 
       expect(buf.getLines()).toHaveLength(1);
       expect(linesOf(buf)[0]).toContain("bash");
-      expect(linesOf(buf)[0]).toContain("◊");
+      expect(linesOf(buf)[0]).toContain("▸");
 
       // Update with refined title and running status
       buf.append({

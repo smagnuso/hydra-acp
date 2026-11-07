@@ -232,7 +232,7 @@ export const activityGadget: Gadget = {
       return [
         row(
           labelValue(
-            onlyUnobservableTasks(s) ? "◊ started" : "◊ waiting",
+            onlyUnobservableTasks(s) ? "▸ started" : "▸ waiting",
             shortDuration(s.now - s.armedSince),
             ctx,
           ),
@@ -312,7 +312,7 @@ export const tasksGadget: Gadget = {
     const lines: SidebarLine[] = [];
     for (const task of s.armedTasks.slice(0, SIDEBAR_PAGE_SIZE)) {
       const elapsed = shortDuration(Math.max(0, s.now - task.since));
-      const head = "◊ ";
+      const head = "▸ ";
       const budget = ctx.width - cellWidth(head) - cellWidth(elapsed) - 1;
       // The label is agent-authored prose of arbitrary length, so it is the
       // part that gives. Falls back to the type ("local_bash") when the
@@ -810,10 +810,10 @@ export function formatCpu(fraction: number | undefined): string {
 // blocked on you. Two independent axes, shown as a two-cell marker at the
 // right edge of the row.
 //
-//   ● working / ◊ background task running / ○ quiet — the same three glyphs
+//   ● working / ▸ background task running / ○ quiet — the same three glyphs
 //   the activity gadget uses at the top of this very column ("● thinking" /
-//   "◊ waiting" / "○ idle"), so a glyph means the same thing whether it
-//   describes this session or another. ◊ shares ●'s yellow: both are the
+//   "▸ waiting" / "○ idle"), so a glyph means the same thing whether it
+//   describes this session or another. ▸ shares ●'s yellow: both are the
 //   session doing work, and the shape carries the difference (a turn is in
 //   flight vs. the agent handed the turn back but armed a job that can wake
 //   it up). Without it an armed session read as quiet here while `hydra
@@ -835,10 +835,10 @@ export function formatCpu(fraction: number | undefined): string {
 // filesystem paths anyway (see rowLinkSpans) — the row stays
 // double-clickable through openPath.
 const BUSY_MARK = "●";
-const RUNNING_MARK = "◊";
+const RUNNING_MARK = "▸";
 const IDLE_MARK = "○";
 const BLOCKED_MARK = "◦";
-const UNREAD_MARK = "■";
+const UNREAD_MARK = "•";
 
 export const sessionsGadget: Gadget = {
   id: "sessions",

@@ -1506,7 +1506,7 @@ describe("sessions gadget", () => {
     const row = (e: SidebarLiveSession) =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
     const armed = row(live("armed", { armed: true }));
-    expect(armed.body.slice(-2)).toBe(" ◊");
+    expect(armed.body.slice(-2)).toBe(" ▸");
     expect(armed.bodyStyle).toBe("status-active");
     expect(armed.prefixStyle).toBe("status-active");
     // Same accent as a mid-turn session, different shape.
@@ -1514,7 +1514,7 @@ describe("sessions gadget", () => {
     expect(armed.bodyStyle).toBe(busy.bodyStyle);
     expect(armed.body.slice(-2)).not.toBe(busy.body.slice(-2));
     // The waiting cell is independent of it, like it is of busy.
-    expect(row(live("both", { armed: true, blocked: true })).body.slice(-2)).toBe("◦◊");
+    expect(row(live("both", { armed: true, blocked: true })).body.slice(-2)).toBe("◦▸");
   });
 
   // A turn in flight outranks a mere armed task, and an armed task outranks
@@ -1545,7 +1545,7 @@ describe("sessions gadget", () => {
   it("marks a quiet unread session with its own dot", () => {
     const marker = (e: SidebarLiveSession): string =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.body.slice(-1);
-    expect(marker(live("a", { unread: true }))).toBe("■");
+    expect(marker(live("a", { unread: true }))).toBe("•");
     expect(marker(live("a"))).toBe("○");
     expect(marker(live("a", { unread: true, busy: true }))).toBe("●");
   });

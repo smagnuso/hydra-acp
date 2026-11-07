@@ -2392,11 +2392,11 @@ function toolStatusIcon(status: string): string {
     default:
       // Same spinner glyph for queued vs. running — bodyStyle distinguishes
       // them visually (dim vs. bold).
-      return "◊";
+      return "▸";
   }
 }
 
-// Icon color tracks the icon's meaning, not the line's emphasis: the ◊
+// Icon color tracks the icon's meaning, not the line's emphasis: the ▸
 // stays yellow (matching the busy banner / plan accent) for both queued
 // and running, so any tool with work pending reads as "active" at a glance.
 function toolIconStyle(status: string): Style {

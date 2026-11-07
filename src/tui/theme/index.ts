@@ -1007,7 +1007,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // flight — which spans reasoning, text streaming AND tool execution, since
   // it is driven by pendingTurns going 0->1 — but it also covers a background
   // task the agent armed and handed the turn back on, which both the activity
-  // gadget ("◊ waiting") and the live-session rows paint with it. The glyph
+  // gadget ("▸ waiting") and the live-session rows paint with it. The glyph
   // carries which of the two it is; the colour only says "still going".
   // It is deliberately not called "thinking": that is only the label
   // the activity gadget prints, and naming the token after it would invite
