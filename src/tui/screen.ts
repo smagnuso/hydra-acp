@@ -9274,7 +9274,7 @@ export class Screen {
       paint(
         this.term,
         "prompt-text",
-        ` ⚙ ${truncate(`${spec.title}${counter}`, w - 5)}`,
+        ` ▪ ${truncate(`${spec.title}${counter}`, w - 5)}`,
       );
     });
     const layouts = layoutFormRows(spec, w, start, visible);

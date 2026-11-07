@@ -510,7 +510,7 @@ describe("Screen form prompt", () => {
     });
     expect(r.promptRows).toBe(3);
     // The bottom rule and the sessionbar sit below the modal.
-    expect(r.row(20).trimEnd()).toBe(" ⚙ Rename session");
+    expect(r.row(20).trimEnd()).toBe(" ▪ Rename session");
     expect(r.row(21).trimEnd()).toBe(" ❯ title: new name");
     expect(r.row(22).trimEnd()).toBe(" ⏎ save · Esc cancel");
   });
@@ -531,7 +531,7 @@ describe("Screen form prompt", () => {
     expect(r.promptRows).toBe(8);
     // Squashed: the dot and label columns pad, which isn't what's under test.
     const squashed = (n: number): string => r.row(n).replace(/\s+/g, " ").trim();
-    expect(squashed(15)).toContain("⚙ Model (31/40)");
+    expect(squashed(15)).toContain("▪ Model (31/40)");
     // Window of 6 centred on index 30 → 28..33, not truncated at the tenth.
     expect(squashed(16)).toBe("29. model-28");
     expect(squashed(18)).toBe("❯ 31. model-30");

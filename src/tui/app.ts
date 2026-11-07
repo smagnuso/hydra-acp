@@ -1766,7 +1766,7 @@ export function _buildToolsLines(args: {
   // Amended is the exception: stays quiet since it's a user action.
   const pureThinking = total === 0 && inProgress;
   // Nothing to say yet. The composer rule two rows below already reads
-  // "Thinking 1m 2s", so painting "⚙ thinking · 1m 2s" here stacked the
+  // "Thinking 1m 2s", so painting "▪ thinking · 1m 2s" here stacked the
   // same word against itself.
   //
   // A blank row rather than no rows, because upsertLines no-ops on an
@@ -1792,7 +1792,7 @@ export function _buildToolsLines(args: {
     stoppedReason !== null ? stoppedHeaderStyle : "status-idle";
   const lines: FormattedLine[] = [
     {
-      prefix: "⚙ ",
+      prefix: "▪ ",
       prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
       body: summary,
       bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
