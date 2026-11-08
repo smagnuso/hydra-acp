@@ -80,6 +80,7 @@ import {
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { LineEditor } from "./line-editor.js";
 import { createTabCompleter } from "./tab-complete.js";
+import { matchesSearch } from "./session-search.js";
 import { formatListingHint } from "./tab-cycle.js";
 import { drawBox, readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
@@ -6037,26 +6038,4 @@ export function describeHostFilter(hostFilter: string): string {
   return `host: ${hostFilter}`; // pre-namespacing persisted value
 }
 
-// Case-insensitive substring match across the session's user-visible
-// metadata. Exported so the picker.test.ts can exercise it directly
-// without driving a fake terminal.
-export function matchesSearch(s: DiscoveredSession, term: string): boolean {
-  if (term.length === 0) {
-    return true;
-  }
-  const t = term.toLowerCase();
-  const haystacks = [
-    stripHydraSessionPrefix(s.sessionId),
-    s.upstreamSessionId ?? "",
-    s.agentId ?? "",
-    s.title ?? "",
-    s.cwd,
-    shortenHomePath(s.cwd),
-  ];
-  for (const h of haystacks) {
-    if (h.toLowerCase().includes(t)) {
-      return true;
-    }
-  }
-  return false;
-}
+export { matchesSearch };

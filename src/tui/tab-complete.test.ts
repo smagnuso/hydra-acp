@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTabCompleter, type ListingItem } from "./tab-complete.js";
 import type { PathCompletion } from "./file-completion.js";
-import type { MentionCompletion } from "./file-search.js";
+import type { MentionCompletion, MentionTarget } from "./file-search.js";
 
 // A one-line buffer with the cursor at the end, like typing at a prompt.
 function setup(
@@ -14,7 +14,7 @@ function setup(
 ) {
   let line = text;
   let listing: ListingItem[] = [];
-  const mentions: Array<[string, string]> = [];
+  const mentions: Array<[string, MentionTarget]> = [];
   const completer = createTabCompleter(
     {
       cwd: () => "/cwd",
@@ -42,6 +42,11 @@ const ambiguousMention: MentionCompletion = {
   replacement: "@fil",
   candidates: ["src/a.ts", "src/b.ts", "docs/"],
   choices: ["@src/a.ts", "@src/b.ts", "@docs/"],
+  targets: [
+    { kind: "file", path: "src/a.ts" },
+    { kind: "file", path: "src/b.ts" },
+    null,
+  ],
 };
 
 describe("createTabCompleter", () => {
@@ -56,12 +61,13 @@ describe("createTabCompleter", () => {
         replacement: "@README.md",
         candidates: ["README.md"],
         choices: ["@README.md"],
-        file: "README.md",
+        targets: [{ kind: "file", path: "README.md" }],
+        target: { kind: "file", path: "README.md" },
       },
     });
     expect(t.completer.tab()).toBe(true);
     expect(t.line()).toBe("see @README.md");
-    expect(t.mentions).toEqual([["@README.md", "README.md"]]);
+    expect(t.mentions).toEqual([["@README.md", { kind: "file", path: "README.md" }]]);
     expect(t.completer.active()).toBe(false);
   });
 
@@ -86,8 +92,8 @@ describe("createTabCompleter", () => {
     t.completer.step(1);
     t.completer.step(1);
     expect(t.mentions).toEqual([
-      ["@src/a.ts", "src/a.ts"],
-      ["@src/b.ts", "src/b.ts"],
+      ["@src/a.ts", { kind: "file", path: "src/a.ts" }],
+      ["@src/b.ts", { kind: "file", path: "src/b.ts" }],
     ]);
   });
 
@@ -161,6 +167,27 @@ describe("createTabCompleter", () => {
     const t = setup("@fil", { mention: { ...ambiguousMention, truncated: false } });
     t.completer.tab();
     expect(t.listing().some((i) => i.note)).toBe(false);
+  });
+
+  it("records a session target when the cycle lands on a session", () => {
+    const t = setup("@fix", {
+      mention: {
+        replacement: "@fix",
+        candidates: ["src/fix.ts", "session: Fix login  (ab12, ~/p)"],
+        choices: ["@src/fix.ts", "@fix-login-ab12"],
+        targets: [
+          { kind: "file", path: "src/fix.ts" },
+          { kind: "session", id: "hydra_session_ab12cd", title: "Fix login" },
+        ],
+      },
+    });
+    t.completer.tab();
+    t.completer.step(1);
+    expect(t.line()).toBe("@fix-login-ab12");
+    expect(t.mentions[t.mentions.length - 1]).toEqual([
+      "@fix-login-ab12",
+      { kind: "session", id: "hydra_session_ab12cd", title: "Fix login" },
+    ]);
   });
 
   it("reset ends the cycle", () => {

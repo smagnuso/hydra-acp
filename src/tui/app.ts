@@ -203,7 +203,15 @@ import type { TurnOrigin } from "./term-host/types.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
-import { mentionBlocks } from "./file-search.js";
+import { completePathToken } from "./file-completion.js";
+import {
+  completeAtMention,
+  listProjectFiles,
+  mentionBlocks,
+  type MentionTarget,
+} from "./file-search.js";
+import { sessionCandidates } from "./session-mentions.js";
+import { createSessionSource } from "./session-source.js";
 import { createTabCompleter } from "./tab-complete.js";
 import {
   computeAttachReconcile,
@@ -4362,7 +4370,7 @@ async function runSession(
   };
 
   // "@token" -> cwd-relative file, recorded when Tab commits a mention.
-  const completedMentions = new Map<string, string>();
+  const completedMentions = new Map<string, MentionTarget>();
 
   const buildPromptBlocks = (
     text: string,
@@ -4381,20 +4389,40 @@ async function runSession(
     return blocks;
   };
 
-  const tabCompleter = createTabCompleter({
-    cwd: () => resolvedCwd,
-    isRemote: () => sessionIsRemote,
-    state: () => dispatcher.state(),
-    replaceRange: (start, end, text) => {
-      dispatcher.replaceRangeOnCurrentLine(start, end, text);
+  // Warmed now so the first "@" already has sessions to offer.
+  const sessionSource = createSessionSource(() => listSessions(target));
+  void sessionSource.get();
+
+  const tabCompleter = createTabCompleter(
+    {
+      cwd: () => resolvedCwd,
+      isRemote: () => sessionIsRemote,
+      state: () => dispatcher.state(),
+      replaceRange: (start, end, text) => {
+        dispatcher.replaceRangeOnCurrentLine(start, end, text);
+      },
+      showListing: (items) => {
+        fileCompletions = items;
+      },
+      recordMention: (token, mentioned) => {
+        completedMentions.set(token, mentioned);
+      },
     },
-    showListing: (items) => {
-      fileCompletions = items;
+    {
+      completeMention: (token, cwd) => {
+        if (!token.startsWith("@")) {
+          return null;
+        }
+        const sessions = sessionCandidates(
+          token.slice(1).replace(/\\ /g, " "),
+          sessionSource.get(),
+          { excludeId: resolvedSessionId ?? undefined },
+        );
+        return completeAtMention(token, cwd, listProjectFiles, undefined, sessions);
+      },
+      completePath: completePathToken,
     },
-    recordMention: (token, file) => {
-      completedMentions.set(token, file);
-    },
-  });
+  );
 
   // ESC / ^C always dismisses the btw overlay when it's open, regardless
   // of pane focus or dispatcher state. Runs before dispatcher.feed so we

@@ -3,6 +3,8 @@
 // swaps the token for the next candidate, wrapping around. Any other key
 // ends the cycle (the caller drops it), and the next Tab starts afresh.
 
+import type { MentionTarget } from "./file-search.js";
+
 export interface TabCycle {
   row: number;
   start: number;
@@ -11,8 +13,9 @@ export interface TabCycle {
   // Display names for the candidate list.
   names: string[];
   index: number;
-  // True for "@" mentions, whose file choices are recorded for resource_link.
-  mention: boolean;
+  // What each choice links to, parallel to `choices`; null for plain path
+  // completions and for text-only entries such as directories.
+  targets: Array<MentionTarget | null>;
   // The token as typed before cycling began, restored on cancel.
   original: string;
 }
@@ -22,10 +25,10 @@ export function startCycle(
   start: number,
   choices: string[],
   names: string[],
-  mention: boolean,
+  targets: Array<MentionTarget | null>,
   original: string,
 ): TabCycle {
-  return { row, start, choices, names, index: 0, mention, original };
+  return { row, start, choices, names, index: 0, targets, original };
 }
 
 // The next step of the cycle when `token` is still the choice we inserted

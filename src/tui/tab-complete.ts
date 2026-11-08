@@ -9,7 +9,11 @@ import {
   extractPathToken,
   type PathCompletion,
 } from "./file-completion.js";
-import { completeAtMention, type MentionCompletion } from "./file-search.js";
+import {
+  completeAtMention,
+  type MentionCompletion,
+  type MentionTarget,
+} from "./file-search.js";
 import {
   advanceCycle,
   cycleListing,
@@ -37,8 +41,8 @@ export interface TabCompleterHost {
   replaceRange(start: number, end: number, text: string): void;
   // The candidate list to show; empty clears it.
   showListing(items: ListingItem[]): void;
-  // A file committed from an "@" mention, as (inserted token, cwd-relative path).
-  recordMention?(token: string, file: string): void;
+  // A mention committed with Tab: the inserted token and what it points at.
+  recordMention?(token: string, target: MentionTarget): void;
 }
 
 export interface TabCompleterDeps {
@@ -81,9 +85,9 @@ export function createTabCompleter(
 
   const show = (c: TabCycle, tok: { start: number; col: number }): void => {
     const choice = c.choices[c.index]!;
-    const cand = c.names[c.index]!;
-    if (c.mention && !cand.endsWith("/")) {
-      host.recordMention?.(choice, cand);
+    const target = c.targets[c.index];
+    if (target !== null && target !== undefined) {
+      host.recordMention?.(choice, target);
     }
     host.replaceRange(tok.start, tok.col, choice);
     host.showListing(withNote(cycleListing(c)));
@@ -108,8 +112,8 @@ export function createTabCompleter(
     }
     const cwd = host.cwd();
     const mention = deps.completeMention(tok.token, cwd);
-    if (mention?.file !== undefined) {
-      host.recordMention?.(mention.replacement, mention.file);
+    if (mention?.target !== undefined) {
+      host.recordMention?.(mention.replacement, mention.target);
     }
     const result = mention ?? deps.completePath(tok.token, cwd);
     if (result === null) {
@@ -123,7 +127,7 @@ export function createTabCompleter(
         tok.start,
         result.choices,
         result.candidates,
-        mention !== null,
+        mention?.targets ?? result.choices.map(() => null),
         tok.token,
       );
       show(cycle, tok);

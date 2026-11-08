@@ -181,17 +181,37 @@ export function wantsHidden(query: string): boolean {
   return /(^|\/)\./.test(query.replace(/\\/g, "/"));
 }
 
+// What a committed "@" mention points at.
+export type MentionTarget =
+  | { kind: "file"; path: string }
+  | { kind: "session"; id: string; title: string };
+
+export interface MentionCandidate {
+  // Shown in the candidate list.
+  label: string;
+  // The full "@token" inserted into the prompt.
+  choice: string;
+  // Null for text-only entries (a directory).
+  target: MentionTarget | null;
+}
+
 export interface MentionCompletion {
   replacement: string;
+  // Labels, parallel to `choices` and `targets`.
   candidates: string[];
-  // Full "@path" token for each candidate, parallel to `candidates`.
   choices: string[];
-  // Set when the token was committed to exactly one file (cwd-relative);
-  // unset for a directory, which is sent as text only.
-  file?: string;
+  targets: Array<MentionTarget | null>;
+  // Set when the token was committed to exactly one linkable target.
+  target?: MentionTarget;
   // The file listing hit its size cap, so matches may be missing.
   truncated?: boolean;
 }
+
+// With session candidates in the list, the first few files stay on top and
+// the sessions follow them, so the sessions are on screen rather than
+// buried behind a screenful of files.
+const FILE_SLOTS_WITH_EXTRAS = 15;
+const FILES_BEFORE_EXTRAS = 2;
 
 // For a listing that was cut short: how much of the query is a directory
 // path that exists under the cwd ("dnload/foo/ma" -> base "dnload/foo/",
@@ -239,6 +259,7 @@ export function completeAtMention(
   cwd: string,
   listFiles: (cwd: string, hidden: boolean) => FileListing = listProjectFiles,
   isDirectory: (abs: string) => boolean = defaultIsDirectory,
+  extra: MentionCandidate[] = [],
 ): MentionCompletion | null {
   if (!token.startsWith("@")) {
     return null;
@@ -258,35 +279,53 @@ export function completeAtMention(
     }
   }
   matches ??= rankFiles(query, listing.files);
-  if (matches.length === 0) {
+  const files = matches.slice(0, extra.length > 0 ? FILE_SLOTS_WITH_EXTRAS : matches.length);
+  const asCandidate = (m: string): MentionCandidate => ({
+    label: m,
+    choice: `@${escapePath(m)}`,
+    target: m.endsWith("/") ? null : { kind: "file", path: m },
+  });
+  const cands: MentionCandidate[] = [
+    ...files.slice(0, FILES_BEFORE_EXTRAS).map(asCandidate),
+    ...extra,
+    ...files.slice(FILES_BEFORE_EXTRAS).map(asCandidate),
+  ];
+  if (cands.length === 0) {
     return null;
   }
-  if (matches.length === 1) {
-    return {
-      replacement: `@${escapePath(matches[0]!)}`,
-      candidates: matches,
-      choices: matches.map((m) => `@${escapePath(m)}`),
-      file: matches[0]!.endsWith("/") ? undefined : matches[0]!,
-      truncated,
-    };
-  }
-  const common = longestCommonPrefix(matches);
-  const replacement =
-    common.length > query.length && common.toLowerCase().startsWith(query.toLowerCase())
-      ? `@${escapePath(common)}`
-      : token;
-  return {
-    replacement,
-    candidates: matches,
-    choices: matches.map((m) => `@${escapePath(m)}`),
+  const base = {
+    candidates: cands.map((c) => c.label),
+    choices: cands.map((c) => c.choice),
+    targets: cands.map((c) => c.target),
     truncated,
   };
+  if (cands.length === 1) {
+    const only = cands[0]!;
+    return {
+      ...base,
+      replacement: only.choice,
+      ...(only.target !== null ? { target: only.target } : {}),
+    };
+  }
+  let common = longestCommonPrefix(cands.map((c) => c.choice.slice(1)));
+  if (common.endsWith("\\")) {
+    common = common.slice(0, -1);
+  }
+  const rawCommon = common.replace(/\\ /g, " ");
+  const replacement =
+    rawCommon.length > query.length &&
+    rawCommon.toLowerCase().startsWith(query.toLowerCase())
+      ? `@${common}`
+      : token;
+  return { ...base, replacement };
 }
 
 export interface ResourceLinkBlock {
   type: "resource_link";
   uri: string;
   name: string;
+  description?: string;
+  mimeType?: string;
 }
 
 function mentionPresent(text: string, token: string): boolean {
@@ -304,20 +343,35 @@ function mentionPresent(text: string, token: string): boolean {
   }
 }
 
+export function sessionUri(id: string): string {
+  return `hydra://sessions/${encodeURIComponent(id)}`;
+}
+
 // resource_link blocks for completed mentions still present in `text`.
-// `mentions` maps the inserted "@token" to its cwd-relative file.
+// `mentions` maps the inserted "@token" to what it points at.
 export function mentionBlocks(
   text: string,
-  mentions: ReadonlyMap<string, string>,
+  mentions: ReadonlyMap<string, MentionTarget>,
   cwd: string,
 ): ResourceLinkBlock[] {
   const out: ResourceLinkBlock[] = [];
-  for (const [token, file] of mentions) {
-    if (mentionPresent(text, token)) {
+  for (const [token, target] of mentions) {
+    if (!mentionPresent(text, token)) {
+      continue;
+    }
+    if (target.kind === "file") {
       out.push({
         type: "resource_link",
-        uri: pathToFileURL(path.resolve(cwd, file)).href,
-        name: file,
+        uri: pathToFileURL(path.resolve(cwd, target.path)).href,
+        name: target.path,
+      });
+    } else {
+      out.push({
+        type: "resource_link",
+        uri: sessionUri(target.id),
+        name: target.title.length > 0 ? target.title : target.id,
+        description: `Hydra session ${target.id}; read it with: hydra session transcript ${target.id}`,
+        mimeType: "text/markdown",
       });
     }
   }

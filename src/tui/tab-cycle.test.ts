@@ -12,7 +12,7 @@ const names = ["a/", "b.ts", "c.ts"];
 
 describe("tab cycle", () => {
   it("advances while the token is still the inserted choice, and wraps", () => {
-    let c = startCycle(0, 5, choices, names, false, "x");
+    let c = startCycle(0, 5, choices, names, [null, null, null], "x");
     c = advanceCycle(c, "a/", 0, 5)!;
     expect(c.index).toBe(1);
     c = advanceCycle(c, "b.ts", 0, 5)!;
@@ -21,24 +21,24 @@ describe("tab cycle", () => {
   });
 
   it("steps backwards with a negative step, wrapping to the end", () => {
-    const c = startCycle(0, 5, choices, names, false, "x");
+    const c = startCycle(0, 5, choices, names, [null, null, null], "x");
     expect(advanceCycle(c, "a/", 0, 5, -1)?.index).toBe(2);
   });
 
   it("ends when the token was edited or moved", () => {
-    const c = startCycle(0, 5, choices, names, false, "x");
+    const c = startCycle(0, 5, choices, names, [null, null, null], "x");
     expect(advanceCycle(c, "a/x", 0, 5)).toBe(null);
     expect(advanceCycle(c, "a/", 0, 6)).toBe(null);
     expect(advanceCycle(c, "a/", 1, 5)).toBe(null);
   });
 
   it("remembers the token as typed so cancel can restore it", () => {
-    const c = advanceCycle(startCycle(0, 5, choices, names, false, "@sr"), "a/", 0, 5)!;
+    const c = advanceCycle(startCycle(0, 5, choices, names, [null, null, null], "@sr"), "a/", 0, 5)!;
     expect(c.original).toBe("@sr");
   });
 
   it("marks only the active choice in the listing", () => {
-    const c = advanceCycle(startCycle(0, 0, choices, names, false, "x"), "a/", 0, 0)!;
+    const c = advanceCycle(startCycle(0, 0, choices, names, [null, null, null], "x"), "a/", 0, 0)!;
     expect(cycleListing(c)).toEqual([
       { name: "a/" },
       { name: "b.ts", selected: true },

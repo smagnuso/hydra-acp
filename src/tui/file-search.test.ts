@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   completeAtMention,
   type FileListing,
+  type MentionTarget,
   fuzzyScore,
   listProjectFilesUncached,
   mentionBlocks,
@@ -67,7 +68,8 @@ describe("completeAtMention", () => {
       replacement: "@README.md",
       candidates: ["README.md"],
       choices: ["@README.md"],
-      file: "README.md",
+      targets: [{ kind: "file", path: "README.md" }],
+      target: { kind: "file", path: "README.md" },
       truncated: false,
     });
   });
@@ -94,9 +96,9 @@ describe("completeAtMention", () => {
 });
 
 describe("mentionBlocks", () => {
-  const mentions = new Map([
-    ["@src/a.ts", "src/a.ts"],
-    ["@docs/my\\ notes.md", "docs/my notes.md"],
+  const mentions = new Map<string, MentionTarget>([
+    ["@src/a.ts", { kind: "file", path: "src/a.ts" }],
+    ["@docs/my\\ notes.md", { kind: "file", path: "docs/my notes.md" }],
   ]);
 
   // Windows anchors "/proj" to the current drive, so allow a drive letter.
@@ -152,7 +154,7 @@ describe("directory mentions", () => {
       replacement: "@src/tui/",
       candidates: ["src/tui/"],
       choices: ["@src/tui/"],
-      file: undefined,
+      targets: [null],
       truncated: false,
     });
   });
@@ -239,7 +241,7 @@ describe("scoped search for a truncated listing", () => {
     };
     const got = completeAtMention("@dnload/foo/main", "/cwd", list, isDir);
     expect(got?.replacement).toBe("@dnload/foo/main.cpp");
-    expect(got?.file).toBe("dnload/foo/main.cpp");
+    expect(got?.target).toEqual({ kind: "file", path: "dnload/foo/main.cpp" });
     expect(got?.truncated).toBe(false);
     expect(calls).toHaveLength(2);
   });
@@ -258,5 +260,82 @@ describe("scoped search for a truncated listing", () => {
   it("reports truncation when no directory prefix narrows it", () => {
     const list = (): FileListing => ({ files: ["main.cpp", "main.c"], truncated: true });
     expect(completeAtMention("@main", "/cwd", list, isDir)?.truncated).toBe(true);
+  });
+});
+
+describe("session candidates alongside files", () => {
+  const sessionCand = (title: string, id: string) => ({
+    label: `session: ${title}  (${id.slice(0, 4)}, ~/p)`,
+    choice: `@${title.toLowerCase().replace(/ /g, "-")}-${id.slice(0, 4)}`,
+    target: { kind: "session" as const, id, title },
+  });
+
+  it("lists files first, then sessions, with a target for each", () => {
+    const got = completeAtMention(
+      "@log",
+      "/cwd",
+      () => ok(["src/login.ts"]),
+      undefined,
+      [sessionCand("Fix login", "ab12cd")],
+    );
+    expect(got?.choices).toEqual(["@src/login.ts", "@fix-login-ab12"]);
+    expect(got?.targets).toEqual([
+      { kind: "file", path: "src/login.ts" },
+      { kind: "session", id: "ab12cd", title: "Fix login" },
+    ]);
+    expect(got?.replacement).toBe("@log");
+  });
+
+  it("commits a lone session match and exposes it as the target", () => {
+    const got = completeAtMention("@zzz", "/cwd", () => ok([]), undefined, [
+      sessionCand("Zzz work", "ff00aa"),
+    ]);
+    expect(got?.replacement).toBe("@zzz-work-ff00");
+    expect(got?.target).toEqual({ kind: "session", id: "ff00aa", title: "Zzz work" });
+  });
+
+  it("puts sessions right after the first two files so they are on screen", () => {
+    const many = Array.from({ length: 30 }, (_, i) => `login${i}.ts`);
+    const got = completeAtMention("@login", "/cwd", () => ok(many), undefined, [
+      sessionCand("Fix login", "ab12cd"),
+    ]);
+    expect(got?.choices.length).toBe(16);
+    expect(got?.choices[2]).toBe("@fix-login-ab12");
+    expect(got?.choices.filter((c) => c.startsWith("@login")).length).toBe(15);
+    expect(got?.targets.slice(0, 2).every((t) => t?.kind === "file")).toBe(true);
+    expect(got?.targets[2]).toMatchObject({ kind: "session" });
+  });
+
+  it("does not extend a token toward a session slug", () => {
+    const got = completeAtMention("@fi", "/cwd", () => ok(["fig.ts"]), undefined, [
+      sessionCand("Fix login", "ab12cd"),
+    ]);
+    expect(got?.replacement).toBe("@fi");
+  });
+});
+
+describe("session mention links", () => {
+  it("builds a hydra:// resource_link with the title and a read hint", () => {
+    const m = new Map<string, MentionTarget>([
+      ["@fix-login-ab12", { kind: "session", id: "hydra_session_ab12cd", title: "Fix login" }],
+    ]);
+    expect(mentionBlocks("see @fix-login-ab12 please", m, "/cwd")).toEqual([
+      {
+        type: "resource_link",
+        uri: "hydra://sessions/hydra_session_ab12cd",
+        name: "Fix login",
+        description:
+          "Hydra session hydra_session_ab12cd; read it with: hydra session transcript hydra_session_ab12cd",
+        mimeType: "text/markdown",
+      },
+    ]);
+  });
+
+  it("names an untitled session by its id and drops it when the token is gone", () => {
+    const m = new Map<string, MentionTarget>([
+      ["@session-ab12", { kind: "session", id: "hydra_session_ab12cd", title: "" }],
+    ]);
+    expect(mentionBlocks("@session-ab12", m, "/cwd")[0]?.name).toBe("hydra_session_ab12cd");
+    expect(mentionBlocks("nothing", m, "/cwd")).toEqual([]);
   });
 });
