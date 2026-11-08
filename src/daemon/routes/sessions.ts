@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import * as zlib from "node:zlib";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { thisMachine } from "../../core/machine.js";
 import { paths } from "../../core/paths.js";
@@ -1432,7 +1433,7 @@ export function registerSessionRoutes(
   // session emitted at most its first matching event).
   interface SessionIterator {
     sessionId: string;
-    rl: readline.Interface;
+    rl: { close(): void };
     gen: AsyncGenerator<{ ts: number; row: Record<string, unknown> }, void, undefined>;
     current: { ts: number; row: Record<string, unknown> } | null;
     exhausted: boolean;
@@ -1440,7 +1441,7 @@ export function registerSessionRoutes(
 
   async function* matchingEvents(
     sessionId: string,
-    rl: readline.Interface,
+    rl: AsyncIterable<string>,
     kindSet: Set<string>,
     sinceMs: number | undefined,
   ): AsyncGenerator<{ ts: number; row: Record<string, unknown> }, void, undefined> {
@@ -1454,14 +1455,92 @@ export function registerSessionRoutes(
     }
   }
 
+  // Spilled history segments (history.jsonl.N / .N.gz), oldest first, then
+  // the live file. Archives whose last write predates `since` cannot hold a
+  // matching event and are skipped without being opened.
+  async function historySegments(
+    sessionId: string,
+    historyPath: string,
+    sinceMs: number | undefined,
+  ): Promise<string[]> {
+    const byIndex = new Map<number, string>();
+    try {
+      for (const name of await fs.promises.readdir(paths.sessionDir(sessionId))) {
+        const m = /^history\.jsonl\.(\d+)(\.gz)?$/.exec(name);
+        if (!m) {
+          continue;
+        }
+        const index = Number.parseInt(m[1]!, 10);
+        if (m[2] !== undefined || !byIndex.has(index)) {
+          byIndex.set(index, path.join(paths.sessionDir(sessionId), name));
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+    }
+    const out: string[] = [];
+    for (const index of [...byIndex.keys()].sort((x, y) => x - y)) {
+      const file = byIndex.get(index)!;
+      if (sinceMs !== undefined) {
+        try {
+          if ((await fs.promises.stat(file)).mtimeMs < sinceMs) {
+            continue;
+          }
+        } catch {
+          continue;
+        }
+      }
+      out.push(file);
+    }
+    out.push(historyPath);
+    return out;
+  }
+
   async function initIterator(
     sessionId: string,
     historyPath: string,
     kindSet: Set<string>,
     sinceMs: number | undefined,
   ): Promise<SessionIterator> {
-    const rl = readline.createInterface({ input: fs.createReadStream(historyPath), crlfDelay: Infinity });
-    const gen = matchingEvents(sessionId, rl, kindSet, sinceMs);
+    const files = await historySegments(sessionId, historyPath, sinceMs);
+    let active: readline.Interface | null = null;
+    let closed = false;
+    async function* lines(): AsyncGenerator<string, void, undefined> {
+      for (const file of files) {
+        if (closed) {
+          return;
+        }
+        const raw = fs.createReadStream(file);
+        let input: NodeJS.ReadableStream = raw;
+        if (file.endsWith(".gz")) {
+          const gunzip = zlib.createGunzip();
+          raw.on("error", (e) => gunzip.destroy(e));
+          input = raw.pipe(gunzip);
+        }
+        const rl = readline.createInterface({ input, crlfDelay: Infinity });
+        active = rl;
+        try {
+          yield* rl;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            continue;
+          }
+          throw err;
+        } finally {
+          rl.close();
+          raw.destroy();
+        }
+      }
+    }
+    const rl = {
+      close(): void {
+        closed = true;
+        active?.close();
+      },
+    };
+    const gen = matchingEvents(sessionId, lines(), kindSet, sinceMs);
     const first = await gen.next();
     const current = first.done ? null : first.value;
     return { sessionId, rl, gen, current, exhausted: current === null };
@@ -1477,7 +1556,8 @@ export function registerSessionRoutes(
     }
   }
 
- // Stream selected session/update kinds from every session's history.jsonl,
+ // Stream selected session/update kinds from every session's history
+  // (spilled archives, then the live history.jsonl),
   // interleaved by ts ascending (k-way merge). `kinds` is required and
   // validated against QUERYABLE_EVENT_KINDS. `since` is an optional ISO-8601
   // lower bound on recordedAt. Sessions whose updatedAt falls before `since`

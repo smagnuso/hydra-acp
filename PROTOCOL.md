@@ -1192,7 +1192,7 @@ Each row carries a cumulative running total — diff successive rows to get per-
 
 #### `GET /v1/sessions/events`
 
-Stream selected session/update kinds from **every** session's `history.jsonl`, interleaved by `ts` ascending (k-way merge). Each emitted row carries an additional top-level `sessionId` field. Useful for cross-session cost aggregation and time-bucketed analytics.
+Stream selected session/update kinds from **every** session's history (spilled `history.jsonl.N[.gz]` archives, then the live `history.jsonl`), interleaved by `ts` ascending (k-way merge). Each emitted row carries an additional top-level `sessionId` field. Useful for cross-session cost aggregation and time-bucketed analytics.
 
 **Query parameters** — identical to [`GET /v1/sessions/:id/events`](#get-v1sessionsidevents): `kinds` (required) and `since` (optional).
 

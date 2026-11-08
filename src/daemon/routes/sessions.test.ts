@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as zlib from "node:zlib";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AddressInfo } from "node:net";
@@ -2355,6 +2356,59 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
     // Only session C's events appear because sessions A and B were
     // pre-filtered out by their updatedAt timestamps — their history.jsonl
     // files are never opened, saving I/O for stale sessions.
+  });
+
+  it("includes spilled archives (plain and .gz) ahead of the live history", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const row = (cost: number, at: number): string =>
+      JSON.stringify({
+        method: "session/update",
+        params: { sessionId: "u", update: { sessionUpdate: "usage_update", cost: { amount: cost, currency: "USD" } } },
+        recordedAt: at,
+      }) + "\n";
+    const dir = paths.sessionDir(a.sessionId);
+    const now = Date.now();
+    await fsPromises.writeFile(path.join(dir, "history.jsonl.1.gz"), zlib.gzipSync(row(1, now - 3000)));
+    await fsPromises.writeFile(path.join(dir, "history.jsonl.2"), row(2, now - 2000));
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u", update: { sessionUpdate: "usage_update", cost: { amount: 3, currency: "USD" } } },
+      recordedAt: now - 1000,
+    });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/events?kinds=usage_update`);
+    const costs = (await res.text())
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => (JSON.parse(l) as { update: { cost: { amount: number } } }).update.cost.amount);
+    expect(costs).toEqual([1, 2, 3]);
+  });
+
+  it("skips archives last written before since", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const dir = paths.sessionDir(a.sessionId);
+    const old = path.join(dir, "history.jsonl.1");
+    await fsPromises.writeFile(
+      old,
+      JSON.stringify({
+        method: "session/update",
+        params: { sessionId: "u", update: { sessionUpdate: "usage_update", cost: { amount: 9, currency: "USD" } } },
+        recordedAt: Date.now() - 10_000,
+      }) + "\n",
+    );
+    const past = new Date(Date.now() - 3_600_000);
+    await fsPromises.utimes(old, past, past);
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u", update: { sessionUpdate: "usage_update", cost: { amount: 4, currency: "USD" } } },
+      recordedAt: Date.now(),
+    });
+
+    const since = new Date(Date.now() - 60_000).toISOString();
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/events?kinds=usage_update&since=${encodeURIComponent(since)}`);
+    const lines = (await res.text()).split("\n").filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    expect((JSON.parse(lines[0]!) as { update: { cost: { amount: number } } }).update.cost.amount).toBe(4);
   });
 
   it("missing kinds param returns 400", async () => {
