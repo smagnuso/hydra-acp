@@ -206,6 +206,7 @@ import {
   completePathToken,
   extractPathToken,
 } from "./file-completion.js";
+import { completeAtMention, mentionBlocks } from "./file-search.js";
 import {
   computeAttachReconcile,
   parseReattachResponse,
@@ -4351,6 +4352,26 @@ async function runSession(
   // Complete a filesystem path token immediately before the cursor against
   // the session cwd. Returns true when Tab was consumed (a path-like token
   // was found and the directory was readable), false to let Tab indent.
+  // "@token" -> cwd-relative file, recorded when Tab commits a mention.
+  const completedMentions = new Map<string, string>();
+
+  const buildPromptBlocks = (
+    text: string,
+    attachments: Attachment[],
+  ): Array<Record<string, unknown>> => {
+    const blocks: Array<Record<string, unknown>> = [];
+    if (text.length > 0) {
+      blocks.push({ type: "text", text });
+    }
+    for (const a of attachments) {
+      blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
+    }
+    for (const link of mentionBlocks(text, completedMentions, resolvedCwd)) {
+      blocks.push({ ...link });
+    }
+    return blocks;
+  };
+
   const tryHandleFileCompletion = (): boolean => {
     if (sessionIsRemote) {
       // resolvedCwd names a directory on the peer, not this machine —
@@ -4367,7 +4388,11 @@ async function runSession(
     if (tok === null) {
       return false;
     }
-    const result = completePathToken(tok.token, resolvedCwd);
+    const mention = completeAtMention(tok.token, resolvedCwd);
+    if (mention?.file !== undefined) {
+      completedMentions.set(mention.replacement, mention.file);
+    }
+    const result = mention ?? completePathToken(tok.token, resolvedCwd);
     if (result === null) {
       return false;
     }
@@ -6769,13 +6794,7 @@ async function runSession(
         if (!mid) {
           return;
         }
-        const blocks: Array<Record<string, unknown>> = [];
-        if (effect.text.length > 0) {
-          blocks.push({ type: "text", text: effect.text });
-        }
-        for (const a of effect.attachments) {
-          blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
-        }
+        const blocks = buildPromptBlocks(effect.text, effect.attachments);
         // Fire-and-forget the wire request; daemon broadcasts
         // prompt_queue_updated on success, which refreshes the chip.
         // If the entry started or got cancelled between Up-arrow and
@@ -7254,13 +7273,7 @@ async function runSession(
       return;
     }
     const target = currentHeadMessageId;
-    const blocks: Array<Record<string, unknown>> = [];
-    if (text.length > 0) {
-      blocks.push({ type: "text", text });
-    }
-    for (const a of attachments) {
-      blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
-    }
+    const blocks = buildPromptBlocks(text, attachments);
     // Mirror runPrompt's pendingEcho dance — the typed text only flushes
     // to scrollback when prompt_queue_removed{started} fires for the
     // amendment's messageId. Without this, the user's input would be
@@ -7359,13 +7372,7 @@ async function runSession(
       amendPrompt(text, attachments, displayText);
       return;
     }
-    const blocks: Array<Record<string, unknown>> = [];
-    if (text.length > 0) {
-      blocks.push({ type: "text", text });
-    }
-    for (const a of attachments) {
-      blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
-    }
+    const blocks = buildPromptBlocks(text, attachments);
     const echo: PendingEcho = {
       text,
       displayText: displayText ?? text,
@@ -7928,13 +7935,7 @@ async function runSession(
     attachments: Attachment[],
     displayText?: string,
   ): Promise<void> => {
-    const userBlocks: Array<Record<string, unknown>> = [];
-    if (text.length > 0) {
-      userBlocks.push({ type: "text", text });
-    }
-    for (const a of attachments) {
-      userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
-    }
+    const userBlocks = buildPromptBlocks(text, attachments);
 
     // Our own prompt revives a cold session. Left armed, the watch sees
     // that revival as somebody else's and replays our prompt back to us.
