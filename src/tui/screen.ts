@@ -4,6 +4,7 @@
 // redraws.
 
 import { FocusTracker } from "./focus-tracker.js";
+import { completionWindow } from "./tab-cycle.js";
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -539,6 +540,8 @@ export interface MouseEvent {
 export interface CompletionItem {
   name: string;
   description?: string;
+  // The active candidate while Tab-cycling; drawn with the menu marker.
+  selected?: boolean;
 }
 
 const SESSIONBAR_ROWS = 1;
@@ -3930,7 +3933,8 @@ export class Screen {
         return (
           prev !== undefined &&
           prev.name === c.name &&
-          prev.description === c.description
+          prev.description === c.description &&
+          prev.selected === c.selected
         );
       });
     if (same) {
@@ -7983,21 +7987,26 @@ export class Screen {
     const completionBottom = separatorRow - 1 - queuedRows - chipRows;
     const completionTop = completionBottom - rows + 1;
     // Width of the longest command name so descriptions line up.
+    const win = completionWindow(
+      this.completions.length,
+      this.completions.findIndex((c) => c.selected),
+      MAX_COMPLETION_ROWS,
+    );
     let nameWidth = 0;
-    for (const item of this.completions.slice(0, rows)) {
+    for (const item of this.completions.slice(win.offset, win.offset + win.shown)) {
       if (item.name.length > nameWidth) {
         nameWidth = item.name.length;
       }
     }
     for (let i = 0; i < rows; i++) {
       const row = completionTop + i;
-      const item = this.completions[i];
-      const isLast = i === rows - 1 && this.completions.length > MAX_COMPLETION_ROWS;
-      const overflow = this.completions.length - MAX_COMPLETION_ROWS + 1;
+      const isLast = i === rows - 1 && win.hidden > 0;
+      const item = this.completions[isLast ? i : win.offset + i];
+      const overflow = win.hidden;
       const sig = item
         ? isLast
           ? `comp|${w}|overflow|${overflow}`
-          : `comp|${w}|${nameWidth}|${item.name}|${item.description ?? ""}`
+          : `comp|${w}|${nameWidth}|${item.name}|${item.description ?? ""}|${item.selected ? "1" : "0"}`
         : `comp|${w}|empty`;
       this.paintRow(row, sig, () => {
         if (!item) {
@@ -8011,8 +8020,16 @@ export class Screen {
         const desc = item.description ?? "";
         const remaining = w - namePadded.length - 4;
         const truncated = remaining > 0 ? truncate(desc, remaining) : "";
-        this.term.noFormat("  ");
-        paint(this.term, "completion-name", namePadded);
+        if (item.selected) {
+          paint(this.term, "modal-option-selected", " \u203a");
+        } else {
+          this.term.noFormat("  ");
+        }
+        paint(
+          this.term,
+          item.selected ? "modal-option-selected" : "completion-name",
+          namePadded,
+        );
         if (truncated.length > 0) {
           this.term.noFormat("  ");
           paint(this.term, "completion-desc", truncated);

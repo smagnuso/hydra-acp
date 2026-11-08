@@ -150,6 +150,7 @@ import {
   resolveAmbiguousWide,
   setAmbiguousWide,
   type CompactionClickTarget,
+  type CompletionItem,
   type FormClickTarget,
   type PermissionClickTarget,
 } from "./screen.js";
@@ -207,6 +208,7 @@ import {
   extractPathToken,
 } from "./file-completion.js";
 import { completeAtMention, mentionBlocks } from "./file-search.js";
+import { advanceCycle, cycleListing, startCycle, type TabCycle } from "./tab-cycle.js";
 import {
   computeAttachReconcile,
   parseReattachResponse,
@@ -4300,7 +4302,8 @@ async function runSession(
   // a one-shot reaction to Tab — refreshCompletions prefers slash-command
   // matches, then these, and any non-Tab key clears them so the list doesn't
   // linger as the user keeps typing.
-  let fileCompletions: AvailableCommand[] = [];
+  let fileCompletions: CompletionItem[] = [];
+  let tabCycle: TabCycle | null = null;
 
   const refreshCompletions = (): void => {
     const slash = currentCompletions();
@@ -4314,7 +4317,32 @@ async function runSession(
 
   const tryHandleCompletionKey = (ev: KeyEvent): boolean => {
     if (ev.type !== "key" || ev.name !== "tab") {
+      if (ev.type === "key" && (ev.name === "up" || ev.name === "down")) {
+        if (stepTabCycle(ev.name === "down" ? 1 : -1)) {
+          return true;
+        }
+      }
+      // Enter mid-cycle accepts the candidate without sending the prompt.
+      if (tabCycle !== null && ev.type === "key" && ev.name === "enter") {
+        tabCycle = null;
+        fileCompletions = [];
+        return true;
+      }
+      // Escape mid-cycle puts back what was typed before the first Tab.
+      if (tabCycle !== null && ev.type === "key" && ev.name === "escape") {
+        const cycle = tabCycle;
+        tabCycle = null;
+        fileCompletions = [];
+        const st = dispatcher.state();
+        const tok = extractPathToken(st.buffer[st.row] ?? "", st.col);
+        if (tok !== null && tok.token === cycle.choices[cycle.index]) {
+          dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, cycle.original);
+          return true;
+        }
+        return false;
+      }
       // Any non-Tab key dismisses a lingering file-completion list.
+      tabCycle = null;
       if (fileCompletions.length > 0) {
         fileCompletions = [];
       }
@@ -4372,6 +4400,41 @@ async function runSession(
     return blocks;
   };
 
+  // Put the cycle's current choice in the buffer and list its siblings.
+  const showCycleChoice = (
+    cycle: TabCycle,
+    insert: (replacement: string) => void,
+  ): void => {
+    const choice = cycle.choices[cycle.index]!;
+    const cand = cycle.names[cycle.index]!;
+    if (cycle.mention && !cand.endsWith("/")) {
+      completedMentions.set(choice, cand);
+    }
+    insert(choice);
+    fileCompletions = cycleListing(cycle);
+  };
+
+  // Up/Down while a cycle is active step through the candidates; false
+  // (leaving the key to its usual meaning) when no cycle is in progress.
+  const stepTabCycle = (step: number): boolean => {
+    if (tabCycle === null) {
+      return false;
+    }
+    const st = dispatcher.state();
+    const tok = extractPathToken(st.buffer[st.row] ?? "", st.col);
+    const next =
+      tok === null ? null : advanceCycle(tabCycle, tok.token, st.row, tok.start, step);
+    if (tok === null || next === null) {
+      tabCycle = null;
+      return false;
+    }
+    tabCycle = next;
+    showCycleChoice(next, (r) =>
+      dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, r),
+    );
+    return true;
+  };
+
   const tryHandleFileCompletion = (): boolean => {
     if (sessionIsRemote) {
       // resolvedCwd names a directory on the peer, not this machine —
@@ -4388,6 +4451,21 @@ async function runSession(
     if (tok === null) {
       return false;
     }
+    const insert = (replacement: string): void => {
+      dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, replacement);
+    };
+    const showCycle = (cycle: TabCycle): void => {
+      showCycleChoice(cycle, insert);
+    };
+    if (tabCycle !== null) {
+      const next = advanceCycle(tabCycle, tok.token, st.row, tok.start);
+      if (next !== null) {
+        tabCycle = next;
+        showCycle(next);
+        return true;
+      }
+      tabCycle = null;
+    }
     const mention = completeAtMention(tok.token, resolvedCwd);
     if (mention?.file !== undefined) {
       completedMentions.set(mention.replacement, mention.file);
@@ -4396,12 +4474,21 @@ async function runSession(
     if (result === null) {
       return false;
     }
-    if (result.replacement !== tok.token) {
-      dispatcher.replaceRangeOnCurrentLine(
+    // Nothing left to extend and several candidates: start cycling.
+    if (result.replacement === tok.token && result.choices.length > 1) {
+      tabCycle = startCycle(
+        st.row,
         tok.start,
-        st.col,
-        result.replacement,
+        result.choices,
+        result.candidates,
+        mention !== null,
+        tok.token,
       );
+      showCycle(tabCycle);
+      return true;
+    }
+    if (result.replacement !== tok.token) {
+      insert(result.replacement);
     }
     // Show the candidate basenames when more than one matched; a unique
     // match is already committed into the buffer so the list adds nothing.

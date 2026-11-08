@@ -63,7 +63,7 @@ describe("completePathToken", () => {
     // The user's ask: type "Mak", press Tab, get "Makefile".
     expect(
       completePathToken("Mak", "/cwd", dir([{ name: "Makefile", isDir: false }])),
-    ).toEqual({ replacement: "Makefile", candidates: ["Makefile"] });
+    ).toEqual({ replacement: "Makefile", candidates: ["Makefile"], choices: ["Makefile"] });
   });
 
   it("completes a bare word to the common prefix when multiple files match", () => {
@@ -79,6 +79,7 @@ describe("completePathToken", () => {
     ).toEqual({
       replacement: "con",
       candidates: ["config.json", "convention.md"],
+      choices: ["config.json", "convention.md"],
     });
   });
 
@@ -95,13 +96,13 @@ describe("completePathToken", () => {
   it("commits a unique file match", () => {
     expect(
       completePathToken("src/fo", "/cwd", dir([{ name: "foo.ts", isDir: false }])),
-    ).toEqual({ replacement: "src/foo.ts", candidates: ["foo.ts"] });
+    ).toEqual({ replacement: "src/foo.ts", candidates: ["foo.ts"], choices: ["src/foo.ts"] });
   });
 
   it("appends a slash for a unique directory match", () => {
     expect(
       completePathToken("./s", "/cwd", dir([{ name: "src", isDir: true }])),
-    ).toEqual({ replacement: "./src/", candidates: ["src/"] });
+    ).toEqual({ replacement: "./src/", candidates: ["src/"], choices: ["./src/"] });
   });
 
   it("extends to the common prefix and lists candidates when ambiguous", () => {
@@ -116,6 +117,7 @@ describe("completePathToken", () => {
     expect(got).toEqual({
       replacement: "src/foo",
       candidates: ["foo.ts", "foobar.ts"],
+      choices: ["src/foo.ts", "src/foobar.ts"],
     });
   });
 
@@ -129,7 +131,7 @@ describe("completePathToken", () => {
           { name: "src", isDir: true },
         ]),
       ),
-    ).toEqual({ replacement: "./src/", candidates: ["src/"] });
+    ).toEqual({ replacement: "./src/", candidates: ["src/"], choices: ["./src/"] });
     expect(
       completePathToken(
         "./.",
@@ -139,13 +141,13 @@ describe("completePathToken", () => {
           { name: "src", isDir: true },
         ]),
       ),
-    ).toEqual({ replacement: "./.git/", candidates: [".git/"] });
+    ).toEqual({ replacement: "./.git/", candidates: [".git/"], choices: ["./.git/"] });
   });
 
   it("re-escapes spaces in the completed token", () => {
     expect(
       completePathToken("./my\\ d", "/cwd", dir([{ name: "my dir", isDir: true }])),
-    ).toEqual({ replacement: "./my\\ dir/", candidates: ["my dir/"] });
+    ).toEqual({ replacement: "./my\\ dir/", candidates: ["my dir/"], choices: ["./my\\ dir/"] });
   });
 });
 
@@ -165,7 +167,7 @@ describe("Windows path completion", () => {
     await onPlatform("win32", () => {
       expect(
         completePathToken("src\\fo", "C:\\proj", dir([{ name: "foo", isDir: true }])),
-      ).toEqual({ replacement: "src\\foo\\", candidates: ["foo\\"] });
+      ).toEqual({ replacement: "src\\foo\\", candidates: ["foo\\"], choices: ["src\\foo\\"] });
     });
   });
 
@@ -173,7 +175,7 @@ describe("Windows path completion", () => {
     await onPlatform("win32", () => {
       expect(
         completePathToken("src/fo", "C:\\proj", dir([{ name: "foo", isDir: true }])),
-      ).toEqual({ replacement: "src/foo/", candidates: ["foo/"] });
+      ).toEqual({ replacement: "src/foo/", candidates: ["foo/"], choices: ["src/foo/"] });
     });
   });
 
@@ -181,7 +183,7 @@ describe("Windows path completion", () => {
     await onPlatform("win32", () => {
       expect(
         completePathToken("src\\mak", "C:\\proj", dir([{ name: "Makefile", isDir: false }])),
-      ).toEqual({ replacement: "src\\Makefile", candidates: ["Makefile"] });
+      ).toEqual({ replacement: "src\\Makefile", candidates: ["Makefile"], choices: ["src\\Makefile"] });
     });
   });
 
@@ -196,6 +198,7 @@ describe("Windows path completion", () => {
       ).toEqual({
         replacement: "C:\\Program\\ Files\\",
         candidates: ["Program Files\\"],
+        choices: ["C:\\Program\\ Files\\"],
       });
     });
   });

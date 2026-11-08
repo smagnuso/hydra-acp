@@ -101,6 +101,9 @@ export interface PathCompletion {
   // Basenames of every candidate (directories carry a trailing "/"), for the
   // completion list. Single-element when the match is unambiguous.
   candidates: string[];
+  // Full replacement token for each candidate (escaped, with the typed
+  // directory prefix), parallel to `candidates`; used to cycle with Tab.
+  choices: string[];
 }
 
 // Default directory lister: returns entries or null when the directory can't
@@ -156,17 +159,20 @@ export function completePathToken(
   }
   const sep = separatorFor(dirPrefix);
   const candidates = matched.map((e) => (e.isDir ? e.name + sep : e.name));
+  const choices = candidates.map((c) => escapeToken(dirPrefix + c));
   if (matched.length === 1) {
     const only = matched[0]!;
     const completedBase = only.isDir ? only.name + sep : only.name;
     return {
       replacement: escapeToken(dirPrefix + completedBase),
       candidates,
+      choices,
     };
   }
   const common = longestCommonPrefix(matched.map((e) => e.name));
   return {
     replacement: escapeToken(dirPrefix + common),
     candidates,
+    choices,
   };
 }

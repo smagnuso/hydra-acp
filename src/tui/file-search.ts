@@ -161,6 +161,8 @@ export function listProjectFiles(cwd: string): string[] {
 export interface MentionCompletion {
   replacement: string;
   candidates: string[];
+  // Full "@path" token for each candidate, parallel to `candidates`.
+  choices: string[];
   // Set when the token was committed to exactly one file (cwd-relative);
   // unset for a directory, which is sent as text only.
   file?: string;
@@ -191,6 +193,7 @@ export function completeAtMention(
     return {
       replacement: `@${escapePath(matches[0]!)}`,
       candidates: matches,
+      choices: matches.map((m) => `@${escapePath(m)}`),
       file: matches[0]!.endsWith("/") ? undefined : matches[0]!,
     };
   }
@@ -199,7 +202,11 @@ export function completeAtMention(
     common.length > query.length && common.toLowerCase().startsWith(query.toLowerCase())
       ? `@${escapePath(common)}`
       : token;
-  return { replacement, candidates: matches };
+  return {
+    replacement,
+    candidates: matches,
+    choices: matches.map((m) => `@${escapePath(m)}`),
+  };
 }
 
 export interface ResourceLinkBlock {

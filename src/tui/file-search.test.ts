@@ -61,6 +61,7 @@ describe("completeAtMention", () => {
     expect(completeAtMention("@readme", "/cwd", list)).toEqual({
       replacement: "@README.md",
       candidates: ["README.md"],
+      choices: ["@README.md"],
       file: "README.md",
     });
   });
@@ -92,11 +93,12 @@ describe("mentionBlocks", () => {
     ["@docs/my\\ notes.md", "docs/my notes.md"],
   ]);
 
+  // Windows anchors "/proj" to the current drive, so allow a drive letter.
   it("links mentions still present in the text", () => {
     const got = mentionBlocks("look at @src/a.ts please", mentions, "/proj");
-    expect(got).toEqual([
-      { type: "resource_link", uri: "file:///proj/src/a.ts", name: "src/a.ts" },
-    ]);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({ type: "resource_link", name: "src/a.ts" });
+    expect(got[0]?.uri).toMatch(/^file:\/\/\/(?:[A-Za-z]:\/)?proj\/src\/a\.ts$/);
   });
 
   it("drops mentions that were edited away", () => {
@@ -109,7 +111,7 @@ describe("mentionBlocks", () => {
 
   it("encodes spaces in the uri", () => {
     const got = mentionBlocks("@docs/my\\ notes.md", mentions, "/proj");
-    expect(got[0]?.uri).toBe("file:///proj/docs/my%20notes.md");
+    expect(got[0]?.uri).toMatch(/^file:\/\/\/(?:[A-Za-z]:\/)?proj\/docs\/my%20notes\.md$/);
   });
 });
 
@@ -140,7 +142,12 @@ describe("directory mentions", () => {
 
   it("commits a unique directory with a trailing slash and no file link", () => {
     const got = completeAtMention("@src/tu", "/cwd", () => ["src/tui/"]);
-    expect(got).toEqual({ replacement: "@src/tui/", candidates: ["src/tui/"], file: undefined });
+    expect(got).toEqual({
+      replacement: "@src/tui/",
+      candidates: ["src/tui/"],
+      choices: ["@src/tui/"],
+      file: undefined,
+    });
   });
 
   it("ranks a directory by its own name", () => {
