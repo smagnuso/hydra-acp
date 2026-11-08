@@ -239,6 +239,10 @@ Before trusting a capture:
   `rundll32 url.dll,FileProtocolHandler <url>`, never `cmd /c start`, which cuts
   the URL at the first `&`. Never interpolate agent or user text into a shell
   command line; pass it through the environment or as separate arguments.
+  A supervised child launched through a `.cmd` shim is a cmd.exe wrapper, so end
+  it with `terminateChild` / `terminatePid` (`core/process-tree.ts`, `taskkill /T`),
+  never a bare `child.kill()` or `process.kill(pid)`: those end only the wrapper
+  and orphan the real process, which a restart then duplicates.
   Copies of `windows-command.ts` live in the slack, archiver, ahp and browser
   repos with no shared package between them, so keep them in step with this one.
 - **Files and signals on Windows.** Write-then-rename can fail with EPERM or

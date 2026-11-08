@@ -9,6 +9,7 @@ import { RestartBreaker, type BreakerOptions } from "./restart-breaker.js";
 import { ROLLING_LOG_SYMLINK_SUPPORTED } from "./rolling-log.js";
 import { expandHome } from "./config.js";
 import { scrubInheritedEnv } from "./scrub-env.js";
+import { terminateChild, terminatePid, type ProcessTreeDeps } from "./process-tree.js";
 import { resolveSpawnTarget } from "./windows-command.js";
 
 // Shared lifecycle for daemon-supervised child processes (extensions and
@@ -94,6 +95,8 @@ export interface ChildSupervisorOptions {
   // should leave these alone.
   restartBaseMs?: number;
   restartCapMs?: number;
+  // Test-only: lets a test drive the Windows tree-kill branch on any host.
+  processTree?: ProcessTreeDeps;
 }
 
 export class ChildSupervisor<TConfig extends BaseChildConfig> {
@@ -102,6 +105,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
   private context: BaseChildContext | undefined;
   private tokenRegistry: ProcessTokenRegistry | undefined;
   private breakerOptions: BreakerOptions | undefined;
+  private processTree: ProcessTreeDeps | undefined;
   private restartBaseMs: number;
   private restartCapMs: number;
   private adapter: SupervisorAdapter;
@@ -116,6 +120,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     this.context = context;
     this.tokenRegistry = options.tokenRegistry;
     this.breakerOptions = options.breakerOptions;
+    this.processTree = options.processTree;
     this.restartBaseMs = options.restartBaseMs ?? DEFAULT_RESTART_BASE_MS;
     this.restartCapMs = options.restartCapMs ?? DEFAULT_RESTART_CAP_MS;
     for (const cfg of configs) {
@@ -167,7 +172,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
         continue;
       }
       try {
-        child.kill("SIGTERM");
+        terminateChild(child, "SIGTERM", this.processTree);
       } catch {
         void 0;
       }
@@ -179,7 +184,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
           }
           const timer = setTimeout(() => {
             try {
-              child.kill("SIGKILL");
+              terminateChild(child, "SIGKILL", this.processTree);
             } catch {
               void 0;
             }
@@ -336,13 +341,13 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       entry.exitWaiters.push(resolve);
     });
     try {
-      child.kill("SIGTERM");
+      terminateChild(child, "SIGTERM", this.processTree);
     } catch {
       void 0;
     }
     const killTimer = setTimeout(() => {
       try {
-        child.kill("SIGKILL");
+        terminateChild(child, "SIGKILL", this.processTree);
       } catch {
         void 0;
       }
@@ -433,7 +438,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       }
       if (typeof pid === "number" && isAlive(pid)) {
         try {
-          process.kill(pid, "SIGTERM");
+          terminatePid(pid, "SIGTERM", this.processTree);
         } catch {
           void 0;
         }
@@ -443,7 +448,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
         }
         if (isAlive(pid)) {
           try {
-            process.kill(pid, "SIGKILL");
+            terminatePid(pid, "SIGKILL", this.processTree);
           } catch {
             void 0;
           }

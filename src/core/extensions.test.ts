@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ExtensionManager, type ExtensionContext } from "./extensions.js";
@@ -440,5 +441,126 @@ describe("ExtensionManager", () => {
         .poll(() => manager?.list()[0]?.status, { timeout: 2_000 })
         .toBe("failed");
     });
+  });
+});
+
+// On Windows an npm-installed extension runs behind a cmd.exe shim, so the pid
+// the supervisor holds is the wrapper and the real process is its child. These
+// drive the Windows branch with a real child and a stand-in for taskkill /T, and
+// check that every place the supervisor ends a process goes through the tree
+// kill instead of a bare kill of that one pid.
+describe("ExtensionManager ends the whole tree on Windows", () => {
+  let tmpHome: string;
+  let probeOut: string;
+  let manager: ExtensionManager | undefined;
+
+  const cfg = (): ExtensionConfig => ({
+    name: "long",
+    command: ["node", "-e", PROBE_SCRIPT],
+    args: [],
+    env: { PROBE_OUT: probeOut },
+    enabled: true,
+  });
+
+  // Stands in for taskkill: ends the pid it is given and records the call.
+  const taskkill = () => vi.fn((pid: number) => process.kill(pid, "SIGKILL"));
+
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
+    probeOut = path.join(tmpHome, "probe-out.json");
+  });
+
+  afterEach(async () => {
+    if (manager) {
+      await manager.stop();
+      manager = undefined;
+    }
+  });
+
+  async function waitForPid(): Promise<number> {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      try {
+        if ((await fs.readFile(probeOut, "utf8")).length > 0) {
+          const pid = manager?.list()[0]?.pid;
+          if (typeof pid === "number") {
+            return pid;
+          }
+        }
+      } catch {
+        void 0;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("probe never came up");
+  }
+
+  it("stop() tree-kills each running extension", async () => {
+    const killTree = taskkill();
+    manager = new ExtensionManager([cfg()], makeContext(tmpHome), {
+      processTree: { platform: "win32", killTree },
+    });
+    await manager.start();
+    const pid = await waitForPid();
+
+    await manager.stop();
+    manager = undefined;
+
+    expect(killTree).toHaveBeenCalledWith(pid);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("stopByName() tree-kills, which is what a restart does first", async () => {
+    const killTree = taskkill();
+    manager = new ExtensionManager([cfg()], makeContext(tmpHome), {
+      processTree: { platform: "win32", killTree },
+    });
+    await manager.start();
+    const pid = await waitForPid();
+
+    await manager.stopByName("long");
+
+    expect(killTree).toHaveBeenCalledWith(pid);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("start() tree-kills an extension a previous daemon left running", async () => {
+    const orphan = spawn("node", ["-e", "setInterval(() => {}, 60_000)"], {
+      stdio: "ignore",
+    });
+    const orphanPid = orphan.pid!;
+    const pidFile = path.join(tmpHome, "extensions", "left-behind", "extension.pid");
+    await fs.mkdir(path.dirname(pidFile), { recursive: true });
+    await fs.writeFile(pidFile, `${orphanPid}\n`);
+
+    const killTree = taskkill();
+    manager = new ExtensionManager([], makeContext(tmpHome), {
+      processTree: { platform: "win32", killTree },
+    });
+    await manager.start();
+
+    expect(killTree).toHaveBeenCalledWith(orphanPid);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(() => process.kill(orphanPid, 0)).toThrow();
+    await expect(fs.readFile(pidFile, "utf8")).rejects.toThrow();
+    orphan.kill();
+  });
+
+  it("does not touch the tree kill off Windows", async () => {
+    const killTree = taskkill();
+    manager = new ExtensionManager([cfg()], makeContext(tmpHome), {
+      processTree: { platform: "linux", killTree },
+    });
+    await manager.start();
+    const pid = await waitForPid();
+
+    await manager.stop();
+    manager = undefined;
+
+    expect(killTree).not.toHaveBeenCalled();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 });
