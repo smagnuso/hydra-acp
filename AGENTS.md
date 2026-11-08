@@ -211,6 +211,47 @@ Before trusting a capture:
   non-emoji symbol a font lacks, so check a new symbol in the classic
   console as well as Windows Terminal before relying on it. Agent and user
   text is shown as written and is not covered.
+- **Treat every path as possibly Windows-shaped, whatever host this runs on.**
+  A cwd, a tool-call path or a session field can arrive as `C:\x`, `C:/x`, a
+  mix, or UNC from a daemon on Windows, even when this code runs on Linux, and
+  the reverse. Never split, prefix-match or find the last separator with a
+  hard-coded `/` on a filesystem path (`split("/")`, `startsWith(dir + "/")`,
+  `lastIndexOf("/")`). Use `path.relative`, `isAbsolute` and `basename`, or in
+  browser code a helper that accepts both separators. URLs and ids are not
+  paths. Here that means `core/paths.ts` (`pathKey`, `isPathInside`,
+  `samePath`, `nativeCwd`) and `core/pathsep.ts`; compare through a key and
+  never store the key.
+- **Containment is `path.relative` plus a first-segment test, never a string
+  prefix.** The result must not be absolute and its first segment must not be
+  `..` (a bare `startsWith("..")` wrongly rejects a file named `..foo`). Keep
+  the `realpath` step so symlinks and junctions are resolved first.
+- **Windows shows full paths, never `~`** (`shortenHomePath` is a no-op there):
+  `~` is only expanded by PowerShell, and these strings get copied into other
+  tools. Expand `~`, `~/` and `~\` on input only. `nativeCwd` leaves a
+  drive-less rooted path (`/w`) alone, because resolving it would pin it to
+  whichever drive the process is on.
+- **Spawning on Windows.** npm-installed bins are `.cmd` shims that
+  `spawn` cannot find: go through `resolveSpawnTarget` (`core/windows-command.ts`)
+  and handle the throw from `quoteForCmd`, which refuses `"`, `%` and newlines
+  rather than emitting something cmd.exe would reinterpret. Never use
+  `detached: true` there; it makes Windows use `DETACHED_PROCESS`, which defeats
+  `windowsHide` and flashes a console. Open URLs with
+  `rundll32 url.dll,FileProtocolHandler <url>`, never `cmd /c start`, which cuts
+  the URL at the first `&`. Never interpolate agent or user text into a shell
+  command line; pass it through the environment or as separate arguments.
+  Copies of `windows-command.ts` live in the slack, archiver, ahp and browser
+  repos with no shared package between them, so keep them in step with this one.
+- **Files and signals on Windows.** Write-then-rename can fail with EPERM or
+  EBUSY when another process (a reader, antivirus, an indexer) has the target
+  open, so retry briefly. `chmod 0o600` does nothing, so do not promise it.
+  `SIGHUP` cannot be sent and `SIGTERM` is a hard kill, so reload from a file
+  watcher and put nothing that must run into a shutdown handler.
+- **Test the Windows branch without Windows.** Inject `platform` and the path
+  module (`path.win32`), or use `onPlatform` and `pinPlatform` from
+  `core/platform-stub.ts`, rather than relying on the CI runner. Never write a
+  fixture that assumes `/`. The Windows CI runner has real tools on `PATH`
+  (Git for Windows ships `vim.EXE`), so a test that expects a command to be
+  missing will fail there.
 
 ## Updating this file
 
