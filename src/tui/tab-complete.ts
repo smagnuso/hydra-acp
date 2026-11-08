@@ -20,7 +20,14 @@ import {
 export interface ListingItem {
   name: string;
   selected?: boolean;
+  // A status line, not a candidate (never selectable or counted).
+  note?: boolean;
 }
+
+const TRUNCATED_NOTE: ListingItem = {
+  name: "(results truncated, add a directory to narrow)",
+  note: true,
+};
 
 export interface TabCompleterHost {
   cwd(): string;
@@ -61,6 +68,10 @@ export function createTabCompleter(
   },
 ): TabCompleter {
   let cycle: TabCycle | null = null;
+  let truncated = false;
+
+  const withNote = (items: ListingItem[]): ListingItem[] =>
+    truncated && items.length > 0 ? [...items, TRUNCATED_NOTE] : items;
 
   const currentToken = (): { token: string; start: number; col: number; row: number } | null => {
     const st = host.state();
@@ -75,7 +86,7 @@ export function createTabCompleter(
       host.recordMention?.(choice, cand);
     }
     host.replaceRange(tok.start, tok.col, choice);
-    host.showListing(cycleListing(c));
+    host.showListing(withNote(cycleListing(c)));
   };
 
   const tab = (): boolean => {
@@ -104,6 +115,7 @@ export function createTabCompleter(
     if (result === null) {
       return false;
     }
+    truncated = mention?.truncated === true;
     // Nothing left to extend and several candidates: start cycling.
     if (result.replacement === tok.token && result.choices.length > 1) {
       cycle = startCycle(
@@ -121,7 +133,9 @@ export function createTabCompleter(
       host.replaceRange(tok.start, tok.col, result.replacement);
     }
     host.showListing(
-      result.candidates.length > 1 ? result.candidates.map((name) => ({ name })) : [],
+      result.candidates.length > 1
+        ? withNote(result.candidates.map((name) => ({ name })))
+        : [],
     );
     return true;
   };

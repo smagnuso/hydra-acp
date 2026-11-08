@@ -145,6 +145,24 @@ describe("createTabCompleter", () => {
     expect(t.listing()).toEqual([{ name: "foo.ts" }, { name: "foobar.ts" }]);
   });
 
+  it("adds a truncation note to the list, but never selects or cycles onto it", () => {
+    const t = setup("@fil", { mention: { ...ambiguousMention, truncated: true } });
+    t.completer.tab();
+    const last = t.listing()[t.listing().length - 1]!;
+    expect(last.note).toBe(true);
+    expect(t.listing().filter((i) => i.selected)).toHaveLength(1);
+    t.completer.step(1);
+    t.completer.step(1);
+    t.completer.step(1);
+    expect(t.line()).toBe("@src/a.ts");
+  });
+
+  it("shows no note for a complete listing", () => {
+    const t = setup("@fil", { mention: { ...ambiguousMention, truncated: false } });
+    t.completer.tab();
+    expect(t.listing().some((i) => i.note)).toBe(false);
+  });
+
   it("reset ends the cycle", () => {
     const t = setup("@fil", { mention: ambiguousMention });
     t.completer.tab();

@@ -76,13 +76,15 @@ export function completionWindow(
 // One-line summary of a candidate list for a status row that truncates on
 // the right: the selected item leads so it can never be cut off.
 export function formatListingHint(
-  items: Array<{ name: string; selected?: boolean }>,
+  all: Array<{ name: string; selected?: boolean; note?: boolean }>,
 ): string {
+  const items = all.filter((i) => !i.note);
+  const flag = all.some((i) => i.note) ? "  (truncated)" : "";
   const sel = items.findIndex((i) => i.selected);
   if (sel === -1) {
-    return `${items.length} matches: ${items.map((i) => i.name).join("  ")}`;
+    return `${items.length} matches: ${items.map((i) => i.name).join("  ")}${flag}`;
   }
   const rest = [...items.slice(sel + 1), ...items.slice(0, sel)];
   const tail = rest.length > 0 ? `  ${rest.map((i) => i.name).join("  ")}` : "";
-  return `${sel + 1}/${items.length} \u203a${items[sel]!.name}${tail}`;
+  return `${sel + 1}/${items.length} \u203a${items[sel]!.name}${tail}${flag}`;
 }

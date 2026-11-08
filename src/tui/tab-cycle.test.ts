@@ -70,6 +70,12 @@ describe("completionWindow", () => {
 });
 
 describe("formatListingHint", () => {
+  it("excludes a note from the count and flags the truncation", () => {
+    expect(
+      formatListingHint([{ name: "a" }, { name: "b" }, { name: "(cut)", note: true }]),
+    ).toBe("2 matches: a  b  (truncated)");
+  });
+
   it("lists plain matches with a count", () => {
     expect(formatListingHint([{ name: "a" }, { name: "b" }])).toBe("2 matches: a  b");
   });
