@@ -79,7 +79,8 @@ import {
 } from "./import-action-prompt.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { LineEditor } from "./line-editor.js";
-import { completePathToken, extractPathToken } from "./file-completion.js";
+import { createTabCompleter } from "./tab-complete.js";
+import { formatListingHint } from "./tab-cycle.js";
 import { drawBox, readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
 import { runUserHotkey } from "./user-hotkey.js";
@@ -2448,6 +2449,24 @@ export async function pickSession(
     repaintComposerStatus();
   };
 
+  // Same completer as the live composer; candidates go to the status row.
+  const pickerCompleter = createTabCompleter({
+    cwd: () => currentCwd,
+    state: () => composer.state(),
+    replaceRange: (start, end, text) => {
+      composer.replaceRangeOnCurrentLine(start, end, text);
+      repaintComposerBody();
+    },
+    showListing: (items) => {
+      if (items.length === 0) {
+        clearComposerStatus();
+        return;
+      }
+      composerHint = formatListingHint(items);
+      repaintComposerStatus();
+    },
+  });
+
   // User-configured hotkeys from tui.hotkeys (core/config.ts) — the same
   // config app.ts's live-session composer reads via tryHandleUserHotkey.
   // No session exists yet here, so %s / HYDRA_SESSION_ID substitutes to ""
@@ -4703,6 +4722,26 @@ export async function pickSession(
       // composer eats hotkeys like `/`, `r`, `?`, `k`, etc. — they only
       // fire when the user has moved focus down into the session list.
       if (selectedIdx === 0 && !searchActive) {
+        // Mid Tab-cycle, these keys act on the cycle instead (step, cancel,
+        // accept) and never reach the abort or submit handling below.
+        if (pickerCompleter.active()) {
+          if (name === "UP" || name === "DOWN") {
+            if (pickerCompleter.step(name === "DOWN" ? 1 : -1)) {
+              placeComposerCursor();
+              return;
+            }
+          } else if (name === "ESCAPE" || name === "CTRL_C") {
+            if (pickerCompleter.cancel()) {
+              placeComposerCursor();
+              return;
+            }
+          } else if (name === "ENTER" || name === "KP_ENTER") {
+            if (pickerCompleter.accept()) {
+              placeComposerCursor();
+              return;
+            }
+          }
+        }
         // ESCAPE has no dispatcher-side meaning in the picker composer
         // (no in-flight turn to cancel), so it stays a top-level abort.
         // ^c / ^d are intentionally NOT intercepted here — they go
@@ -4806,47 +4845,16 @@ export async function pickSession(
         // Any other key in the composer cancels the held-UP guard so a
         // later, deliberate UP isn't wrongly swallowed.
         upGuardArmed = false;
-        // Tab expands a path-like token under the cursor against the
-        // picker's current cwd, matching what the live session composer
-        // does. Bare-word tokens fall through to InputDispatcher, which
-        // treats Tab as insert-two-spaces (indent). No multi-candidate
-        // overlay here — the picker has nowhere to render it — so a
-        // token with multiple matches commits the longest common prefix
-        // silently and the user hits Tab again once they've disambiguated.
-        if (name === "TAB") {
-          const st = composer.state();
-          const line = st.buffer[st.row] ?? "";
-          const tok = extractPathToken(line, st.col);
-          if (tok !== null) {
-            const result = completePathToken(tok.token, currentCwd);
-            if (result !== null) {
-              if (result.replacement !== tok.token) {
-                composer.replaceRangeOnCurrentLine(
-                  tok.start,
-                  st.col,
-                  result.replacement,
-                );
-                repaintComposerBody();
-              }
-              // Ambiguous match — no path-completion overlay in the
-              // picker, so surface candidate basenames in the composer-
-              // adjacent status row so the user can see what
-              // disambiguates. The row width truncates for us.
-              if (result.candidates.length > 1) {
-                const shown = result.candidates.join("  ");
-                composerHint = `${result.candidates.length} matches: ${shown}`;
-                repaintComposerStatus();
-              } else {
-                clearComposerStatus();
-              }
-              placeComposerCursor();
-              return;
-            }
-          }
+        // Tab completes a path or @ token against the picker's cwd, the same
+        // way the live composer does. Bare words fall through to the
+        // dispatcher, which treats Tab as indent.
+        if (name === "TAB" && pickerCompleter.tab()) {
+          placeComposerCursor();
+          return;
         }
         // Any composer keystroke other than Tab dismisses a lingering
         // completion hint so it doesn't shadow the next action.
-        clearComposerStatus();
+        pickerCompleter.reset();
         // state() aliases the live buffer — snapshot before feeding so
         // in-place mutations (e.g. ^K at col=0 rewriting the current
         // line) are visible in the after-comparison.

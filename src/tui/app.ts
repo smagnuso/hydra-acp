@@ -203,12 +203,8 @@ import type { TurnOrigin } from "./term-host/types.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
-import {
-  completePathToken,
-  extractPathToken,
-} from "./file-completion.js";
-import { completeAtMention, mentionBlocks } from "./file-search.js";
-import { advanceCycle, cycleListing, startCycle, type TabCycle } from "./tab-cycle.js";
+import { mentionBlocks } from "./file-search.js";
+import { createTabCompleter } from "./tab-complete.js";
 import {
   computeAttachReconcile,
   parseReattachResponse,
@@ -4303,7 +4299,6 @@ async function runSession(
   // matches, then these, and any non-Tab key clears them so the list doesn't
   // linger as the user keeps typing.
   let fileCompletions: CompletionItem[] = [];
-  let tabCycle: TabCycle | null = null;
 
   const refreshCompletions = (): void => {
     const slash = currentCompletions();
@@ -4317,35 +4312,24 @@ async function runSession(
 
   const tryHandleCompletionKey = (ev: KeyEvent): boolean => {
     if (ev.type !== "key" || ev.name !== "tab") {
-      if (ev.type === "key" && (ev.name === "up" || ev.name === "down")) {
-        if (stepTabCycle(ev.name === "down" ? 1 : -1)) {
+      if (ev.type === "key") {
+        if (ev.name === "up" || ev.name === "down") {
+          if (tabCompleter.step(ev.name === "down" ? 1 : -1)) {
+            return true;
+          }
+        }
+        if (ev.name === "enter" && tabCompleter.accept()) {
+          return true;
+        }
+        if (
+          (ev.name === "escape" || ev.name === "ctrl-c") &&
+          tabCompleter.cancel()
+        ) {
           return true;
         }
       }
-      // Enter mid-cycle accepts the candidate without sending the prompt.
-      if (tabCycle !== null && ev.type === "key" && ev.name === "enter") {
-        tabCycle = null;
-        fileCompletions = [];
-        return true;
-      }
-      // Escape mid-cycle puts back what was typed before the first Tab.
-      if (tabCycle !== null && ev.type === "key" && ev.name === "escape") {
-        const cycle = tabCycle;
-        tabCycle = null;
-        fileCompletions = [];
-        const st = dispatcher.state();
-        const tok = extractPathToken(st.buffer[st.row] ?? "", st.col);
-        if (tok !== null && tok.token === cycle.choices[cycle.index]) {
-          dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, cycle.original);
-          return true;
-        }
-        return false;
-      }
-      // Any non-Tab key dismisses a lingering file-completion list.
-      tabCycle = null;
-      if (fileCompletions.length > 0) {
-        fileCompletions = [];
-      }
+      // Any other key dismisses a lingering list and ends a cycle.
+      tabCompleter.reset();
       return false;
     }
     // Slash-command completion takes precedence when the first line is a
@@ -4374,12 +4358,9 @@ async function runSession(
     }
     // Otherwise, try completing a file path under the cursor. Falling
     // through (returning false) lets the dispatcher handle Tab as indent.
-    return tryHandleFileCompletion();
+    return tabCompleter.tab();
   };
 
-  // Complete a filesystem path token immediately before the cursor against
-  // the session cwd. Returns true when Tab was consumed (a path-like token
-  // was found and the directory was readable), false to let Tab indent.
   // "@token" -> cwd-relative file, recorded when Tab commits a mention.
   const completedMentions = new Map<string, string>();
 
@@ -4400,106 +4381,20 @@ async function runSession(
     return blocks;
   };
 
-  // Put the cycle's current choice in the buffer and list its siblings.
-  const showCycleChoice = (
-    cycle: TabCycle,
-    insert: (replacement: string) => void,
-  ): void => {
-    const choice = cycle.choices[cycle.index]!;
-    const cand = cycle.names[cycle.index]!;
-    if (cycle.mention && !cand.endsWith("/")) {
-      completedMentions.set(choice, cand);
-    }
-    insert(choice);
-    fileCompletions = cycleListing(cycle);
-  };
-
-  // Up/Down while a cycle is active step through the candidates; false
-  // (leaving the key to its usual meaning) when no cycle is in progress.
-  const stepTabCycle = (step: number): boolean => {
-    if (tabCycle === null) {
-      return false;
-    }
-    const st = dispatcher.state();
-    const tok = extractPathToken(st.buffer[st.row] ?? "", st.col);
-    const next =
-      tok === null ? null : advanceCycle(tabCycle, tok.token, st.row, tok.start, step);
-    if (tok === null || next === null) {
-      tabCycle = null;
-      return false;
-    }
-    tabCycle = next;
-    showCycleChoice(next, (r) =>
-      dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, r),
-    );
-    return true;
-  };
-
-  const tryHandleFileCompletion = (): boolean => {
-    if (sessionIsRemote) {
-      // resolvedCwd names a directory on the peer, not this machine —
-      // listing it here would offer completions from whatever (possibly
-      // unrelated) local directory happens to sit at that path. Falling
-      // through to plain Tab-as-indent is a fine default; there's no local
-      // completion to fall back to that wouldn't risk the same silent
-      // wrong-machine hit as the guards above.
-      return false;
-    }
-    const st = dispatcher.state();
-    const line = st.buffer[st.row] ?? "";
-    const tok = extractPathToken(line, st.col);
-    if (tok === null) {
-      return false;
-    }
-    const insert = (replacement: string): void => {
-      dispatcher.replaceRangeOnCurrentLine(tok.start, st.col, replacement);
-    };
-    const showCycle = (cycle: TabCycle): void => {
-      showCycleChoice(cycle, insert);
-    };
-    if (tabCycle !== null) {
-      const next = advanceCycle(tabCycle, tok.token, st.row, tok.start);
-      if (next !== null) {
-        tabCycle = next;
-        showCycle(next);
-        return true;
-      }
-      tabCycle = null;
-    }
-    const mention = completeAtMention(tok.token, resolvedCwd);
-    if (mention?.file !== undefined) {
-      completedMentions.set(mention.replacement, mention.file);
-    }
-    const result = mention ?? completePathToken(tok.token, resolvedCwd);
-    if (result === null) {
-      return false;
-    }
-    // Nothing left to extend and several candidates: start cycling.
-    if (result.replacement === tok.token && result.choices.length > 1) {
-      tabCycle = startCycle(
-        st.row,
-        tok.start,
-        result.choices,
-        result.candidates,
-        mention !== null,
-        tok.token,
-      );
-      showCycle(tabCycle);
-      return true;
-    }
-    if (result.replacement !== tok.token) {
-      insert(result.replacement);
-    }
-    // Show the candidate basenames when more than one matched; a unique
-    // match is already committed into the buffer so the list adds nothing.
-    fileCompletions =
-      result.candidates.length > 1
-        ? result.candidates.map((name) => ({ name }))
-        : [];
-    return true;
-  };
-
-
+  const tabCompleter = createTabCompleter({
+    cwd: () => resolvedCwd,
+    isRemote: () => sessionIsRemote,
+    state: () => dispatcher.state(),
+    replaceRange: (start, end, text) => {
+      dispatcher.replaceRangeOnCurrentLine(start, end, text);
+    },
+    showListing: (items) => {
+      fileCompletions = items;
+    },
+    recordMention: (token, file) => {
+      completedMentions.set(token, file);
+    },
+  });
 
   // ESC / ^C always dismisses the btw overlay when it's open, regardless
   // of pane focus or dispatcher state. Runs before dispatcher.feed so we

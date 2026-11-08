@@ -105,7 +105,7 @@ function gitFiles(dir: string): string[] | null {
 
 // Fallback for a cwd that is not itself a repo. A nested repo is listed
 // through git so its .gitignore applies, and is not descended into.
-function walk(root: string): string[] {
+function walk(root: string, hidden: boolean): string[] {
   const out: string[] = [];
   const queue = [""];
   while (queue.length > 0 && out.length < MAX_FILES) {
@@ -126,7 +126,7 @@ function walk(root: string): string[] {
       }
     }
     for (const d of dirents) {
-      if (d.name.startsWith(".") || SKIP_DIRS.has(d.name)) {
+      if ((!hidden && d.name.startsWith(".")) || SKIP_DIRS.has(d.name)) {
         continue;
       }
       const child = rel === "" ? d.name : `${rel}/${d.name}`;
@@ -141,21 +141,32 @@ function walk(root: string): string[] {
 }
 
 // Tracked and untracked-but-not-ignored files via git, else a bounded walk.
-export function listProjectFilesUncached(cwd: string): string[] {
+export function listProjectFilesUncached(cwd: string, hidden = false): string[] {
   const files = gitFiles(cwd);
-  return files !== null ? files.slice(0, MAX_FILES) : walk(cwd);
+  return files !== null ? files.slice(0, MAX_FILES) : walk(cwd, hidden);
 }
 
-let cache: { cwd: string; at: number; files: string[] } | null = null;
+let cache: { cwd: string; hidden: boolean; at: number; files: string[] } | null = null;
 
-export function listProjectFiles(cwd: string): string[] {
+export function listProjectFiles(cwd: string, hidden = false): string[] {
   const now = Date.now();
-  if (cache !== null && cache.cwd === cwd && now - cache.at < CACHE_TTL_MS) {
+  if (
+    cache !== null &&
+    cache.cwd === cwd &&
+    cache.hidden === hidden &&
+    now - cache.at < CACHE_TTL_MS
+  ) {
     return cache.files;
   }
-  const files = withDirectories(listProjectFilesUncached(cwd));
-  cache = { cwd, at: now, files };
+  const files = withDirectories(listProjectFilesUncached(cwd, hidden));
+  cache = { cwd, hidden, at: now, files };
   return files;
+}
+
+// A query naming a dot-entry (".bashr", "src/.en") opts in to hidden files,
+// which the directory walk otherwise skips.
+export function wantsHidden(query: string): boolean {
+  return /(^|\/)\./.test(query.replace(/\\/g, "/"));
 }
 
 export interface MentionCompletion {
@@ -179,13 +190,13 @@ function escapePath(p: string): string {
 export function completeAtMention(
   token: string,
   cwd: string,
-  listFiles: (cwd: string) => string[] = listProjectFiles,
+  listFiles: (cwd: string, hidden: boolean) => string[] = listProjectFiles,
 ): MentionCompletion | null {
   if (!token.startsWith("@")) {
     return null;
   }
   const query = token.slice(1).replace(/\\ /g, " ").replace(/\\/g, "/");
-  const matches = rankFiles(query, listFiles(cwd));
+  const matches = rankFiles(query, listFiles(cwd, wantsHidden(query)));
   if (matches.length === 0) {
     return null;
   }

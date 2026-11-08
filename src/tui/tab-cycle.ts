@@ -72,3 +72,17 @@ export function completionWindow(
     selected >= shown ? Math.min(selected - shown + 1, total - shown) : 0;
   return { offset, shown, hidden: total - shown };
 }
+
+// One-line summary of a candidate list for a status row that truncates on
+// the right: the selected item leads so it can never be cut off.
+export function formatListingHint(
+  items: Array<{ name: string; selected?: boolean }>,
+): string {
+  const sel = items.findIndex((i) => i.selected);
+  if (sel === -1) {
+    return `${items.length} matches: ${items.map((i) => i.name).join("  ")}`;
+  }
+  const rest = [...items.slice(sel + 1), ...items.slice(0, sel)];
+  const tail = rest.length > 0 ? `  ${rest.map((i) => i.name).join("  ")}` : "";
+  return `${sel + 1}/${items.length} \u203a${items[sel]!.name}${tail}`;
+}

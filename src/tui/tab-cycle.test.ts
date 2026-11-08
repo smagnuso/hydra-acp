@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { advanceCycle, completionWindow, cycleListing, startCycle } from "./tab-cycle.js";
+import {
+  advanceCycle,
+  completionWindow,
+  cycleListing,
+  formatListingHint,
+  startCycle,
+} from "./tab-cycle.js";
 
 const choices = ["a/", "b.ts", "c.ts"];
 const names = ["a/", "b.ts", "c.ts"];
@@ -60,5 +66,17 @@ describe("completionWindow", () => {
 
   it("clamps at the end of the list", () => {
     expect(completionWindow(20, 19, 6).offset).toBe(15);
+  });
+});
+
+describe("formatListingHint", () => {
+  it("lists plain matches with a count", () => {
+    expect(formatListingHint([{ name: "a" }, { name: "b" }])).toBe("2 matches: a  b");
+  });
+
+  it("leads with the selected item and wraps the rest after it", () => {
+    expect(
+      formatListingHint([{ name: "a" }, { name: "b", selected: true }, { name: "c" }]),
+    ).toBe("2/3 \u203ab  c  a");
   });
 });

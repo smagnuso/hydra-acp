@@ -9,6 +9,7 @@ import {
   listProjectFilesUncached,
   mentionBlocks,
   rankFiles,
+  wantsHidden,
   withDirectories,
 } from "./file-search.js";
 
@@ -167,5 +168,44 @@ describe("Windows-typed queries", () => {
   it("completeAtMention commits a backslash-typed unique match", () => {
     const got = completeAtMention("@src\\tui\\ap", "C:\\proj", () => ["src/tui/app.ts"]);
     expect(got?.replacement).toBe("@src/tui/app.ts");
+  });
+});
+
+describe("hidden entries", () => {
+  it("wantsHidden is true only when a segment starts with a dot", () => {
+    expect(wantsHidden(".bashr")).toBe(true);
+    expect(wantsHidden("src/.en")).toBe(true);
+    expect(wantsHidden("src\\.en")).toBe(true);
+    expect(wantsHidden("bash.rc")).toBe(false);
+    expect(wantsHidden("src/app")).toBe(false);
+  });
+
+  it("completeAtMention asks the lister for hidden files only when the query opts in", () => {
+    const seen: boolean[] = [];
+    const list = (_cwd: string, hidden: boolean): string[] => {
+      seen.push(hidden);
+      return [".bashrc"];
+    };
+    expect(completeAtMention("@.bashr", "/cwd", list)?.replacement).toBe("@.bashrc");
+    completeAtMention("@bash", "/cwd", list);
+    expect(seen).toEqual([true, false]);
+  });
+
+  it("the walk lists dotfiles only when asked, and never .git or node_modules", () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "tui-hidden-")));
+    try {
+      mkdirSync(join(dir, ".config"));
+      mkdirSync(join(dir, ".git"));
+      mkdirSync(join(dir, "node_modules"));
+      writeFileSync(join(dir, ".bashrc"), "");
+      writeFileSync(join(dir, ".config", "x"), "");
+      writeFileSync(join(dir, ".git", "HEAD"), "");
+      writeFileSync(join(dir, "node_modules", "n"), "");
+      writeFileSync(join(dir, "a.txt"), "");
+      expect(listProjectFilesUncached(dir).sort()).toEqual(["a.txt"]);
+      expect(listProjectFilesUncached(dir, true).sort()).toEqual([".bashrc", ".config/x", "a.txt"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
