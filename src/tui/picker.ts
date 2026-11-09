@@ -2463,7 +2463,8 @@ export async function pickSession(
         clearComposerStatus();
         return;
       }
-      composerHint = formatListingHint(items);
+      // Two columns of padding on the status row, plus the unwritten edge.
+      composerHint = formatListingHint(items, Math.max(10, termWidth - 4));
       repaintComposerStatus();
     },
   });
@@ -4724,10 +4725,12 @@ export async function pickSession(
       // fire when the user has moved focus down into the session list.
       if (selectedIdx === 0 && !searchActive) {
         // Mid Tab-cycle, these keys act on the cycle instead (step, cancel,
-        // accept) and never reach the abort or submit handling below.
+        // accept) and never reach the abort or submit handling below. The
+        // candidates are listed along one row here, so Left/Right step
+        // through them; Up/Down keep their usual meaning.
         if (pickerCompleter.active()) {
-          if (name === "UP" || name === "DOWN") {
-            if (pickerCompleter.step(name === "DOWN" ? 1 : -1)) {
+          if (name === "LEFT" || name === "RIGHT") {
+            if (pickerCompleter.step(name === "RIGHT" ? 1 : -1)) {
               placeComposerCursor();
               return;
             }
@@ -4742,6 +4745,11 @@ export async function pickSession(
               return;
             }
           }
+        }
+        // Backspace straight after a completion takes the expansion back.
+        if (name === "BACKSPACE" && pickerCompleter.undo()) {
+          placeComposerCursor();
+          return;
         }
         // ESCAPE has no dispatcher-side meaning in the picker composer
         // (no in-flight turn to cancel), so it stays a top-level abort.

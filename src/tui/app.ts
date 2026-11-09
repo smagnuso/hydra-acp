@@ -4334,6 +4334,10 @@ async function runSession(
         ) {
           return true;
         }
+        // Backspace straight after a completion takes the expansion back.
+        if (ev.name === "backspace" && tabCompleter.undo()) {
+          return true;
+        }
       }
       // Any other key dismisses a lingering list and ends a cycle.
       tabCompleter.reset();

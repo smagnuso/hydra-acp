@@ -35,7 +35,16 @@ function setup(
       completePath: () => opts.path ?? null,
     },
   );
-  return { completer, line: () => line, listing: () => listing, mentions };
+  return {
+    completer,
+    line: () => line,
+    // Edit the buffer behind the completer's back, as a keystroke would.
+    setLine: (t: string) => {
+      line = t;
+    },
+    listing: () => listing,
+    mentions,
+  };
 }
 
 const ambiguousMention: MentionCompletion = {
@@ -195,5 +204,81 @@ describe("createTabCompleter", () => {
     t.completer.tab();
     t.completer.reset();
     expect(t.completer.active()).toBe(false);
+  });
+});
+
+describe("undo (Backspace right after a completion)", () => {
+  const unique: MentionCompletion = {
+    replacement: "@src/main.cpp",
+    candidates: ["src/main.cpp"],
+    choices: ["@src/main.cpp"],
+    targets: [{ kind: "file", path: "src/main.cpp" }],
+    target: { kind: "file", path: "src/main.cpp" },
+  };
+
+  it("puts back what was typed after a unique expansion, then deletes normally", () => {
+    const t = setup("@main", { mention: unique });
+    t.completer.tab();
+    expect(t.line()).toBe("@src/main.cpp");
+    expect(t.completer.undo()).toBe(true);
+    expect(t.line()).toBe("@main");
+    expect(t.completer.undo()).toBe(false);
+  });
+
+  it("undoes a prefix extension of a plain path", () => {
+    const t = setup("src/f", {
+      path: {
+        replacement: "src/foo",
+        candidates: ["foo.ts", "foobar.ts"],
+        choices: ["src/foo.ts", "src/foobar.ts"],
+      },
+    });
+    t.completer.tab();
+    expect(t.completer.undo()).toBe(true);
+    expect(t.line()).toBe("src/f");
+    expect(t.listing()).toEqual([]);
+  });
+
+  it("goes back to the original token from any step of a cycle", () => {
+    const t = setup("@fil", { mention: ambiguousMention });
+    t.completer.tab();
+    t.completer.step(1);
+    expect(t.completer.undo()).toBe(true);
+    expect(t.line()).toBe("@fil");
+    expect(t.completer.active()).toBe(false);
+  });
+
+  it("does nothing when idle or when Tab changed nothing", () => {
+    expect(setup("hello").completer.undo()).toBe(false);
+    const t = setup("hello");
+    t.completer.tab();
+    expect(t.completer.undo()).toBe(false);
+    expect(t.line()).toBe("hello");
+  });
+
+  it("is dropped by any other key, so a later Backspace deletes a character", () => {
+    const t = setup("@main", { mention: unique });
+    t.completer.tab();
+    t.completer.reset();
+    expect(t.completer.undo()).toBe(false);
+    expect(t.line()).toBe("@src/main.cpp");
+  });
+
+  it("leaves the buffer alone when it was edited after the expansion", () => {
+    const t = setup("@main", { mention: unique });
+    t.completer.tab();
+    t.setLine("@src/main.cp");
+    expect(t.completer.undo()).toBe(false);
+    expect(t.line()).toBe("@src/main.cp");
+  });
+
+  it("can be repeated: Tab again after an undo, then Backspace again", () => {
+    const t = setup("@main", { mention: unique });
+    t.completer.tab();
+    t.completer.undo();
+    t.completer.tab();
+    expect(t.line()).toBe("@src/main.cpp");
+    expect(t.completer.undo()).toBe(true);
+    expect(t.line()).toBe("@main");
   });
 });

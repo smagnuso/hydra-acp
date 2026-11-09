@@ -59,6 +59,10 @@ export interface TabCompleter {
   cancel(): boolean;
   // Enter while cycling: keep the candidate, do not submit. False when idle.
   accept(): boolean;
+  // Backspace right after a completion: put back what was typed before it,
+  // whether it was a cycle step or a plain expansion. False when there is
+  // nothing to undo, so Backspace deletes a character as usual.
+  undo(): boolean;
   // Any other key: the cycle ends and the list clears.
   reset(): void;
   active(): boolean;
@@ -73,6 +77,8 @@ export function createTabCompleter(
 ): TabCompleter {
   let cycle: TabCycle | null = null;
   let truncated = false;
+  // The last plain (non-cycle) expansion, so Backspace can take it back.
+  let last: { row: number; start: number; original: string; replacement: string } | null = null;
 
   const withNote = (items: ListingItem[]): ListingItem[] =>
     truncated && items.length > 0 ? [...items, TRUNCATED_NOTE] : items;
@@ -94,6 +100,7 @@ export function createTabCompleter(
   };
 
   const tab = (): boolean => {
+    last = null;
     if (host.isRemote?.() === true) {
       return false;
     }
@@ -135,6 +142,12 @@ export function createTabCompleter(
     }
     if (result.replacement !== tok.token) {
       host.replaceRange(tok.start, tok.col, result.replacement);
+      last = {
+        row: tok.row,
+        start: tok.start,
+        original: tok.token,
+        replacement: result.replacement,
+      };
     }
     host.showListing(
       result.candidates.length > 1
@@ -183,13 +196,34 @@ export function createTabCompleter(
     return true;
   };
 
+  const undo = (): boolean => {
+    if (cycle !== null) {
+      return cancel();
+    }
+    const l = last;
+    last = null;
+    if (l === null) {
+      return false;
+    }
+    host.showListing([]);
+    const tok = currentToken();
+    // Only while the expansion is still exactly what Tab left behind.
+    if (tok === null || tok.row !== l.row || tok.start !== l.start || tok.token !== l.replacement) {
+      return false;
+    }
+    host.replaceRange(tok.start, tok.col, l.original);
+    return true;
+  };
+
   return {
     tab,
     step,
     cancel,
     accept,
+    undo,
     reset: () => {
       cycle = null;
+      last = null;
       host.showListing([]);
     },
     active: () => cycle !== null,

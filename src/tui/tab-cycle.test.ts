@@ -80,9 +80,29 @@ describe("formatListingHint", () => {
     expect(formatListingHint([{ name: "a" }, { name: "b" }])).toBe("2 matches: a  b");
   });
 
-  it("leads with the selected item and wraps the rest after it", () => {
-    expect(
-      formatListingHint([{ name: "a" }, { name: "b", selected: true }, { name: "c" }]),
-    ).toBe("2/3 \u203ab  c  a");
+  it("keeps the list in order and marks the selected item, so the marker moves", () => {
+    const at = (i: number) =>
+      formatListingHint(["a", "b", "c"].map((name, j) => ({ name, selected: j === i })));
+    expect(at(0)).toBe("1/3 \u203aa  b  c");
+    expect(at(1)).toBe("2/3 a  \u203ab  c");
+    expect(at(2)).toBe("3/3 a  b  \u203ac");
+  });
+
+  const six = (sel: number) =>
+    ["a", "b", "c", "d", "e", "f"].map((name, i) => ({ name, selected: i === sel }));
+
+  it("windows a long list around the selection with ... on the cut sides", () => {
+    expect(formatListingHint(six(3), 20)).toBe("4/6 ... c  \u203ad  e  f");
+    expect(formatListingHint(six(0), 20)).toBe("1/6 \u203aa  b  c  d ...");
+  });
+
+  it("always keeps the selected item, even in a very narrow row", () => {
+    expect(formatListingHint(six(3), 8)).toContain("\u203ad");
+  });
+
+  it("drops the truncation flag when it does not fit", () => {
+    const items = [...six(1), { name: "(cut)", note: true }];
+    expect(formatListingHint(items)).toContain("(truncated)");
+    expect(formatListingHint(items, 24)).not.toContain("(truncated)");
   });
 });

@@ -76,10 +76,13 @@ export function completionWindow(
   return { offset, shown, hidden: total - shown };
 }
 
-// One-line summary of a candidate list for a status row that truncates on
-// the right: the selected item leads so it can never be cut off.
+// One-line summary of a candidate list for a single-row status line. The
+// list keeps its order and the "\u203a" marks the selected item, so Left/Right
+// move the marker along the row. When the row is too narrow, a window around
+// the selection is shown with "..." on the cut side(s).
 export function formatListingHint(
   all: Array<{ name: string; selected?: boolean; note?: boolean }>,
+  width = Infinity,
 ): string {
   const items = all.filter((i) => !i.note);
   const flag = all.some((i) => i.note) ? "  (truncated)" : "";
@@ -87,7 +90,35 @@ export function formatListingHint(
   if (sel === -1) {
     return `${items.length} matches: ${items.map((i) => i.name).join("  ")}${flag}`;
   }
-  const rest = [...items.slice(sel + 1), ...items.slice(0, sel)];
-  const tail = rest.length > 0 ? `  ${rest.map((i) => i.name).join("  ")}` : "";
-  return `${sel + 1}/${items.length} \u203a${items[sel]!.name}${tail}${flag}`;
+  const prefix = `${sel + 1}/${items.length} `;
+  const cells = items.map((it, i) => (i === sel ? `\u203a${it.name}` : it.name));
+  const more = "... ";
+  const room = width - prefix.length;
+  const last = items.length - 1;
+  const cost = (lo: number, hi: number): number => {
+    let n = 2 * (hi - lo);
+    for (let i = lo; i <= hi; i++) {
+      n += cells[i]!.length;
+    }
+    return n + (lo > 0 ? more.length : 0) + (hi < last ? more.length : 0);
+  };
+  let lo = sel;
+  let hi = sel;
+  for (;;) {
+    let grew = false;
+    if (hi < last && cost(lo, hi + 1) <= room) {
+      hi += 1;
+      grew = true;
+    }
+    if (lo > 0 && cost(lo - 1, hi) <= room) {
+      lo -= 1;
+      grew = true;
+    }
+    if (!grew) {
+      break;
+    }
+  }
+  const body = `${lo > 0 ? more : ""}${cells.slice(lo, hi + 1).join("  ")}${hi < last ? " ..." : ""}`;
+  const fits = prefix.length + body.length + flag.length <= width;
+  return `${prefix}${body}${fits ? flag : ""}`;
 }
