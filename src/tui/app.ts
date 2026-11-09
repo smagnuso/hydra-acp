@@ -1763,13 +1763,11 @@ export function _buildToolsLines(args: {
     }
     summary = parts.join(" · ") + finishedSuffix;
   }
-  // Pure-thinking placeholder (no tool has fired yet and the turn is
-  // still live) renders yellow to match the busy banner / active plan /
-  // running tool accent. Once a tool fires the per-tool status colors
-  // carry the activity signal, and once frozen ("thought · Xs") the
-  // header dims so completed turns stop pulling the eye. A non-success
-  // stopReason overrides the frozen dim and goes bold-red so the user
-  // can spot a cancelled / refused / truncated turn at a glance.
+  // While the turn is live the square is yellow, matching the busy banner and
+  // active plan; the label stays muted so only the marker signals activity.
+  // Once frozen the square dims with the label, so completed turns stop
+  // pulling the eye. A non-success stopReason overrides both and goes
+  // bold-red so a cancelled / refused / truncated turn is easy to spot.
   // Amended is the exception: stays quiet since it's a user action.
   const pureThinking = total === 0 && inProgress;
   // Nothing to say yet. The composer rule two rows below already reads
@@ -1790,8 +1788,6 @@ export function _buildToolsLines(args: {
   }
   const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
     isAmended ? "tool-status-cancelled" : "tool-status-fail";
-  const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
-    stoppedReason !== null ? stoppedHeaderStyle : "tool";
   const frozenBodyStyle:
     | "tool-status-fail"
     | "tool-status-cancelled"
@@ -1800,9 +1796,12 @@ export function _buildToolsLines(args: {
   const lines: FormattedLine[] = [
     {
       prefix: "▪ ",
-      prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
+      prefixStyle:
+        inProgress && stoppedReason === null
+          ? "tool-status-running"
+          : frozenBodyStyle,
       body: summary,
-      bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
+      bodyStyle: frozenBodyStyle,
     },
   ];
   // rowOwners[0] is always null (header line); subsequent entries map to
