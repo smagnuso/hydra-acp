@@ -410,34 +410,33 @@ export const contextGadget: Gadget = {
     const { used, size, costAmount, costCurrency } = s.usage;
     if (used !== undefined && size !== undefined && size > 0) {
       const pct = used / size;
+      const warn = pct >= 0.9;
+      const counts = `${compactCount(used)}/${compactCount(size)}`;
+      const percent = `${Math.round(pct * 100)}%`;
+      // Both figures are data, so they take the value colour like the info
+      // and resources values, until the last 10%, when figure and bar turn
+      // into the warning that a compaction is imminent.
       lines.push(
         row(
-          labelValue(
-            `${compactCount(used)}/${compactCount(size)}`,
-            `${Math.round(pct * 100)}%`,
-            ctx,
-          ),
-          // Kept coloured, and deliberately: this figure is the state the
-          // meter below it visualises, and it turns into the warning that a
-          // compaction is imminent.
-          pct >= 0.9 ? "meter-warn" : "metric",
+          labelValue(counts, percent, ctx),
+          warn ? "meter-warn" : "sidebar-value",
         ),
       );
-      // Over 90% of the window the bar turns into a warning — this is the
-      // cue that a compaction is imminent.
-      lines.push(
-        row(meterBar(pct, ctx.width), pct >= 0.9 ? "meter-warn" : "meter-fill"),
-      );
+      const bar = meterBar(pct, ctx.width);
+      const dots = bar.indexOf("·");
+      const filled = dots === -1 ? bar : bar.slice(0, dots);
+      lines.push({
+        prefix: filled,
+        prefixStyle: warn ? "meter-warn" : "sidebar-value",
+        body: bar.slice(filled.length),
+        bodyStyle: "muted",
+      });
     } else if (used !== undefined) {
-      lines.push(row(labelValue("tokens", compactCount(used), ctx), "metric"));
+      lines.push(fieldRow("tokens", compactCount(used), ctx));
     }
     if (costAmount !== undefined) {
       const cur = costCurrency === "USD" || costCurrency === undefined ? "$" : `${costCurrency} `;
-      // A metric by shape, but muted by intent: unlike context usage it never
-      // becomes something to act on, so it stays scaffolding-coloured.
-      lines.push(
-        row(labelValue("cost", `${cur}${costAmount.toFixed(2)}`, ctx), "muted"),
-      );
+      lines.push(fieldRow("cost", `${cur}${costAmount.toFixed(2)}`, ctx));
     }
     return lines;
   },

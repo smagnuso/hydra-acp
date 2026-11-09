@@ -713,7 +713,8 @@ describe("SidebarRenderer", () => {
     const r = new SidebarRenderer(["context"]);
     const narrow = r.render(dirty, ctx(16));
     const wide = r.render(dirty, ctx(30));
-    expect(wide[1]!.body).not.toBe(narrow[1]!.body);
+    const text = (l: (typeof wide)[number]): string => `${l.prefix ?? ""}${l.body}`;
+    expect(text(wide[1]!)).not.toBe(text(narrow[1]!));
   });
 
   // Fitting the column to the terminal is the screen layer's job now:
