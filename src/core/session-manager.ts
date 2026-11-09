@@ -131,6 +131,7 @@ import { JsonRpcConnection } from "../acp/connection.js";
 import type { MessageStream } from "../acp/framing.js";
 import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
+import { normalizeTags } from "./tags.js";
 
 // Persisted queued prompts older than this are dropped at restart
 // rather than re-fired. Queues are live intent; if hydra was down
@@ -354,6 +355,7 @@ export interface ResurrectParams {
   // Session so toggles + list rendering see the persisted value
   // immediately on wake.
   priority?: number;
+  tags?: string[];
   // Read state from meta.json; see SessionRecord.lastTurnEndedAt.
   lastTurnEndedAt?: number;
   readAt?: number;
@@ -1689,6 +1691,7 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       priority: params.priority,
+      tags: params.tags,
       lastTurnEndedAt: params.lastTurnEndedAt,
       readAt: params.readAt,
       forkedFromSessionId: params.forkedFromSessionId,
@@ -1849,6 +1852,7 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       priority: params.priority,
+      tags: params.tags,
       lastTurnEndedAt: params.lastTurnEndedAt,
       readAt: params.readAt,
       forkedFromSessionId: params.forkedFromSessionId,
@@ -5997,6 +6001,9 @@ export class SessionManager {
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });
+    session.onTagsChange((tags) => {
+      void this.persistTags(session.sessionId, tags).catch(() => undefined);
+    });
     session.onPriorityChange((priority) => {
       void this.persistPriority(session.sessionId, priority).catch(
         () => undefined,
@@ -6207,6 +6214,7 @@ export class SessionManager {
       originatingClient: record.originatingClient,
       interactive: record.interactive,
       priority: record.priority,
+      tags: record.tags,
       lastTurnEndedAt: record.lastTurnEndedAt,
       readAt: record.readAt,
       forkedFromSessionId: record.forkedFromSessionId,
@@ -6470,6 +6478,7 @@ export class SessionManager {
         originatingClient: live.originatingClient,
         interactive,
         priority: live.priority,
+        tags: live.tags,
         createdAt: new Date(live.createdAt).toISOString(),
         updatedAt: used,
         attachedClients: live.attachedCount,
@@ -6508,6 +6517,7 @@ export class SessionManager {
       originatingClient: r.originatingClient,
       interactive,
       priority: r.priority,
+      tags: r.tags,
       createdAt: r.createdAt,
       updatedAt: used,
       attachedClients: 0,
@@ -6695,6 +6705,7 @@ export class SessionManager {
         originatingClient: session.originatingClient,
         interactive,
         priority: session.priority,
+        tags: session.tags,
         createdAt: new Date(session.createdAt).toISOString(),
         updatedAt: used,
         attachedClients: session.attachedCount,
@@ -6753,6 +6764,7 @@ export class SessionManager {
         originatingClient: r.originatingClient,
         interactive,
         priority: r.priority,
+        tags: r.tags,
         createdAt: r.createdAt,
         updatedAt: used,
         attachedClients: 0,
@@ -7427,6 +7439,7 @@ export class SessionManager {
         interactive: args.bundle.session.interactive,
         originatingClient: args.bundle.session.originatingClient,
         priority: args.bundle.session.priority,
+        tags: args.bundle.session.tags,
         attentionFlags: [],
         createdAt: args.preservedCreatedAt ?? now,
         // Fallback path for historyStatus (used when the history file
@@ -7771,6 +7784,34 @@ export class SessionManager {
       priority === undefined || priority <= 0 ? undefined : Math.floor(priority);
     await this.persistPriority(sessionId, next);
     return true;
+  }
+
+  // Replace the tag set on a live or cold session. Pass [] to clear.
+  // Returns false when no record exists at all.
+  async setTags(sessionId: string, tags: readonly string[]): Promise<boolean> {
+    const live = this.get(sessionId);
+    if (live) {
+      live.setTags(tags);
+      return true;
+    }
+    if (!(await this.hasRecord(sessionId))) {
+      return false;
+    }
+    const norm = normalizeTags(tags);
+    await this.persistTags(sessionId, norm.length > 0 ? norm : undefined);
+    return true;
+  }
+
+  private async persistTags(
+    sessionId: string,
+    tags: string[] | undefined,
+  ): Promise<void> {
+    if (tags === undefined) {
+      await this.mutateRecord(sessionId, {}, ["tags"]);
+    } else {
+      await this.mutateRecord(sessionId, { tags });
+    }
+    this.invalidateListCache();
   }
 
   private async persistPriority(
@@ -8691,6 +8732,7 @@ export function mergeForPersistence(
       session.originatingClient ?? existing?.originatingClient,
     interactive: session.interactive ?? existing?.interactive,
     priority: session.priority ?? existing?.priority,
+    tags: session.tags ?? existing?.tags,
     lastTurnEndedAt: session.lastTurnEndedAt ?? existing?.lastTurnEndedAt,
     readAt: session.readAt ?? existing?.readAt,
     // Live Session is the source of truth for forwardedEnv: it's set

@@ -104,6 +104,8 @@ export const SessionListEntry = z.object({
   // User-set sort weight; >0 floats the session to the top of the
   // picker. Absent / 0 = normal priority.
   priority: z.number().int().nonnegative().optional(),
+  // User-set labels; absent when the session has none.
+  tags: z.array(z.string()).optional(),
   // Read state (epoch ms). `unread` is true while the last turn ended
   // after the last time a client marked the session read; mark it with
   // PATCH /v1/sessions/:id { read }. Never moves updatedAt.
@@ -310,6 +312,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.priority !== undefined && entry.priority > 0) {
     meta.priority = entry.priority;
+  }
+  if (entry.tags !== undefined && entry.tags.length > 0) {
+    meta.tags = entry.tags;
   }
   if (entry.lastTurnEndedAt !== undefined) {
     meta.lastTurnEndedAt = entry.lastTurnEndedAt;

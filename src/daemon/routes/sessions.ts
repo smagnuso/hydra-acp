@@ -38,6 +38,7 @@ import {
 } from "../extension-mcp-mint.js";
 import { createOnRemote, ForeignSessionCache, searchAcrossPeers } from "./session-forward.js";
 import type { PeerStore } from "../../core/peer-store.js";
+import { MAX_TAGS, normalizeTag } from "../../core/tags.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
 // GET /v1/sessions/events. Additive only — new kinds may be added
@@ -498,6 +499,7 @@ export function registerSessionRoutes(
       title?: unknown;
       regen?: unknown;
       priority?: unknown;
+      tags?: unknown;
       read?: unknown;
       workspace?: unknown;
       cwd?: unknown;
@@ -578,6 +580,30 @@ export function registerSessionRoutes(
         return;
       }
       const ok = await manager.setPriority(id, next);
+      if (!ok) {
+        reply.code(404).send({ error: "session not found" });
+        return;
+      }
+      reply.code(204).send();
+      return;
+    }
+    if (body.tags !== undefined) {
+      const raw = body.tags;
+      if (raw !== null && !Array.isArray(raw)) {
+        reply.code(400).send({ error: "tags must be an array of strings (or null to clear)" });
+        return;
+      }
+      const list = raw === null ? [] : raw;
+      const bad = list.filter(
+        (t: unknown) => typeof t !== "string" || normalizeTag(t) === undefined,
+      );
+      if (bad.length > 0 || list.length > MAX_TAGS) {
+        reply.code(400).send({
+          error: `tags must be at most ${MAX_TAGS} strings of letters, digits, . _ / -`,
+        });
+        return;
+      }
+      const ok = await manager.setTags(id, list as string[]);
       if (!ok) {
         reply.code(404).send({ error: "session not found" });
         return;

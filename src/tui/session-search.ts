@@ -10,7 +10,30 @@ export function matchesSearch(s: DiscoveredSession, term: string): boolean {
   if (term.length === 0) {
     return true;
   }
-  const t = term.toLowerCase();
+  const wanted: string[] = [];
+  const words: string[] = [];
+  for (const w of term.trim().split(/\s+/)) {
+    const m = w.match(/^(?:#|tag:)(.+)$/i);
+    if (m) {
+      wanted.push(m[1]!.toLowerCase());
+    } else {
+      words.push(w);
+    }
+  }
+  if (wanted.length > 0) {
+    const have = s.tags ?? [];
+    // A tag also matches its children, so #area finds area/auth.
+    const ok = wanted.every((w) =>
+      have.some((t) => t === w || t.startsWith(`${w}/`)),
+    );
+    if (!ok) {
+      return false;
+    }
+    if (words.length === 0) {
+      return true;
+    }
+  }
+  const t = (wanted.length > 0 ? words.join(" ") : term).toLowerCase();
   const haystacks = [
     stripHydraSessionPrefix(s.sessionId),
     s.upstreamSessionId ?? "",
@@ -18,6 +41,7 @@ export function matchesSearch(s: DiscoveredSession, term: string): boolean {
     s.title ?? "",
     s.cwd,
     shortenHomePath(s.cwd),
+    ...(s.tags ?? []),
   ];
   for (const h of haystacks) {
     if (h.toLowerCase().includes(t)) {

@@ -58,6 +58,7 @@ const BundleSession = z.object({
   // round-tripping your own work between laptops). The recipient can
   // always clear it with `*` if they don't care.
   priority: z.number().int().nonnegative().optional(),
+  tags: z.array(z.string()).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -145,6 +146,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
         : {}),
       ...(params.record.priority !== undefined && params.record.priority > 0
         ? { priority: params.record.priority }
+        : {}),
+      ...(params.record.tags !== undefined && params.record.tags.length > 0
+        ? { tags: params.record.tags }
         : {}),
       createdAt: params.record.createdAt,
       updatedAt: params.record.updatedAt,

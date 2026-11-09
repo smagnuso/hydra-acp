@@ -68,6 +68,19 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Drop every turn of this conversation, this command included, and restart the agent with no context",
   },
   {
+    verb: "tag",
+    name: "hydra tag",
+    argsHint: "[<tag...>]",
+    description:
+      "Add free-form tags to this session (lowercase letters, digits, . _ / -); with no args, lists them. Searchable from the session picker as #tag.",
+  },
+  {
+    verb: "untag",
+    name: "hydra untag",
+    argsHint: "<tag...> | --all",
+    description: "Remove tags from this session",
+  },
+  {
     verb: "fork",
     name: "hydra fork",
     argsHint: "[--verbatim] [prompt]",

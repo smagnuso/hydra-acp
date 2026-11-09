@@ -329,6 +329,7 @@ export interface HydraMeta {
   busy?: boolean;
   awaitingInput?: boolean;
   priority?: number;
+  tags?: string[];
   attachedClients?: number;
   importedFromMachine?: string;
   importedFromUpstreamSessionId?: string;

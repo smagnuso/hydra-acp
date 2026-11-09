@@ -139,6 +139,7 @@ import {
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import type { SentBy } from "../daemon/sent-by.js";
 import * as fsp from "node:fs/promises";
+import { MAX_TAGS, normalizeTag, normalizeTags, sameTags } from "./tags.js";
 
 export interface AttachedClient {
   clientId: string;
@@ -383,6 +384,8 @@ export interface SessionInit {
   // User-set sort weight. 0 / absent → normal; positive → pinned to top
   // of the picker. Loaded from the persisted record on resurrect.
   priority?: number;
+  // User-set labels, loaded from the persisted record on resurrect.
+  tags?: string[];
   // Read state, loaded from the persisted record on resurrect. See
   // SessionRecord.lastTurnEndedAt / readAt.
   lastTurnEndedAt?: number;
@@ -814,6 +817,10 @@ export class Session {
   // setPriority(), which fires onPriorityChange so SessionManager can
   // persist the change to meta.json.
   private _priority: number | undefined;
+  private _tags: string[] | undefined;
+  get tags(): string[] | undefined {
+    return this._tags;
+  }
   get priority(): number | undefined {
     return this._priority;
   }
@@ -1428,6 +1435,7 @@ export class Session {
   private modeHandlers: Array<(mode: string) => void> = [];
   private interactiveHandlers: Array<(interactive: boolean) => void> = [];
   private priorityHandlers: Array<(priority: number | undefined) => void> = [];
+  private tagsHandlers: Array<(tags: string[] | undefined) => void> = [];
   private readStateHandlers: Array<(state: SessionReadState) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
@@ -1637,6 +1645,10 @@ export class Session {
     }
     this._interactive = init.interactive;
     this._priority = init.priority;
+    this._tags =
+      init.tags !== undefined && init.tags.length > 0
+        ? normalizeTags(init.tags)
+        : undefined;
     this._lastTurnEndedAt = init.lastTurnEndedAt;
     this._readAt = init.readAt;
     this._summarizedThroughEntry = init.summarizedThroughEntry;
@@ -7152,6 +7164,10 @@ export class Session {
     this.interactiveHandlers.push(handler);
   }
 
+  onTagsChange(handler: (tags: string[] | undefined) => void): void {
+    this.tagsHandlers.push(handler);
+  }
+
   onPriorityChange(handler: (priority: number | undefined) => void): void {
     this.priorityHandlers.push(handler);
   }
@@ -7346,6 +7362,32 @@ export class Session {
     this._priority = next;
     this.updatedAt = Date.now();
     for (const handler of this.priorityHandlers) {
+      try {
+        handler(next);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  // Replaces the tag set (normalized, deduped); empty clears. Notifies
+  // handlers so SessionManager persists to meta.json.
+  setTags(tags: readonly string[]): void {
+    const norm = normalizeTags(tags);
+    const next = norm.length > 0 ? norm : undefined;
+    if (sameTags(next, this._tags)) {
+      return;
+    }
+    this._tags = next;
+    this.updatedAt = Date.now();
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { synthetic: true, tags: next ?? [] } },
+      },
+    });
+    for (const handler of this.tagsHandlers) {
       try {
         handler(next);
       } catch {
@@ -7878,6 +7920,9 @@ export class Session {
           return inline ? this.runRestartCommandInline() : this.runRestartCommand();
         case "clear":
           return this.runClearCommand();
+        case "tag":
+        case "untag":
+          return this.runTagCommand(first === "untag", remainder);
         case "compact":
           return inline ? this.runCompactCommandInline(remainder) : this.runCompactCommand(remainder);
         case "uncompact":
@@ -8958,6 +9003,54 @@ export class Session {
         keepThrough,
       });
     });
+  }
+
+  // "/hydra tag [a b ...]" adds tags, "/hydra untag a b | --all" removes
+  // them; with no args, tag lists the current set. Tags are user-only.
+  private runTagCommand(remove: boolean, arg: string): Promise<unknown> {
+    const words = arg.split(/\s+/).filter((w) => w.length > 0);
+    const current = this._tags ?? [];
+    const show = (): void => {
+      this.broadcastSyntheticText(
+        current.length > 0
+          ? `tags: ${current.map((t) => `#${t}`).join(" ")}`
+          : "no tags",
+      );
+    };
+    if (words.length === 0) {
+      if (remove) {
+        this.broadcastSyntheticText("usage: /hydra untag <tag...> | --all");
+      } else {
+        show();
+      }
+      return Promise.resolve({ stopReason: "end_turn" });
+    }
+    if (remove) {
+      const drop =
+        words.length === 1 && words[0] === "--all"
+          ? null
+          : new Set(words.map((w) => normalizeTag(w) ?? w));
+      this.setTags(drop === null ? [] : current.filter((t) => !drop.has(t)));
+    } else {
+      const bad = words.filter((w) => normalizeTag(w) === undefined);
+      if (bad.length > 0) {
+        this.broadcastSyntheticText(
+          `invalid tag: ${bad.join(" ")} (use letters, digits, . _ / -)`,
+        );
+        return Promise.resolve({ stopReason: "end_turn" });
+      }
+      const next = normalizeTags([...current, ...words]);
+      if (next.length < new Set([...current, ...normalizeTags(words)]).size) {
+        this.broadcastSyntheticText(`at most ${MAX_TAGS} tags per session`);
+        return Promise.resolve({ stopReason: "end_turn" });
+      }
+      this.setTags(next);
+    }
+    const now = this._tags ?? [];
+    this.broadcastSyntheticText(
+      now.length > 0 ? `tags: ${now.map((t) => `#${t}`).join(" ")}` : "no tags",
+    );
+    return Promise.resolve({ stopReason: "end_turn" });
   }
 
   // "/hydra clear": every turn goes, this one included, once it ends, and

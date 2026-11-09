@@ -636,6 +636,16 @@ User-set sort weight: a positive integer floats the session to the top of the pi
 
 Response: `204` on success, `400` if not a non-negative integer or `null`, `404` on unknown session.
 
+**Request body — tags**
+
+```jsonc
+{ "tags": ["auth", "area/login"] }
+```
+
+Replaces the session's user-set tags; `[]` or `null` clears them. Tags are lowercased, trimmed, deduped, at most 16 per session and 40 characters each, from `[a-z0-9._/-]` (leading alphanumeric). `/` makes a hierarchy: searching `#area` matches `area/login`. Tags are user-only: there is no agent-facing way to set them. Over a prompt, `/hydra tag <tag...>` adds, `/hydra untag <tag...|--all>` removes, and `/hydra tag` alone lists. They appear as `tags` on session list entries (and `_meta` `tags` in `session/list`) when non-empty, and travel in exported bundles. On a live session every change is broadcast to attached clients as a `session_info_update` with `_meta["hydra-acp"].tags` set to the full new list (`[]` when cleared), so clients can update without refetching. Works on live and cold sessions.
+
+Response: `204` on success, `400` on a malformed or over-limit list, `404` on unknown session.
+
 **Request body — read state**
 
 ```jsonc

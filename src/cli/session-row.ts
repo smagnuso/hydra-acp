@@ -34,6 +34,7 @@ export interface SessionSummary {
   currentModel?: string;
   currentUsage?: DisplayUsage;
   title?: string;
+  tags?: string[];
   // Origin host for imported sessions. Used to populate the UPSTREAM
   // cell with `← <host>` when the local upstream id hasn't been bound
   // yet (typical for imported-not-yet-attached rows), so imported rows
@@ -242,7 +243,10 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     agent: formatAgentCell(s.agentId),
     model: shortenModel(s.currentModel) ?? "-",
     age: formatRelativeAge(s.updatedAt, now),
-    title: s.title ?? "-",
+    title:
+      s.tags !== undefined && s.tags.length > 0
+        ? `${s.title ?? "-"} ${s.tags.map((t) => `#${t}`).join(" ")}`
+        : (s.title ?? "-"),
     // Isolated sessions show the PROJECT with a workspace marker, not
     // the workspace path. Grouping by what the reader recognizes is the
     // point: a column full of `~/.hydra-acp/workspaces/<hash>/...` rows

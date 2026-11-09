@@ -394,6 +394,9 @@ export const SessionRecord = z.object({
   // `*`; no agent involvement, no broadcast — picker auto-refresh picks
   // it up on the next tick.
   priority: z.number().int().nonnegative().optional(),
+  // User-set free-form labels, normalized by core/tags.ts. User-only: no
+  // agent-facing way to set them. Absent = no tags.
+  tags: z.array(z.string()).optional(),
   // Epoch ms when the last agent turn ended, and when a person last
   // looked at the session (set by clients through PATCH). The session is
   // unread while lastTurnEndedAt > readAt; an absent readAt reads as
@@ -748,6 +751,7 @@ export function recordFromMemorySession(args: {
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
   priority?: number;
+  tags?: string[];
   lastTurnEndedAt?: number;
   readAt?: number;
   forwardedEnv?: Record<string, string>;
@@ -825,6 +829,7 @@ export function recordFromMemorySession(args: {
     originatingClient: args.originatingClient,
     interactive: args.interactive,
     priority: args.priority,
+    tags: args.tags,
     lastTurnEndedAt: args.lastTurnEndedAt,
     readAt: args.readAt,
     forwardedEnv: args.forwardedEnv,
