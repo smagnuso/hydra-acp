@@ -1166,10 +1166,13 @@ export class Session {
   // Per-session attention flags keyed by `${source}::${reason}`.
   // Used by clients to surface "attention" state without scanning history.
   private attentionFlags = new Map<string, AttentionFlag>();
-  // True when any daemon-raised permission flag is still pending.
+  // True when any daemon-raised permission or elicitation flag is still pending.
   private get hasPermissionFlag(): boolean {
     for (const flag of this.attentionFlags.values()) {
-      if (flag.source === "daemon" && flag.reason.startsWith("permission:")) {
+      if (
+        flag.source === "daemon" &&
+        (flag.reason.startsWith("permission:") || flag.reason.startsWith("elicitation:"))
+      ) {
         return true;
       }
     }

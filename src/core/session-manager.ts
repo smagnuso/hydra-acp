@@ -6231,7 +6231,10 @@ export class SessionManager {
       compactionState: record.compactionState,
       attentionFlags: record.attentionFlags?.filter(
         (f: import("../acp/types-attention.js").AttentionFlag) =>
-          !(f.source === "daemon" && f.reason.startsWith("permission:")),
+          !(
+            f.source === "daemon" &&
+            (f.reason.startsWith("permission:") || f.reason.startsWith("elicitation:"))
+          ),
       ),
     };
   }
