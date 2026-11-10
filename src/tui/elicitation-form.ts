@@ -9,7 +9,7 @@ import type {
   ElicitationValue,
   ParsedElicitation,
 } from "../acp/elicitation.js";
-import { oneLine, validateTextInput } from "../acp/elicitation.js";
+import { fieldLabel, oneLine, validateTextInput } from "../acp/elicitation.js";
 import { LineEditor } from "./line-editor.js";
 import {
   handleFormKey,
@@ -259,7 +259,8 @@ export class ElicitationWizard {
     const total = this.parsed.fields.length;
     const step = total > 1 ? ` (${this.index + 1}/${total})` : "";
     const field = this.field;
-    const heading = total > 1 || field.title !== field.key ? ` · ${field.title}` : "";
+    const heading =
+      total > 1 || field.title !== field.key ? ` · ${fieldLabel(field)}` : "";
     const err = this.error ? ` · ${this.error}` : "";
     return `${this.parsed.message}${heading}${step}${err}`;
   }

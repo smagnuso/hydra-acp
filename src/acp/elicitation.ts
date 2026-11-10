@@ -13,6 +13,9 @@ export interface ElicitationOption {
 interface FieldBase {
   key: string;
   title: string;
+  // The question text when it differs from the title (claude-acp puts the
+  // short header in `title` and the full question here for multi-question forms).
+  description?: string;
   required: boolean;
   default?: unknown;
   // claude-acp pairs a select `question_N` with a free-text `question_N_custom`.
@@ -92,9 +95,14 @@ function parseProperty(
     return null;
   }
   const title = oneLine(str(prop.title) ?? str(prop.description) ?? key);
+  const description =
+    str(prop.title) !== undefined && str(prop.description) !== undefined
+      ? oneLine(prop.description as string)
+      : undefined;
   const base = {
     key,
     title,
+    ...(description !== undefined ? { description } : {}),
     required,
     ...(prop.default !== undefined ? { default: prop.default } : {}),
   };
@@ -272,4 +280,12 @@ export function validateTextInput(
   }
   const problem = checkString(field, text);
   return problem === null ? { value: text } : { error: problem };
+}
+
+// What to call a field in a prompt: the full question when there is one,
+// with the short header alongside it.
+export function fieldLabel(field: { title: string; description?: string }): string {
+  return field.description !== undefined
+    ? `${field.description} (${field.title})`
+    : field.title;
 }

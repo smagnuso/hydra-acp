@@ -3,6 +3,7 @@
 // sees once it settles.
 
 import {
+  fieldLabel,
   oneLine,
   parseElicitation,
   validateTextInput,
@@ -19,12 +20,12 @@ function optionLabel(field: ElicitationField, value: string): string {
 
 function describeField(field: ElicitationField, withTitle = true): string {
   if (field.kind === "text") {
-    return field.title;
+    return fieldLabel(field);
   }
   const options = field.options.map((o) => o.label).join(" / ");
   const other = field.customKey !== undefined ? " / or type your own" : "";
   const many = field.kind === "multi" ? " (pick any)" : "";
-  return withTitle ? `${field.title}${many}: ${options}${other}` : `${options}${other}${many}`;
+  return withTitle ? `${fieldLabel(field)}${many}: ${options}${other}` : `${options}${other}${many}`;
 }
 
 export function formatElicitationQuestion(params: unknown): string {
