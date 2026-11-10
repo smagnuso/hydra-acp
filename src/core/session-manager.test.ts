@@ -730,6 +730,42 @@ describe("SessionManager.resurrect: dead cwd reseed", () => {
   });
 });
 
+describe("SessionManager.loadFromDisk: stale pending-request flags", () => {
+  it("drops permission and elicitation flags but keeps the rest", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    const flag = (source: string, reason: string) => ({
+      source,
+      reason,
+      raisedAt: 1,
+      payload: null,
+    });
+    await store.write({
+      sessionId: "hydra_stale_flags",
+      cwd: W_CWD,
+      agentId: "claude-code",
+      upstreamSessionId: "u_flags",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 30_000).toISOString(),
+      attentionFlags: [
+        flag("daemon", "permission:p1"),
+        flag("daemon", "elicitation:e1"),
+        flag("daemon", "other"),
+        flag("ext", "elicitation:e2"),
+      ],
+    });
+    const manager = new TrackedSessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
+    );
+    const params = await manager.loadFromDisk("hydra_stale_flags");
+    const reasons = (params?.attentionFlags ?? []).map(
+      (f: { reason: string }) => f.reason,
+    );
+    expect(reasons).toEqual(["other", "elicitation:e2"]);
+  });
+});
+
 describe("SessionManager.reapIfOrphanedNonInteractive", () => {
   // create()/reap never stat the cwd, so any existing dir works — use one
   // that needs no import so this block stands on its own.

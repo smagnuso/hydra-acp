@@ -431,6 +431,77 @@ describe("Session", () => {
       });
     });
 
+    it("raises an attention flag while a form is pending, counts it as work in flight, and clears it on settle", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient(undefined, { elicitationForm: true });
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      const flags = () =>
+        session.listAttentionFlags().filter((f) => f.reason.startsWith("elicitation:"));
+      expect(flags()).toHaveLength(1);
+      expect(flags()[0]!.payload).toMatchObject({ kind: "elicitation", message: "Which?" });
+      expect(session.hasWorkInFlight).toBe(true);
+
+      const req = a.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      )!;
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { action: "decline" },
+      });
+      await requestPromise;
+      expect(flags()).toHaveLength(0);
+      expect(session.hasWorkInFlight).toBe(false);
+    });
+
+    it("replays a pending form to a capable client that attaches late", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const first = makeClient({ name: "first" }, { elicitationForm: true });
+      session.attach(first.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const late = makeClient({ name: "late" }, { elicitationForm: true });
+      await session.attach(late.client, "full");
+      session.replayPendingPermissions(late.client);
+      await new Promise((r) => setImmediate(r));
+      const req = late.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      );
+      expect(req).toBeDefined();
+
+      late.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { action: "accept", content: {} },
+      });
+      await expect(requestPromise).resolves.toEqual({ action: "accept", content: {} });
+    });
+
+    it("cancels a pending form when the session closes", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient(undefined, { elicitationForm: true });
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      await session.close();
+      await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+    });
+
     it("records the question and cancels when no client can show a form", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const plain = makeClient();

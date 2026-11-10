@@ -17,14 +17,14 @@ function optionLabel(field: ElicitationField, value: string): string {
   return field.options.find((o) => o.value === value)?.label ?? value;
 }
 
-function describeField(field: ElicitationField): string {
+function describeField(field: ElicitationField, withTitle = true): string {
   if (field.kind === "text") {
     return field.title;
   }
   const options = field.options.map((o) => o.label).join(" / ");
   const other = field.customKey !== undefined ? " / or type your own" : "";
   const many = field.kind === "multi" ? " (pick any)" : "";
-  return `${field.title}${many}: ${options}${other}`;
+  return withTitle ? `${field.title}${many}: ${options}${other}` : `${options}${other}${many}`;
 }
 
 export function formatElicitationQuestion(params: unknown): string {
@@ -38,7 +38,7 @@ export function formatElicitationQuestion(params: unknown): string {
     return `**The agent asked:** ${message}`;
   }
   const lines = parsed.fields.map((f, i) =>
-    parsed.fields.length > 1 ? `${i + 1}. ${describeField(f)}` : `Options: ${describeField(f)}`,
+    parsed.fields.length > 1 ? `${i + 1}. ${describeField(f)}` : `Options: ${describeField(f, false)}`,
   );
   const tail = parsed.fields.length === 1 && parsed.fields[0]!.kind === "text" ? [] : lines;
   return [`**The agent asked:** ${parsed.message}`, ...tail].join("\n");

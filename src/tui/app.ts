@@ -116,11 +116,7 @@ import {
   type FormRow,
   type FormState,
 } from "./modal-form.js";
-import {
-  ElicitationWizard,
-  parseElicitation,
-  type ElicitationOutcome,
-} from "./elicitation-form.js";
+import { ElicitationController } from "./elicitation-controller.js";
 import { runBtwSidechain, type SidechainEventEmitter } from "./btw/sidechain.js";
 import { BtwOverlayBuffer } from "./btw/overlay-buffer.js";
 import {
@@ -2516,7 +2512,7 @@ async function runSession(
       return;
     }
     if (rawTag === "elicitation_resolved") {
-      dismissElicitationExternally((update as { elicitationId?: unknown }).elicitationId);
+      elicitations.dismissExternally((update as { elicitationId?: unknown }).elicitationId);
       return;
     }
     if (rawTag === "_hydra_compaction") {
@@ -3388,97 +3384,27 @@ async function runSession(
 
   // ── Agent form questions (elicitation/create) ───────────────────
   //
-  // One wizard on the shared form slot at a time; later requests queue.
-  // The reply goes out when the wizard finishes, or with "cancel" when the
-  // session tears down. elicitation_resolved means a sibling client answered
-  // first, so the modal is dropped and the (ignored) reply is a cancel.
-  type ActiveElicitation = {
-    id: string | undefined;
-    wizard: ElicitationWizard;
-    resolve: (result: unknown) => void;
-  };
-  let activeElicitation: ActiveElicitation | null = null;
-  const elicitationQueue: ActiveElicitation[] = [];
-
-  const showNextElicitation = (): void => {
-    if (activeElicitation !== null) {
-      return;
-    }
-    const next = elicitationQueue.shift();
-    if (next === undefined) {
-      return;
-    }
-    activeElicitation = next;
-    setForm("elicitation", next.wizard.form);
-  };
-
-  const finishElicitation = (response: unknown): void => {
-    const done = activeElicitation;
-    if (done === null) {
-      return;
-    }
-    activeElicitation = null;
-    closeForm("elicitation");
-    done.resolve(response);
-    showNextElicitation();
-  };
-
-  const applyElicitationOutcome = (
-    outcome: ElicitationOutcome | undefined,
-  ): void => {
-    if (outcome === undefined || activeElicitation === null) {
-      return;
-    }
-    if (outcome.type === "done") {
-      finishElicitation(outcome.response);
-      return;
-    }
-    if (outcome.type === "update") {
-      setForm("elicitation", activeElicitation.wizard.form);
-    }
-  };
-
-  const dismissElicitationExternally = (id: unknown): void => {
-    if (typeof id !== "string") {
-      return;
-    }
-    const queued = elicitationQueue.findIndex((e) => e.id === id);
-    if (queued >= 0) {
-      const [gone] = elicitationQueue.splice(queued, 1);
-      gone!.resolve({ action: "cancel" });
-      return;
-    }
-    if (activeElicitation?.id === id) {
-      finishElicitation({ action: "cancel" });
-    }
-  };
-
-  const cancelAllElicitations = (): void => {
-    for (const e of elicitationQueue.splice(0)) {
-      e.resolve({ action: "cancel" });
-    }
-    finishElicitation({ action: "cancel" });
-  };
+  // One wizard on the shared form slot at a time (ElicitationController).
+  // elicitation_resolved means a sibling client answered first.
+  const elicitations = new ElicitationController({
+    show: (next) => setForm("elicitation", next),
+    hide: () => closeForm("elicitation"),
+  });
 
   // A view-only attachment cannot answer, so it does not opt in.
   const elicitationCapability =
     opts.readonly === true ? {} : { elicitation: { form: {} } };
 
   conn.onRequest("elicitation/create", async (params) => {
-    const parsed = parseElicitation(params);
-    if (teardownStarted || opts.readonly === true || parsed === null) {
+    const pending =
+      teardownStarted || opts.readonly === true ? null : elicitations.request(params);
+    if (pending === null) {
       // Abstain: another attached client may be able to render it.
       throw Object.assign(new Error("elicitation not supported here"), {
         code: -32601,
       });
     }
-    const meta = (params as { _meta?: Record<string, { elicitationId?: unknown }> })
-      ._meta?.["hydra-acp"];
-    const id = typeof meta?.elicitationId === "string" ? meta.elicitationId : undefined;
-    return new Promise<unknown>((resolve) => {
-      elicitationQueue.push({ id, wizard: new ElicitationWizard(parsed), resolve });
-      showNextElicitation();
-    });
+    return pending;
   });
 
   conn.setDefaultHandler(async () => {
@@ -6095,7 +6021,7 @@ async function runSession(
       case "chooser":
         return tryHandleChooserKey(ev, state);
       case "elicitation":
-        applyElicitationOutcome(activeElicitation?.wizard.handleKey(ev));
+        elicitations.handleKey(ev);
         return true;
     }
   };
@@ -6109,7 +6035,7 @@ async function runSession(
       return;
     }
     if (formOwner === "elicitation") {
-      applyElicitationOutcome(activeElicitation?.wizard.handleClick(target));
+      elicitations.handleClick(target);
       return;
     }
     for (const result of handleFormClick(state, target)) {
@@ -6254,7 +6180,7 @@ async function runSession(
     // Set first so any inbound notification/request that lands between
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
-    cancelAllElicitations();
+    elicitations.cancelAll();
     stopWatchingFocus?.();
     stopWatchingFocus = null;
     // Cancel any in-flight btw sidechain so its events don't land on a
@@ -10760,7 +10686,7 @@ async function runSession(
       screen.setPermissionPrompt(null);
       resolve({ outcome: { outcome: "cancelled" } });
     }
-    cancelAllElicitations();
+    elicitations.cancelAll();
     closeAgentText();
     closeThought();
   };

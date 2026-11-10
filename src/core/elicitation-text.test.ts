@@ -83,3 +83,32 @@ describe("formatting", () => {
     expect(formatElicitationOutcome(single(), { action: "cancel" }, undefined)).toContain("Not answered");
   });
 });
+
+describe("outcome lines", () => {
+  it("covers decline, multi-question answers and unparseable forms", () => {
+    expect(formatElicitationOutcome(single(), { action: "decline" }, "tui")).toBe(
+      "**Declined by tui:** Which cache?",
+    );
+    const two = {
+      mode: "form",
+      message: "Two",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          a: { type: "string", title: "A", oneOf: opts },
+          b: { type: "array", title: "B", items: { anyOf: opts } },
+        },
+      },
+    };
+    const text = formatElicitationOutcome(
+      two,
+      { action: "accept", content: { a: "Redis", b: ["Redis", "Memcached"] } },
+      undefined,
+    );
+    expect(text).toContain("- A: Redis");
+    expect(text).toContain("- B: Redis, Memcached");
+    expect(formatElicitationOutcome({ mode: "url", message: "x" }, { action: "accept" }, "tui")).toBe(
+      "**Answered by tui:** the agent's question",
+    );
+  });
+});

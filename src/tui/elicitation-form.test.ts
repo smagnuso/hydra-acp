@@ -221,3 +221,52 @@ describe("ElicitationWizard constraints", () => {
     expect(w.form.title).toContain("at least 2");
   });
 });
+
+describe("ElicitationWizard extras", () => {
+  it("requires at least one pick for a required multi-select", () => {
+    const w = wizardFor(
+      { m: { type: "array", items: { anyOf: options } } },
+      ["m"],
+    );
+    w.handleKey(key("down"));
+    w.handleKey(key("down"));
+    expect(w.handleKey(key("enter")).type).toBe("update");
+    expect(w.form.title).toContain("pick at least one");
+  });
+
+  it("checks date-time and uri formats", () => {
+    const dt = wizardFor({ t: { type: "string", format: "date-time" } });
+    typeText(dt, "2026-07-22");
+    dt.handleKey(key("enter"));
+    expect(dt.form.title).toContain("ISO 8601");
+    const uri = wizardFor({ t: { type: "string", format: "uri" } });
+    typeText(uri, "not a uri");
+    uri.handleKey(key("enter"));
+    expect(uri.form.title).toContain("not a URI");
+    const ok = wizardFor({ t: { type: "string", format: "uri" } });
+    typeText(ok, "https://example.com/x");
+    expect(ok.handleKey(key("enter")).type).toBe("done");
+  });
+
+  it("clicking a choice row commits it and the decline hint declines", () => {
+    const w = wizardFor({ s: { type: "string", oneOf: options } });
+    expect(w.handleClick({ kind: "row", row: 1 })).toEqual({
+      type: "done",
+      response: { action: "accept", content: { s: "Memcached" } },
+    });
+    const d = wizardFor({ s: { type: "string", oneOf: options } });
+    expect(d.handleClick({ kind: "hint", action: "dismiss" })).toEqual({
+      type: "done",
+      response: { action: "decline" },
+    });
+  });
+
+  it("Esc on the Other page goes back instead of cancelling", () => {
+    const w = new ElicitationWizard(parseElicitation(askParams())!);
+    w.handleKey(key("down"));
+    w.handleKey(key("down"));
+    w.handleKey(key("enter"));
+    expect(w.handleKey(key("escape")).type).toBe("update");
+    expect(w.form.rows[0]!.kind).toBe("choice");
+  });
+});

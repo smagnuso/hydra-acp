@@ -3671,7 +3671,7 @@ function bindClientToSession(
   return {
     clientId: callerClientId ?? `cli_${nanoid(8)}`,
     connection,
-    clientInfo,
+    clientInfo: clientInfo ?? state.clientInfo,
     ...(state.elicitationForm === true ? { elicitationForm: true } : {}),
   };
 }
