@@ -502,6 +502,90 @@ describe("Session", () => {
       await expect(requestPromise).resolves.toEqual({ action: "cancel" });
     });
 
+    it("keeps a form pending when its only client drops, and redelivers it to the next one", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const first = makeClient({ name: "browser" }, { elicitationForm: true });
+      session.attach(first.client, "full");
+      let settled = false;
+      const requestPromise = mock
+        .triggerRequest("elicitation/create", {
+          mode: "form",
+          message: "Which?",
+          requestedSchema: { type: "object", properties: {} },
+        })
+        .then((r) => {
+          settled = true;
+          return r;
+        });
+      await new Promise((r) => setImmediate(r));
+
+      session.detach(first.client.clientId);
+      await first.conn.close();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).toBe(false);
+      expect(
+        session.listAttentionFlags().some((f) => f.reason.startsWith("elicitation:")),
+      ).toBe(true);
+
+      const next = makeClient({ name: "browser" }, { elicitationForm: true });
+      await session.attach(next.client, "full");
+      session.replayPendingPermissions(next.client);
+      await new Promise((r) => setImmediate(r));
+      const req = next.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      );
+      expect(req).toBeDefined();
+      next.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { action: "accept", content: { a: 1 } },
+      });
+      await expect(requestPromise).resolves.toEqual({
+        action: "accept",
+        content: { a: 1 },
+      });
+    });
+
+    it("still cancels when every client that was asked abstains", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient(undefined, { elicitationForm: true });
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      const req = a.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      )!;
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        error: { code: -32601, message: "nope" },
+      });
+      await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+    });
+
+    it("ends a form left pending by dropped clients when the turn is cancelled", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const first = makeClient({ name: "browser" }, { elicitationForm: true });
+      const canceller = makeClient({ name: "other" });
+      session.attach(first.client, "full");
+      session.attach(canceller.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      session.detach(first.client.clientId);
+      await first.conn.close();
+      await new Promise((r) => setTimeout(r, 20));
+      await session.cancel(canceller.client.clientId);
+      await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+    });
+
     it("records the question and cancels when no client can show a form", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const plain = makeClient();

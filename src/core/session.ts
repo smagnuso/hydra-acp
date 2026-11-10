@@ -10668,6 +10668,11 @@ export class Session {
     return new Promise<unknown>((resolve) => {
       let settled = false;
       let outstanding = 0;
+      // A client that was asked has since disconnected (a reload, a closed
+      // tab). The form stays pending for whoever attaches next instead of
+      // being cancelled: attach redelivers it, and it still ends on an
+      // answer, a turn cancel, an agent swap or a session close.
+      let dropped = false;
       const outbound: AttachedClient[] = [];
 
       const settle = (fn: () => void): void => {
@@ -10712,6 +10717,8 @@ export class Session {
         }
         outbound.push(client);
         outstanding++;
+        // Someone new is being asked, so an earlier drop no longer holds the form.
+        dropped = false;
         client.connection
           .request<unknown>("elicitation/create", clientParams)
           .then((result) => {
@@ -10732,7 +10739,11 @@ export class Session {
           })
           .catch(() => {
             outstanding--;
-            if (outstanding === 0) {
+            if (client.connection.isClosed()) {
+              dropped = true;
+              return;
+            }
+            if (outstanding === 0 && !dropped) {
               settle(() => {
                 this.recordElicitationText(formatElicitationOutcome(params, { action: "cancel" }, undefined));
                 resolve({ action: "cancel" });
