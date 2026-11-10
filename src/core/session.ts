@@ -1171,6 +1171,7 @@ export class Session {
   private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCancellers = new Map<string, () => void>();
+  private elicitationQuestions = new Map<string, string>();
   // Per-session attention flags keyed by `${source}::${reason}`.
   // Used by clients to surface "attention" state without scanning history.
   private attentionFlags = new Map<string, AttentionFlag>();
@@ -3524,7 +3525,15 @@ export class Session {
       if (flag.reason.startsWith("permission:")) {
         this.permissionCallbacks.get(flag.reason.slice("permission:".length))?.(client);
       } else if (flag.reason.startsWith("elicitation:")) {
-        this.elicitationCallbacks.get(flag.reason.slice("elicitation:".length))?.(client);
+        const id = flag.reason.slice("elicitation:".length);
+        if (canAnswerElicitation(client)) {
+          this.elicitationCallbacks.get(id)?.(client);
+        } else {
+          const question = this.elicitationQuestions.get(id);
+          if (question !== undefined) {
+            this.sendElicitationQuestionText(client, question);
+          }
+        }
       }
     }
   }
@@ -10623,7 +10632,7 @@ export class Session {
     if (allClients.length === 0) {
       return { action: "cancel" };
     }
-    const initialClients = allClients.filter((c) => c.elicitationForm === true);
+    const initialClients = allClients.filter(canAnswerElicitation);
     if (initialClients.length === 0) {
       this.recordElicitationText(
         `${formatElicitationQuestion(params)}\n_No attached client can show a form, so this was not answered. Reply here to answer._`,
@@ -10640,20 +10649,11 @@ export class Session {
     };
     const sessionId = this.sessionId;
     const question = formatElicitationQuestion(params);
+    this.elicitationQuestions.set(requestId, question);
     for (const c of allClients) {
-      if (c.elicitationForm === true) {
-        continue;
+      if (!canAnswerElicitation(c)) {
+        this.sendElicitationQuestionText(c, question);
       }
-      void c.connection
-        .notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: `\n${question}\n` },
-            _meta: { "hydra-acp": { synthetic: true } },
-          },
-        })
-        .catch(() => undefined);
     }
     return new Promise<unknown>((resolve) => {
       let settled = false;
@@ -10668,11 +10668,12 @@ export class Session {
         this.clearAttentionFlag("daemon", `elicitation:${requestId}`);
         this.elicitationCallbacks.delete(requestId);
         this.elicitationCancellers.delete(requestId);
+        this.elicitationQuestions.delete(requestId);
         fn();
       };
 
       const sendTo = (client: AttachedClient): void => {
-        if (settled || client.elicitationForm !== true) {
+        if (settled || !canAnswerElicitation(client)) {
           return;
         }
         outbound.push(client);
@@ -10752,6 +10753,19 @@ export class Session {
         sendTo(client);
       }
     });
+  }
+
+  private sendElicitationQuestionText(client: AttachedClient, question: string): void {
+    void client.connection
+      .notify("session/update", {
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n${question}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      })
+      .catch(() => undefined);
   }
 
   // A daemon-written line in the transcript, recorded and sent to everyone.
@@ -12024,6 +12038,11 @@ function extractOutcome(result: unknown): OutcomeShape | undefined {
     out.reason = reason;
   }
   return out;
+}
+
+// A read-only attachment cannot answer, whatever it advertised.
+function canAnswerElicitation(client: AttachedClient): boolean {
+  return client.elicitationForm === true && client.readonly !== true;
 }
 
 function buildResolvedBy(client: AttachedClient): Record<string, unknown> {

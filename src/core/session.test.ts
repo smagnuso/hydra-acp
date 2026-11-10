@@ -332,6 +332,35 @@ describe("Session", () => {
       }
     });
 
+    it("treats a read-only client as unable to answer, and replays the question text to a late one", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const capable = makeClient({ name: "tui" }, { elicitationForm: true });
+      session.attach(capable.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which cache?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const viewer = makeClient({ name: "viewer" }, { elicitationForm: true });
+      viewer.client.readonly = true;
+      await session.attach(viewer.client, "full");
+      session.replayPendingPermissions(viewer.client);
+      expect(viewer.stream.sent.some((m) => "method" in m && m.method === "elicitation/create")).toBe(false);
+      expect(JSON.stringify(viewer.stream.sent)).toContain("The agent asked");
+
+      const req = capable.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      )!;
+      capable.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { action: "decline" },
+      });
+      await requestPromise;
+    });
+
     it("records the question and cancels when no client can show a form", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const plain = makeClient();
