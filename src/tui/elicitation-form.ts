@@ -262,6 +262,10 @@ export class ElicitationWizard {
     const heading =
       total > 1 || field.title !== field.key ? ` · ${fieldLabel(field)}` : "";
     const err = this.error ? ` · ${this.error}` : "";
+    // The message of a multi-question form is a lead-in; say it once.
+    if (total > 1 && this.index > 0) {
+      return `${fieldLabel(field)}${step}${err}`;
+    }
     return `${this.parsed.message}${heading}${step}${err}`;
   }
 

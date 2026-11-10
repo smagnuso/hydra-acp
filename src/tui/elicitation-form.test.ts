@@ -270,3 +270,21 @@ describe("ElicitationWizard extras", () => {
     expect(w.form.rows[0]!.kind).toBe("choice");
   });
 });
+
+describe("ElicitationWizard titles", () => {
+  it("shows the lead-in message only on the first page of a multi-question form", () => {
+    const w = wizardFor({
+      a: { type: "string", title: "First", description: "Which first?", oneOf: options },
+      b: { type: "string", title: "Second", description: "Which second?", oneOf: options },
+    });
+    expect(w.form.title).toContain("m");
+    expect(w.form.title).toContain("Which first? (First) (1/2)");
+    w.handleKey(key("enter"));
+    expect(w.form.title).toBe("Which second? (Second) (2/2)");
+  });
+
+  it("keeps the message on a single-question form", () => {
+    const w = new ElicitationWizard(parseElicitation(askParams())!);
+    expect(w.form.title).toContain("Which cache?");
+  });
+});
