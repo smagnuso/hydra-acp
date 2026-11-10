@@ -36,6 +36,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [Session delete](#session-delete)
   - [Local fork](#local-fork)
   - [Agent install progress](#agent-install-progress)
+  - [Elicitation (forms)](#elicitation-forms)
   - [Extension and transformer plumbing](#extension-and-transformer-plumbing)
   - [Transformer-only methods](#transformer-only-methods)
   - [Capability discovery](#capability-discovery)
@@ -3307,6 +3308,31 @@ When `session/new` or `session/attach` requires downloading or installing an age
 ```
 
 The notification is *not* keyed by `sessionId` — the session may not exist yet at notification time (it's still being created). The originating WebSocket connection is the implicit scope.
+
+### Elicitation (forms)
+
+Hydra implements the ACP `elicitation/create` method (form mode) so agents can ask the user structured questions mid-turn. Claude Code's `AskUserQuestion` tool arrives this way; claude-acp only offers that tool to a client that advertises the capability. Spec: `ElicitationCapabilities`, `CreateElicitationRequest` and `CreateElicitationResponse` in the ACP schema.
+
+**Capability.** The daemon sends `clientCapabilities.elicitation: { "form": {} }` on every agent `initialize`. URL mode is not advertised.
+
+**Fan-out.** An agent's `elicitation/create` is broadcast to every attached client as a request, exactly like `session/request_permission`: the first real answer wins and its result is returned to the agent. A client that cannot render forms answers `-32601 MethodNotFound`, which is abstention, not a vote. A result without a string `action` counts as abstention too. If every client abstains or errors, or none is attached, the agent receives `{ "action": "cancel" }` (not an error). A client that attaches while a form is pending is sent it after history replay.
+
+The forwarded params are the agent's own (`mode`, `message`, `requestedSchema`, optional `toolCallId`) with `sessionId` rewritten to the hydra session id, plus `_meta["hydra-acp"].elicitationId`, a daemon-minted id used to correlate dismissal.
+
+**Response.** `{ "action": "accept", "content": { <fieldKey>: string | number | boolean | string[] } }`, `{ "action": "decline" }` or `{ "action": "cancel" }`.
+
+**Dismissal.** When one client answers, every other client that was sent the request receives a `session/update` with:
+
+```jsonc
+{ "sessionUpdate": "elicitation_resolved",
+  "elicitationId": "<_meta.hydra-acp.elicitationId>",
+  "action": "accept" | "decline" | "cancel",
+  "resolvedBy": { "clientId": "...", "name": "...", "version": "..." } }
+```
+
+It is broadcast to those clients only, not recorded in `history.jsonl`. A client showing the form drops it and resolves its own (ignored) reply.
+
+**Attention.** While a form is pending the session carries a daemon attention flag with reason `elicitation:<elicitationId>` and payload `{ "kind": "elicitation", "message": ... }`.
 
 ### Extension and transformer plumbing
 

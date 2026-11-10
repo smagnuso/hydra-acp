@@ -1162,6 +1162,7 @@ export class Session {
   // ("permission:<requestId>"). Does NOT persist — rebuilt as new
   // permission requests arrive after a restart.
   private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
+  private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
   // Per-session attention flags keyed by `${source}::${reason}`.
   // Used by clients to surface "attention" state without scanning history.
   private attentionFlags = new Map<string, AttentionFlag>();
@@ -1799,6 +1800,9 @@ export class Session {
         sourceWasTransformer: false,
       });
       return outcome;
+    });
+    agent.connection.onRequest("elicitation/create", async (params) => {
+      return this.handleElicitationRequest(params);
     });
     // Guard: some test doubles / alternate transports don't implement
     // the orphan-error hook. Real JsonRpcConnection always does.
@@ -3503,13 +3507,13 @@ export class Session {
   // transcript rather than above the conversation.
   replayPendingPermissions(client: AttachedClient): void {
     for (const flag of this.attentionFlags.values()) {
-      if (flag.source !== "daemon" || !flag.reason.startsWith("permission:")) {
+      if (flag.source !== "daemon") {
         continue;
       }
-      const requestId = flag.reason.slice("permission:".length);
-      const cb = this.permissionCallbacks.get(requestId);
-      if (cb) {
-        cb(client);
+      if (flag.reason.startsWith("permission:")) {
+        this.permissionCallbacks.get(flag.reason.slice("permission:".length))?.(client);
+      } else if (flag.reason.startsWith("elicitation:")) {
+        this.elicitationCallbacks.get(flag.reason.slice("elicitation:".length))?.(client);
       }
     }
   }
@@ -10581,6 +10585,96 @@ export class Session {
       });
       this.permissionCallbacks.set(requestId, sendTo);
 
+      for (const client of initialClients) {
+        sendTo(client);
+      }
+    });
+  }
+
+  // Agent-initiated `elicitation/create` (form mode). Same race as a
+  // permission request: broadcast to every attached client, first real
+  // answer wins, -32601 is abstention. Unlike permissions, "nobody
+  // answered" settles as `{ action: "cancel" }` rather than an error, so
+  // the agent sees a dismissed form instead of a failed call.
+  private async handleElicitationRequest(params: unknown): Promise<unknown> {
+    const initialClients = [...this.clients.values()];
+    if (initialClients.length === 0) {
+      return { action: "cancel" };
+    }
+    const requestId = generateMessageId();
+    const base = (this.rewriteForClient(params) as Record<string, unknown> | null) ?? {};
+    const prevMeta = (base._meta as Record<string, unknown> | undefined) ?? {};
+    const prevHydra = (prevMeta["hydra-acp"] as Record<string, unknown> | undefined) ?? {};
+    const clientParams = {
+      ...base,
+      _meta: { ...prevMeta, "hydra-acp": { ...prevHydra, elicitationId: requestId } },
+    };
+    const sessionId = this.sessionId;
+    return new Promise<unknown>((resolve) => {
+      let settled = false;
+      let outstanding = 0;
+      const outbound: AttachedClient[] = [];
+
+      const settle = (fn: () => void): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.clearAttentionFlag("daemon", `elicitation:${requestId}`);
+        this.elicitationCallbacks.delete(requestId);
+        fn();
+      };
+
+      const sendTo = (client: AttachedClient): void => {
+        if (settled) {
+          return;
+        }
+        outbound.push(client);
+        outstanding++;
+        client.connection
+          .request<unknown>("elicitation/create", clientParams)
+          .then((result) => {
+            outstanding--;
+            const action = (result as { action?: unknown } | null)?.action;
+            if (typeof action !== "string") {
+              // A client whose catch-all answers every unknown method with a
+              // result-shaped error is abstaining, not voting.
+              if (outstanding === 0) {
+                settle(() => resolve({ action: "cancel" }));
+              }
+              return;
+            }
+            settle(() => {
+              const update = {
+                sessionUpdate: "elicitation_resolved",
+                elicitationId: requestId,
+                action,
+                resolvedBy: buildResolvedBy(client),
+              };
+              for (const o of outbound) {
+                if (o.clientId === client.clientId) {
+                  continue;
+                }
+                void o.connection
+                  .notify("session/update", { sessionId, update })
+                  .catch(() => undefined);
+              }
+              resolve(result);
+            });
+          })
+          .catch(() => {
+            outstanding--;
+            if (outstanding === 0) {
+              settle(() => resolve({ action: "cancel" }));
+            }
+          });
+      };
+
+      this.setAttentionFlag("daemon", `elicitation:${requestId}`, {
+        kind: "elicitation",
+        message: base.message ?? null,
+      });
+      this.elicitationCallbacks.set(requestId, sendTo);
       for (const client of initialClients) {
         sendTo(client);
       }

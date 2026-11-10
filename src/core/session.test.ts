@@ -181,6 +181,83 @@ describe("Session", () => {
       });
     });
 
+    it("fans elicitation/create out to clients, tags it, and settles on the first real answer", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient();
+      const b = makeClient();
+      session.attach(a.client, "full");
+      session.attach(b.client, "full");
+
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        sessionId: "u_agent",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const find = (sent: typeof a.stream.sent): JsonRpcRequest | undefined =>
+        sent.find(
+          (m): m is JsonRpcRequest =>
+            "method" in m && m.method === "elicitation/create",
+        );
+      const reqA = find(a.stream.sent)!;
+      const reqB = find(b.stream.sent)!;
+      expect(reqA.params).toMatchObject({ sessionId: "sess_hyd", message: "Which?" });
+      const elicitationId = (
+        reqA.params as { _meta: { "hydra-acp": { elicitationId: string } } }
+      )._meta["hydra-acp"].elicitationId;
+
+      b.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (reqB as { id: string | number }).id,
+        error: { code: -32601, message: "nope" },
+      });
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (reqA as { id: string | number }).id,
+        result: { action: "accept", content: { q: "x" } },
+      });
+
+      await expect(requestPromise).resolves.toEqual({
+        action: "accept",
+        content: { q: "x" },
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(
+        b.stream.sent.some(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as { update?: { sessionUpdate?: string; elicitationId?: string } })
+              .update?.sessionUpdate === "elicitation_resolved" &&
+            (m.params as { update: { elicitationId: string } }).update.elicitationId ===
+              elicitationId,
+        ),
+      ).toBe(true);
+    });
+
+    it("answers elicitation/create with cancel when every client abstains", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient();
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      const req = a.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      )!;
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        error: { code: -32601, message: "nope" },
+      });
+      await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+    });
+
     it("rewrites permission requests bearing a subagent (foreign) sessionId to the hydra session id", async () => {
       // Regression: opencode subagent permission requests (acp/permission.ts)
       // carry the subagent's internal opencode session id in params.sessionId,

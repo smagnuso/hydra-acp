@@ -122,6 +122,7 @@ export interface AuthMethod {
 // both agents key off in addition. We send both for max coverage.
 export const HYDRA_CLIENT_CAPABILITIES: Record<string, unknown> = {
   auth: { terminal: true },
+  elicitation: { form: {} },
   _meta: { "terminal-auth": true },
 };
 
