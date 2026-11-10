@@ -361,6 +361,44 @@ describe("Session", () => {
       await requestPromise;
     });
 
+    it("lets a prompt from a client without form support answer a pending form", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const capable = makeClient({ name: "tui" }, { elicitationForm: true });
+      const plain = makeClient({ name: "editor" });
+      session.attach(capable.client, "full");
+      session.attach(plain.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which cache?",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            q: { type: "string", oneOf: [{ const: "r", title: "Redis" }, { const: "m", title: "Memcached" }] },
+          },
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await session.prompt(plain.client.clientId, {
+        sessionId: "sess_hyd",
+        prompt: [{ type: "text", text: "/help" }],
+      });
+      expect(JSON.stringify(capable.stream.sent)).not.toContain("elicitation_resolved");
+
+      const reply = await session.prompt(plain.client.clientId, {
+        sessionId: "sess_hyd",
+        prompt: [{ type: "text", text: "memcached" }],
+      });
+      expect(reply).toEqual({ stopReason: "end_turn" });
+      await expect(requestPromise).resolves.toEqual({
+        action: "accept",
+        content: { q: "m" },
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(JSON.stringify(capable.stream.sent)).toContain("elicitation_resolved");
+      expect(JSON.stringify(capable.stream.sent)).toContain("Answered by editor");
+    });
+
     it("records the question and cancels when no client can show a form", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const plain = makeClient();

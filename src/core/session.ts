@@ -76,8 +76,10 @@ import {
   type ConfigOptionValue,
 } from "./hydra-commands.js";
 import {
+  answerFromText,
   formatElicitationOutcome,
   formatElicitationQuestion,
+  replyHint,
 } from "./elicitation-text.js";
 import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import {
@@ -1172,6 +1174,10 @@ export class Session {
   private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCancellers = new Map<string, () => void>();
   private elicitationQuestions = new Map<string, string>();
+  private elicitationAnswerers = new Map<
+    string,
+    (client: AttachedClient, text: string) => boolean
+  >();
   // Per-session attention flags keyed by `${source}::${reason}`.
   // Used by clients to surface "attention" state without scanning history.
   private attentionFlags = new Map<string, AttentionFlag>();
@@ -3755,6 +3761,9 @@ export class Session {
         new Error("session is closing; new prompts cannot be accepted"),
         JsonRpcErrorCodes.SessionClosing,
       );
+    }
+    if (this.tryAnswerElicitationFromPrompt(client, params, sentBy)) {
+      return { stopReason: "end_turn" };
     }
     // Slash commands (`/hydra ...`, `/model`, `/mode`, `/sessions`,
     // `/help`) flow through the same enqueueUserPrompt path as
@@ -10669,7 +10678,31 @@ export class Session {
         this.elicitationCallbacks.delete(requestId);
         this.elicitationCancellers.delete(requestId);
         this.elicitationQuestions.delete(requestId);
+        this.elicitationAnswerers.delete(requestId);
         fn();
+      };
+
+      const resolveFrom = (client: AttachedClient, result: unknown): void => {
+        settle(() => {
+          const update = {
+            sessionUpdate: "elicitation_resolved",
+            elicitationId: requestId,
+            action: (result as { action?: unknown }).action,
+            resolvedBy: buildResolvedBy(client),
+          };
+          for (const o of outbound) {
+            if (o.clientId === client.clientId) {
+              continue;
+            }
+            void o.connection
+              .notify("session/update", { sessionId, update })
+              .catch(() => undefined);
+          }
+          this.recordElicitationText(
+            formatElicitationOutcome(params, result, client.clientInfo?.name),
+          );
+          resolve(result);
+        });
       };
 
       const sendTo = (client: AttachedClient): void => {
@@ -10694,26 +10727,7 @@ export class Session {
               }
               return;
             }
-            settle(() => {
-              const update = {
-                sessionUpdate: "elicitation_resolved",
-                elicitationId: requestId,
-                action,
-                resolvedBy: buildResolvedBy(client),
-              };
-              for (const o of outbound) {
-                if (o.clientId === client.clientId) {
-                  continue;
-                }
-                void o.connection
-                  .notify("session/update", { sessionId, update })
-                  .catch(() => undefined);
-              }
-              this.recordElicitationText(
-                formatElicitationOutcome(params, result, client.clientInfo?.name),
-              );
-              resolve(result);
-            });
+            resolveFrom(client, result);
           })
           .catch(() => {
             outstanding--;
@@ -10731,6 +10745,14 @@ export class Session {
         message: base.message ?? null,
       });
       this.elicitationCallbacks.set(requestId, sendTo);
+      this.elicitationAnswerers.set(requestId, (client, text) => {
+        const response = answerFromText(params, text);
+        if (settled || response === null) {
+          return false;
+        }
+        resolveFrom(client, response);
+        return true;
+      });
       // Turn cancel or agent loss: the agent no longer awaits this form, so
       // close it on every client instead of leaving it up.
       this.elicitationCancellers.set(requestId, () => {
@@ -10753,6 +10775,34 @@ export class Session {
         sendTo(client);
       }
     });
+  }
+
+  // A human-typed prompt from a client that cannot show forms answers a
+  // pending form when it reads as an answer (see answerFromText). Anything
+  // else, including slash commands and agent-to-agent prompts, queues as usual.
+  private tryAnswerElicitationFromPrompt(
+    client: AttachedClient,
+    params: unknown,
+    sentBy: SentBy | undefined,
+  ): boolean {
+    if (
+      this.elicitationAnswerers.size === 0 ||
+      canAnswerElicitation(client) ||
+      client.readonly === true ||
+      sentBy?.fromSession !== undefined
+    ) {
+      return false;
+    }
+    const text = extractPromptText((params as { prompt?: unknown } | null)?.prompt).trim();
+    if (text.length === 0 || text.startsWith("/")) {
+      return false;
+    }
+    for (const answer of [...this.elicitationAnswerers.values()]) {
+      if (answer(client, text)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private sendElicitationQuestionText(client: AttachedClient, question: string): void {
