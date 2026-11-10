@@ -48,8 +48,8 @@ function hintsFor(withNotes: boolean): Array<{ label: string; action?: "save" | 
     { label: "Enter next" },
     ...(withNotes ? [{ label: "n note" }] : []),
     { label: "s submit", action: "save" },
-    { label: "d decline", action: "dismiss" },
-    { label: "Esc cancel", action: "close" },
+    { label: "d skip", action: "dismiss" },
+    { label: "Esc dismiss", action: "close" },
   ];
 }
 

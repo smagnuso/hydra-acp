@@ -81,13 +81,16 @@ describe("formatting", () => {
       formatElicitationOutcome(single(), { action: "accept", content: { question_0: "Redis" } }, "tui"),
     ).toBe("**Answered by tui:** Which cache? Redis");
     expect(formatElicitationOutcome(single(), { action: "cancel" }, undefined)).toContain("Not answered");
+    expect(formatElicitationOutcome(single(), { action: "cancel" }, "tui")).toBe(
+      "**Dismissed by tui:** Which cache?",
+    );
   });
 });
 
 describe("outcome lines", () => {
   it("covers decline, multi-question answers and unparseable forms", () => {
     expect(formatElicitationOutcome(single(), { action: "decline" }, "tui")).toBe(
-      "**Declined by tui:** Which cache?",
+      "**Skipped by tui:** Which cache?",
     );
     const two = {
       mode: "form",

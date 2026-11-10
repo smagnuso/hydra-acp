@@ -302,8 +302,8 @@ export class ElicitationWizard {
       ...(field.kind === "single" && field.customKey !== undefined
         ? [{ label: "n pick + note" }]
         : []),
-      { label: "d decline", action: "dismiss" },
-      { label: "Esc cancel", action: "close" },
+      { label: "d skip", action: "dismiss" },
+      { label: "Esc dismiss", action: "close" },
     ];
     if (this.customOpen || field.kind === "text") {
       rows.push({
@@ -322,7 +322,7 @@ export class ElicitationWizard {
         cursor: 0,
         hints: [
           { label: "Enter submit", action: "commit" },
-          { label: this.customOpen ? "Esc back" : "Esc cancel", action: "close" },
+          { label: this.customOpen ? "Esc back" : "Esc dismiss", action: "close" },
         ],
       };
     }

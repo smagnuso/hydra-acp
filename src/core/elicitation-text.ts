@@ -71,10 +71,14 @@ export function formatElicitationOutcome(
   const parsed = parseElicitation(params);
   const message = parsed?.message ?? "the agent's question";
   if (action === "decline") {
-    return `**Declined${by}:** ${message}`;
+    return `**Skipped${by}:** ${message}`;
   }
   if (action !== "accept") {
-    return `**Not answered:** ${message}`;
+    // A cancel somebody chose says so; one nobody made (no client could
+    // answer, or the turn was cancelled) reads as unanswered.
+    return resolvedBy !== undefined
+      ? `**Dismissed${by}:** ${message}`
+      : `**Not answered:** ${message}`;
   }
   const content = ((response as { content?: unknown }).content ?? {}) as Record<
     string,
