@@ -4,11 +4,8 @@
 // down or a sibling client answered first.
 
 import type { KeyEvent } from "./input.js";
-import {
-  ElicitationWizard,
-  parseElicitation,
-  type ElicitationOutcome,
-} from "./elicitation-form.js";
+import { parseElicitation, type ElicitationOutcome } from "./elicitation-form.js";
+import { createElicitationFlow, type ElicitationFlow } from "./elicitation-list.js";
 import type { FormState } from "./modal-form.js";
 import type { FormClickTarget } from "./screen.js";
 
@@ -19,7 +16,7 @@ export interface ElicitationUi {
 
 interface Entry {
   id: string | undefined;
-  wizard: ElicitationWizard;
+  wizard: ElicitationFlow;
   resolve: (result: unknown) => void;
 }
 
@@ -44,7 +41,7 @@ export class ElicitationController {
       ._meta?.["hydra-acp"];
     const id = typeof meta?.elicitationId === "string" ? meta.elicitationId : undefined;
     return new Promise<unknown>((resolve) => {
-      this.queue.push({ id, wizard: new ElicitationWizard(parsed), resolve });
+      this.queue.push({ id, wizard: createElicitationFlow(parsed), resolve });
       this.showNext();
     });
   }
