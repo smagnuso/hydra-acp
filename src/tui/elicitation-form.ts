@@ -44,6 +44,9 @@ export class ElicitationWizard {
   private picked = new Set<string>();
   // Set while the "Other" text page of a select field is showing.
   private customOpen = false;
+  // Set while the note page of a single-select is showing: the option row
+  // the note belongs to.
+  private notePick: number | null = null;
   private error = "";
   private state: FormState;
 
@@ -56,6 +59,22 @@ export class ElicitationWizard {
   }
 
   handleKey(ev: KeyEvent): ElicitationOutcome {
+    if (ev.type === "char" && (ev.ch === "n" || ev.ch === "N")) {
+      const field = this.field;
+      const row = this.state.cursor;
+      if (
+        !this.customOpen &&
+        field.kind === "single" &&
+        field.customKey !== undefined &&
+        row < field.options.length
+      ) {
+        this.notePick = row;
+        this.customOpen = true;
+        this.error = "";
+        this.state = this.buildPage();
+        return { type: "update" };
+      }
+    }
     return this.apply(handleFormKey(this.state, ev));
   }
 
@@ -96,9 +115,11 @@ export class ElicitationWizard {
         return { type: "done", response: { action: "decline" } };
       case "close":
         if (this.customOpen) {
+          const back = this.notePick ?? 0;
           this.customOpen = false;
+          this.notePick = null;
           this.error = "";
-          this.state = this.buildPage();
+          this.state = this.buildPage(back);
           return { type: "update" };
         }
         return { type: "done", response: { action: "cancel" } };
@@ -194,6 +215,10 @@ export class ElicitationWizard {
       if (field.customKey !== undefined && text.length > 0) {
         this.answers[field.customKey] = text;
       }
+      if (this.notePick !== null && field.kind === "single") {
+        this.answers[field.key] = this.coerceSingle(field, field.options[this.notePick]!.value);
+      }
+      this.notePick = null;
       if (field.kind === "multi") {
         return this.finishMulti(field);
       }
@@ -272,16 +297,19 @@ export class ElicitationWizard {
   private buildPage(cursor = 0): FormState {
     const field = this.field;
     const rows: FormRow[] = [];
-    const hints = [
-      { label: "Enter select", action: "commit" as const },
-      { label: "d decline", action: "dismiss" as const },
-      { label: "Esc cancel", action: "close" as const },
+    const hints: Array<{ label: string; action?: "commit" | "dismiss" | "close" }> = [
+      { label: "Enter select", action: "commit" },
+      ...(field.kind === "single" && field.customKey !== undefined
+        ? [{ label: "n pick + note" }]
+        : []),
+      { label: "d decline", action: "dismiss" },
+      { label: "Esc cancel", action: "close" },
     ];
     if (this.customOpen || field.kind === "text") {
       rows.push({
         id: "text",
         kind: "text",
-        label: this.customOpen ? "answer:" : "value:",
+        label: this.customOpen ? (this.notePick !== null ? "note:" : "answer:") : "value:",
         editor: new LineEditor(
           !this.customOpen && field.kind === "text" && field.default !== undefined
             ? String(field.default)

@@ -288,3 +288,46 @@ describe("ElicitationWizard titles", () => {
     expect(w.form.title).toContain("Which cache?");
   });
 });
+
+describe("ElicitationWizard notes", () => {
+  const withOther = (): ElicitationWizard =>
+    new ElicitationWizard(parseElicitation(askParams())!);
+
+  it("n picks the option under the cursor and attaches a note", () => {
+    const w = withOther();
+    w.handleKey(key("down"));
+    expect(w.handleKey(ch("n")).type).toBe("update");
+    expect(w.form.rows[0]!.kind).toBe("text");
+    typeText(w, "but small");
+    expect(w.handleKey(key("enter"))).toEqual({
+      type: "done",
+      response: {
+        action: "accept",
+        content: { question_0: "Memcached", question_0_custom: "but small" },
+      },
+    });
+  });
+
+  it("Esc on the note page returns to the list on the same row", () => {
+    const w = withOther();
+    w.handleKey(key("down"));
+    w.handleKey(ch("n"));
+    expect(w.handleKey(key("escape")).type).toBe("update");
+    expect(w.form.rows[0]!.kind).toBe("choice");
+    expect(w.form.cursor).toBe(1);
+  });
+
+  it("n is ignored without a free-text slot and on the Other row", () => {
+    const plain = wizardFor({ s: { type: "string", oneOf: options } });
+    expect(plain.handleKey(ch("n")).type).toBe("noop");
+    const w = withOther();
+    w.handleKey(key("down"));
+    w.handleKey(key("down"));
+    expect(w.handleKey(ch("n")).type).toBe("noop");
+  });
+
+  it("shows the pick-and-note hint only where it applies", () => {
+    expect(withOther().form.hints.some((h) => h.label === "n pick + note")).toBe(true);
+    expect(wizardFor({ s: { type: "string", oneOf: options } }).form.hints.some((h) => h.label === "n pick + note")).toBe(false);
+  });
+});

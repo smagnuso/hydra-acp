@@ -42,13 +42,16 @@ export function createElicitationFlow(parsed: ParsedElicitation): ElicitationFlo
   return listEligible(parsed) ? new ElicitationList(parsed) : new ElicitationWizard(parsed);
 }
 
-const HINTS = [
-  { label: "←/→ change" },
-  { label: "Enter next" },
-  { label: "s submit", action: "save" as const },
-  { label: "d decline", action: "dismiss" as const },
-  { label: "Esc cancel", action: "close" as const },
-];
+function hintsFor(withNotes: boolean): Array<{ label: string; action?: "save" | "dismiss" | "close" }> {
+  return [
+    { label: "←/→ change" },
+    { label: "Enter next" },
+    ...(withNotes ? [{ label: "n note" }] : []),
+    { label: "s submit", action: "save" },
+    { label: "d decline", action: "dismiss" },
+    { label: "Esc cancel", action: "close" },
+  ];
+}
 
 export class ElicitationList implements ElicitationFlow {
   private readonly fields: SingleField[];
@@ -89,6 +92,11 @@ export class ElicitationList implements ElicitationFlow {
     if (this.other !== null) {
       return this.applyOther(handleFormKey(this.other.state, ev));
     }
+    if (ev.type === "char" && (ev.ch === "n" || ev.ch === "N")) {
+      return this.fields[this.cursor]!.customKey !== undefined
+        ? this.openText(this.cursor)
+        : { type: "noop" };
+    }
     return this.apply(handleFormKey(this.state, ev));
   }
 
@@ -121,7 +129,8 @@ export class ElicitationList implements ElicitationFlow {
       return "-";
     }
     if (e.t === "opt") {
-      return field.options[e.index]!.label;
+      const label = field.options[e.index]!.label;
+      return this.custom[row]!.length > 0 ? `${label} (+ note: ${this.custom[row]})` : label;
     }
     return this.custom[row]!.length > 0 ? `Other: ${this.custom[row]}` : "Other...";
   }
@@ -144,7 +153,12 @@ export class ElicitationList implements ElicitationFlow {
       label: f.title,
       value: this.valueLabel(i),
     }));
-    return { title: this.title(), rows, cursor: this.cursor, hints: HINTS };
+    return {
+      title: this.title(),
+      rows,
+      cursor: this.cursor,
+      hints: hintsFor(this.fields.some((f) => f.customKey !== undefined)),
+    };
   }
 
   private refresh(): ElicitationOutcome {
@@ -182,7 +196,7 @@ export class ElicitationList implements ElicitationFlow {
   private advance(row: number): ElicitationOutcome {
     this.cursor = row;
     if (this.entry(row).t === "other") {
-      return this.openOther(row);
+      return this.openText(row);
     }
     if (row < this.fields.length - 1) {
       this.cursor = row + 1;
@@ -192,14 +206,18 @@ export class ElicitationList implements ElicitationFlow {
     return this.submit();
   }
 
-  private openOther(row: number): ElicitationOutcome {
+  // Free text for a row: the answer itself when nothing is picked, otherwise
+  // a note that travels beside the pick.
+  private openText(row: number): ElicitationOutcome {
     const field = this.fields[row]!;
+    this.cursor = row;
+    const note = this.entry(row).t === "opt";
     this.other = {
       row,
       state: {
-        title: `${field.description ?? field.title} · type your own answer`,
+        title: `${field.description ?? field.title} · ${note ? "add a note to your pick" : "type your own answer"}`,
         rows: [
-          { id: "text", kind: "text", label: "answer:", editor: new LineEditor(this.custom[row]) },
+          { id: "text", kind: "text", label: note ? "note:" : "answer:", editor: new LineEditor(this.custom[row]) },
         ],
         cursor: 0,
         hints: [
@@ -221,8 +239,12 @@ export class ElicitationList implements ElicitationFlow {
         const textRow = other.state.rows[0];
         const text = textRow?.kind === "text" ? textRow.editor.text.trim() : "";
         this.custom[row] = text;
-        if (text.length === 0) {
+        const ring = this.rings[row]!;
+        const otherAt = ring.findIndex((r) => r.t === "other");
+        if (text.length === 0 && this.entry(row).t === "other") {
           this.pos[row] = 0;
+        } else if (text.length > 0 && this.entry(row).t === "unset" && otherAt >= 0) {
+          this.pos[row] = otherAt;
         }
         this.other = null;
         if (row < this.fields.length - 1) {
@@ -256,6 +278,9 @@ export class ElicitationList implements ElicitationFlow {
       if (e.t === "other") {
         content[field.customKey!] = this.custom[i];
         continue;
+      }
+      if (this.custom[i]!.length > 0) {
+        content[field.customKey!] = this.custom[i];
       }
       const value = field.options[e.index]!.value;
       const boolean =

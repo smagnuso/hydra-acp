@@ -154,3 +154,48 @@ describe("ElicitationList", () => {
     expect(l.form.rows[1]).toMatchObject({ value: "Python" });
   });
 });
+
+describe("ElicitationList notes", () => {
+  it("n adds a note that travels beside the pick", () => {
+    const l = two();
+    l.handleKey(key("right"));
+    expect(l.handleKey(ch("n")).type).toBe("update");
+    expect(l.form.rows[0]!.kind).toBe("text");
+    expect(l.form.title).toContain("add a note to your pick");
+    for (const c of "needs WAL") {
+      l.handleKey(ch(c));
+    }
+    l.handleKey(key("enter"));
+    expect(l.form.rows[0]).toMatchObject({ value: "Postgres (+ note: needs WAL)" });
+    expect(l.handleKey(ch("s"))).toEqual({
+      type: "done",
+      response: { action: "accept", content: { a: "Postgres", a_custom: "needs WAL" } },
+    });
+  });
+
+  it("a note on an unanswered row becomes its own answer", () => {
+    const l = two();
+    l.handleKey(ch("n"));
+    expect(l.form.title).toContain("type your own answer");
+    for (const c of "Valkey") {
+      l.handleKey(ch(c));
+    }
+    l.handleKey(key("enter"));
+    expect(l.form.rows[0]).toMatchObject({ value: "Other: Valkey" });
+  });
+
+  it("n does nothing on a question with no free-text slot", () => {
+    const l = two();
+    l.handleKey(key("down"));
+    expect(l.handleKey(ch("n")).type).toBe("noop");
+    expect(l.form.rows[1]!.kind).toBe("select");
+  });
+
+  it("advertises the note key only when some question has a free-text slot", () => {
+    expect(two().form.hints.some((h) => h.label.startsWith("n note"))).toBe(true);
+    const plain = new ElicitationList(
+      form({ a: { type: "string", oneOf: db }, b: { type: "string", oneOf: lang } })!,
+    );
+    expect(plain.form.hints.some((h) => h.label.startsWith("n note"))).toBe(false);
+  });
+});
