@@ -7,6 +7,7 @@ import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { DiscoveredSession } from "./discovery.js";
 import type { MentionCandidate } from "./file-search.js";
+import { takeWidth, textWidth } from "../core/width.js";
 import { matchesSearch } from "./session-search.js";
 
 const MAX_SESSION_CANDIDATES = 5;
@@ -31,7 +32,7 @@ export function slugify(title: string): string {
 }
 
 function clip(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+  return textWidth(text) > max ? `${takeWidth(text, max - 3)}...` : text;
 }
 
 // The short id is always part of the token: two sessions can share a title,

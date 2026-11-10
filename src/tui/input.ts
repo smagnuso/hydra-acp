@@ -4,6 +4,7 @@
 // responsible for translating terminal-kit key names into KeyEvents and
 // rendering the state.
 
+import { nextGraphemeOffset, prevGraphemeOffset } from "../core/width.js";
 import { type ChordTable, buildChordTable, CHORD_TIMEOUT_MS } from "./chord.js";
 
 export type KeyName =
@@ -674,13 +675,15 @@ export class InputDispatcher {
         const line = this.currentLine();
         if (this.col > 0 && this.col < line.length) {
           this.recordEdit();
+          const prev = prevGraphemeOffset(line, this.col);
+          const next = nextGraphemeOffset(line, this.col);
           this.setCurrentLine(
-            line.slice(0, this.col - 1) +
-              line[this.col] +
-              line[this.col - 1] +
-              line.slice(this.col + 1),
+            line.slice(0, prev) +
+              line.slice(this.col, next) +
+              line.slice(prev, this.col) +
+              line.slice(next),
           );
-          this.col += 1;
+          this.col = next;
           return [];
         }
         return [{ type: "toggle-thoughts" }];
@@ -887,8 +890,9 @@ export class InputDispatcher {
         this.col -= m[0].length;
         return;
       }
-      this.setCurrentLine(line.slice(0, this.col - 1) + line.slice(this.col));
-      this.col -= 1;
+      const start = prevGraphemeOffset(line, this.col);
+      this.setCurrentLine(line.slice(0, start) + line.slice(this.col));
+      this.col = start;
       return;
     }
     if (this.row === 0) {
@@ -914,7 +918,9 @@ export class InputDispatcher {
         );
         return;
       }
-      this.setCurrentLine(line.slice(0, this.col) + line.slice(this.col + 1));
+      this.setCurrentLine(
+        line.slice(0, this.col) + line.slice(nextGraphemeOffset(line, this.col)),
+      );
       return;
     }
     if (this.row < this.buffer.length - 1) {
@@ -1072,7 +1078,7 @@ export class InputDispatcher {
         this.col -= m[0].length;
         return;
       }
-      this.col -= 1;
+      this.col = prevGraphemeOffset(this.currentLine(), this.col);
       return;
     }
     if (this.row > 0) {
@@ -1090,7 +1096,7 @@ export class InputDispatcher {
         this.col += m[0].length;
         return;
       }
-      this.col += 1;
+      this.col = nextGraphemeOffset(line, this.col);
       return;
     }
     if (this.row < this.buffer.length - 1) {

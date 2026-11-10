@@ -118,6 +118,8 @@ import {
   type InstallStatusLine,
   type InstallStatusSink,
 } from "./install-status.js";
+import { padEndWidth } from "../core/width.js";
+import { columnToOffset } from "./column-mapping.js";
 
 export type PickerResult =
   | {
@@ -658,7 +660,8 @@ export async function pickSession(
     }
     findWidths = computeWidths(rowList, formatOpts);
     const budget = Math.max(20, readTermWidth(term) - ROW_PREFIX_WIDTH);
-    findHeaderLine = formatRow(HEADER, findWidths, budget, formatOpts).padEnd(
+    findHeaderLine = padEndWidth(
+      formatRow(HEADER, findWidths, budget, formatOpts),
       budget,
     );
   };
@@ -873,11 +876,12 @@ export async function pickSession(
     // header paint can overwrite the previous frame without an
     // eraseLineAfter. Without padding, a shorter new row would leave
     // stale glyphs from the prior frame.
-    headerLine = formatRow(HEADER, widths, rowMaxWidth, formatOpts).padEnd(
+    headerLine = padEndWidth(
+      formatRow(HEADER, widths, rowMaxWidth, formatOpts),
       rowMaxWidth,
     );
     sessionLines = rows.map((r) =>
-      formatRow(r, widths, rowMaxWidth, formatOpts).padEnd(rowMaxWidth),
+      padEndWidth(formatRow(r, widths, rowMaxWidth, formatOpts), rowMaxWidth),
     );
   };
 
@@ -1454,7 +1458,11 @@ export async function pickSession(
     if (!vr) {
       return null;
     }
-    const colInSlice = Math.max(0, Math.min(vr.endCol - vr.startCol, x - 3));
+    const rowText = (composer.state().buffer[vr.bufferIdx] ?? "").slice(
+      vr.startCol,
+      vr.endCol,
+    );
+    const colInSlice = columnToOffset(rowText, Math.max(0, x - 3));
     return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
   };
 
@@ -2095,14 +2103,17 @@ export async function pickSession(
     const row = findRowFor(hit.sessionId);
     const line1 =
       row !== null
-        ? formatRow(row, findWidths, rowBudget, formatOpts).padEnd(rowBudget)
+        ? padEndWidth(formatRow(row, findWidths, rowBudget, formatOpts), rowBudget)
         : // Session retired out from under the results (killed, or a
           // filter change since the search). Fall back to what the hit
           // itself carries.
-          `${stripHydraSessionPrefix(hit.sessionId)}  ${hit.status === "warm" ? "warm" : "cold"}  ${truncateMiddle(
-            hit.title ?? shortenHomePath(hit.cwd),
-            Math.max(5, rowBudget - 20),
-          )}`.padEnd(rowBudget);
+          padEndWidth(
+            `${stripHydraSessionPrefix(hit.sessionId)}  ${hit.status === "warm" ? "warm" : "cold"}  ${truncateMiddle(
+              hit.title ?? shortenHomePath(hit.cwd),
+              Math.max(5, rowBudget - 20),
+            )}`,
+            rowBudget,
+          );
     // Snippet line: counter first (it's about the snippets, so it belongs
     // on the snippet row), then the tool name when there is one. The
     // snippet *kind* (agent / thought / user) is deliberately omitted —
@@ -2131,7 +2142,7 @@ export async function pickSession(
     );
     const text = snippet ? truncateMiddle(snippet.text, snippetBudget) : "";
     const line2 = snippet ? `    ${prefix}${text}` : "    (no snippet)";
-    return { rowBudget, line1, line2: line2.padEnd(rowBudget + ROW_PREFIX_WIDTH), focusedRow: focused };
+    return { rowBudget, line1, line2: padEndWidth(line2, rowBudget + ROW_PREFIX_WIDTH), focusedRow: focused };
   };
 
   // Column header for the results list. Same content as the main
@@ -4276,7 +4287,11 @@ export async function pickSession(
         if (!vr) {
           return null;
         }
-        const colInSlice = Math.max(0, Math.min(vr.endCol - vr.startCol, x - 3));
+        const rowText = (findComposer.state().buffer[vr.bufferIdx] ?? "").slice(
+          vr.startCol,
+          vr.endCol,
+        );
+        const colInSlice = columnToOffset(rowText, Math.max(0, x - 3));
         return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
       };
 

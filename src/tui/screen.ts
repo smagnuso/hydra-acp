@@ -72,6 +72,8 @@ import { ChordMatcher } from "./chord.js";
 import {
   columnToOffset,
   columnToOffsetFromSegments,
+  displayWidth,
+  segmentGraphemes,
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { runForegroundChild } from "./foreground-run.js";
@@ -8212,10 +8214,11 @@ export class Screen {
       return null;
     }
     const gutterWidth = 2; // "> " / "· " / two blank columns
-    const colInSlice = Math.max(
-      0,
-      Math.min(vr.endCol - vr.startCol, x - 1 - gutterWidth),
+    const rowText = (this.dispatcher.state().buffer[vr.bufferIdx] ?? "").slice(
+      vr.startCol,
+      vr.endCol,
     );
+    const colInSlice = columnToOffset(rowText, Math.max(0, x - 1 - gutterWidth));
     return { row: vr.bufferIdx, col: vr.startCol + colInSlice };
   }
 
@@ -10224,26 +10227,31 @@ export function computePromptVisualRows(buffer: string[], room: number): PromptV
       rows.push({ bufferIdx: i, startCol: 0, endCol: 0 });
       continue;
     }
-    let pos = 0;
-    while (pos < line.length) {
-      if (line.length - pos <= room) {
-        rows.push({ bufferIdx: i, startCol: pos, endCol: line.length });
-        pos = line.length;
-        break;
-      }
-      let breakAt = -1;
-      for (let j = pos + room - 1; j >= pos; j--) {
-        const c = line[j];
-        if (c === " " || c === "\t") {
-          breakAt = j + 1;
+    const graphemes = segmentGraphemes(line);
+    let gi = 0;
+    while (gi < graphemes.length) {
+      const startGi = gi;
+      let width = 0;
+      let lastSpaceGi = -1;
+      while (gi < graphemes.length) {
+        const g = graphemes[gi]!;
+        if (width + g.width > room && gi > startGi) {
           break;
         }
+        width += g.width;
+        gi++;
+        if (g.segment === " " || g.segment === "\t") {
+          lastSpaceGi = gi;
+        }
       }
-      if (breakAt === -1) {
-        breakAt = pos + room;
+      let endGi = gi;
+      if (gi < graphemes.length && lastSpaceGi > startGi) {
+        endGi = lastSpaceGi;
       }
-      rows.push({ bufferIdx: i, startCol: pos, endCol: breakAt });
-      pos = breakAt;
+      const startCol = graphemes[startGi]!.offset;
+      const endCol = endGi < graphemes.length ? graphemes[endGi]!.offset : line.length;
+      rows.push({ bufferIdx: i, startCol, endCol });
+      gi = endGi;
     }
   }
   if (rows.length === 0) {
@@ -10285,7 +10293,9 @@ export function computePromptLayout(
     lastMatchIdx = i;
     if (state.col >= vr.startCol && state.col < vr.endCol) {
       cursorVisualRow = i;
-      cursorVisualCol = state.col - vr.startCol;
+      cursorVisualCol = displayWidth(
+        (state.buffer[state.row] ?? "").slice(vr.startCol, state.col),
+      );
       lastMatchIdx = -1;
       break;
     }
@@ -10294,7 +10304,9 @@ export function computePromptLayout(
     const vr = visualRows[lastMatchIdx];
     if (vr) {
       cursorVisualRow = lastMatchIdx;
-      cursorVisualCol = state.col - vr.startCol;
+      cursorVisualCol = displayWidth(
+        (state.buffer[state.row] ?? "").slice(vr.startCol, state.col),
+      );
     }
   }
   const rendered = Math.min(maxRows, Math.max(1, visualRows.length));

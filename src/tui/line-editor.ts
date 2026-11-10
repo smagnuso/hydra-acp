@@ -1,3 +1,4 @@
+import { nextGraphemeOffset, prevGraphemeOffset } from "../core/width.js";
 // Single-line text buffer with cursor, kill ring, and undo/redo. The
 // shared foundation for one-line prompt inputs (picker rename, cwd
 // prompt). Multi-line / composer semantics live in InputDispatcher;
@@ -97,15 +98,11 @@ export class LineEditor {
   }
 
   moveLeft(): void {
-    if (this.cur > 0) {
-      this.cur -= 1;
-    }
+    this.cur = prevGraphemeOffset(this.buffer, this.cur);
   }
 
   moveRight(): void {
-    if (this.cur < this.buffer.length) {
-      this.cur += 1;
-    }
+    this.cur = nextGraphemeOffset(this.buffer, this.cur);
   }
 
   moveHome(): void {
@@ -154,9 +151,9 @@ export class LineEditor {
       return;
     }
     this.recordEdit();
-    this.buffer =
-      this.buffer.slice(0, this.cur - 1) + this.buffer.slice(this.cur);
-    this.cur -= 1;
+    const start = prevGraphemeOffset(this.buffer, this.cur);
+    this.buffer = this.buffer.slice(0, start) + this.buffer.slice(this.cur);
+    this.cur = start;
   }
 
   deleteForward(): void {
@@ -165,7 +162,8 @@ export class LineEditor {
     }
     this.recordEdit();
     this.buffer =
-      this.buffer.slice(0, this.cur) + this.buffer.slice(this.cur + 1);
+      this.buffer.slice(0, this.cur) +
+      this.buffer.slice(nextGraphemeOffset(this.buffer, this.cur));
   }
 
   // ^U — kill from cursor back to start of line. Standard readline.

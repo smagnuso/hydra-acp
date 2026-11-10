@@ -252,6 +252,15 @@ describe("InputDispatcher", () => {
     expect(d.state().col).toBe(3);
   });
 
+  it("Ctrl+T transposes whole graphemes, not code units", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "a👍🏽b" }]);
+    feed(d, [k("left")]);
+    expect(feed(d, [k("ctrl-t")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["ab👍🏽"]);
+    expect(d.state().col).toBe("ab👍🏽".length);
+  });
+
   it("Ctrl+D at end of last line does not exit while text remains", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "abc" }]);

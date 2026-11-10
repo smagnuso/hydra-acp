@@ -7,7 +7,8 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
-import { resolveAmbiguousWide, setAmbiguousWide } from "./screen.js";
+import { computePromptLayout, computePromptVisualRows, resolveAmbiguousWide, setAmbiguousWide } from "./screen.js";
+import { displayWidth } from "./column-mapping.js";
 import { setControlWriter } from "./ansi.js";
 import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
@@ -5084,5 +5085,23 @@ describe("Screen chord matcher", () => {
     const { screen, seen } = makeChordScreen();
     press(screen, "CTRL_E");
     expect(seen).toEqual([{ type: "key", name: "ctrl-e" }]);
+  });
+});
+
+describe("computePromptVisualRows with wide characters", () => {
+  const text = "국제화와지역화와현지화테스트를위한매우긴단어입니다";
+
+  it("wraps by display cells, not code units", () => {
+    const rows = computePromptVisualRows([text], 10);
+    for (const r of rows) {
+      expect(displayWidth(text.slice(r.startCol, r.endCol))).toBeLessThanOrEqual(10);
+    }
+    expect(rows[rows.length - 1]!.endCol).toBe(text.length);
+  });
+
+  it("reports the cursor column in display cells", () => {
+    const rows = computePromptVisualRows([text], 10);
+    const layout = computePromptLayout(rows, { buffer: [text], row: 0, col: 3 }, 5);
+    expect(layout.cursorVisualCol).toBe(6);
   });
 });

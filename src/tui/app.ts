@@ -331,6 +331,7 @@ import {
 } from "../core/proc-sample.js";
 import type { ProcSample } from "../core/proc-sample.js";
 import { execFile } from "node:child_process";
+import { truncateEndWidth } from "../core/width.js";
 
 // Pure helper: filter a question array down to entries that should appear
 // in the ^Q modal. Both `open` (never-answered) and `pending-delivery`
@@ -434,13 +435,7 @@ function toSidebarArmedTasks(raw: unknown[]): SidebarArmedTask[] {
 }
 
 function truncateQuestionLabel(text: string, max: number): string {
-  if (text.length <= max) {
-    return text;
-  }
-  if (max <= 1) {
-    return "…";
-  }
-  return text.slice(0, max - 1) + "…";
+  return truncateEndWidth(text, max);
 }
 
 // Pure helper: build the form showing every open question group. Each row

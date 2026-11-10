@@ -11,6 +11,14 @@ import {
   type DisplayUsage,
 } from "../core/agent-display.js";
 import { shortenHomePath } from "../core/paths.js";
+import {
+  padEndWidth,
+  padStartWidth,
+  takeWidth,
+  textWidth,
+  truncateEndWidth,
+  truncateMiddleWidth,
+} from "../core/width.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 
 export interface SessionSummary {
@@ -415,10 +423,11 @@ export function formatRelativeAge(iso: string | undefined, now: number): string 
 }
 
 function maxLen(headerCell: string, values: string[]): number {
-  let max = headerCell.length;
+  let max = textWidth(headerCell);
   for (const v of values) {
-    if (v.length > max) {
-      max = v.length;
+    const vw = textWidth(v);
+    if (vw > max) {
+      max = vw;
     }
   }
   return max;
@@ -449,7 +458,7 @@ export function formatRow(
   // Natural-width cell, no truncation. age is right-aligned (numeric-ish),
   // everything else left-aligned — matching the original layout.
   const naturalCell = (col: ColumnKey): string =>
-    col === "age" ? r[col].padStart(w[col]) : r[col].padEnd(w[col]);
+    col === "age" ? padStartWidth(r[col], w[col]) : padEndWidth(r[col], w[col]);
 
   // Unbounded path: every column at natural width. The trailing column
   // isn't padded (no need to pad the last cell out to a fixed width).
@@ -472,7 +481,7 @@ export function formatRow(
   // and hard-clip to maxWidth as a backstop.
   if (lastElastic === -1) {
     const out = columns.map(naturalCell).join(SEP);
-    return out.length > maxWidth ? out.slice(0, maxWidth) : out;
+    return textWidth(out) > maxWidth ? takeWidth(out, maxWidth) : out;
   }
 
   // Budget available to elastic columns: maxWidth minus the natural width
@@ -513,10 +522,10 @@ export function formatRow(
   // ragged trailing run of spaces.
   const renderElastic = (col: ColumnKey, width: number, isLast: boolean): string => {
     if (col === "cwd") {
-      return truncateMiddle(r[col], width).padEnd(width);
+      return padEndWidth(truncateMiddle(r[col], width), width);
     }
     const cell = truncateRight(r[col], width);
-    return isLast ? cell : cell.padEnd(width);
+    return isLast ? cell : padEndWidth(cell, width);
   };
 
   const cells = columns.map((col, i) => {
@@ -529,33 +538,13 @@ export function formatRow(
   // Backstop: when the fixed columns alone overflow maxWidth (elastic
   // budget already 0), hard-clip so the row never exceeds the cap.
   const out = cells.join(SEP);
-  return out.length > maxWidth ? out.slice(0, maxWidth) : out;
+  return textWidth(out) > maxWidth ? takeWidth(out, maxWidth) : out;
 }
 
 export function truncateRight(s: string, max: number): string {
-  if (max <= 0) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  if (max === 1) {
-    return "…";
-  }
-  return s.slice(0, max - 1) + "…";
+  return truncateEndWidth(s, max);
 }
 
 export function truncateMiddle(s: string, max: number): string {
-  if (max <= 0) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  if (max === 1) {
-    return "…";
-  }
-  const head = Math.ceil((max - 1) / 2);
-  const tail = max - 1 - head;
-  return s.slice(0, head) + "…" + s.slice(s.length - tail);
+  return truncateMiddleWidth(s, max);
 }

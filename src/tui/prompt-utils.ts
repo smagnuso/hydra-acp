@@ -38,6 +38,7 @@ import {
 } from "./ansi.js";
 import { paint, SGR_RESET } from "./theme/index.js";
 import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
+import { fitWidth, truncateEndWidth } from "../core/width.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -208,19 +209,13 @@ export function truncate(s: string, max: number): string {
   if (max <= 1) {
     return "";
   }
-  if (s.length <= max) {
-    return s;
-  }
-  return s.slice(0, Math.max(0, max - 1)) + "…";
+  return truncateEndWidth(s, max);
 }
 
-// Right-pad / hard-truncate to exactly `w` chars so a highlight bar
+// Right-pad / hard-truncate to exactly `w` cells so a highlight bar
 // covers the full line width.
 export function padRight(s: string, w: number): string {
-  if (s.length >= w) {
-    return s.slice(0, w);
-  }
-  return s + " ".repeat(w - s.length);
+  return fitWidth(s, w);
 }
 
 export interface ModalKeyData {
