@@ -3319,6 +3319,10 @@ Hydra implements the ACP `elicitation/create` method (form mode) so agents can a
 
 The forwarded params are the agent's own (`mode`, `message`, `requestedSchema`, optional `toolCallId`) with `sessionId` rewritten to the hydra session id, plus `_meta["hydra-acp"].elicitationId`, a daemon-minted id used to correlate dismissal.
 
+**Scope.** A session-scoped request (`sessionId`, optional `toolCallId`) and a request-scoped one (`requestId`, no `sessionId`) are both forwarded verbatim by a live session, which only rewrites `sessionId`. The daemon has no handler on an agent connection before its session exists, so a request-scoped form sent during startup (before `session/new` returns) is not routed to any client.
+
+**Cancellation.** A form still pending when the turn is cancelled (`session/cancel`), the agent is retired (switch, restart, upstream loss) or the session closes is answered `{ "action": "cancel" }` and every client that was sent it receives `elicitation_resolved` with `action: "cancel"` and no `resolvedBy`.
+
 **Response.** `{ "action": "accept", "content": { <fieldKey>: string | number | boolean | string[] } }`, `{ "action": "decline" }` or `{ "action": "cancel" }`.
 
 **Dismissal.** When one client answers, every other client that was sent the request receives a `session/update` with:

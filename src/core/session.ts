@@ -1163,6 +1163,7 @@ export class Session {
   // permission requests arrive after a restart.
   private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
+  private elicitationCancellers = new Map<string, () => void>();
   // Per-session attention flags keyed by `${source}::${reason}`.
   // Used by clients to surface "attention" state without scanning history.
   private attentionFlags = new Map<string, AttentionFlag>();
@@ -4549,7 +4550,14 @@ export class Session {
    * Returns the labels dropped so callers can tell the user what stopped
    * rather than letting it vanish.
    */
+  private cancelPendingElicitations(): void {
+    for (const cancel of [...this.elicitationCancellers.values()]) {
+      cancel();
+    }
+  }
+
   private async retireAgent(agent: AgentInstance, reason: string): Promise<string[]> {
+    this.cancelPendingElicitations();
     await agent.kill().catch(() => undefined);
     this.resetBackgroundTaskLevel();
     return this.discardArmedTasks(reason);
@@ -5760,6 +5768,7 @@ export class Session {
     // Ordered before the agent dispatch so clients see the turn end
     // immediately rather than after the chain walk.
     this.closeUnsolicitedTurn("cancelled");
+    this.cancelPendingElicitations();
     // ^C with nothing in flight: the only thing left to stop is a chain
     // some earlier turn abandoned. The turn-end paths only ever see turns
     // that are actually running, so without this the keystroke is no
@@ -9579,6 +9588,7 @@ export class Session {
   }
 
   private markClosed(opts: { deleteRecord: boolean }): void {
+    this.cancelPendingElicitations();
     if (this.closed) {
       return;
     }
@@ -10625,6 +10635,7 @@ export class Session {
         settled = true;
         this.clearAttentionFlag("daemon", `elicitation:${requestId}`);
         this.elicitationCallbacks.delete(requestId);
+        this.elicitationCancellers.delete(requestId);
         fn();
       };
 
@@ -10678,6 +10689,23 @@ export class Session {
         message: base.message ?? null,
       });
       this.elicitationCallbacks.set(requestId, sendTo);
+      // Turn cancel or agent loss: the agent no longer awaits this form, so
+      // close it on every client instead of leaving it up.
+      this.elicitationCancellers.set(requestId, () => {
+        settle(() => {
+          const update = {
+            sessionUpdate: "elicitation_resolved",
+            elicitationId: requestId,
+            action: "cancel",
+          };
+          for (const o of outbound) {
+            void o.connection
+              .notify("session/update", { sessionId, update })
+              .catch(() => undefined);
+          }
+          resolve({ action: "cancel" });
+        });
+      });
       for (const client of initialClients) {
         sendTo(client);
       }

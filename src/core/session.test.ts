@@ -237,6 +237,30 @@ describe("Session", () => {
       ).toBe(true);
     });
 
+    it("cancels a pending elicitation on session/cancel and tells the clients", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient();
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      await new Promise((r) => setImmediate(r));
+      await session.cancel(a.client.clientId);
+      await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+      await new Promise((r) => setImmediate(r));
+      expect(
+        a.stream.sent.some(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === "elicitation_resolved",
+        ),
+      ).toBe(true);
+    });
+
     it("answers elicitation/create with cancel when every client abstains", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const a = makeClient();

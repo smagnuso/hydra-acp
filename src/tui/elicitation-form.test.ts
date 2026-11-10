@@ -133,3 +133,91 @@ describe("ElicitationWizard", () => {
     });
   });
 });
+
+const wizardFor = (properties: Record<string, unknown>, required: string[] = []): ElicitationWizard =>
+  new ElicitationWizard(
+    parseElicitation({
+      mode: "form",
+      message: "m",
+      requestedSchema: { type: "object", required, properties },
+    })!,
+  );
+
+const typeText = (w: ElicitationWizard, text: string): void => {
+  for (const c of text) {
+    w.handleKey(ch(c));
+  }
+};
+
+describe("ElicitationWizard defaults", () => {
+  it("starts a select on its default option", () => {
+    const w = wizardFor({ s: { type: "string", oneOf: options, default: "Memcached" } });
+    expect(w.form.cursor).toBe(1);
+    expect(w.handleKey(key("enter"))).toEqual({
+      type: "done",
+      response: { action: "accept", content: { s: "Memcached" } },
+    });
+  });
+
+  it("pre-picks multi-select defaults", () => {
+    const w = wizardFor({
+      m: { type: "array", items: { anyOf: options }, default: ["Memcached"] },
+    });
+    w.handleKey(key("down"));
+    w.handleKey(key("down"));
+    expect(w.handleKey(key("enter"))).toEqual({
+      type: "done",
+      response: { action: "accept", content: { m: ["Memcached"] } },
+    });
+  });
+
+  it("seeds a text field with its default", () => {
+    const w = wizardFor({ t: { type: "string", default: "abc" } });
+    expect(w.handleKey(key("enter"))).toEqual({
+      type: "done",
+      response: { action: "accept", content: { t: "abc" } },
+    });
+  });
+});
+
+describe("ElicitationWizard constraints", () => {
+  it("enforces minLength and maxLength", () => {
+    const w = wizardFor({ t: { type: "string", minLength: 3, maxLength: 4 } });
+    typeText(w, "ab");
+    expect(w.handleKey(key("enter")).type).toBe("update");
+    expect(w.form.title).toContain("at least 3");
+    typeText(w, "cde");
+    w.handleKey(key("enter"));
+    expect(w.form.title).toContain("at most 4");
+  });
+
+  it("enforces pattern and format", () => {
+    const p = wizardFor({ t: { type: "string", pattern: "^[a-z]+$" } });
+    typeText(p, "AB1");
+    p.handleKey(key("enter"));
+    expect(p.form.title).toContain("expected format");
+    const f = wizardFor({ t: { type: "string", format: "email" } });
+    typeText(f, "nope");
+    f.handleKey(key("enter"));
+    expect(f.form.title).toContain("not an email");
+    const ok = wizardFor({ t: { type: "string", format: "date" } });
+    typeText(ok, "2026-07-22");
+    expect(ok.handleKey(key("enter")).type).toBe("done");
+  });
+
+  it("enforces numeric minimum and maximum", () => {
+    const w = wizardFor({ n: { type: "number", minimum: 1, maximum: 5 } });
+    typeText(w, "9");
+    w.handleKey(key("enter"));
+    expect(w.form.title).toContain("at most 5");
+  });
+
+  it("enforces multi-select minItems", () => {
+    const w = wizardFor({ m: { type: "array", items: { anyOf: options }, minItems: 2 } });
+    w.handleKey(key("enter"));
+    w.handleKey(key("down"));
+    w.handleKey(key("down"));
+    expect(w.handleKey(key("enter")).type).toBe("update");
+    expect(w.form.title).toContain("at least 2");
+  });
+});

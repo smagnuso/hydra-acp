@@ -26,6 +26,7 @@ interface FieldBase {
   key: string;
   title: string;
   required: boolean;
+  default?: unknown;
   // claude-acp pairs a select `question_N` with a free-text `question_N_custom`.
   // It folds into the select as an "Other" row instead of a page of its own.
   customKey?: string;
@@ -33,8 +34,22 @@ interface FieldBase {
 
 export type ElicitationField =
   | (FieldBase & { kind: "single"; options: ElicitationOption[] })
-  | (FieldBase & { kind: "multi"; options: ElicitationOption[] })
-  | (FieldBase & { kind: "text"; numeric?: "number" | "integer" });
+  | (FieldBase & {
+      kind: "multi";
+      options: ElicitationOption[];
+      minItems?: number;
+      maxItems?: number;
+    })
+  | (FieldBase & {
+      kind: "text";
+      numeric?: "number" | "integer";
+      minimum?: number;
+      maximum?: number;
+      minLength?: number;
+      maxLength?: number;
+      pattern?: string;
+      format?: string;
+    });
 
 export interface ParsedElicitation {
   message: string;
@@ -87,14 +102,38 @@ function parseProperty(
     return null;
   }
   const title = oneLine(str(prop.title) ?? str(prop.description) ?? key);
-  const base = { key, title, required };
+  const base = {
+    key,
+    title,
+    required,
+    ...(prop.default !== undefined ? { default: prop.default } : {}),
+  };
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  const opt = <T extends object>(o: T): T => {
+    for (const k of Object.keys(o) as Array<keyof T>) {
+      if (o[k] === undefined) {
+        delete o[k];
+      }
+    }
+    return o;
+  };
   switch (prop.type) {
     case "string": {
       const options = constOptions(prop.oneOf) ?? constOptions(prop.enum);
       if (options !== null && options.length > 0) {
         return { ...base, kind: "single", options };
       }
-      return { ...base, kind: "text" };
+      return {
+        ...base,
+        kind: "text",
+        ...opt({
+          minLength: num(prop.minLength),
+          maxLength: num(prop.maxLength),
+          pattern: str(prop.pattern),
+          format: str(prop.format),
+        }),
+      };
     }
     case "boolean":
       return {
@@ -107,14 +146,24 @@ function parseProperty(
       };
     case "number":
     case "integer":
-      return { ...base, kind: "text", numeric: prop.type };
+      return {
+        ...base,
+        kind: "text",
+        numeric: prop.type,
+        ...opt({ minimum: num(prop.minimum), maximum: num(prop.maximum) }),
+      };
     case "array": {
       const items = isObject(prop.items) ? prop.items : {};
       const options = constOptions(items.anyOf) ?? constOptions(items.enum);
       if (options === null || options.length === 0) {
         return null;
       }
-      return { ...base, kind: "multi", options };
+      return {
+        ...base,
+        kind: "multi",
+        options,
+        ...opt({ minItems: num(prop.minItems), maxItems: num(prop.maxItems) }),
+      };
     }
     default:
       return null;
@@ -169,6 +218,53 @@ export type ElicitationOutcome =
   | { type: "done"; response: Json }
   | { type: "noop" };
 
+const MAX_PATTERN_LENGTH = 256;
+const MAX_PATTERN_INPUT = 10_000;
+
+// Null when the text is acceptable. The pattern is an ACP extension whose
+// evaluation must be bounded, so an oversized pattern or input is skipped
+// rather than handed to the regex engine.
+function checkString(
+  field: ElicitationField & { kind: "text" },
+  text: string,
+): string | null {
+  if (field.minLength !== undefined && text.length < field.minLength) {
+    return `at least ${field.minLength} characters`;
+  }
+  if (field.maxLength !== undefined && text.length > field.maxLength) {
+    return `at most ${field.maxLength} characters`;
+  }
+  if (
+    field.pattern !== undefined &&
+    field.pattern.length <= MAX_PATTERN_LENGTH &&
+    text.length <= MAX_PATTERN_INPUT
+  ) {
+    try {
+      if (!new RegExp(field.pattern, "u").test(text)) {
+        return "does not match the expected format";
+      }
+    } catch {
+      void 0;
+    }
+  }
+  switch (field.format) {
+    case "email":
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text) ? null : "not an email address";
+    case "uri":
+      return URL.canParse(text) ? null : "not a URI";
+    case "date":
+      return /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(Date.parse(text))
+        ? null
+        : "expected YYYY-MM-DD";
+    case "date-time":
+      return /^\d{4}-\d{2}-\d{2}T/.test(text) && !Number.isNaN(Date.parse(text))
+        ? null
+        : "expected an ISO 8601 date-time";
+    default:
+      return null;
+  }
+}
+
 const OTHER_LABEL = "Other (type an answer)";
 const SKIP_LABEL = "Skip this question";
 const DONE_LABEL = "Done";
@@ -183,7 +279,7 @@ export class ElicitationWizard {
   private state: FormState;
 
   constructor(private readonly parsed: ParsedElicitation) {
-    this.state = this.buildPage();
+    this.state = this.startPage();
   }
 
   get form(): FormState {
@@ -298,6 +394,16 @@ export class ElicitationWizard {
       this.state = this.buildPage(field.options.length);
       return { type: "update" };
     }
+    if (field.minItems !== undefined && chosen.length < field.minItems) {
+      this.error = `pick at least ${field.minItems}`;
+      this.state = this.buildPage(field.options.length);
+      return { type: "update" };
+    }
+    if (field.maxItems !== undefined && chosen.length > field.maxItems) {
+      this.error = `pick at most ${field.maxItems}`;
+      this.state = this.buildPage(field.options.length);
+      return { type: "update" };
+    }
     if (chosen.length > 0) {
       this.answers[field.key] = chosen;
     }
@@ -342,11 +448,27 @@ export class ElicitationWizard {
         this.state = { ...this.state, title: this.pageTitle() };
         return { type: "update" };
       }
+      if (field.minimum !== undefined && n < field.minimum) {
+        return this.reject(`at least ${field.minimum}`);
+      }
+      if (field.maximum !== undefined && n > field.maximum) {
+        return this.reject(`at most ${field.maximum}`);
+      }
       this.answers[field.key] = n;
       return this.advance();
     }
+    const problem = checkString(field, text);
+    if (problem !== null) {
+      return this.reject(problem);
+    }
     this.answers[field.key] = text;
     return this.advance();
+  }
+
+  private reject(message: string): ElicitationOutcome {
+    this.error = message;
+    this.state = { ...this.state, title: this.pageTitle() };
+    return { type: "update" };
   }
 
   private advance(): ElicitationOutcome {
@@ -357,8 +479,27 @@ export class ElicitationWizard {
     if (this.index >= this.parsed.fields.length) {
       return { type: "done", response: { action: "accept", content: this.answers } };
     }
-    this.state = this.buildPage();
+    this.state = this.startPage();
     return { type: "update" };
+  }
+
+  // First view of a field, with its schema default pre-populated.
+  private startPage(): FormState {
+    const field = this.field;
+    const dflt = field.default;
+    if (field.kind === "multi" && Array.isArray(dflt)) {
+      for (const v of dflt) {
+        if (field.options.some((o) => o.value === v)) {
+          this.picked.add(v as string);
+        }
+      }
+    }
+    let cursor = 0;
+    if (field.kind === "single" && dflt !== undefined) {
+      const at = field.options.findIndex((o) => o.value === String(dflt));
+      cursor = Math.max(0, at);
+    }
+    return this.buildPage(cursor);
   }
 
   private pageTitle(): string {
@@ -383,7 +524,11 @@ export class ElicitationWizard {
         id: "text",
         kind: "text",
         label: this.customOpen ? "answer:" : "value:",
-        editor: new LineEditor(""),
+        editor: new LineEditor(
+          !this.customOpen && field.kind === "text" && field.default !== undefined
+            ? String(field.default)
+            : "",
+        ),
       });
       return {
         title: this.pageTitle(),
