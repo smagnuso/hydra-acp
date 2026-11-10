@@ -1172,6 +1172,7 @@ export class Session {
   private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCancellers = new Map<string, () => void>();
+  private permissionCancellers = new Map<string, () => void>();
   private elicitationQuestions = new Map<string, () => string>();
   private elicitationAnswerers = new Map<
     string,
@@ -1810,7 +1811,9 @@ export class Session {
         });
         return chained.payload;
       }
-      const outcome = await this.handlePermissionRequest(chained.envelope);
+      const outcome = await this.handlePermissionRequest(chained.envelope, {
+        fromAgent: true,
+      });
       this.notifyChain("permission.replied", {
         toolCallId: toolCallId ?? null,
         outcome,
@@ -4574,14 +4577,20 @@ export class Session {
    * Returns the labels dropped so callers can tell the user what stopped
    * rather than letting it vanish.
    */
-  private cancelPendingElicitations(): void {
+  // The agent no longer awaits what it asked the user: a turn cancel, an
+  // agent swap or loss, or the session closing. Close its pending permission
+  // prompts and forms on every client instead of leaving them up.
+  private cancelPendingAgentRequests(): void {
     for (const cancel of [...this.elicitationCancellers.values()]) {
+      cancel();
+    }
+    for (const cancel of [...this.permissionCancellers.values()]) {
       cancel();
     }
   }
 
   private async retireAgent(agent: AgentInstance, reason: string): Promise<string[]> {
-    this.cancelPendingElicitations();
+    this.cancelPendingAgentRequests();
     await agent.kill().catch(() => undefined);
     this.resetBackgroundTaskLevel();
     return this.discardArmedTasks(reason);
@@ -5792,7 +5801,7 @@ export class Session {
     // Ordered before the agent dispatch so clients see the turn end
     // immediately rather than after the chain walk.
     this.closeUnsolicitedTurn("cancelled");
-    this.cancelPendingElicitations();
+    this.cancelPendingAgentRequests();
     // ^C with nothing in flight: the only thing left to stop is a chain
     // some earlier turn abandoned. The turn-end paths only ever see turns
     // that are actually running, so without this the keystroke is no
@@ -9612,7 +9621,7 @@ export class Session {
   }
 
   private markClosed(opts: { deleteRecord: boolean }): void {
-    this.cancelPendingElicitations();
+    this.cancelPendingAgentRequests();
     if (this.closed) {
       return;
     }
@@ -10523,7 +10532,12 @@ export class Session {
     return this.handlePermissionRequest(params);
   }
 
-  private async handlePermissionRequest(params: unknown): Promise<unknown> {
+  // fromAgent: the request is the agent's own, so it dies with the agent's
+  // turn (see cancelPendingAgentRequests). A transformer's prompt is not.
+  private async handlePermissionRequest(
+    params: unknown,
+    opts: { fromAgent?: boolean } = {},
+  ): Promise<unknown> {
     const initialClients = [...this.clients.values()];
     if (initialClients.length === 0) {
       throw withCode(
@@ -10548,6 +10562,11 @@ export class Session {
       // surfaces something meaningful.
       let outstanding = 0;
       let lastRealErr: unknown;
+      // A client that was asked has since disconnected (a reload, a closed
+      // tab). The request stays pending for whoever attaches next, and for
+      // the auto-approver, instead of failing the agent's tool call. It still
+      // ends on an answer, a turn cancel, an agent swap or a session close.
+      let dropped = false;
       const sessionId = this.sessionId;
 
       const settle = (fn: () => void): void => {
@@ -10557,6 +10576,7 @@ export class Session {
         settled = true;
         this.clearAttentionFlag("daemon", `permission:${requestId}`);
         this.permissionCallbacks.delete(requestId);
+        this.permissionCancellers.delete(requestId);
         fn();
       };
 
@@ -10575,6 +10595,7 @@ export class Session {
         );
         outbound.push({ client });
         outstanding++;
+        dropped = false;
         void response
           .then((result) => {
             outstanding--;
@@ -10600,10 +10621,14 @@ export class Session {
           })
           .catch((err) => {
             outstanding--;
+            if (client.connection.isClosed()) {
+              dropped = true;
+              return;
+            }
             if (!isAbstention(err)) {
               lastRealErr = err;
             }
-            if (outstanding === 0 && !settled) {
+            if (outstanding === 0 && !settled && !dropped) {
               const finalErr =
                 lastRealErr ??
                 withCode(
@@ -10621,6 +10646,23 @@ export class Session {
         options: options ?? null,
       });
       this.permissionCallbacks.set(requestId, sendTo);
+      if (opts.fromAgent === true) {
+        this.permissionCancellers.set(requestId, () => {
+          settle(() => {
+            const update = {
+              sessionUpdate: "permission_resolved",
+              ...(toolCallId !== undefined ? { toolCallId } : {}),
+              outcome: { kind: "cancelled" },
+            };
+            for (const o of outbound) {
+              void o.client.connection
+                .notify("session/update", { sessionId, update })
+                .catch(() => undefined);
+            }
+            resolve({ outcome: { outcome: "cancelled" } });
+          });
+        });
+      }
 
       for (const client of initialClients) {
         sendTo(client);

@@ -185,6 +185,102 @@ describe("Session", () => {
       });
     });
 
+    it("keeps a permission request pending when its only client drops, and redelivers it to the next", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const first = makeClient({ name: "browser" });
+      session.attach(first.client, "full");
+      let settled = false;
+      const requestPromise = mock
+        .triggerRequest("session/request_permission", {
+          sessionId: "u_agent",
+          toolCall: { name: "edit_file", toolCallId: "tc_1" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        })
+        .then((r) => {
+          settled = true;
+          return r;
+        });
+      await new Promise((r) => setImmediate(r));
+
+      session.detach(first.client.clientId);
+      await first.conn.close();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).toBe(false);
+
+      const next = makeClient({ name: "approver" });
+      await session.attach(next.client, "full");
+      session.replayPendingPermissions(next.client);
+      await new Promise((r) => setImmediate(r));
+      const req = next.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "session/request_permission",
+      );
+      expect(req).toBeDefined();
+      next.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { outcome: { outcome: "selected", optionId: "allow" } },
+      });
+      await expect(requestPromise).resolves.toMatchObject({
+        outcome: { optionId: "allow" },
+      });
+    });
+
+    it("still fails a permission request at once when no client is attached", async () => {
+      const { mock } = makeSession("sess_hyd", "u_agent");
+      await expect(
+        mock.triggerRequest("session/request_permission", {
+          sessionId: "u_agent",
+          toolCall: { name: "edit_file" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCodes.PermissionDenied });
+    });
+
+    it("cancels the agent's pending permission on session/cancel and tells the clients", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient();
+      session.attach(a.client, "full");
+      const requestPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_agent",
+        toolCall: { name: "edit_file", toolCallId: "tc_2" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      await session.cancel(a.client.clientId);
+      await expect(requestPromise).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+      await new Promise((r) => setImmediate(r));
+      expect(
+        a.stream.sent.some(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as { update?: { sessionUpdate?: string; toolCallId?: string } }).update
+              ?.sessionUpdate === "permission_resolved",
+        ),
+      ).toBe(true);
+      expect(session.hasWorkInFlight).toBe(false);
+    });
+
+    it("does not cancel a transformer's permission prompt when the turn is cancelled", async () => {
+      const { session } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient();
+      session.attach(a.client, "full");
+      let settled = false;
+      void session
+        .requestPermissionFromClients({
+          sessionId: "sess_hyd",
+          toolCall: { name: "plan_step", toolCallId: "tc_3" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        })
+        .then(() => {
+          settled = true;
+        });
+      await new Promise((r) => setImmediate(r));
+      await session.cancel(a.client.clientId);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).toBe(false);
+    });
+
     it("fans elicitation/create out to clients, tags it, and settles on the first real answer", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const a = makeClient(undefined, { elicitationForm: true });
