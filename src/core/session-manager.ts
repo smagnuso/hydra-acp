@@ -114,7 +114,7 @@ import {
   type ModelVerb,
 } from "./model-verb.js";
 import {
-  HYDRA_CLIENT_CAPABILITIES,
+  clientCapabilitiesFor,
   type AgentCapabilities,
   type AuthMethod,
   type SessionListEntry,
@@ -241,6 +241,9 @@ export interface CreateSessionParams {
   // cold-resurrect. An explicit empty map `{}` clears any persisted
   // value (overwrite semantics, not merge).
   forwardedEnv?: Record<string, string>;
+  // `false` keeps the form-elicitation capability from this session's agent.
+  // Persisted on the record and reapplied on respawn / cold-resurrect.
+  elicitation?: boolean;
   // Request an isolated workspace instead of running directly in `cwd`.
   // Arrives from _meta["hydra-acp"].workspace on session/new. When it
   // succeeds, `cwd` above is treated as the SOURCE tree and the session's
@@ -377,6 +380,8 @@ export interface ResurrectParams {
   // Env to forward into the spawn. Mirrors CreateSessionParams.forwardedEnv;
   // loadFromDisk() reads it off the persisted record.
   forwardedEnv?: Record<string, string>;
+  // Mirrors CreateSessionParams.elicitation.
+  elicitation?: boolean;
   // Persisted compaction state restored from meta.json on resurrect.
   // Passed to Session so buildStateSnapshotReplay can deliver it to
   // freshly-attaching clients before any live broadcast fires.
@@ -419,6 +424,8 @@ export interface SessionListDelta extends SessionListing {
 
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
+  // See HydraConfig.elicitation; undefined is on.
+  elicitation?: boolean;
   // See DaemonConfig.backgroundTaskTracking; undefined is auto.
   backgroundTaskTracking?: boolean;
   // Fast-reap window for a session with zero attached clients that has
@@ -583,6 +590,14 @@ export class SessionManager {
     description?: string;
   }> = [];
 
+  private readonly elicitationEnabled: boolean;
+
+  // Capabilities for one agent spawn: the daemon setting and the session's
+  // own opt-out must both allow form elicitation.
+  private clientCaps(sessionElicitation?: boolean): Record<string, unknown> {
+    return clientCapabilitiesFor(this.elicitationEnabled && sessionElicitation !== false);
+  }
+
   constructor(
     private registry: Registry,
     spawner?: AgentSpawner,
@@ -600,6 +615,7 @@ export class SessionManager {
     });
     this.workspaceSnapshotsDisabled = options.disableWorkspaceSnapshots === true;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.elicitationEnabled = options.elicitation !== false;
     this.backgroundTaskTracking = options.backgroundTaskTracking;
     this.orphanTimeoutMs = options.orphanTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
@@ -1240,6 +1256,7 @@ export class SessionManager {
       configDefaults: params.configDefaults,
       onInstallProgress: params.onInstallProgress,
       forwardedEnv: params.forwardedEnv,
+      elicitation: params.elicitation,
       selfSessionId: sessionId,
     });
 
@@ -1323,6 +1340,7 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       forwardedEnv: params.forwardedEnv,
+      elicitation: params.elicitation,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
@@ -1457,7 +1475,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
+          clientCapabilities: this.clientCaps(params.elicitation),
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -1698,6 +1716,7 @@ export class SessionManager {
       forkedFromMessageId: params.forkedFromMessageId,
       side: params.side,
       forwardedEnv: params.forwardedEnv,
+      elicitation: params.elicitation,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
@@ -1744,6 +1763,7 @@ export class SessionManager {
       mcpServers: params.mcpServers ?? [],
       onInstallProgress: params.onInstallProgress,
       forwardedEnv: params.forwardedEnv,
+      elicitation: params.elicitation,
       // Pass the persisted model so bootstrapAgent calls session/set_model
       // during session/new — the only context where the agent reliably
       // honours the switch.
@@ -1859,6 +1879,7 @@ export class SessionManager {
       forkedFromMessageId: params.forkedFromMessageId,
       side: params.side,
       forwardedEnv: params.forwardedEnv,
+      elicitation: params.elicitation,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
@@ -4778,7 +4799,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
+          clientCapabilities: this.clientCaps(),
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -5279,6 +5300,8 @@ export class SessionManager {
     // (brand-new, agent switch, import re-seed, /hydra restart) so
     // resurrect paths and respawn carry the same env.
     forwardedEnv?: Record<string, string>;
+    // Mirrors CreateSessionParams.elicitation.
+    elicitation?: boolean;
     // The hydra session this agent is being spawned for. Exported into
     // the child as HYDRA_ACP_SESSION so anything the agent shells out to
     // can identify itself without being told.
@@ -5327,7 +5350,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
+          clientCapabilities: this.clientCaps(params.elicitation),
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -5599,6 +5622,7 @@ export class SessionManager {
       cwd: string;
       agentArgs?: string[];
       forwardedEnv?: Record<string, string>;
+      elicitation?: boolean;
       mcpServers?: unknown[];
       selfSessionId?: string;
     },
@@ -5629,7 +5653,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
+          clientCapabilities: this.clientCaps(params.elicitation),
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -5846,7 +5870,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
+          clientCapabilities: this.clientCaps(),
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -6222,6 +6246,7 @@ export class SessionManager {
       side: record.side,
       forkSynthesisState: record.forkSynthesisState,
       forwardedEnv: record.forwardedEnv,
+      elicitation: record.elicitation,
       // `cwd` above is already the workspace path, so the agent respawns
       // in the right directory without this. Restoring the binding is
       // what keeps the resurrected session FINDABLE by its source tree:
@@ -8745,6 +8770,7 @@ export function mergeForPersistence(
     // matters if the Session somehow has no field at all — shouldn't
     // happen, but keeps round-trip safe for old records.
    forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
+    elicitation: session.elicitation ?? existing?.elicitation,
     // The live Session is AUTHORITATIVE here, deliberately unlike
     // forwardedEnv above: no `?? existing?.workspace` fallback.
     //

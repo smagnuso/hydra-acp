@@ -117,6 +117,8 @@ export const CONFIG_TIERS: { [K in keyof HydraConfig]-?: ConfigKeyTier } = {
   defaultTransformers: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   disableWorkspaceSnapshots: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   compressToolContent: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
+  // Read when an agent process is spawned, so a change reaches new agents only.
+  elicitation: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   // Child processes started at boot. Reconciling a changed set is
   // plausible (extension start/stop/restart already exist) but nobody has
   // built it, so say so rather than pretend.

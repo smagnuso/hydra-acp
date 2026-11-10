@@ -169,6 +169,9 @@ export interface SpawnReplacementAgentParams {
   // restart, forceCancel). Carried from Session.forwardedEnv so the
   // replacement process matches the persisted spawn-env.
   forwardedEnv?: Record<string, string>;
+  // `false` keeps the form-elicitation capability from the fresh agent, as it
+  // was kept from the one it replaces. Carried from Session.elicitation.
+  elicitation?: boolean;
   // MCP server descriptors passed to session/new on the fresh agent.
   // Used by swapUpstream to bootstrap a new upstream session with the
   // same tooling context as the current one.
@@ -404,6 +407,9 @@ export interface SessionInit {
   // a fresh session/attach with _meta["hydra-acp"].env replace this
   // wholesale (including an explicit empty map to clear).
   forwardedEnv?: Record<string, string>;
+  // `false` when this session's agent must not be offered form elicitation.
+  // Persisted on the record and reapplied on respawn / cold-resurrect.
+  elicitation?: boolean;
   // Isolated-workspace binding, when the session has one. `cwd` above
   // must already be workspace.path; SessionManager resolves that before
   // constructing the Session.
@@ -1267,6 +1273,8 @@ export class Session {
   // spawn, and by SessionManager.mergeForPersistence to round-trip
   // through meta.json.
   forwardedEnv: Record<string, string> | undefined;
+  // See SessionInit.elicitation. Fixed for the life of the session.
+  readonly elicitation: boolean | undefined;
   // Set when this session runs in an isolated workspace. Metadata only:
   // deliberately NOT threaded into any spawn path, because `cwd` above is
   // already the workspace path, so respawn, cold resurrect, and
@@ -1640,6 +1648,7 @@ export class Session {
     this.forkHook = init.forkHook;
     this.mcpServersConfig = init.mcpServers;
     this.forwardedEnv = init.forwardedEnv;
+    this.elicitation = init.elicitation;
     this.availableAgentsFn = init.availableAgents;
     this.listSessions = init.listSessions;
     this.logger = init.logger;
@@ -2502,6 +2511,7 @@ export class Session {
       cwd,
       agentArgs,
       ...(forwardedEnv ? { forwardedEnv } : {}),
+      ...(this.elicitation === false ? { elicitation: false } : {}),
       mcpServers,
     });
 
@@ -2871,6 +2881,7 @@ export class Session {
       cwd,
       agentArgs,
       ...(forwardedEnv ? { forwardedEnv } : {}),
+      ...(this.elicitation === false ? { elicitation: false } : {}),
       mcpServers: this.mcpServersConfig ?? [],
     });
 
@@ -2957,6 +2968,7 @@ export class Session {
       cwd: this.cwd,
       agentArgs: this.agentArgs,
       ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
+      ...(this.elicitation === false ? { elicitation: false } : {}),
       mcpServers: this.mcpServersConfig ?? [],
     });
 
@@ -9145,6 +9157,7 @@ export class Session {
       cwd: this.cwd,
       agentArgs: this.agentArgs,
       ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
+      ...(this.elicitation === false ? { elicitation: false } : {}),
     });
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent, { respawn: true });

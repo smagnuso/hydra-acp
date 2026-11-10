@@ -852,6 +852,11 @@ export const HydraConfig = z.object({
   // Per-agent pin overrides applied to registry agents (e.g. force a
   // specific npm version of opencode). Keyed by agent id.
   agentOverrides: z.record(z.string(), AgentOverrideConfig).default({}),
+  // Offer agents the form-elicitation capability (ACP elicitation/create),
+  // which is what lets claude-acp expose AskUserQuestion. False never sends
+  // it. Applies when an agent process is spawned; a session can also opt out
+  // for itself (session/new _meta["hydra-acp"].elicitation: false).
+  elicitation: z.boolean().optional(),
   defaultAgent: z.string().default("opencode"),
   // Optional per-agent default session configuration, seeded once at
   // fresh session/new (never on resurrect). Keyed by agent id; each

@@ -309,6 +309,11 @@ export interface HydraMeta {
   // an empty-history session show immediately. Honoured only on
   // session/new; the don't-promote direction lives on `ancillary` below.
   interactive?: boolean;
+  // `false` on session/new keeps the form-elicitation capability from being
+  // offered to this session's agent (a client that cannot answer forms, such
+  // as `hydra cat`, sets it so the agent never asks). Persisted with the
+  // session; absent means the daemon's `elicitation` setting decides.
+  elicitation?: boolean;
   // Set on a session/prompt by a hydra component acting as an external
   // ACP client (today only `hydra cat`) to mark the turn as ancillary:
   // it does NOT promote an undecided session to interactive. Absent (the
@@ -602,6 +607,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.interactive === "boolean") {
     out.interactive = obj.interactive;
+  }
+  if (typeof obj.elicitation === "boolean") {
+    out.elicitation = obj.elicitation;
   }
   if (typeof obj.ancillary === "boolean") {
     out.ancillary = obj.ancillary;

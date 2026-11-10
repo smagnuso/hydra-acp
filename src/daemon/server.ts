@@ -286,6 +286,7 @@ export async function startDaemon(
     extensionCommands,
     defaultCwd: config.defaultCwd,
     disableWorkspaceSnapshots: config.disableWorkspaceSnapshots,
+    elicitation: config.elicitation,
   });
   const foreignSessions = new ForeignSessionRegistry(peerStore, undefined, {
     resolvesLocally: async (id) =>

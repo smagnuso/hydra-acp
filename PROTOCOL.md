@@ -1763,6 +1763,7 @@ The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything
 | `transformers` | `string[]` | Names of transformers to attach to the session chain. Resolves to live connections at session-creation time; missing names are silently skipped (fail-open). Falls back to `config.defaultTransformers`. |
 | `model` | `string` | One-shot model id applied via `session/set_model` at agent bootstrap. Ignored on resurrect. |
 | `mcpStdin` | `boolean` | Allocate a `SessionStreamBuffer` and inject a `hydra-acp-stdin` HTTP MCP descriptor into the agent's `mcpServers`. Used by `hydra cat --stream`. |
+| `elicitation` | `boolean` | `false` keeps the form-elicitation capability from this session's agent (see [Elicitation](#elicitation-forms)). `cat` sets it for the sessions it creates, unless `--detach`. Persisted on the record and reapplied on respawn and cold resurrect. It can only turn the capability off: the daemon's `elicitation` setting is checked first. |
 | `interactive` | `boolean` | Initial value for the session's interactivity tristate. `cat` sets `false`; everything else leaves it undefined so the first user prompt promotes it to `true`. |
 | `resume` | `SessionResumeHints` | `{ upstreamSessionId, agentId, cwd, title?, agentArgs? }` — populated by the shim's reconnect path so the daemon can resurrect the session against the right agent. **Advisory, not authoritative**: see [Stale resume hints](#stale-resume-hints). |
 | `workspace` | `WorkspaceRequest` | Run this session in an isolated workspace instead of directly in `cwd`. See [Workspace isolation](#workspace-isolation). |
@@ -3314,7 +3315,7 @@ The notification is *not* keyed by `sessionId` — the session may not exist yet
 
 Hydra implements the ACP `elicitation/create` method (form mode) so agents can ask the user structured questions mid-turn. Claude Code's `AskUserQuestion` tool arrives this way; claude-acp only offers that tool to a client that advertises the capability. Spec: `ElicitationCapabilities`, `CreateElicitationRequest` and `CreateElicitationResponse` in the ACP schema.
 
-**Capability.** The daemon sends `clientCapabilities.elicitation: { "form": {} }` on every agent `initialize`. URL mode is not advertised.
+**Capability.** The daemon sends `clientCapabilities.elicitation: { "form": {} }` on every agent `initialize`. URL mode is not advertised. Two switches turn it off for an agent process, and either is enough: `elicitation: false` in the daemon config (for every agent), or `_meta["hydra-acp"].elicitation: false` on `session/new` (for that session, persisted with it). It is read when the agent is spawned, so a change reaches new agents and respawns, not a running process. With it off, claude-acp withholds `AskUserQuestion` from the model.
 
 **Client opt-in.** A client declares form support on its own `initialize` with `clientCapabilities.elicitation.form` (any non-null value, `{}` is the norm), and only those clients are sent `elicitation/create`. A read-only attachment never counts as capable, whatever it advertised. The `/acp` WebSocket is ACP, so this is the same field a stdio editor sends, and `hydra-acp shim` forwards the editor's `initialize` unchanged. A client that never advertises it is never sent a form request.
 
