@@ -3460,6 +3460,10 @@ async function runSession(
     finishElicitation({ action: "cancel" });
   };
 
+  // A view-only attachment cannot answer, so it does not opt in.
+  const elicitationCapability =
+    opts.readonly === true ? {} : { elicitation: { form: {} } };
+
   conn.onRequest("elicitation/create", async (params) => {
     const parsed = parseElicitation(params);
     if (teardownStarted || opts.readonly === true || parsed === null) {
@@ -3505,6 +3509,7 @@ async function runSession(
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
+        ...elicitationCapability,
       },
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
     })) as {
@@ -10873,6 +10878,7 @@ async function runSession(
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
+          ...elicitationCapability,
         },
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       },

@@ -3315,7 +3315,11 @@ Hydra implements the ACP `elicitation/create` method (form mode) so agents can a
 
 **Capability.** The daemon sends `clientCapabilities.elicitation: { "form": {} }` on every agent `initialize`. URL mode is not advertised.
 
-**Fan-out.** An agent's `elicitation/create` is broadcast to every attached client as a request, exactly like `session/request_permission`: the first real answer wins and its result is returned to the agent. A client that cannot render forms answers `-32601 MethodNotFound`, which is abstention, not a vote. A result without a string `action` counts as abstention too. If every client abstains or errors, or none is attached, the agent receives `{ "action": "cancel" }` (not an error). A client that attaches while a form is pending is sent it after history replay.
+**Client opt-in.** A client declares form support on its own `initialize` with `clientCapabilities.elicitation.form` (any non-null value, `{}` is the norm), and only those clients are sent `elicitation/create`. The `/acp` WebSocket is ACP, so this is the same field a stdio editor sends, and `hydra-acp shim` forwards the editor's `initialize` unchanged. A client that never advertises it is never sent a form request.
+
+**Clients without form support.** Each one is sent the question as a live-only synthetic `agent_message_chunk` (`_meta["hydra-acp"].synthetic: true`, not recorded). When the form settles, a recorded synthetic line carrying the question and the outcome ("Answered by <client>: ...", "Declined", "Not answered") goes to every client and into history. If no attached client advertised form support, the question is recorded with a note that it was not answered and the agent receives `{ "action": "cancel" }`.
+
+**Fan-out.** An agent's `elicitation/create` is broadcast to every capable attached client as a request, exactly like `session/request_permission`: the first real answer wins and its result is returned to the agent. A client that cannot render forms answers `-32601 MethodNotFound`, which is abstention, not a vote. A result without a string `action` counts as abstention too. If every client abstains or errors, or none is attached, the agent receives `{ "action": "cancel" }` (not an error). A client that attaches while a form is pending is sent it after history replay.
 
 The forwarded params are the agent's own (`mode`, `message`, `requestedSchema`, optional `toolCallId`) with `sessionId` rewritten to the hydra session id, plus `_meta["hydra-acp"].elicitationId`, a daemon-minted id used to correlate dismissal.
 

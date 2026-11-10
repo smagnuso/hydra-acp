@@ -75,6 +75,10 @@ import {
   type ConfigOption,
   type ConfigOptionValue,
 } from "./hydra-commands.js";
+import {
+  formatElicitationOutcome,
+  formatElicitationQuestion,
+} from "./elicitation-text.js";
 import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import {
   MODEL_VERB_SET_MODEL,
@@ -149,6 +153,9 @@ export interface AttachedClient {
   // from this connection (session/prompt, session/cancel, etc.).
   // Set during session/attach from SessionAttachParams.readonly.
   readonly?: boolean;
+  // True when the connection advertised clientCapabilities.elicitation.form
+  // on initialize. Only these clients are sent `elicitation/create`.
+  elicitationForm?: boolean;
 }
 
 export type CachedNotification = HistoryEntry;
@@ -10605,13 +10612,22 @@ export class Session {
   }
 
   // Agent-initiated `elicitation/create` (form mode). Same race as a
-  // permission request: broadcast to every attached client, first real
-  // answer wins, -32601 is abstention. Unlike permissions, "nobody
+  // permission request among the clients that advertised form support:
+  // first real answer wins, -32601 is abstention. Clients without form
+  // support are shown the question as text (live only), and the settled
+  // outcome is recorded into the transcript for everyone. "Nobody
   // answered" settles as `{ action: "cancel" }` rather than an error, so
   // the agent sees a dismissed form instead of a failed call.
   private async handleElicitationRequest(params: unknown): Promise<unknown> {
-    const initialClients = [...this.clients.values()];
+    const allClients = [...this.clients.values()];
+    if (allClients.length === 0) {
+      return { action: "cancel" };
+    }
+    const initialClients = allClients.filter((c) => c.elicitationForm === true);
     if (initialClients.length === 0) {
+      this.recordElicitationText(
+        `${formatElicitationQuestion(params)}\n_No attached client can show a form, so this was not answered. Reply here to answer._`,
+      );
       return { action: "cancel" };
     }
     const requestId = generateMessageId();
@@ -10623,6 +10639,22 @@ export class Session {
       _meta: { ...prevMeta, "hydra-acp": { ...prevHydra, elicitationId: requestId } },
     };
     const sessionId = this.sessionId;
+    const question = formatElicitationQuestion(params);
+    for (const c of allClients) {
+      if (c.elicitationForm === true) {
+        continue;
+      }
+      void c.connection
+        .notify("session/update", {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `\n${question}\n` },
+            _meta: { "hydra-acp": { synthetic: true } },
+          },
+        })
+        .catch(() => undefined);
+    }
     return new Promise<unknown>((resolve) => {
       let settled = false;
       let outstanding = 0;
@@ -10640,7 +10672,7 @@ export class Session {
       };
 
       const sendTo = (client: AttachedClient): void => {
-        if (settled) {
+        if (settled || client.elicitationForm !== true) {
           return;
         }
         outbound.push(client);
@@ -10654,7 +10686,10 @@ export class Session {
               // A client whose catch-all answers every unknown method with a
               // result-shaped error is abstaining, not voting.
               if (outstanding === 0) {
-                settle(() => resolve({ action: "cancel" }));
+                settle(() => {
+                  this.recordElicitationText(formatElicitationOutcome(params, { action: "cancel" }, undefined));
+                  resolve({ action: "cancel" });
+                });
               }
               return;
             }
@@ -10673,13 +10708,19 @@ export class Session {
                   .notify("session/update", { sessionId, update })
                   .catch(() => undefined);
               }
+              this.recordElicitationText(
+                formatElicitationOutcome(params, result, client.clientInfo?.name),
+              );
               resolve(result);
             });
           })
           .catch(() => {
             outstanding--;
             if (outstanding === 0) {
-              settle(() => resolve({ action: "cancel" }));
+              settle(() => {
+                this.recordElicitationText(formatElicitationOutcome(params, { action: "cancel" }, undefined));
+                resolve({ action: "cancel" });
+              });
             }
           });
       };
@@ -10703,12 +10744,25 @@ export class Session {
               .notify("session/update", { sessionId, update })
               .catch(() => undefined);
           }
+          this.recordElicitationText(formatElicitationOutcome(params, { action: "cancel" }, undefined));
           resolve({ action: "cancel" });
         });
       });
       for (const client of initialClients) {
         sendTo(client);
       }
+    });
+  }
+
+  // A daemon-written line in the transcript, recorded and sent to everyone.
+  private recordElicitationText(text: string): void {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `\n${text}\n` },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
     });
   }
 

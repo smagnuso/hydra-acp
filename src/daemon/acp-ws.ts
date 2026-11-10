@@ -94,6 +94,8 @@ interface ClientState {
   // manager.create on session/new so the originating process is
   // persisted with the session (used by list-view filters).
   clientInfo?: { name: string; version?: string };
+  // clientCapabilities.elicitation.form advertised on initialize.
+  elicitationForm?: boolean;
   attached: Map<
     string,
     {
@@ -459,6 +461,15 @@ export function registerAcpWsEndpoint(
             : {}),
         };
       }
+      const elicitation = params.clientCapabilities?.elicitation as
+        | { form?: unknown }
+        | null
+        | undefined;
+      state.elicitationForm =
+        elicitation !== null &&
+        typeof elicitation === "object" &&
+        elicitation.form !== undefined &&
+        elicitation.form !== null;
       // If the connecting process reported a version and the daemon knows its
       // identity, push the version back to the appropriate manager.
       const version = params.clientInfo?.version;
@@ -3656,12 +3667,12 @@ function bindClientToSession(
   clientInfo?: { name: string; version?: string },
   callerClientId?: string,
 ): AttachedClient {
-  void state;
   void session;
   return {
     clientId: callerClientId ?? `cli_${nanoid(8)}`,
     connection,
     clientInfo,
+    ...(state.elicitationForm === true ? { elicitationForm: true } : {}),
   };
 }
 

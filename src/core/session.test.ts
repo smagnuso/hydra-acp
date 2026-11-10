@@ -73,7 +73,10 @@ function isStateSnapshotEntry(entry: { method: string; params: unknown }): boole
   return typeof u?.sessionUpdate === "string" && STATE_SNAPSHOT_KINDS.has(u.sessionUpdate);
 }
 
-function makeClient(clientInfo?: { name: string; version?: string }): {
+function makeClient(
+  clientInfo?: { name: string; version?: string },
+  opts: { elicitationForm?: boolean } = {},
+): {
   client: AttachedClient;
   conn: JsonRpcConnection;
   stream: ReturnType<typeof makeControlledStream>;
@@ -84,6 +87,7 @@ function makeClient(clientInfo?: { name: string; version?: string }): {
     clientId: `c_${Math.random().toString(36).slice(2, 8)}`,
     connection: conn,
     ...(clientInfo ? { clientInfo } : {}),
+    ...(opts.elicitationForm === true ? { elicitationForm: true } : {}),
   };
   return { client, conn, stream };
 }
@@ -183,8 +187,8 @@ describe("Session", () => {
 
     it("fans elicitation/create out to clients, tags it, and settles on the first real answer", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient();
-      const b = makeClient();
+      const a = makeClient(undefined, { elicitationForm: true });
+      const b = makeClient(undefined, { elicitationForm: true });
       session.attach(a.client, "full");
       session.attach(b.client, "full");
 
@@ -239,7 +243,7 @@ describe("Session", () => {
 
     it("cancels a pending elicitation on session/cancel and tells the clients", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient();
+      const a = makeClient(undefined, { elicitationForm: true });
       session.attach(a.client, "full");
       const requestPromise = mock.triggerRequest("elicitation/create", {
         mode: "form",
@@ -263,7 +267,7 @@ describe("Session", () => {
 
     it("answers elicitation/create with cancel when every client abstains", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient();
+      const a = makeClient(undefined, { elicitationForm: true });
       session.attach(a.client, "full");
       const requestPromise = mock.triggerRequest("elicitation/create", {
         mode: "form",
@@ -280,6 +284,71 @@ describe("Session", () => {
         error: { code: -32601, message: "nope" },
       });
       await expect(requestPromise).resolves.toEqual({ action: "cancel" });
+    });
+
+    it("shows the question as text to clients without form support and records the outcome for all", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const capable = makeClient({ name: "tui" }, { elicitationForm: true });
+      const plain = makeClient();
+      session.attach(capable.client, "full");
+      session.attach(plain.client, "full");
+
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which cache?",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            q: { type: "string", oneOf: [{ const: "r", title: "Redis" }, { const: "m", title: "Memcached" }] },
+          },
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const text = (sent: typeof plain.stream.sent): string[] =>
+        sent
+          .filter((m) => "method" in m && m.method === "session/update")
+          .map(
+            (m) =>
+              (m as { params: { update: { content?: { text?: string } } } }).params.update
+                .content?.text ?? "",
+          );
+      expect(plain.stream.sent.some((m) => "method" in m && m.method === "elicitation/create")).toBe(false);
+      expect(text(plain.stream.sent).some((t) => t.includes("The agent asked") && t.includes("Redis / Memcached"))).toBe(true);
+      expect(text(capable.stream.sent).some((t) => t.includes("The agent asked"))).toBe(false);
+
+      const req = capable.stream.sent.find(
+        (m): m is JsonRpcRequest => "method" in m && m.method === "elicitation/create",
+      )!;
+      capable.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (req as { id: string | number }).id,
+        result: { action: "accept", content: { q: "r" } },
+      });
+      await requestPromise;
+      await new Promise((r) => setImmediate(r));
+      for (const c of [capable, plain]) {
+        expect(text(c.stream.sent).some((t) => t.includes("Answered by tui") && t.includes("Redis"))).toBe(true);
+      }
+    });
+
+    it("records the question and cancels when no client can show a form", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const plain = makeClient();
+      session.attach(plain.client, "full");
+      const result = await mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Which cache?",
+        requestedSchema: { type: "object", properties: {} },
+      });
+      expect(result).toEqual({ action: "cancel" });
+      expect(
+        plain.stream.sent.some(
+          (m) =>
+            "method" in m &&
+            JSON.stringify(m.params).includes("No attached client can show a form"),
+        ),
+      ).toBe(true);
     });
 
     it("rewrites permission requests bearing a subagent (foreign) sessionId to the hydra session id", async () => {
