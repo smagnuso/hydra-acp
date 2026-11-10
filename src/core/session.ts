@@ -76,10 +76,9 @@ import {
   type ConfigOptionValue,
 } from "./hydra-commands.js";
 import {
-  answerFromText,
+  TextAnswerer,
   formatElicitationOutcome,
   formatElicitationQuestion,
-  replyHint,
 } from "./elicitation-text.js";
 import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import {
@@ -1173,7 +1172,7 @@ export class Session {
   private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCallbacks = new Map<string, (client: AttachedClient) => void>();
   private elicitationCancellers = new Map<string, () => void>();
-  private elicitationQuestions = new Map<string, string>();
+  private elicitationQuestions = new Map<string, () => string>();
   private elicitationAnswerers = new Map<
     string,
     (client: AttachedClient, text: string) => boolean
@@ -3537,7 +3536,7 @@ export class Session {
         } else {
           const question = this.elicitationQuestions.get(id);
           if (question !== undefined) {
-            this.sendElicitationQuestionText(client, question);
+            this.sendElicitationQuestionText(client, question());
           }
         }
       }
@@ -10657,11 +10656,13 @@ export class Session {
       _meta: { ...prevMeta, "hydra-acp": { ...prevHydra, elicitationId: requestId } },
     };
     const sessionId = this.sessionId;
-    const question = formatElicitationQuestion(params);
+    const stepper = TextAnswerer.create(params);
+    const question = (): string =>
+      stepper !== null ? stepper.prompt() : formatElicitationQuestion(params);
     this.elicitationQuestions.set(requestId, question);
     for (const c of allClients) {
       if (!canAnswerElicitation(c)) {
-        this.sendElicitationQuestionText(c, question);
+        this.sendElicitationQuestionText(c, question());
       }
     }
     return new Promise<unknown>((resolve) => {
@@ -10745,14 +10746,28 @@ export class Session {
         message: base.message ?? null,
       });
       this.elicitationCallbacks.set(requestId, sendTo);
-      this.elicitationAnswerers.set(requestId, (client, text) => {
-        const response = answerFromText(params, text);
-        if (settled || response === null) {
-          return false;
-        }
-        resolveFrom(client, response);
-        return true;
-      });
+      if (stepper !== null) {
+        this.elicitationAnswerers.set(requestId, (client, text) => {
+          if (settled) {
+            return false;
+          }
+          const step = stepper.reply(text);
+          if (step.type === "done") {
+            resolveFrom(client, step.response);
+            return true;
+          }
+          if (step.type === "retry") {
+            this.sendElicitationQuestionText(client, step.message);
+            return true;
+          }
+          for (const c of this.clients.values()) {
+            if (!canAnswerElicitation(c) && c.readonly !== true) {
+              this.sendElicitationQuestionText(c, step.prompt);
+            }
+          }
+          return true;
+        });
+      }
       // Turn cancel or agent loss: the agent no longer awaits this form, so
       // close it on every client instead of leaving it up.
       this.elicitationCancellers.set(requestId, () => {

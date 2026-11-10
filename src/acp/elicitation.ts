@@ -20,6 +20,8 @@ interface FieldBase {
   customKey?: string;
 }
 
+export type TextField = Extract<ElicitationField, { kind: "text" }>;
+
 export type ElicitationField =
   | (FieldBase & { kind: "single"; options: ElicitationOption[] })
   | (FieldBase & {
@@ -201,3 +203,73 @@ export function parseElicitation(params: unknown): ParsedElicitation | null {
   return { message: oneLine(str(params.message) ?? "The agent has a question"), fields };
 }
 
+
+const MAX_PATTERN_LENGTH = 256;
+const MAX_PATTERN_INPUT = 10_000;
+
+// Null when the text is acceptable. The pattern is an ACP extension whose
+// evaluation must be bounded, so an oversized pattern or input is skipped
+// rather than handed to the regex engine.
+function checkString(
+  field: TextField,
+  text: string,
+): string | null {
+  if (field.minLength !== undefined && text.length < field.minLength) {
+    return `at least ${field.minLength} characters`;
+  }
+  if (field.maxLength !== undefined && text.length > field.maxLength) {
+    return `at most ${field.maxLength} characters`;
+  }
+  if (
+    field.pattern !== undefined &&
+    field.pattern.length <= MAX_PATTERN_LENGTH &&
+    text.length <= MAX_PATTERN_INPUT
+  ) {
+    try {
+      if (!new RegExp(field.pattern, "u").test(text)) {
+        return "does not match the expected format";
+      }
+    } catch {
+      void 0;
+    }
+  }
+  switch (field.format) {
+    case "email":
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text) ? null : "not an email address";
+    case "uri":
+      return URL.canParse(text) ? null : "not a URI";
+    case "date":
+      return /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(Date.parse(text))
+        ? null
+        : "expected YYYY-MM-DD";
+    case "date-time":
+      return /^\d{4}-\d{2}-\d{2}T/.test(text) && !Number.isNaN(Date.parse(text))
+        ? null
+        : "expected an ISO 8601 date-time";
+    default:
+      return null;
+  }
+}
+
+
+// Parse and check one typed value for a text or number field.
+export function validateTextInput(
+  field: TextField,
+  text: string,
+): { value: string | number } | { error: string } {
+  if (field.numeric !== undefined) {
+    const n = Number(text);
+    if (!Number.isFinite(n) || (field.numeric === "integer" && !Number.isInteger(n))) {
+      return { error: field.numeric === "integer" ? "not an integer" : "not a number" };
+    }
+    if (field.minimum !== undefined && n < field.minimum) {
+      return { error: `at least ${field.minimum}` };
+    }
+    if (field.maximum !== undefined && n > field.maximum) {
+      return { error: `at most ${field.maximum}` };
+    }
+    return { value: n };
+  }
+  const problem = checkString(field, text);
+  return problem === null ? { value: text } : { error: problem };
+}

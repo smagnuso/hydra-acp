@@ -9,7 +9,7 @@ import type {
   ElicitationValue,
   ParsedElicitation,
 } from "../acp/elicitation.js";
-import { oneLine } from "../acp/elicitation.js";
+import { oneLine, validateTextInput } from "../acp/elicitation.js";
 import { LineEditor } from "./line-editor.js";
 import {
   handleFormKey,
@@ -33,53 +33,6 @@ export type ElicitationOutcome =
   | { type: "update" }
   | { type: "done"; response: Json }
   | { type: "noop" };
-
-const MAX_PATTERN_LENGTH = 256;
-const MAX_PATTERN_INPUT = 10_000;
-
-// Null when the text is acceptable. The pattern is an ACP extension whose
-// evaluation must be bounded, so an oversized pattern or input is skipped
-// rather than handed to the regex engine.
-function checkString(
-  field: ElicitationField & { kind: "text" },
-  text: string,
-): string | null {
-  if (field.minLength !== undefined && text.length < field.minLength) {
-    return `at least ${field.minLength} characters`;
-  }
-  if (field.maxLength !== undefined && text.length > field.maxLength) {
-    return `at most ${field.maxLength} characters`;
-  }
-  if (
-    field.pattern !== undefined &&
-    field.pattern.length <= MAX_PATTERN_LENGTH &&
-    text.length <= MAX_PATTERN_INPUT
-  ) {
-    try {
-      if (!new RegExp(field.pattern, "u").test(text)) {
-        return "does not match the expected format";
-      }
-    } catch {
-      void 0;
-    }
-  }
-  switch (field.format) {
-    case "email":
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text) ? null : "not an email address";
-    case "uri":
-      return URL.canParse(text) ? null : "not a URI";
-    case "date":
-      return /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(Date.parse(text))
-        ? null
-        : "expected YYYY-MM-DD";
-    case "date-time":
-      return /^\d{4}-\d{2}-\d{2}T/.test(text) && !Number.isNaN(Date.parse(text))
-        ? null
-        : "expected an ISO 8601 date-time";
-    default:
-      return null;
-  }
-}
 
 const OTHER_LABEL = "Other (type an answer)";
 const SKIP_LABEL = "Skip this question";
@@ -257,27 +210,11 @@ export class ElicitationWizard {
       }
       return this.advance();
     }
-    if (field.numeric !== undefined) {
-      const n = Number(text);
-      if (!Number.isFinite(n) || (field.numeric === "integer" && !Number.isInteger(n))) {
-        this.error = field.numeric === "integer" ? "not an integer" : "not a number";
-        this.state = { ...this.state, title: this.pageTitle() };
-        return { type: "update" };
-      }
-      if (field.minimum !== undefined && n < field.minimum) {
-        return this.reject(`at least ${field.minimum}`);
-      }
-      if (field.maximum !== undefined && n > field.maximum) {
-        return this.reject(`at most ${field.maximum}`);
-      }
-      this.answers[field.key] = n;
-      return this.advance();
+    const checked = validateTextInput(field, text);
+    if ("error" in checked) {
+      return this.reject(checked.error);
     }
-    const problem = checkString(field, text);
-    if (problem !== null) {
-      return this.reject(problem);
-    }
-    this.answers[field.key] = text;
+    this.answers[field.key] = checked.value;
     return this.advance();
   }
 

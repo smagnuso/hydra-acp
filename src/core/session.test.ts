@@ -399,6 +399,38 @@ describe("Session", () => {
       expect(JSON.stringify(capable.stream.sent)).toContain("Answered by editor");
     });
 
+    it("walks a multi-question form for a plain client one question at a time", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const capable = makeClient({ name: "tui" }, { elicitationForm: true });
+      const plain = makeClient({ name: "editor" });
+      session.attach(capable.client, "full");
+      session.attach(plain.client, "full");
+      const opts = [{ const: "a", title: "Alpha" }, { const: "b", title: "Beta" }];
+      const requestPromise = mock.triggerRequest("elicitation/create", {
+        mode: "form",
+        message: "Two things",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            one: { type: "string", title: "First", oneOf: opts },
+            two: { type: "string", title: "Second", oneOf: opts },
+          },
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(JSON.stringify(plain.stream.sent)).toContain("Question 1 of 2");
+
+      await session.prompt(plain.client.clientId, { sessionId: "sess_hyd", prompt: [{ type: "text", text: "1" }] });
+      expect(JSON.stringify(plain.stream.sent)).toContain("Question 2 of 2");
+      expect(JSON.stringify(capable.stream.sent)).not.toContain("elicitation_resolved");
+
+      await session.prompt(plain.client.clientId, { sessionId: "sess_hyd", prompt: [{ type: "text", text: "beta" }] });
+      await expect(requestPromise).resolves.toEqual({
+        action: "accept",
+        content: { one: "a", two: "b" },
+      });
+    });
+
     it("records the question and cancels when no client can show a form", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const plain = makeClient();

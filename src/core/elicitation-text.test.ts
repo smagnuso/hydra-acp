@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerFromText, formatElicitationOutcome, formatElicitationQuestion } from "./elicitation-text.js";
+import { TextAnswerer, formatElicitationOutcome, formatElicitationQuestion } from "./elicitation-text.js";
 
 const opts = [
   { const: "Redis", title: "Redis" },
@@ -14,16 +14,18 @@ const single = (extra: Record<string, unknown> = {}): unknown => ({
   },
 });
 
-describe("answerFromText", () => {
-  it("matches an option by number or label", () => {
-    expect(answerFromText(single(), "2")).toEqual({ action: "accept", content: { question_0: "Memcached" } });
-    expect(answerFromText(single(), " redis ")).toEqual({ action: "accept", content: { question_0: "Redis" } });
+const ask = (params: unknown): TextAnswerer => TextAnswerer.create(params)!;
+
+describe("TextAnswerer", () => {
+  it("answers a single select by number or label", () => {
+    expect(ask(single()).reply("2")).toEqual({ type: "done", response: { action: "accept", content: { question_0: "Memcached" } } });
+    expect(ask(single()).reply(" redis ")).toEqual({ type: "done", response: { action: "accept", content: { question_0: "Redis" } } });
   });
 
-  it("falls back to the custom slot only when the form has one", () => {
-    expect(answerFromText(single(), "valkey")).toBeNull();
+  it("uses the custom slot only when the form has one, else asks again", () => {
+    expect(ask(single()).reply("valkey").type).toBe("retry");
     const withOther = single({ question_0_custom: { type: "string" } });
-    expect(answerFromText(withOther, "valkey")).toEqual({ action: "accept", content: { question_0_custom: "valkey" } });
+    expect(ask(withOther).reply("valkey")).toEqual({ type: "done", response: { action: "accept", content: { question_0_custom: "valkey" } } });
   });
 
   it("handles multi-select lists", () => {
@@ -32,19 +34,43 @@ describe("answerFromText", () => {
       message: "Pick",
       requestedSchema: { type: "object", properties: { m: { type: "array", items: { anyOf: opts } } } },
     };
-    expect(answerFromText(multi, "1, memcached")).toEqual({ action: "accept", content: { m: ["Redis", "Memcached"] } });
-    expect(answerFromText(multi, "nope")).toBeNull();
+    expect(ask(multi).reply("1, memcached")).toEqual({ type: "done", response: { action: "accept", content: { m: ["Redis", "Memcached"] } } });
+    expect(ask(multi).reply("nope").type).toBe("retry");
   });
 
-  it("refuses multi-question and text forms", () => {
-    const two = {
+  it("walks several questions one after another, validating text fields", () => {
+    const form = {
+      mode: "form",
+      message: "Setup",
+      requestedSchema: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          cache: { type: "string", title: "Cache", oneOf: opts },
+          name: { type: "string", title: "Name", minLength: 3 },
+          n: { type: "integer", title: "Count", minimum: 1 },
+        },
+      },
+    };
+    const a = ask(form);
+    expect(a.prompt()).toContain("Question 1 of 3");
+    expect(a.prompt()).toContain("Setup");
+    expect(a.reply("1")).toMatchObject({ type: "next" });
+    expect(a.reply("ab")).toMatchObject({ type: "retry" });
+    expect(a.reply("abc")).toMatchObject({ type: "next" });
+    expect(a.reply("skip")).toEqual({
+      type: "done",
+      response: { action: "accept", content: { cache: "Redis", name: "abc" } },
+    });
+  });
+
+  it("will not skip a required question", () => {
+    const form = {
       mode: "form",
       message: "x",
-      requestedSchema: { type: "object", properties: { a: { type: "string", oneOf: opts }, b: { type: "string", oneOf: opts } } },
+      requestedSchema: { type: "object", required: ["t"], properties: { t: { type: "string" } } },
     };
-    expect(answerFromText(two, "1")).toBeNull();
-    const text = { mode: "form", message: "x", requestedSchema: { type: "object", properties: { t: { type: "string" } } } };
-    expect(answerFromText(text, "hello")).toBeNull();
+    expect(ask(form).reply("skip")).toEqual({ type: "done", response: { action: "accept", content: { t: "skip" } } });
   });
 });
 

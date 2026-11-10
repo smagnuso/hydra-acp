@@ -5,7 +5,9 @@
 import {
   oneLine,
   parseElicitation,
+  validateTextInput,
   type ElicitationField,
+  type ParsedElicitation,
 } from "../acp/elicitation.js";
 
 function optionLabel(field: ElicitationField, value: string): string {
@@ -105,55 +107,127 @@ function matchOption(
   return hit?.value ?? null;
 }
 
-// Read a typed reply as the answer to a single select question: an option
-// number or label (comma-separated for multi), else the free-text "Other"
-// slot when the form has one. Null when it does not fit, so the caller treats
-// the text as an ordinary prompt. Text fields and multi-question forms are
-// not answerable this way.
-export function answerFromText(
-  params: unknown,
-  text: string,
-): { action: "accept"; content: Record<string, unknown> } | null {
-  const parsed = parseElicitation(params);
-  const reply = text.trim();
-  if (parsed === null || parsed.fields.length !== 1 || reply.length === 0) {
-    return null;
-  }
-  const field = parsed.fields[0]!;
+function fieldHint(field: ElicitationField): string {
+  const skip = field.required ? "" : ", or `skip`";
   if (field.kind === "text") {
-    return null;
+    return `_Reply with ${field.numeric !== undefined ? "a number" : "a value"}${skip}._`;
   }
-  if (field.kind === "single") {
-    const value = matchOption(field, reply);
-    if (value !== null) {
-      const boolean =
-        field.options.length === 2 &&
-        field.options[0]!.value === "true" &&
-        field.options[1]!.value === "false";
-      return {
-        action: "accept",
-        content: { [field.key]: boolean ? value === "true" : value },
-      };
-    }
-  } else {
-    const matches = reply.split(",").map((t) => matchOption(field, t));
-    if (matches.every((m): m is string => m !== null)) {
-      return { action: "accept", content: { [field.key]: [...new Set(matches)] } };
-    }
-  }
-  if (field.customKey !== undefined) {
-    return { action: "accept", content: { [field.customKey]: reply } };
-  }
-  return null;
+  const how =
+    field.kind === "multi"
+      ? "option numbers or names, comma-separated"
+      : "an option number or name";
+  const other = field.customKey !== undefined ? ", or any text" : "";
+  return `_Reply with ${how}${other}${skip}._`;
 }
 
-export function replyHint(params: unknown): string {
-  const parsed = parseElicitation(params);
-  const field = parsed?.fields.length === 1 ? parsed.fields[0]! : undefined;
-  if (field === undefined || field.kind === "text") {
-    return "";
+export type TextReply =
+  | { type: "next"; prompt: string }
+  | { type: "done"; response: { action: "accept"; content: Record<string, unknown> } }
+  | { type: "retry"; message: string };
+
+// Walks a form's questions one at a time for a client that cannot show a
+// form: each typed reply answers the current question. A select takes an
+// option number or name (comma-separated for a multi), or the free-text
+// "Other" slot when the form has one; a text field takes a validated value;
+// an optional question can be skipped.
+export class TextAnswerer {
+  private index = 0;
+  private readonly answers: Record<string, unknown> = {};
+
+  private constructor(private readonly parsed: ParsedElicitation) {}
+
+  static create(params: unknown): TextAnswerer | null {
+    const parsed = parseElicitation(params);
+    return parsed === null ? null : new TextAnswerer(parsed);
   }
-  const how = field.kind === "multi" ? "option numbers or names, comma-separated" : "an option number or name";
-  const other = field.customKey !== undefined ? ", or any text" : "";
-  return `\n_Reply with ${how}${other} to answer._`;
+
+  private get field(): ElicitationField {
+    return this.parsed.fields[this.index]!;
+  }
+
+  // The question this client is being asked right now.
+  prompt(): string {
+    const total = this.parsed.fields.length;
+    const field = this.field;
+    if (total === 1) {
+      return `${formatElicitationQuestion({
+        mode: "form",
+        message: this.parsed.message,
+        requestedSchema: this.schemaOf(field),
+      })}\n${fieldHint(field)}`;
+    }
+    const head = this.index === 0 ? `**The agent asked:** ${this.parsed.message}\n` : "";
+    return `${head}Question ${this.index + 1} of ${total}: ${describeField(field)}\n${fieldHint(field)}`;
+  }
+
+  private schemaOf(field: ElicitationField): unknown {
+    return {
+      type: "object",
+      properties: {
+        [field.key]: {
+          type: field.kind === "multi" ? "array" : "string",
+          title: field.title,
+          ...(field.kind === "multi"
+            ? { items: { anyOf: field.options.map((o) => ({ const: o.value, title: o.label })) } }
+            : field.kind === "single"
+              ? { oneOf: field.options.map((o) => ({ const: o.value, title: o.label })) }
+              : {}),
+        },
+        ...(field.customKey !== undefined ? { [field.customKey]: { type: "string" } } : {}),
+      },
+    };
+  }
+
+  reply(text: string): TextReply {
+    const field = this.field;
+    const reply = text.trim();
+    const retry = (why: string): TextReply => ({
+      type: "retry",
+      message: `${why}\n${fieldHint(field)}`,
+    });
+    if (reply.length === 0) {
+      return retry("Empty reply.");
+    }
+    if (!field.required && /^skip$/i.test(reply)) {
+      return this.advance();
+    }
+    if (field.kind === "text") {
+      const checked = validateTextInput(field, reply);
+      if ("error" in checked) {
+        return retry(`Not accepted: ${checked.error}.`);
+      }
+      this.answers[field.key] = checked.value;
+      return this.advance();
+    }
+    if (field.kind === "single") {
+      const value = matchOption(field, reply);
+      if (value !== null) {
+        const boolean =
+          field.options.length === 2 &&
+          field.options[0]!.value === "true" &&
+          field.options[1]!.value === "false";
+        this.answers[field.key] = boolean ? value === "true" : value;
+        return this.advance();
+      }
+    } else {
+      const matches = reply.split(",").map((t) => matchOption(field, t));
+      if (matches.every((m): m is string => m !== null)) {
+        this.answers[field.key] = [...new Set(matches)];
+        return this.advance();
+      }
+    }
+    if (field.customKey !== undefined) {
+      this.answers[field.customKey] = reply;
+      return this.advance();
+    }
+    return retry("Not one of the options.");
+  }
+
+  private advance(): TextReply {
+    this.index += 1;
+    if (this.index >= this.parsed.fields.length) {
+      return { type: "done", response: { action: "accept", content: this.answers } };
+    }
+    return { type: "next", prompt: this.prompt() };
+  }
 }
