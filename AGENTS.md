@@ -257,6 +257,30 @@ Before trusting a capture:
   (Git for Windows ships `vim.EXE`), so a test that expects a command to be
   missing will fail there.
 
+- **Abstain by throwing `-32601`, never by returning an error-shaped
+  result.** A client that cannot handle an agent-to-client request
+  (`session/request_permission`, `elicitation/create`) must reject with
+  `MethodNotFound`. A catch-all handler that answers with `{ error: ... }` as
+  a *result* looks like a real answer to the daemon. The elicitation path
+  treats a result with no string `action` as abstention for this reason, but
+  permissions do not, so do not lean on it.
+- **An agent's own pending requests survive a client dropping, and end with
+  its turn.** A permission prompt or a form that was sent to a client which
+  then disconnected (a reload, a closed tab) stays pending and is redelivered
+  to whoever attaches next (`replayPendingPermissions`); only every asked
+  client abstaining settles it. It is ended explicitly on a turn cancel, an
+  agent swap or loss, and a session close (`cancelPendingAgentRequests`). A new
+  kind of pending request needs a hook in all three, or an abandoned one
+  leaves the session stuck on "blocked" and never idle-closes. A prompt raised
+  through `hydra-acp/session/request_permission` is a transformer's, not the
+  agent's, and is deliberately not ended by a turn cancel.
+- **A per-session option must be threaded through every spawn path.**
+  `elicitationForms` (and `forwardedEnv` before it) is read when an agent
+  process starts, so it has to reach create, cold resurrect, agent switch,
+  `/hydra restart`, compaction swap and the persisted record
+  (`SessionRecord`, `mergeForPersistence`, `loadFromDisk`). Miss one and the
+  option is silently dropped on the next respawn. Tests: `elicitation-capability.test.ts`.
+
 ## Updating this file
 
 If you discover a durable, non-obvious invariant while working here — the
