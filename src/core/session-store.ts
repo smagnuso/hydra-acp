@@ -410,7 +410,7 @@ export const SessionRecord = z.object({
   // _meta["hydra-acp"].env map. Stored here so resurrect after a
   // daemon restart restores the same spawn-env.
   forwardedEnv: z.record(z.string(), z.string()).optional(),
-  elicitation: z.boolean().optional(),
+  elicitationForms: z.boolean().optional(),
   // Set when this session runs in an isolated workspace rather than
   // directly in the directory the caller named. `cwd` above is then the
   // WORKSPACE path (the session's real working directory, which is what
@@ -756,7 +756,7 @@ export function recordFromMemorySession(args: {
   lastTurnEndedAt?: number;
   readAt?: number;
   forwardedEnv?: Record<string, string>;
-  elicitation?: boolean;
+  elicitationForms?: boolean;
   workspace?: PersistedWorkspace;
   compactionState?: CompactionState;
   rollbackBreadcrumb?: RollbackBreadcrumb;
@@ -835,7 +835,7 @@ export function recordFromMemorySession(args: {
     lastTurnEndedAt: args.lastTurnEndedAt,
     readAt: args.readAt,
     forwardedEnv: args.forwardedEnv,
-    elicitation: args.elicitation,
+    elicitationForms: args.elicitationForms,
     workspace: args.workspace,
       attentionFlags: args.attentionFlags ?? [],
     extensionState: args.extensionState ?? {},

@@ -1638,8 +1638,8 @@ export function registerAcpWsEndpoint(
           onInstallProgress: makeInstallProgressForwarder(connection),
           transformChain,
           originatingClient: state.clientInfo,
-          ...(hydraMeta.elicitation !== undefined
-            ? { elicitation: hydraMeta.elicitation }
+          ...(hydraMeta.elicitationForms !== undefined
+            ? { elicitationForms: hydraMeta.elicitationForms }
             : {}),
           ...(hydraMeta.interactive !== undefined
             ? { interactive: hydraMeta.interactive }

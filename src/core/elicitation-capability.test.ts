@@ -71,22 +71,22 @@ describe("elicitation capability sent to a spawned agent", () => {
   it("is withheld when the daemon setting is off", async () => {
     const caps = await capabilitiesSeen(
       (m) => m.create({ agentId: "claude-code", cwd: CWD }),
-      { elicitation: false },
+      { elicitationForms: false },
     );
     expect(caps?.elicitation).toBeUndefined();
   });
 
   it("is withheld when the session opts out", async () => {
     const caps = await capabilitiesSeen((m) =>
-      m.create({ agentId: "claude-code", cwd: CWD, elicitation: false }),
+      m.create({ agentId: "claude-code", cwd: CWD, elicitationForms: false }),
     );
     expect(caps?.elicitation).toBeUndefined();
   });
 
   it("a session cannot opt in past the daemon setting", async () => {
     const caps = await capabilitiesSeen(
-      (m) => m.create({ agentId: "claude-code", cwd: CWD, elicitation: true }),
-      { elicitation: false },
+      (m) => m.create({ agentId: "claude-code", cwd: CWD, elicitationForms: true }),
+      { elicitationForms: false },
     );
     expect(caps?.elicitation).toBeUndefined();
   });
@@ -104,12 +104,12 @@ describe("elicitation capability sent to a spawned agent", () => {
       ),
     );
     const manager = new SessionManager(fakeRegistry(), () => mock.agent);
-    const session = await manager.create({ agentId: "claude-code", cwd: CWD, elicitation: false });
+    const session = await manager.create({ agentId: "claude-code", cwd: CWD, elicitationForms: false });
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setImmediate(r));
     }
     const params = await manager.loadFromDisk(session.sessionId);
-    expect(params?.elicitation).toBe(false);
+    expect(params?.elicitationForms).toBe(false);
   });
 
   it("the session's opt-out survives a cold resurrect", async () => {
@@ -122,7 +122,7 @@ describe("elicitation capability sent to a spawned agent", () => {
       createdAt: new Date(Date.now() - 60_000).toISOString(),
       updatedAt: new Date(Date.now() - 30_000).toISOString(),
       attentionFlags: [],
-      elicitation: false,
+      elicitationForms: false,
     });
     const mock = makeMockAgent({ agentId: "claude-code", cwd: CWD });
     const request = mock.agent.connection.request as ReturnType<typeof vi.fn>;
@@ -131,7 +131,7 @@ describe("elicitation capability sent to a spawned agent", () => {
     );
     const manager = new SessionManager(fakeRegistry(), () => mock.agent, store);
     const params = await manager.loadFromDisk("hydra_elicit_off");
-    expect(params?.elicitation).toBe(false);
+    expect(params?.elicitationForms).toBe(false);
     await manager.resurrect(params!);
     const init = request.mock.calls.find((c) => c[0] === "initialize");
     expect(
@@ -141,8 +141,8 @@ describe("elicitation capability sent to a spawned agent", () => {
 });
 
 describe("session/new _meta", () => {
-  it("parses elicitation: false", () => {
-    expect(extractHydraMeta({ "hydra-acp": { elicitation: false } }).elicitation).toBe(false);
-    expect(extractHydraMeta({ "hydra-acp": {} }).elicitation).toBeUndefined();
+  it("parses elicitationForms: false", () => {
+    expect(extractHydraMeta({ "hydra-acp": { elicitationForms: false } }).elicitationForms).toBe(false);
+    expect(extractHydraMeta({ "hydra-acp": {} }).elicitationForms).toBeUndefined();
   });
 });

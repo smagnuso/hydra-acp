@@ -129,8 +129,8 @@ export const HYDRA_CLIENT_CAPABILITIES: Record<string, unknown> = {
 // The capabilities sent to one agent. Form elicitation is left out when the
 // daemon setting or the session turns it off, which also makes claude-acp
 // withhold AskUserQuestion from the model.
-export function clientCapabilitiesFor(elicitation: boolean): Record<string, unknown> {
-  if (elicitation) {
+export function clientCapabilitiesFor(forms: boolean): Record<string, unknown> {
+  if (forms) {
     return HYDRA_CLIENT_CAPABILITIES;
   }
   const { elicitation: _omitted, ...rest } = HYDRA_CLIENT_CAPABILITIES;

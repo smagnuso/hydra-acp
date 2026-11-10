@@ -1264,7 +1264,7 @@ async function openOrAttachSession(
     // Nobody can answer a form in a pipe, so don't offer the agent the
     // capability (claude-acp then withholds AskUserQuestion). A --detach
     // session is meant for a human to pick up later, so it keeps it.
-    hydraMeta.elicitation = false;
+    hydraMeta.elicitationForms = false;
   }
   if (useAutoStream) {
     // Tell the daemon to mint a per-session MCP token, open the stdin
