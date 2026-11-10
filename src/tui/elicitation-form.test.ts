@@ -331,3 +331,40 @@ describe("ElicitationWizard notes", () => {
     expect(wizardFor({ s: { type: "string", oneOf: options } }).form.hints.some((h) => h.label === "n pick + note")).toBe(false);
   });
 });
+
+describe("opencode's question form", () => {
+  // Captured from opencode 2.2.6 (its `question` tool over elicitation/create).
+  const opencode = {
+    mode: "form",
+    sessionId: "ses_x",
+    toolCallId: "tc",
+    message: "Questions",
+    requestedSchema: {
+      type: "object",
+      properties: {
+        q0: {
+          type: "string",
+          title: "Database",
+          description: "Which database do you prefer?",
+          oneOf: [
+            { const: "Postgres", title: "Postgres", description: "A powerful relational database server." },
+            { const: "SQLite", title: "SQLite", description: "A lightweight embedded database." },
+          ],
+        },
+        q0_custom: { type: "string", title: "Database (other)", description: "Type your own answer" },
+      },
+      required: [],
+    },
+  };
+
+  it("folds its q0_custom companion into the select and answers", () => {
+    const parsed = parseElicitation(opencode)!;
+    expect(parsed.fields).toHaveLength(1);
+    expect(parsed.fields[0]).toMatchObject({ kind: "single", customKey: "q0_custom" });
+    const w = new ElicitationWizard(parsed);
+    expect(w.handleKey(key("enter"))).toEqual({
+      type: "done",
+      response: { action: "accept", content: { q0: "Postgres" } },
+    });
+  });
+});
