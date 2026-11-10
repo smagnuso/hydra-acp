@@ -322,6 +322,17 @@ describe("toFormSpec", () => {
     });
   });
 
+  it("shows a newline in a text row as a one-cell mark and leaves the editor text alone", () => {
+    const f = textForm(seed("a\r\nb\nc"));
+    const row = toFormSpec(f).rows[0] as { text: string; cursor: number };
+    expect(row.text).toBe("a¶¶b¶c");
+    expect(row.text).toHaveLength(f.rows[0]!.kind === "text" ? f.rows[0]!.editor.text.length : -1);
+    expect(row.cursor).toBe(6);
+    if (f.rows[0]!.kind === "text") {
+      expect(f.rows[0]!.editor.text).toBe("a\r\nb\nc");
+    }
+  });
+
   it("carries note and current only when set", () => {
     const rows: FormRow[] = [
       { id: "a", kind: "choice", label: "Alpha", note: "a", current: true },

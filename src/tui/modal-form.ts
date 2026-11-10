@@ -269,6 +269,13 @@ function handleFilterKey(
   }
 }
 
+// A field is one row, so a newline in its text (a multi-line default) would
+// break the layout. Swap each break for a single-cell mark rather than drop it,
+// which keeps every caret offset valid; the editor's own text is untouched.
+function singleLine(text: string): string {
+  return text.replace(/[\r\n]/g, "¶");
+}
+
 // Project a form onto the render spec. Text rows read their editor here,
 // which is why the screen never sees a LineEditor.
 export function toFormSpec(state: FormState): FormPromptSpec {
@@ -277,7 +284,7 @@ export function toFormSpec(state: FormState): FormPromptSpec {
       return {
         kind: "text",
         label: r.label,
-        text: r.editor.text,
+        text: singleLine(r.editor.text),
         cursor: r.editor.cursor,
       };
     }
