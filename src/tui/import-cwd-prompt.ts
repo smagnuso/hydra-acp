@@ -33,6 +33,7 @@ import {
 } from "./prompt-utils.js";
 import { LineEditor } from "./line-editor.js";
 import { paint } from "./theme/index.js";
+import { nextGraphemeOffset, takeWidth, textWidth } from "../core/width.js";
 
 export interface PromptOptions {
   defaultCwd?: string;
@@ -196,16 +197,18 @@ export async function promptForImportCwd(
     if (cur < scrollOffset) {
       scrollOffset = cur;
     }
-    if (cur - scrollOffset >= available) {
-      scrollOffset = cur - available + 1;
+    while (
+      scrollOffset < cur &&
+      textWidth(text.slice(scrollOffset, cur)) >= available
+    ) {
+      scrollOffset = nextGraphemeOffset(text, scrollOffset);
     }
-    if (scrollOffset < 0) {
-      scrollOffset = 0;
-    }
-    let visible = text.slice(scrollOffset, scrollOffset + available);
-    if (scrollOffset > 0 && visible.length > 0) {
-      visible = "…" + visible.slice(1);
-    }
+    const visible = takeWidth(text.slice(scrollOffset), available);
+    // A scrolled-off prefix is flagged by an ellipsis over the first cell(s).
+    const lead =
+      scrollOffset > 0 && visible.length > 0 && cur > scrollOffset
+        ? nextGraphemeOffset(visible, 0)
+        : 0;
     // Mirrors `file-name-shadow-mode`: a prefix that
     // `substitute-in-file-name`-style collapsing would discard (a stray
     // "/foo/~/" or "/foo//") renders dimmed rather than disappearing.
@@ -228,17 +231,28 @@ export async function promptForImportCwd(
       }
     };
     const rel = cur - scrollOffset;
+    const paintBody = (from: number, to: number): void => {
+      if (lead > 0 && from < lead) {
+        const w = textWidth(visible.slice(0, lead));
+        paint(term, "content", "…" + " ".repeat(Math.max(0, w - 1)));
+        from = lead;
+      }
+      if (from < to) {
+        paintSegment(scrollOffset + from, visible.slice(from, to));
+      }
+    };
     if (busy) {
-      paintSegment(scrollOffset, visible);
+      paintBody(0, visible.length);
       return;
     }
     if (rel >= visible.length) {
-      paintSegment(scrollOffset, visible);
+      paintBody(0, visible.length);
       paint(term, "input-cursor", " ");
     } else {
-      paintSegment(scrollOffset, visible.slice(0, rel));
-      paint(term, "input-cursor", visible[rel] ?? " ");
-      paintSegment(scrollOffset + rel + 1, visible.slice(rel + 1));
+      const next = nextGraphemeOffset(visible, rel);
+      paintBody(0, rel);
+      paint(term, "input-cursor", visible.slice(rel, next));
+      paintBody(next, visible.length);
     }
   };
 

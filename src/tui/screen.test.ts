@@ -7,7 +7,7 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
-import { computePromptLayout, computePromptVisualRows, resolveAmbiguousWide, setAmbiguousWide } from "./screen.js";
+import { computePromptLayout, computePromptVisualRows, resolveAmbiguousWide, setAmbiguousWide, windowTextField } from "./screen.js";
 import { displayWidth } from "./column-mapping.js";
 import { setControlWriter } from "./ansi.js";
 import type { InputDispatcher, KeyEvent } from "./input.js";
@@ -5103,5 +5103,15 @@ describe("computePromptVisualRows with wide characters", () => {
     const rows = computePromptVisualRows([text], 10);
     const layout = computePromptLayout(rows, { buffer: [text], row: 0, col: 3 }, 5);
     expect(layout.cursorVisualCol).toBe(6);
+  });
+});
+
+describe("windowTextField with clusters", () => {
+  it("never starts the window inside an emoji", () => {
+    const text = "x👍🏽👍🏽👍🏽";
+    const { field, fieldStart } = windowTextField(text, text.length, 5);
+    expect(fieldStart === 0 || text.slice(fieldStart).startsWith("👍🏽")).toBe(true);
+    expect(field.startsWith("\ud83c")).toBe(false);
+    expect(field).not.toMatch(/^[\u{1F3FB}-\u{1F3FF}]/u);
   });
 });

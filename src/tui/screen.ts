@@ -76,6 +76,7 @@ import {
   segmentGraphemes,
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
+import { prevGraphemeOffset } from "../core/width.js";
 import { runForegroundChild } from "./foreground-run.js";
 import { type OpenFilePlan, planOpenFile } from "./open-file-plan.js";
 import { withSync } from "./sync.js";
@@ -7287,13 +7288,13 @@ export class Screen {
       const { slice, sliceStart, startCol } = rowHit.field;
       let offset = sliceStart;
       let col = startCol;
-      for (const chr of slice) {
-        const next = col + cellWidth(chr);
+      for (const g of segmentGraphemes(slice)) {
+        const next = col + g.width;
         if (x < next) {
           break;
         }
         col = next;
-        offset += chr.length;
+        offset += g.segment.length;
       }
       return { kind: "row", row: rowHit.row, caretOffset: offset };
     }
@@ -11312,12 +11313,13 @@ export function windowTextField(
   let start = cur;
   let used = 1;
   while (start > 0) {
-    const chWidth = cellWidth(text[start - 1] ?? "");
+    const prev = prevGraphemeOffset(text, start);
+    const chWidth = cellWidth(text.slice(prev, start));
     if (used + chWidth > room) {
       break;
     }
     used += chWidth;
-    start -= 1;
+    start = prev;
   }
   return {
     field: takeByWidth(text.slice(start), room),

@@ -118,7 +118,7 @@ import {
   type InstallStatusLine,
   type InstallStatusSink,
 } from "./install-status.js";
-import { padEndWidth } from "../core/width.js";
+import { nextGraphemeOffset, padEndWidth } from "../core/width.js";
 import { columnToOffset } from "./column-mapping.js";
 
 export type PickerResult =
@@ -1344,8 +1344,9 @@ export async function pickSession(
           paint(term, "prompt-text", "  title: ");
           paint(term, "prompt-text", text.slice(0, cur));
           if (cur < text.length) {
-            paint(term, "prompt-cursor", text[cur] ?? " ");
-            paint(term, "prompt-text", text.slice(cur + 1));
+            const next = nextGraphemeOffset(text, cur);
+            paint(term, "prompt-cursor", text.slice(cur, next));
+            paint(term, "prompt-text", text.slice(next));
           } else {
             paint(term, "prompt-cursor", " ");
           }
