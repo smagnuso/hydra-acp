@@ -3,6 +3,7 @@
 // swaps the token for the next candidate, wrapping around. Any other key
 // ends the cycle (the caller drops it), and the next Tab starts afresh.
 
+import { textWidth } from "../core/width.js";
 import type { MentionTarget } from "./file-search.js";
 
 export interface TabCycle {
@@ -93,12 +94,12 @@ export function formatListingHint(
   const prefix = `${sel + 1}/${items.length} `;
   const cells = items.map((it, i) => (i === sel ? `\u203a${it.name}` : it.name));
   const more = "... ";
-  const room = width - prefix.length;
+  const room = width - textWidth(prefix);
   const last = items.length - 1;
   const cost = (lo: number, hi: number): number => {
     let n = 2 * (hi - lo);
     for (let i = lo; i <= hi; i++) {
-      n += cells[i]!.length;
+      n += textWidth(cells[i]!);
     }
     return n + (lo > 0 ? more.length : 0) + (hi < last ? more.length : 0);
   };
@@ -119,6 +120,6 @@ export function formatListingHint(
     }
   }
   const body = `${lo > 0 ? more : ""}${cells.slice(lo, hi + 1).join("  ")}${hi < last ? " ..." : ""}`;
-  const fits = prefix.length + body.length + flag.length <= width;
+  const fits = textWidth(prefix) + textWidth(body) + textWidth(flag) <= width;
   return `${prefix}${body}${fits ? flag : ""}`;
 }

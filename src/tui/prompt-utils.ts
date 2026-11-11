@@ -38,7 +38,7 @@ import {
 } from "./ansi.js";
 import { paint, SGR_RESET } from "./theme/index.js";
 import { ChordMatcher, RAW_KEY_CHORD_TABLE } from "./chord.js";
-import { fitWidth, truncateEndWidth } from "../core/width.js";
+import { fitWidth, textWidth, truncateEndWidth } from "../core/width.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -173,14 +173,15 @@ export function renderTitleStrip(
   // Need room for the chip plus at least 2 dashes on each side so the
   // title still reads as part of a border. Fall back to no chip if the
   // box is too narrow.
-  if (chip.length + 4 > innerDashes.length) {
+  const chipWidth = textWidth(chip);
+  if (chipWidth + 4 > innerDashes.length) {
     return { dashes: innerDashes };
   }
   const offset = 2;
   const dashes =
     innerDashes.slice(0, offset) +
-    " ".repeat(chip.length) +
-    innerDashes.slice(offset + chip.length);
+    " ".repeat(chipWidth) +
+    innerDashes.slice(offset + chipWidth);
   return { dashes, title: { offset, text: chip } };
 }
 
@@ -199,7 +200,7 @@ function paintTopStrip(
   paint(
     term,
     "box-border",
-    strip.dashes.slice(strip.title.offset + strip.title.text.length),
+    strip.dashes.slice(strip.title.offset + textWidth(strip.title.text)),
   );
 }
 

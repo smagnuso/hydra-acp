@@ -7997,8 +7997,9 @@ export class Screen {
     );
     let nameWidth = 0;
     for (const item of this.completions.slice(win.offset, win.offset + win.shown)) {
-      if (item.name.length > nameWidth) {
-        nameWidth = item.name.length;
+      const itemWidth = cellWidth(item.name);
+      if (itemWidth > nameWidth) {
+        nameWidth = itemWidth;
       }
     }
     for (let i = 0; i < rows; i++) {
@@ -8019,9 +8020,9 @@ export class Screen {
           paint(this.term, "modal-hint", `  + ${overflow} more match(es)`);
           return;
         }
-        const namePadded = item.name.padEnd(nameWidth);
+        const namePadded = padToWidth(item.name, nameWidth);
         const desc = item.description ?? "";
-        const remaining = w - namePadded.length - 4;
+        const remaining = w - cellWidth(namePadded) - 4;
         const truncated = remaining > 0 ? truncate(desc, remaining) : "";
         if (item.selected) {
           paint(this.term, "modal-option-selected", " \u203a");
@@ -8139,7 +8140,7 @@ export class Screen {
           return;
         }
         const rest = `» ${summary}`;
-        const padded = rest + " ".repeat(Math.max(0, w - 1 - rest.length));
+        const padded = rest + " ".repeat(Math.max(0, w - 1 - cellWidth(rest)));
         if (editing) {
           paint(this.term, "queue-cursor", "▸");
         } else {

@@ -752,7 +752,7 @@ function expandTabs(line: string, tabSize = 4): string {
   let out = "";
   for (const ch of line) {
     if (ch === "\t") {
-      out += " ".repeat(tabSize - (out.length % tabSize));
+      out += " ".repeat(tabSize - (stringWidth(out) % tabSize));
     } else {
       out += ch;
     }

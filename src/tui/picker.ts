@@ -118,7 +118,7 @@ import {
   type InstallStatusLine,
   type InstallStatusSink,
 } from "./install-status.js";
-import { nextGraphemeOffset, padEndWidth } from "../core/width.js";
+import { nextGraphemeOffset, padEndWidth, textWidth, truncateEndWidth } from "../core/width.js";
 import { columnToOffset } from "./column-mapping.js";
 
 export type PickerResult =
@@ -1047,7 +1047,7 @@ export async function pickSession(
     let rightFragment = "";
     if (rawRight.length > 0) {
       const candidate = `─ ${rawRight} `;
-      if (candidate.length + titleFragment.length + 1 <= inner) {
+      if (textWidth(candidate) + textWidth(titleFragment) + 1 <= inner) {
         rightFragment = candidate;
       }
     }
@@ -1055,7 +1055,7 @@ export async function pickSession(
     if ((opts.availableHosts?.length ?? 0) > 0) {
       const candidate = `─ ${composerHost ?? "local"} `;
       if (
-        candidate.length + rightFragment.length + titleFragment.length + 1 <=
+        textWidth(candidate) + textWidth(rightFragment) + textWidth(titleFragment) + 1 <=
         inner
       ) {
         hostFragment = candidate;
@@ -1063,7 +1063,7 @@ export async function pickSession(
     }
     const dashCount = Math.max(
       1,
-      inner - titleFragment.length - hostFragment.length - rightFragment.length,
+      inner - textWidth(titleFragment) - textWidth(hostFragment) - textWidth(rightFragment),
     );
     const dashes = "─".repeat(dashCount);
     const focused = (selectedIdx === 0 || composerHover) && focusTracker.focused;
@@ -1074,29 +1074,29 @@ export async function pickSession(
     // is clickable (including its own leading dash + trailing space,
     // matching how obviously "titley" that segment reads); ditto for
     // the right fragment.
-    // "╭" occupies column 1, then titleFragment spans columns 2..1+titleFragment.length.
+    // "╭" occupies column 1, then titleFragment spans columns 2..1+its width.
     cwdClickRange =
-      titleFragment.length > 0
-        ? { start: 2, end: 1 + titleFragment.length }
+      textWidth(titleFragment) > 0
+        ? { start: 2, end: 1 + textWidth(titleFragment) }
         : null;
-    if (hostFragment.length > 0) {
-      const hostStart = 1 + titleFragment.length + dashCount + 1;
+    if (textWidth(hostFragment) > 0) {
+      const hostStart = 1 + textWidth(titleFragment) + dashCount + 1;
       hostClickRange = {
         start: hostStart,
-        end: hostStart + hostFragment.length - 1,
+        end: hostStart + textWidth(hostFragment) - 1,
       };
     } else {
       hostClickRange = null;
     }
-    if (rightFragment.length > 0) {
+    if (textWidth(rightFragment) > 0) {
       // rightFragment sits between the trailing dashes and the "╮"
-      // corner. Its start column = 1 (corner) + titleFragment.length +
+      // corner. Its start column = 1 (corner) + title width +
       // dashCount + 1 (first char of rightFragment).
       const rightStart =
-        1 + titleFragment.length + dashCount + hostFragment.length + 1;
+        1 + textWidth(titleFragment) + dashCount + textWidth(hostFragment) + 1;
       agentClickRange = {
         start: rightStart,
-        end: rightStart + rightFragment.length - 1,
+        end: rightStart + textWidth(rightFragment) - 1,
       };
     } else {
       agentClickRange = null;
@@ -1145,8 +1145,8 @@ export async function pickSession(
       return;
     }
     const w = Math.max(0, readTermWidth(term) - 2);
-    if (status.plain.length > w) {
-      const truncated = status.plain.slice(0, Math.max(0, w - 1)) + "…";
+    if (textWidth(status.plain) > w) {
+      const truncated = truncateEndWidth(status.plain, Math.max(1, w));
       paint(term, "modal-hint", `  ${truncated}`);
       return;
     }
@@ -1199,7 +1199,7 @@ export async function pickSession(
   const paintComposerBodyRow = (visualIdx: number): void => {
     const inner = composerBoxInner();
     const slice = composerSliceAt(visualIdx);
-    const padWidth = Math.max(0, inner - 1 - slice.length);
+    const padWidth = Math.max(0, inner - 1 - textWidth(slice));
     const pad = " ".repeat(padWidth);
     const selRange = composerSelectionRangeFor(visualIdx);
     const paintBody = (): void => {
@@ -1385,7 +1385,7 @@ export async function pickSession(
                 col += 3;
               }
               if (p.kind === "host") {
-                hostHitCols = { start: col, end: col + p.text.length - 1 };
+                hostHitCols = { start: col, end: col + textWidth(p.text) - 1 };
                 if (hostHintHovered) {
                   paint(term, "content", p.text);
                 } else {
@@ -1394,7 +1394,7 @@ export async function pickSession(
               } else {
                 paint(term, "modal-hint", p.text);
               }
-              col += p.text.length;
+              col += textWidth(p.text);
             }
           }
           paint(term, "modal-hint", " ".repeat(gap));
@@ -1971,7 +1971,7 @@ export async function pickSession(
         vr.endCol,
       );
     }
-    const padWidth = Math.max(0, inner - 1 - slice.length);
+    const padWidth = Math.max(0, inner - 1 - textWidth(slice));
     const pad = " ".repeat(padWidth);
     const selRange = findSelectionRangeFor(visualIdx);
     const paintBody = (): void => {
