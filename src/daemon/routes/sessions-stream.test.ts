@@ -40,6 +40,9 @@ function frameReader(res: Response): {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // A read that outlives a timed-out next() is kept, so the next call picks
+  // up its chunk instead of starting a second read that would swallow it.
+  let pending: ReturnType<typeof reader.read> | null = null;
   const next = async (timeoutMs = 2000): Promise<Frame> => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -59,12 +62,14 @@ function frameReader(res: Response): {
       if (left <= 0) {
         throw new Error("timed out waiting for a frame");
       }
+      pending ??= reader.read();
       const chunk = await Promise.race([
-        reader.read(),
+        pending,
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error("timed out waiting for a frame")), left),
         ),
       ]);
+      pending = null;
       if (chunk.done) {
         throw new Error("stream ended");
       }
@@ -193,6 +198,69 @@ describe("GET /v1/sessions/stream", () => {
     expect(manager.listHub.size).toBe(1);
     await frames.stop();
     await vi.waitFor(() => expect(manager.listHub.size).toBe(0));
+  });
+
+  describe("GET /v1/sessions/:id/stream", () => {
+    it("sends the session's row first, then again when something it shows moves", async () => {
+      const a = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const b = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const res = await fetch(`${baseUrl}/v1/sessions/${a.sessionId}/stream`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+      const frames = frameReader(res);
+      try {
+        const first = await frames.next();
+        expect(first.sessions.map((s) => s.sessionId)).toEqual([a.sessionId]);
+        expect(first.removed).toEqual([]);
+        expect("cursor" in first).toBe(false);
+
+        // Another session changing must not produce a frame for this one.
+        b.attach(
+          { clientId: "other", connection: { notify: vi.fn(), request: vi.fn() } as never },
+          "none",
+        );
+        await expect(frames.next(400)).rejects.toThrow(/timed out/);
+
+        a.attach(
+          { clientId: "c1", connection: { notify: vi.fn(), request: vi.fn() } as never },
+          "none",
+        );
+        const second = await frames.next();
+        expect(second.sessions.map((s) => s.sessionId)).toEqual([a.sessionId]);
+      } finally {
+        await frames.stop();
+      }
+    });
+
+    it("404s an unknown id before opening a stream", async () => {
+      const res = await fetch(`${baseUrl}/v1/sessions/hydra_session_nope/stream`);
+      expect(res.status).toBe(404);
+    });
+
+    it("reports a deleted session in removed and ends the stream", async () => {
+      const a = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const res = await fetch(`${baseUrl}/v1/sessions/${a.sessionId}/stream`);
+      const frames = frameReader(res);
+      try {
+        await frames.next();
+        await a.close({ deleteRecord: true });
+        const gone = await frames.next();
+        expect(gone.removed).toEqual([a.sessionId]);
+        await expect(frames.next(1000)).rejects.toThrow(/stream ended/);
+      } finally {
+        await frames.stop();
+      }
+    });
+
+    it("drops its hub subscription when the client disconnects", async () => {
+      const a = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const res = await fetch(`${baseUrl}/v1/sessions/${a.sessionId}/stream`);
+      const frames = frameReader(res);
+      await frames.next();
+      expect(manager.listHub.size).toBe(1);
+      await frames.stop();
+      await vi.waitFor(() => expect(manager.listHub.size).toBe(0));
+    });
   });
 
   it("rejects a non-numeric cursor", async () => {

@@ -173,6 +173,85 @@ export function registerSessionRoutes(
     };
   });
 
+  // Serves a server-sent stream that is re-read on every session-list tick.
+  // `compute` returns the frame to send (none when nothing moved) and may ask
+  // for the stream to end. One read runs at a time: a tick that lands
+  // mid-read is folded into a single rerun afterwards, so an older snapshot
+  // never races a newer one.
+  const serveSse = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    banner: string,
+    compute: () => Promise<{ frame?: unknown; end?: boolean }>,
+  ): Promise<void> => {
+    let closed = false;
+    let busy = false;
+    let again = false;
+
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    res.write(`: ${banner}\n\n`);
+
+    let unsubscribe: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const close = (): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe?.();
+      if (!res.writableEnded) {
+        res.end();
+      }
+    };
+
+    const tick = async (): Promise<void> => {
+      if (closed) {
+        return;
+      }
+      if (busy) {
+        again = true;
+        return;
+      }
+      busy = true;
+      try {
+        do {
+          again = false;
+          const out = await compute();
+          if (out.frame !== undefined && !closed) {
+            res.write(`event: sessions\ndata: ${JSON.stringify(out.frame)}\n\n`);
+          }
+          if (out.end) {
+            close();
+          }
+        } while (again && !closed);
+      } catch {
+        // A failed read is retried on the next tick or heartbeat.
+      } finally {
+        busy = false;
+      }
+    };
+
+    unsubscribe = manager.listHub.subscribe(() => void tick());
+    // Doubles as the liveness ping and as the re-read that picks up changes
+    // no local event announces (peer rows).
+    heartbeat = setInterval(() => {
+      res.write(": ping\n\n");
+      void tick();
+    }, 20_000);
+    heartbeat.unref?.();
+    request.raw.on("close", close);
+    res.on("error", close);
+    await tick();
+  };
+
   // Server-sent stream of session list changes. Same frame shape as a
   // `GET /v1/sessions?since=` page, so a client merges it the same way.
   // The first frame is everything the filter matches (narrowed by `since`
@@ -210,95 +289,72 @@ export function registerSessionRoutes(
     };
     const diff = new SessionStreamDiff(status === "warm");
     let cursor = since;
-    let closed = false;
-    let busy = false;
-    let again = false;
     // The first frame is always sent, even empty, so the client learns its
     // cursor without a separate GET.
     let sentFirst = false;
 
-    reply.hijack();
-    const res = reply.raw;
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
+    await serveSse(request, reply, "hydra sessions stream", async () => {
+      const foreign =
+        foreignSessions && !filter.cwd
+          ? foreignSessions.list({
+              includeNonInteractive,
+              ...(status ? { status } : {}),
+            })
+          : [];
+      let entries: SessionRow[];
+      let deleted: string[] = [];
+      let next: number;
+      if (cursor === undefined) {
+        const listing = await manager.listing(filter);
+        entries = listing.entries;
+        next = listing.cursor;
+      } else {
+        const delta = await manager.listSince(filter, cursor);
+        entries = delta.entries;
+        deleted = delta.removed;
+        next = delta.cursor;
+      }
+      const frame =
+        diff.next([...entries, ...foreign], deleted, next) ??
+        (sentFirst ? null : { sessions: [], removed: [], cursor: next });
+      cursor = next;
+      if (frame === null) {
+        return {};
+      }
+      sentFirst = true;
+      return { frame };
     });
-    res.write(": hydra sessions stream\n\n");
+  });
 
-    // One read at a time: a tick that lands mid-read is folded into a
-    // single rerun afterwards instead of racing it with an older snapshot.
-    const tick = async (): Promise<void> => {
-      if (closed) {
-        return;
-      }
-      if (busy) {
-        again = true;
-        return;
-      }
-      busy = true;
-      try {
-        do {
-          again = false;
-          const foreign =
-            foreignSessions && !filter.cwd
-              ? foreignSessions.list({
-                  includeNonInteractive,
-                  ...(status ? { status } : {}),
-                })
-              : [];
-          let entries: SessionRow[];
-          let deleted: string[] = [];
-          let next: number;
-          if (cursor === undefined) {
-            const listing = await manager.listing(filter);
-            entries = listing.entries;
-            next = listing.cursor;
-          } else {
-            const delta = await manager.listSince(filter, cursor);
-            entries = delta.entries;
-            deleted = delta.removed;
-            next = delta.cursor;
-          }
-          const frame =
-            diff.next([...entries, ...foreign], deleted, next) ??
-            (sentFirst ? null : { sessions: [], removed: [], cursor: next });
-          cursor = next;
-          if (frame !== null && !closed) {
-            sentFirst = true;
-            res.write(`event: sessions\ndata: ${JSON.stringify(frame)}\n\n`);
-          }
-        } while (again && !closed);
-      } catch {
-        // A failed read is retried on the next tick or heartbeat.
-      } finally {
-        busy = false;
-      }
-    };
+  // Server-sent stream of one session's row. The first frame is the row as
+  // `GET /v1/sessions/:id` returns it; after that it sends the row again
+  // whenever something it shows moved. Same frame shape as the list stream,
+  // minus `cursor`. A session that is deleted arrives as `removed: [id]` and
+  // ends the stream. An unknown id is a 404 before the stream opens.
+  app.get("/v1/sessions/:id/stream", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    if ((await manager.getOne(id)) === undefined) {
+      return reply.code(404).send({ error: "session not found" });
+    }
+    const diff = new SessionStreamDiff(false);
+    let known = false;
 
-    const unsubscribe = manager.listHub.subscribe(() => void tick());
-    // Doubles as the liveness ping and as the re-read that picks up peer
-    // rows, which no local event announces.
-    const heartbeat = setInterval(() => {
-      res.write(": ping\n\n");
-      void tick();
-    }, 20_000);
-    heartbeat.unref?.();
-    const close = (): void => {
-      if (closed) {
-        return;
+    await serveSse(request, reply, `hydra session stream ${id}`, async () => {
+      const row = await manager.getOne(id);
+      if (row === undefined) {
+        if (!known) {
+          return { end: true };
+        }
+        return { frame: { sessions: [], removed: [id] }, end: true };
       }
-      closed = true;
-      clearInterval(heartbeat);
-      unsubscribe();
-      if (!res.writableEnded) {
-        res.end();
+      const frame = diff.next([row], [], 0);
+      if (frame === null) {
+        return {};
       }
-    };
-    request.raw.on("close", close);
-    res.on("error", close);
-    await tick();
+      known = true;
+      return { frame: { sessions: frame.sessions, removed: frame.removed } };
+    });
   });
 
   // Single-session info — the same shape as one `GET /v1/sessions`

@@ -432,6 +432,22 @@ data: {"sessions":[<SessionListEntry>...],"removed":["id",...],"cursor":17883962
 
 **Resume.** Reconnect with `since=<last cursor>`. Keep a slow poll of `GET /v1/sessions` as a backstop; the stream is an accelerator, not the only source of truth.
 
+#### `GET /v1/sessions/:id/stream`
+
+Server-sent stream of one session's row, for a client that shows a single session and would otherwise poll [`GET /v1/sessions/:id`](#get-v1sessionsid). Same bearer auth, and the same id forms (canonical, short) as the other per-session routes. An unknown id is a `404` before the stream opens. Because an older daemon also answers `404`, a client cannot tell "no such session" from "daemon too old"; both mean keep polling.
+
+The response is `text/event-stream`. Each `event: sessions` frame has the list stream's shape, without `cursor`:
+
+```
+event: sessions
+data: {"sessions":[<SessionListEntry>],"removed":[]}
+```
+
+- **The first frame is always sent** and holds the row exactly as `GET /v1/sessions/:id` returns it.
+- **Later frames repeat the whole row** whenever a field it shows changes. What counts as a change is the same as on the [list stream](#get-v1sessionsstream), and `updatedAt` is likewise not a trigger.
+- **A session that is deleted** arrives as `{"sessions":[],"removed":["<id>"]}` and the daemon then ends the stream. A session that merely went cold stays a valid target: the row arrives with `status: "cold"`.
+- A `: ping` comment is sent every 20 s. Keep a slow poll as a backstop, as for the list stream.
+
 #### `GET /v1/sessions/:id`
 
 Single-session info — same shape as one entry from `GET /v1/sessions`, looked up by id. Lets callers that already know a `sessionId` read its `agentId`, `currentModel`, `currentUsage`, `status`, `busy`, `awaitingInput`, etc. without scanning the full list. Works on both live and cold sessions.
