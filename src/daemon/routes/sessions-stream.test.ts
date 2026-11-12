@@ -142,6 +142,27 @@ describe("GET /v1/sessions/stream", () => {
     }
   });
 
+  it("sends a session that cooled down as a cold row on an unfiltered stream", async () => {
+    const a = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const res = await fetch(
+      `${baseUrl}/v1/sessions/stream?includeNonInteractive=true`,
+    );
+    const frames = frameReader(res);
+    try {
+      const first = await frames.next();
+      expect(first.sessions.find((s) => s.sessionId === a.sessionId)?.status).toBe("warm");
+      await a.close({ deleteRecord: false });
+      let status: string | undefined;
+      for (let i = 0; i < 5 && status !== "cold"; i++) {
+        const frame = await frames.next();
+        status = frame.sessions.find((s) => s.sessionId === a.sessionId)?.status;
+      }
+      expect(status).toBe("cold");
+    } finally {
+      await frames.stop();
+    }
+  });
+
   it("emits a row when an attached client count changes", async () => {
     const a = await manager.create({ cwd: "/w", agentId: "claude-code" });
     const res = await fetch(

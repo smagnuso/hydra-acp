@@ -43,13 +43,16 @@ import {
   killSession,
   listSessionsPage,
   mergeSessionListPage,
+  mergeSessionStreamFrame,
   regenSessionTitle,
   renameSession,
   searchSessions,
   setSessionPriority,
+  streamSessionPages,
   syncInstalledAgents,
   type DiscoveredAgent,
   type DiscoveredSession,
+  type SessionListPage,
   type SessionHits,
 } from "./discovery.js";
 import { promptForComposerConfig } from "./composer-config-prompt.js";
@@ -3150,6 +3153,7 @@ export async function pickSession(
         clearInterval(autoRefreshTimer);
         autoRefreshTimer = null;
       }
+      stopSessionStream();
       if (autoRefreshAbort) {
         autoRefreshAbort.abort();
         autoRefreshAbort = null;
@@ -3198,6 +3202,11 @@ export async function pickSession(
       ) {
         return;
       }
+      // With the stream up, frames carry every change, so the poll only
+      // runs now and then as a backstop for a missed one.
+      if (streamHealthy && ++backstopTicks % STREAM_BACKSTOP_TICKS !== 0) {
+        return;
+      }
       if (autoRefreshInFlight && autoRefreshAbort) {
         // A prior refresh is stuck — cancel it before issuing a new one
         // so an unresponsive daemon can't latch the in-flight flag.
@@ -3217,12 +3226,92 @@ export async function pickSession(
         autoRefreshInFlight = false;
       });
     };
+    // Push from the daemon's session stream. Frames are buffered and applied
+    // only when the same guards the poll uses allow it, and once the
+    // keyboard has been idle a moment, so a resort can never land between a
+    // navigation key and the Enter that selects a row.
+    const STREAM_IDLE_MS = 400;
+    const STREAM_BACKSTOP_TICKS = 10;
+    let streamHealthy = false;
+    let backstopTicks = 0;
+    let lastKeyAt = 0;
+    let streamFrames: SessionListPage[] = [];
+    let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let streamAbort: AbortController | null = null;
+    const flushStreamFrames = (): void => {
+      streamFlushTimer = null;
+      if (resolved || streamFrames.length === 0) {
+        return;
+      }
+      const wait = lastKeyAt + STREAM_IDLE_MS - Date.now();
+      const blocked =
+        focusStack.length > 1 ||
+        mode !== "normal" ||
+        searchActive ||
+        syncInFlight ||
+        terminalWithdrawnForChild;
+      if (blocked || wait > 0) {
+        streamFlushTimer = setTimeout(flushStreamFrames, Math.max(wait, 250));
+        return;
+      }
+      const frames = streamFrames;
+      streamFrames = [];
+      const currentId =
+        selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+      integrate(
+        () => {
+          let next = allSessions;
+          for (const frame of frames) {
+            next = mergeSessionStreamFrame(next, frame);
+          }
+          allSessions = sortSessions(next, currentCwd);
+        },
+        currentId,
+        true,
+      );
+    };
+    const startSessionStream = (): void => {
+      if (streamAbort !== null) {
+        return;
+      }
+      const abort = new AbortController();
+      streamAbort = abort;
+      void streamSessionPages(opts.target, {
+        includeNonInteractive: true,
+        signal: abort.signal,
+        onFrame: (frame) => {
+          streamHealthy = true;
+          streamFrames.push(frame);
+          if (streamFlushTimer === null) {
+            streamFlushTimer = setTimeout(flushStreamFrames, 0);
+          }
+        },
+        onDisconnect: () => {
+          streamHealthy = false;
+        },
+      }).then((outcome) => {
+        if (outcome === "unsupported") {
+          streamHealthy = false;
+        }
+      });
+    };
+    const stopSessionStream = (): void => {
+      streamAbort?.abort();
+      streamAbort = null;
+      streamHealthy = false;
+      if (streamFlushTimer !== null) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      streamFrames = [];
+    };
     // Restart the 3s countdown. Called on every keypress so a silent
     // refresh (which re-sorts `visible`) can only fire after 3s of
     // keyboard idle — never landing a resort between a navigation key and
     // the Enter that selects a row, which previously let the cursor's
     // session shift out from under the user.
     const resetAutoRefresh = (): void => {
+      lastKeyAt = Date.now();
       if (resolved) {
         return;
       }
@@ -3349,60 +3438,73 @@ export async function pickSession(
         return false;
       }
     };
+    // Fold new data into the list and repaint, keeping the cursor on the
+    // session the user is on through any resort. `merge` mutates
+    // allSessions; everything after it is shared by the poll and the stream.
+    const integrate = (
+      merge: () => void,
+      preferredId: string | undefined,
+      silent: boolean,
+    ): void => {
+      const beforeKey = silent ? renderFingerprint() : "";
+      const beforeTotal = total;
+      // Snapshot the session the cursor is on right now, after any HTTP
+      // wait rather than before, so callers that don't pin a specific id
+      // (auto-refresh, `r`) still follow the user's CURRENT selection
+      // through a resort. If they pressed UP/DOWN during the await, this
+      // captures where they are now, not where they were three seconds ago.
+      const followId =
+        preferredId ??
+        (selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined);
+      merge();
+      applyFilter();
+      if (followId !== undefined) {
+        const idx = visible.findIndex((s) => s.sessionId === followId);
+        if (idx >= 0) {
+          selectedIdx = idx + 1;
+        } else {
+          // The session under the cursor is gone after the resort.
+          // Don't leave selectedIdx pointing at its old numeric slot, which
+          // now aliases onto whatever session slid into that position, so
+          // Enter would pick the wrong one. Fall back to the composer
+          // ("New session"), a predictable, safe landing.
+          selectedIdx = 0;
+        }
+      }
+      if (selectedIdx > total - 1) {
+        selectedIdx = Math.max(0, total - 1);
+      }
+      if (scrollOffset + viewportSize > visible.length) {
+        scrollOffset = Math.max(0, visible.length - viewportSize);
+      }
+      adjustScroll();
+      if (silent && renderFingerprint() === beforeKey) {
+        return;
+      }
+      if (total === beforeTotal) {
+        // Session count unchanged: repaint in place so the composer and
+        // screen structure are never cleared.
+        repaintDataZone();
+      } else {
+        renderFromScratch();
+      }
+    };
     const refresh = async (
       preferredId?: string,
       refreshOpts: { silent?: boolean; signal?: AbortSignal } = {},
     ): Promise<void> => {
       const attempt = async (): Promise<void> => {
-        const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
-        const beforeTotal = total;
         const incremental = sessionCursor !== undefined;
         const page = await listSessionsPage(opts.target, {
           includeNonInteractive: true,
           since: sessionCursor,
           signal: refreshOpts.signal,
         });
-        // Snapshot the session the cursor is on right now — after the
-        // HTTP wait, not before — so callers that don't pin a specific
-        // id (auto-refresh, `r`) still follow the user's CURRENT
-        // selection through a resort. If they pressed UP/DOWN during
-        // the await, this captures where they are now, not where they
-        // were three seconds ago.
-        const followId =
-          preferredId ??
-          (selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined);
-        applySessionPage(page, incremental);
-        applyFilter();
-        if (followId !== undefined) {
-          const idx = visible.findIndex((s) => s.sessionId === followId);
-          if (idx >= 0) {
-            selectedIdx = idx + 1;
-          } else {
-            // The session under the cursor is gone after the resort.
-            // Don't leave selectedIdx pointing at its old numeric slot —
-            // that now aliases onto whatever session slid into that
-            // position, so Enter would pick the wrong one. Fall back to
-            // the composer ("New session"), a predictable, safe landing.
-            selectedIdx = 0;
-          }
-        }
-        if (selectedIdx > total - 1) {
-          selectedIdx = Math.max(0, total - 1);
-        }
-        if (scrollOffset + viewportSize > visible.length) {
-          scrollOffset = Math.max(0, visible.length - viewportSize);
-        }
-        adjustScroll();
-        if (refreshOpts.silent && renderFingerprint() === beforeKey) {
-          return;
-        }
-        if (total === beforeTotal) {
-          // Session count unchanged — repaint in-place so the composer
-          // and screen structure are never cleared.
-          repaintDataZone();
-        } else {
-          renderFromScratch();
-        }
+        integrate(
+          () => applySessionPage(page, incremental),
+          preferredId,
+          refreshOpts.silent === true,
+        );
       };
       try {
         await attempt();
@@ -5748,6 +5850,7 @@ export async function pickSession(
     // makes refresh a no-op when the visible state is unchanged, which
     // is the common case — keeps the picker quiet between actual events.
     autoRefreshTimer = setInterval(autoRefreshTick, 3000);
+    startSessionStream();
   });
 }
 
