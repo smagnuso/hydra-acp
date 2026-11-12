@@ -424,7 +424,7 @@ data: {"sessions":[<SessionListEntry>...],"removed":["id",...],"cursor":17883962
 ```
 
 - **First frame is always sent**, even when empty, so the client has a `cursor` without a separate GET. It holds every row the filter matches (narrowed the way `since` narrows a list when one is given).
-- **Later frames carry only rows whose state moved**, as whole rows rather than field diffs, so a missed frame is healed by the next one for that session. Merge them the way an incremental list page is merged.
+- **Later frames carry only rows whose state moved**, as whole rows rather than field diffs, so a missed frame is healed by the next one for that session. Merge a frame by upserting its rows by `sessionId` and dropping `removed`; do not apply the incremental-list rule of purging every warm row the page omits, because a frame is a delta and the unmentioned rows are unchanged.
 - **What counts as a change:** anything the row shows other than `updatedAt` (busy, `awaitingInput`, armed tasks, unread, title, priority, attached clients, model, agent, warm to cold, create, delete). `updatedAt` moves on every transcript chunk and is not a trigger; it arrives whenever a frame is sent for another reason, so treat it as approximate between frames.
 - **`removed`** names ids that left. On a `status=warm` stream that includes a session that went cold (it is no longer in the warm set); on an unfiltered stream it is the store's deleted ids, and a cooled session arrives as a cold row instead.
 - Changes are coalesced over roughly 100 ms, so a burst produces one frame.

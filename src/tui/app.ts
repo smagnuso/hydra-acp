@@ -97,8 +97,10 @@ import {
   fetchRemoteInfo,
   createSessionOnRemote,
   markSessionRead,
+  mergeSessionStreamFrame,
   pickMostRecent,
   renameSession,
+  streamSessionPages,
   type DiscoveredSession,
   type HostInfo,
 } from "./discovery.js";
@@ -3965,11 +3967,15 @@ async function runSession(
     onSidebarCollapseChange: (gadget, collapsed) => {
       viewPrefs.sidebarCollapsed = screenRef?.sidebarCollapsedIds() ?? [];
       if (collapsed) {
+        if (gadget === "sessions") {
+          stopLiveSessionsStream();
+        }
         return;
       }
       if (gadget === "git") {
         pollGitOnce();
       } else if (gadget === "sessions") {
+        startLiveSessionsStream();
         pollLiveSessionsOnce();
       } else if (gadget === "resources") {
         // Drop the CPU baseline: it was taken before the fold, so
@@ -6224,6 +6230,7 @@ async function runSession(
     // snapshot into the next session's sidebar.
     stopSidebarTicker();
     stopGitPoll();
+    stopLiveSessionsStream();
     if (scriptTicker !== null) {
       clearInterval(scriptTicker);
       scriptTicker = null;
@@ -9366,11 +9373,76 @@ async function runSession(
   // ── live sessions ────────────────────────────────────────────────────
   //
   // Which live sessions exist and whether any is blocked on the user.
-  // Polled (status=warm, so the daemon answers from memory) rather than
-  // pushed:
-  // the daemon's cross-session lifecycle events go to transformers only,
-  // and an ordinary client has no subscription for them.
+  // Pushed over the daemon's /v1/sessions/stream when it has one, with a
+  // slow poll (status=warm, answered from memory) as a backstop; against a
+  // daemon without the stream the poll is the only source, at its fast
+  // cadence.
   let liveSessionsPollInFlight = false;
+
+  // The warm rows behind the sidebar's sessions block. A poll replaces the
+  // whole set; a stream frame merges into it.
+  let liveRows: DiscoveredSession[] = [];
+
+  const publishLiveSessions = (): void => {
+    const entries: SidebarLiveSession[] = [];
+    for (const s of liveRows) {
+      entries.push({
+        sessionId: s.sessionId,
+        current: s.sessionId === resolvedSessionId,
+        // Titles are what the picker shows and what the user named the
+        // work; the short id is only a fallback for the untitled.
+        label:
+          s.title !== undefined && s.title.length > 0
+            ? s.title
+            : stripHydraSessionPrefix(s.sessionId),
+        // Independent axes, forwarded as they come off the wire rather
+        // than collapsed: a session can be mid-turn AND blocked on a
+        // permission prompt at the same time, and an armed background
+        // task outlives the turn that started it.
+        busy: s.busy === true,
+        armed: (s.armedTasks ?? 0) > 0,
+        blocked: s.awaitingInput === true,
+        unread: s.unread === true,
+      });
+    }
+    screen.setSidebarSnapshot({ liveSessions: entries });
+  };
+
+  // Push from the daemon's session stream. While it is healthy the poll
+  // drops to a slow backstop; if the daemon predates the stream, or the
+  // connection is down, the poll runs at its fast cadence as before.
+  let liveStreamAbort: AbortController | null = null;
+  let liveStreamHealthy = false;
+
+  const startLiveSessionsStream = (): void => {
+    if (liveStreamAbort !== null) {
+      return;
+    }
+    const abort = new AbortController();
+    liveStreamAbort = abort;
+    void streamSessionPages(target, {
+      status: "warm",
+      signal: abort.signal,
+      onFrame: (frame) => {
+        liveStreamHealthy = true;
+        liveRows = mergeSessionStreamFrame(liveRows, frame);
+        publishLiveSessions();
+      },
+      onDisconnect: () => {
+        liveStreamHealthy = false;
+      },
+    }).then((outcome) => {
+      if (outcome === "unsupported") {
+        liveStreamHealthy = false;
+      }
+    });
+  };
+
+  const stopLiveSessionsStream = (): void => {
+    liveStreamAbort?.abort();
+    liveStreamAbort = null;
+    liveStreamHealthy = false;
+  };
 
   const pollLiveSessionsOnce = (): void => {
     if (liveSessionsPollInFlight) {
@@ -9379,29 +9451,8 @@ async function runSession(
     liveSessionsPollInFlight = true;
     void (async (): Promise<void> => {
       try {
-        const live = await listSessions(target, { status: "warm" });
-        const entries: SidebarLiveSession[] = [];
-        for (const s of live) {
-          entries.push({
-            sessionId: s.sessionId,
-            current: s.sessionId === resolvedSessionId,
-            // Titles are what the picker shows and what the user named the
-            // work; the short id is only a fallback for the untitled.
-            label:
-              s.title !== undefined && s.title.length > 0
-                ? s.title
-                : stripHydraSessionPrefix(s.sessionId),
-            // Independent axes, forwarded as they come off the wire rather
-            // than collapsed: a session can be mid-turn AND blocked on a
-            // permission prompt at the same time, and an armed background
-            // task outlives the turn that started it.
-            busy: s.busy === true,
-            armed: (s.armedTasks ?? 0) > 0,
-            blocked: s.awaitingInput === true,
-            unread: s.unread === true,
-          });
-        }
-        screen.setSidebarSnapshot({ liveSessions: entries });
+        liveRows = await listSessions(target, { status: "warm" });
+        publishLiveSessions();
       } catch {
         // Daemon unreachable or slow: keep the last known list rather than
         // blanking the block, which would read as "no other sessions".
@@ -9555,10 +9606,13 @@ async function runSession(
     if (!screen.isSidebarGadgetActive("sessions")) {
       return;
     }
+    startLiveSessionsStream();
     pollLiveSessionsOnce();
   };
 
   const stopLiveSessionsPoll = (): void => {
+    stopLiveSessionsStream();
+    liveRows = [];
     screen.setSidebarSnapshot({ liveSessions: [] });
   };
 
@@ -9593,6 +9647,8 @@ async function runSession(
   // The sessions list is one cheap in-memory daemon query and carries the
   // state dots (blocked, busy, unread), so it polls faster than the rest.
   const LIVE_SESSIONS_TICKS = 2;
+  // With the stream up the poll is only a backstop.
+  const LIVE_SESSIONS_BACKSTOP_TICKS = 30;
   let sidebarTicker: NodeJS.Timeout | null = null;
   let sidebarTickCount = 0;
 
@@ -9614,7 +9670,11 @@ async function runSession(
         pollGitOnce();
       }
       if (
-        sidebarTickCount % LIVE_SESSIONS_TICKS === 0 &&
+        sidebarTickCount %
+          (liveStreamHealthy
+            ? LIVE_SESSIONS_BACKSTOP_TICKS
+            : LIVE_SESSIONS_TICKS) ===
+          0 &&
         screen.isSidebarGadgetActive("sessions")
       ) {
         pollLiveSessionsOnce();
@@ -10406,6 +10466,7 @@ async function runSession(
   // Fetch the live-session list now rather than after the drain, so it
   // arrives while the replay renders instead of after it.
   if (viewPrefs.sidebarVisible && screen.isSidebarGadgetActive("sessions")) {
+    startLiveSessionsStream();
     pollLiveSessionsOnce();
   }
   screen.pauseRepaint();

@@ -224,8 +224,21 @@ export async function listSessionsPage(
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
-  const body = (await response.json()) as {
-    sessions?: Array<Partial<DiscoveredSession> & { sessionId: string; cwd: string; updatedAt: string; attachedClients?: number }>;
+  return parseSessionPage(await response.json());
+}
+
+type RawSessionRow = Partial<DiscoveredSession> & {
+  sessionId: string;
+  cwd: string;
+  updatedAt: string;
+  attachedClients?: number;
+};
+
+// Shared by the list response and each stream frame: both carry
+// `{ sessions, removed, cursor }`.
+export function parseSessionPage(raw: unknown): SessionListPage {
+  const body = raw as {
+    sessions?: RawSessionRow[];
     removed?: string[];
     cursor?: number;
   };
@@ -318,6 +331,156 @@ export function mergeSessionListPage(
     merged.set(s.sessionId, s);
   }
   return [...merged.values()];
+}
+
+// Apply one stream frame. Unlike a list page, a frame is a delta: it holds
+// only the rows that changed, so every other row must survive. Rows replace
+// by id (a warm row that cooled arrives as its cold row) and `removed` drops.
+export function mergeSessionStreamFrame(
+  current: DiscoveredSession[],
+  frame: SessionListPage,
+): DiscoveredSession[] {
+  const merged = new Map(current.map((s) => [s.sessionId, s]));
+  for (const id of frame.removed) {
+    merged.delete(id);
+  }
+  for (const s of frame.sessions) {
+    merged.set(s.sessionId, s);
+  }
+  return [...merged.values()];
+}
+
+// Pulls SSE `data:` payloads out of a growing text buffer. Returns what is
+// left over, which may be the front of a frame still arriving.
+export function drainSseData(buffer: string): {
+  payloads: string[];
+  rest: string;
+} {
+  const payloads: string[] = [];
+  let rest = buffer;
+  for (;;) {
+    const end = rest.indexOf("\n\n");
+    if (end === -1) {
+      return { payloads, rest };
+    }
+    const block = rest.slice(0, end);
+    rest = rest.slice(end + 2);
+    const data = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (data.length > 0) {
+      payloads.push(data);
+    }
+  }
+}
+
+const STREAM_BACKOFF_MS = [1_000, 2_000, 5_000, 15_000];
+
+export interface SessionStreamOptions {
+  includeNonInteractive?: boolean;
+  status?: "warm" | "cold";
+  signal: AbortSignal;
+  // Called for every frame, in order. The first frame after a (re)connect is
+  // the daemon's catch-up from the cursor, so there is nothing to refetch.
+  onFrame: (frame: SessionListPage) => void;
+  // Called when the stream drops, before the reconnect wait. A caller can
+  // fall back to polling for the gap.
+  onDisconnect?: () => void;
+  fetchImpl?: typeof fetch;
+  // Injected so tests do not wait out real backoff.
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
+
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+// Holds a /v1/sessions/stream connection open, resuming from the last cursor
+// after a drop. Resolves "unsupported" when the daemon has no such route (an
+// older daemon), so the caller can keep polling, and "aborted" once the
+// signal fires. Never rejects.
+export async function streamSessionPages(
+  target: RemoteTarget,
+  opts: SessionStreamOptions,
+): Promise<"unsupported" | "aborted"> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const sleep = opts.sleep ?? sleepUnlessAborted;
+  let cursor: number | undefined;
+  let failures = 0;
+  while (!opts.signal.aborted) {
+    try {
+      const url = new URL(`${target.baseUrl}/v1/sessions/stream`);
+      if (opts.includeNonInteractive) {
+        url.searchParams.set("includeNonInteractive", "true");
+      }
+      if (opts.status) {
+        url.searchParams.set("status", opts.status);
+      }
+      if (cursor !== undefined) {
+        url.searchParams.set("since", String(cursor));
+      }
+      const response = await fetchImpl(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${target.token}`,
+          Accept: "text/event-stream",
+        },
+        signal: opts.signal,
+      });
+      if (response.status === 404 || response.status === 405) {
+        return "unsupported";
+      }
+      if (!response.ok || !response.body) {
+        throw new Error(`daemon returned HTTP ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const drained = drainSseData(buffer);
+        buffer = drained.rest;
+        for (const payload of drained.payloads) {
+          let frame: SessionListPage;
+          try {
+            frame = parseSessionPage(JSON.parse(payload));
+          } catch {
+            continue;
+          }
+          cursor = frame.cursor;
+          failures = 0;
+          opts.onFrame(frame);
+        }
+      }
+    } catch {
+      // Fall through to the reconnect wait; an abort is caught by the loop.
+    }
+    if (opts.signal.aborted) {
+      break;
+    }
+    opts.onDisconnect?.();
+    const wait = STREAM_BACKOFF_MS[Math.min(failures, STREAM_BACKOFF_MS.length - 1)]!;
+    failures++;
+    await sleep(wait, opts.signal);
+  }
+  return "aborted";
 }
 
 export interface DiscoveredAgent {
