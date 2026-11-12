@@ -194,6 +194,15 @@ describe("streamSessionPages", () => {
 });
 
 describe("parseSessionPage", () => {
+  it("keeps the agent pid a stream row carries", () => {
+    const page = parseSessionPage({
+      sessions: [{ sessionId: "a", cwd: "/w", updatedAt: "x", agentPid: 4242 }],
+      removed: [],
+      cursor: 1,
+    });
+    expect(page.sessions[0]?.agentPid).toBe(4242);
+  });
+
   it("defaults missing removed and cursor", () => {
     expect(parseSessionPage({ sessions: [] })).toEqual({
       sessions: [],

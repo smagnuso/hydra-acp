@@ -9515,6 +9515,14 @@ async function runSession(
     if (agentPidFetchInFlight || resolvedSessionId === null) {
       return;
     }
+    // With the session stream up, the warm set is complete and its rows
+    // change whenever the agent is swapped or restarted, so the pid needs no
+    // request of its own. A session absent from the set has no live agent.
+    if (liveStreamHealthy) {
+      const row = liveRows.find((s) => s.sessionId === resolvedSessionId);
+      agentPid = typeof row?.agentPid === "number" ? row.agentPid : null;
+      return;
+    }
     agentPidFetchInFlight = true;
     void (async (): Promise<void> => {
       try {

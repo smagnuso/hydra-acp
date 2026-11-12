@@ -124,6 +124,8 @@ export interface DiscoveredSession {
   // makes the picker read BUSY even with no turn in flight, distinguishing
   // "finished" from "idle but will restart itself".
   armedTasks?: number;
+  // OS pid of the live agent process; absent on cold sessions. Only meaningful to a client on the daemon's host.
+  agentPid?: number;
   // clientInfo from the process that issued session/new. Carried for
   // log/display; the effective filtering signal is `interactive` below.
   originatingClient?: { name: string; version?: string };
@@ -265,6 +267,7 @@ export function parseSessionPage(raw: unknown): SessionListPage {
         awaitingInput: s.awaitingInput,
         unread: s.unread,
         armedTasks: s.armedTasks,
+        agentPid: s.agentPid,
         originatingClient: s.originatingClient,
         interactive: s.interactive,
         priority: s.priority,
