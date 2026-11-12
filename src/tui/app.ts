@@ -6803,6 +6803,7 @@ async function runSession(
         armed: (s.armedTasks ?? 0) > 0,
         blocked: s.awaitingInput === true,
       })),
+      (e) => e.s.sessionId,
     ).map((e) => e.s);
     if (live.length <= 1)
       return;

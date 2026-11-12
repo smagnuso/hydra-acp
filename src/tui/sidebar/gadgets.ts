@@ -850,10 +850,20 @@ const UNREAD_MARK = "●";
 // the rows in the order they are drawn.
 export function sortLiveSessions<
   T extends { blocked: boolean; busy: boolean; armed: boolean },
->(sessions: readonly T[]): T[] {
+>(sessions: readonly T[], idOf: (e: T) => string): T[] {
   const rank = (e: T): number =>
     (e.blocked ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
-  return [...sessions].sort((a, b) => rank(a) - rank(b));
+  // The daemon lists by updatedAt, which a switch itself bumps; without a
+  // fixed tie-break equal-rank rows reshuffle and the cycle never wraps.
+  return [...sessions].sort((a, b) => {
+    const d = rank(a) - rank(b);
+    if (d !== 0) {
+      return d;
+    }
+    const ia = idOf(a);
+    const ib = idOf(b);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
 }
 
 export const sessionsGadget: Gadget = {
@@ -884,7 +894,7 @@ export const sessionsGadget: Gadget = {
       .join("\u0000"),
   render: (s, ctx) => {
     const { truncate, cellWidth } = ctx.metrics;
-    const sorted = sortLiveSessions(s.liveSessions);
+    const sorted = sortLiveSessions(s.liveSessions, (p) => p.sessionId);
     return sorted.map((entry) => {
       const working = entry.busy || entry.armed;
       const marker = `${entry.blocked ? BLOCKED_MARK : " "}${
