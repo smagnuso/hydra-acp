@@ -896,6 +896,10 @@ interface ViewPrefs {
   // carried in the prefs container like every other toggle, or ^S is
   // silently undone by the next session switch.
   sidebarVisible: boolean;
+  // The warm rows behind the sidebar's sessions block. Carried across a
+  // session switch so the new sidebar opens with the list already in it
+  // instead of an empty block that fills in after its first fetch.
+  liveSessionRows: DiscoveredSession[];
   // In-process memory of the last agent the user picked in the new-session
   // agent prompt (including the picker composer's click-to-switch label).
   // Used to highlight that row first on the next prompt so they don't have
@@ -1385,6 +1389,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     defaultEnterAction: config.tui.defaultEnterAction,
     sidebarVisible: config.tui.sidebar.enabled,
     sidebarCollapsed: [],
+    liveSessionRows: [],
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
   // picker so re-opening via ^p restores the same filtered view the
@@ -9381,7 +9386,12 @@ async function runSession(
 
   // The warm rows behind the sidebar's sessions block. A poll replaces the
   // whole set; a stream frame merges into it.
-  let liveRows: DiscoveredSession[] = [];
+  let liveRows: DiscoveredSession[] = viewPrefs.liveSessionRows;
+
+  const setLiveRows = (rows: DiscoveredSession[]): void => {
+    liveRows = rows;
+    viewPrefs.liveSessionRows = rows;
+  };
 
   const publishLiveSessions = (): void => {
     const entries: SidebarLiveSession[] = [];
@@ -9425,7 +9435,7 @@ async function runSession(
       signal: abort.signal,
       onFrame: (frame) => {
         liveStreamHealthy = true;
-        liveRows = mergeSessionStreamFrame(liveRows, frame);
+        setLiveRows(mergeSessionStreamFrame(liveRows, frame));
         publishLiveSessions();
       },
       onDisconnect: () => {
@@ -9451,7 +9461,7 @@ async function runSession(
     liveSessionsPollInFlight = true;
     void (async (): Promise<void> => {
       try {
-        liveRows = await listSessions(target, { status: "warm" });
+        setLiveRows(await listSessions(target, { status: "warm" }));
         publishLiveSessions();
       } catch {
         // Daemon unreachable or slow: keep the last known list rather than
@@ -9606,13 +9616,16 @@ async function runSession(
     if (!screen.isSidebarGadgetActive("sessions")) {
       return;
     }
+    // Paint what the last session knew right away; the stream and poll
+    // below correct it.
+    publishLiveSessions();
     startLiveSessionsStream();
     pollLiveSessionsOnce();
   };
 
   const stopLiveSessionsPoll = (): void => {
     stopLiveSessionsStream();
-    liveRows = [];
+    setLiveRows([]);
     screen.setSidebarSnapshot({ liveSessions: [] });
   };
 
@@ -10466,6 +10479,7 @@ async function runSession(
   // Fetch the live-session list now rather than after the drain, so it
   // arrives while the replay renders instead of after it.
   if (viewPrefs.sidebarVisible && screen.isSidebarGadgetActive("sessions")) {
+    publishLiveSessions();
     startLiveSessionsStream();
     pollLiveSessionsOnce();
   }
