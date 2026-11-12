@@ -12,6 +12,7 @@
 // management.
 
 import { CANDIDATES, terminalHost } from "./index.js";
+import { holdOnFatalEnv } from "./hold-on-fatal.js";
 import { tabLabelFor, tabLabelOwnershipEnv } from "./label-sync.js";
 import type { OpenTabResult } from "./types.js";
 
@@ -300,7 +301,9 @@ export async function openInNewTab(spec: OpenSpec): Promise<OpenTabResult> {
       // already named after the session, and the hydra in it — a different
       // process, with no memory of the call that named it — would conclude a
       // human named the tab and leave it alone forever.
-      env: tabLabelOwnershipEnv(label),
+      // The host closes the pane when the process exits, so a fatal startup
+      // error would vanish; the child holds the pane open to show it.
+      env: { ...tabLabelOwnershipEnv(label), ...holdOnFatalEnv() },
     });
   } catch (err) {
     return { ok: false, error: (err as Error).message };

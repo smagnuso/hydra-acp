@@ -14,6 +14,10 @@ import {
 } from "./cli/resolve-session.js";
 import { writeDebugLine } from "./tui/debug-log.js";
 import type { TerminalHostOverride } from "./tui/term-host/index.js";
+import {
+  holdOnFatal,
+  shouldHoldOnFatal,
+} from "./tui/term-host/hold-on-fatal.js";
 import { runInit } from "./cli/commands/init.js";
 import {
   runDaemonLogs,
@@ -1292,7 +1296,14 @@ async function resolveSessionFlagOrExit(
       stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
     });
     process.stderr.write(`${(err as Error).message}\n`);
+    await holdPaneIfHosted();
     process.exit(1);
+  }
+}
+
+async function holdPaneIfHosted(): Promise<void> {
+  if (shouldHoldOnFatal(process.env, process.stdin, process.stderr)) {
+    await holdOnFatal(process.stdin, (text) => process.stderr.write(text));
   }
 }
 
@@ -1561,6 +1572,7 @@ main()
     const suffix = causeSummary ? ` (${causeSummary})` : "";
     process.stderr.write(`hydra-acp: ${(err as Error).message}${suffix}\n`);
     await maybePrintUpdateNotice();
+    await holdPaneIfHosted();
     process.exit(1);
   });
 

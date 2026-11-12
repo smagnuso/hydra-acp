@@ -291,7 +291,10 @@ describe("tab-label ownership hand-off", () => {
     // in it — a different process, with no memory of the call that named it —
     // concludes a human named the tab and leaves it alone forever.
     await openInNewTab({ kind: "attach", sessionId: "s", title: "refactor auth" });
-    expect(only().env).toEqual({ HYDRA_TAB_LABEL: "refactor auth" });
+    expect(only().env).toEqual({
+      HYDRA_TAB_LABEL: "refactor auth",
+      HYDRA_HOLD_ON_FATAL: "1",
+    });
   });
 
   it("hands over exactly the label it asked the host to set", async () => {
