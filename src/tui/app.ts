@@ -4802,6 +4802,9 @@ async function runSession(
   installStatus.finalize();
   // runTuiApp engages the alt screen for the lifetime of the TUI
   // (so the picker lives in there too); skip the per-session toggle.
+  // Held until the replay is in, so a session switch shows one complete
+  // frame instead of the chrome filling in piece by piece.
+  screen.pauseRepaint();
   screen.start({ skipFullscreen: true });
   screen.setHideThoughts(!viewPrefs.showThoughts);
   // Seed the sidebar from config. Gadget list and width first, so the
@@ -9816,7 +9819,7 @@ async function runSession(
     }
   };
 
-  const setSidebarVisible = (visible: boolean): void => {
+  const setSidebarVisible = (visible: boolean, opts: { clear?: boolean } = {}): void => {
     // Record the intent, not the outcome: a too-narrow terminal suppresses
     // the column, but the user still asked for it and a later session on a
     // wider terminal should honor that.
@@ -9834,7 +9837,11 @@ async function runSession(
       // disappearing looks like corruption if you don't know why.
       screen.notify("sidebar overlaying transcript (too wide to reflow)");
     }
-    screen.fullRedraw();
+    if (opts.clear === false) {
+      screen.redraw();
+    } else {
+      screen.fullRedraw();
+    }
     if (visible) {
       startGitPoll();
       startLiveSessionsPoll();
@@ -10575,6 +10582,13 @@ async function runSession(
     pollLiveSessionsOnce();
   }
   screen.pauseRepaint();
+  // Open the column before the replay so the transcript is laid out at its
+  // final width once, instead of painting full width and then reflowing
+  // (and clearing the screen) when the sidebar appears.
+  screen.setSidebarCollapsed(viewPrefs.sidebarCollapsed);
+  if (viewPrefs.sidebarVisible) {
+    setSidebarVisible(true, { clear: false });
+  }
   replayDraining = true;
   try {
     for (const { event, rawUpdate, recordedAt } of buffered) {
@@ -10604,21 +10618,12 @@ async function runSession(
     }
   }
   livePeerHistoryRecording = true;
+  screen.resumeRepaint();
 
-  // Open the sidebar last: setSidebarVisible re-renders the width-baked
-  // blocks, so it has to run after the replay drain has populated them
-  // (and after the helper consts it closes over are initialized).
-  //
-  // Read from viewPrefs, not from config or from the Screen. Every session
-  // builds a fresh Screen, so asking the Screen always answers "hidden";
-  // asking config ignores the toggle entirely, which made ^S asymmetric —
-  // opening the column didn't survive a session switch, and closing it
-  // didn't either when the config default was on. The prefs container is
-  // how every other ^O toggle carries across sessions.
-  screen.setSidebarCollapsed(viewPrefs.sidebarCollapsed);
-  if (viewPrefs.sidebarVisible) {
-    setSidebarVisible(true);
-  }
+  // The sidebar is opened before the replay (above), from viewPrefs, not
+  // config or the Screen. Every session builds a fresh Screen, so asking
+  // the Screen always answers "hidden"; config ignores the ^S toggle, which
+  // made it asymmetric across session switches.
 
   // Attach-time compaction work — two independent concerns share one
   // GET /compact/status call:
