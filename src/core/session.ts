@@ -1200,6 +1200,7 @@ export class Session {
     return false;
   }
   private attentionFlagsChangeHandlers: Array<(flags: AttentionFlag[]) => void> = [];
+  private listStateChangeHandlers: Array<() => void> = [];
   // While set, agent-emitted session/update notifications are
   // captured into `chunks` and NOT broadcast to clients. Used by
   // /hydra slash-command sub-prompts (e.g. title regeneration) so
@@ -3281,6 +3282,7 @@ export class Session {
       );
     }
     this.clients.set(client.clientId, client);
+    this.fireListStateChange();
     this.cancelOrphanTimer();
     this.updatedAt = Date.now();
     // "none" is a true opt-out — caller wants zero notifications.
@@ -3564,6 +3566,7 @@ export class Session {
       return;
     }
     this.clients.delete(clientId);
+    this.fireListStateChange();
     this.updatedAt = Date.now();
     this.scheduleOrphanCheck();
     this.broadcastClientDisconnected(leaving);
@@ -3875,6 +3878,7 @@ export class Session {
       sentBy.depth = entry.originator.depth;
     }
     this.promptStartedAt = Date.now();
+    this.fireListStateChange();
     this.turnRanTool = false;
     this.recordAndBroadcast(
       "session/update",
@@ -4088,6 +4092,7 @@ export class Session {
       };
     }
     this.promptStartedAt = undefined;
+    this.fireListStateChange();
     this.noteTurnEnded();
     // From here on, agent output with no prompt in flight means the agent
     // resumed a turn on its own. See noteAgentActivity.
@@ -4549,6 +4554,7 @@ export class Session {
       return;
     }
     this.lastArmedBroadcast = { key, since };
+    this.fireListStateChange();
     this.broadcastQueueNotification("hydra-acp/session/armed_tasks_updated", {
       sessionId: this.sessionId,
       count,
@@ -4816,6 +4822,7 @@ export class Session {
     this.pendingSteerDetach = undefined;
     this.unsolicitedTurn = turn;
     this.promptStartedAt = startedAt;
+    this.fireListStateChange();
     this.logger?.info(
       `session ${this.sessionId} agent resumed with no prompt in flight` +
         (cause ? ` (after ${cause.label})` : ""),
@@ -4948,6 +4955,7 @@ export class Session {
     const durationMs = Date.now() - turn.startedAt;
     this.unsolicitedTurn = undefined;
     this.promptStartedAt = undefined;
+    this.fireListStateChange();
     this.noteTurnEnded();
     // Feeds openUnsolicitedTurn's rapid-reopen streak. Any other reason is
     // what a legitimately finishing background task looks like, not a sign
@@ -9825,6 +9833,23 @@ export class Session {
   // persist the updated flag list to disk so a daemon restart restores it.
   onAttentionFlagsChange(handler: (flags: AttentionFlag[]) => void): void {
     this.attentionFlagsChangeHandlers.push(handler);
+  }
+
+  // Fires when something a session list row shows has moved: turn
+  // boundaries, armed tasks, attach and detach. The rest (attention,
+  // read state, title, priority, agent) already have their own hooks.
+  onListStateChange(handler: () => void): void {
+    this.listStateChangeHandlers.push(handler);
+  }
+
+  private fireListStateChange(): void {
+    for (const handler of this.listStateChangeHandlers) {
+      try {
+        handler();
+      } catch {
+        void 0;
+      }
+    }
   }
 
   private fireAttentionFlagsChange(): void {

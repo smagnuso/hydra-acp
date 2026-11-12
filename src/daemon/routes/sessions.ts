@@ -39,6 +39,7 @@ import {
 import { createOnRemote, ForeignSessionCache, searchAcrossPeers } from "./session-forward.js";
 import type { PeerStore } from "../../core/peer-store.js";
 import { MAX_TAGS, normalizeTag } from "../../core/tags.js";
+import { SessionStreamDiff, type SessionRow } from "../session-stream.js";
 
 // The public wire contract for GET /v1/sessions/:id/events and
 // GET /v1/sessions/events. Additive only — new kinds may be added
@@ -170,6 +171,134 @@ export function registerSessionRoutes(
       removed: [],
       cursor: listing.cursor,
     };
+  });
+
+  // Server-sent stream of session list changes. Same frame shape as a
+  // `GET /v1/sessions?since=` page, so a client merges it the same way.
+  // The first frame is everything the filter matches (narrowed by `since`
+  // when given); after that only rows whose state moved, and ids that left.
+  // Takes the same filters as the plain list.
+  app.get("/v1/sessions/stream", async (request, reply) => {
+    const query = request.query as
+      | {
+          cwd?: string;
+          includeNonInteractive?: string;
+          status?: string;
+          since?: string;
+        }
+      | undefined;
+    let since: number | undefined;
+    if (query?.since !== undefined) {
+      since = Number(query.since);
+      if (!Number.isFinite(since) || since < 0) {
+        return reply.code(400).send({
+          error: `since must be a non-negative number, got ${JSON.stringify(query.since)}`,
+        });
+      }
+    }
+    const includeNonInteractive =
+      query?.includeNonInteractive === "1" ||
+      query?.includeNonInteractive === "true";
+    const status =
+      query?.status === "warm" || query?.status === "cold"
+        ? query.status
+        : undefined;
+    const filter: SessionListFilter = {
+      cwd: query?.cwd,
+      includeNonInteractive,
+      ...(status ? { status } : {}),
+    };
+    const diff = new SessionStreamDiff(status === "warm");
+    let cursor = since;
+    let closed = false;
+    let busy = false;
+    let again = false;
+    // The first frame is always sent, even empty, so the client learns its
+    // cursor without a separate GET.
+    let sentFirst = false;
+
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    res.write(": hydra sessions stream\n\n");
+
+    // One read at a time: a tick that lands mid-read is folded into a
+    // single rerun afterwards instead of racing it with an older snapshot.
+    const tick = async (): Promise<void> => {
+      if (closed) {
+        return;
+      }
+      if (busy) {
+        again = true;
+        return;
+      }
+      busy = true;
+      try {
+        do {
+          again = false;
+          const foreign =
+            foreignSessions && !filter.cwd
+              ? foreignSessions.list({
+                  includeNonInteractive,
+                  ...(status ? { status } : {}),
+                })
+              : [];
+          let entries: SessionRow[];
+          let deleted: string[] = [];
+          let next: number;
+          if (cursor === undefined) {
+            const listing = await manager.listing(filter);
+            entries = listing.entries;
+            next = listing.cursor;
+          } else {
+            const delta = await manager.listSince(filter, cursor);
+            entries = delta.entries;
+            deleted = delta.removed;
+            next = delta.cursor;
+          }
+          const frame =
+            diff.next([...entries, ...foreign], deleted, next) ??
+            (sentFirst ? null : { sessions: [], removed: [], cursor: next });
+          cursor = next;
+          if (frame !== null && !closed) {
+            sentFirst = true;
+            res.write(`event: sessions\ndata: ${JSON.stringify(frame)}\n\n`);
+          }
+        } while (again && !closed);
+      } catch {
+        // A failed read is retried on the next tick or heartbeat.
+      } finally {
+        busy = false;
+      }
+    };
+
+    const unsubscribe = manager.listHub.subscribe(() => void tick());
+    // Doubles as the liveness ping and as the re-read that picks up peer
+    // rows, which no local event announces.
+    const heartbeat = setInterval(() => {
+      res.write(": ping\n\n");
+      void tick();
+    }, 20_000);
+    heartbeat.unref?.();
+    const close = (): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      if (!res.writableEnded) {
+        res.end();
+      }
+    };
+    request.raw.on("close", close);
+    res.on("error", close);
+    await tick();
   });
 
   // Single-session info — the same shape as one `GET /v1/sessions`

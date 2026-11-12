@@ -1,4 +1,5 @@
 import type { SideInfo } from "../acp/types-side.js";
+import { SessionListHub } from "./session-list-hub.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { contextBoundary, ownEntries } from "./side-context.js";
 import * as fs from "node:fs/promises";
@@ -558,6 +559,7 @@ export class SessionManager {
     { expiresAt: number; promise: Promise<SessionListing> }
   >();
   private static readonly LIST_CACHE_TTL_MS = 500;
+  readonly listHub = new SessionListHub();
   private logger?: AgentLogger;
   private npmRegistry?: string;
   private extensionCommands?: ExtensionCommandRegistry;
@@ -5944,7 +5946,10 @@ export class SessionManager {
       // the record, so bump its mtime or a `since=` client never hears
       // that the row left the warm set.
       if (!deleteRecord) {
-        void this.store.touch(session.sessionId).catch(() => undefined);
+        void this.store
+          .touch(session.sessionId)
+          .catch(() => undefined)
+          .then(() => this.listHub.poke());
       }
       // Release the workspace only when the record is going away too.
       // A close WITHOUT deleteRecord is a cold-down, not a deletion: the
@@ -6022,13 +6027,17 @@ export class SessionManager {
     });
     session.rewindHook = (keepThrough) =>
       this.rewindSession(session.sessionId, keepThrough, { afterCurrentTurn: true });
+    session.onListStateChange(() => this.listHub.poke());
+    session.onAttentionFlagsChange(() => this.listHub.poke());
     session.onTitleChange((title) => {
+      this.listHub.poke();
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });
     session.onTagsChange((tags) => {
       void this.persistTags(session.sessionId, tags).catch(() => undefined);
     });
     session.onPriorityChange((priority) => {
+      this.listHub.poke();
       void this.persistPriority(session.sessionId, priority).catch(
         () => undefined,
       );
@@ -6593,6 +6602,7 @@ export class SessionManager {
 
   private invalidateListCache(): void {
     this.listCache.clear();
+    this.listHub.poke();
   }
 
   private async listUncached(

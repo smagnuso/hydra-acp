@@ -412,6 +412,26 @@ List sessions known to the daemon.
 
 **Read state.** One read/unread state per session, shared by every client. `lastTurnEndedAt` is when the last agent turn ended (solicited or not) and `readAt` is when a client last marked the session read, both epoch ms; `unread` is `lastTurnEndedAt > readAt`, and is absent or `false` otherwise. A session with no `readAt` reads as read: the daemon pins `readAt` to the previous turn's end (or `createdAt`) when the next turn ends, so that turn is the one that makes it unread. Clients mark sessions read with [`PATCH /v1/sessions/:id`](#patch-v1sessionsid) `{ "read": true }` when a person has seen them; being attached is not enough. Neither field moves `updatedAt`. The fields also appear in `session/list` `_meta["hydra-acp"]`.
 
+#### `GET /v1/sessions/stream`
+
+Server-sent stream of session list changes, so a client that shows other sessions' state does not have to poll. Takes the same query parameters as [`GET /v1/sessions`](#get-v1sessions) (`cwd`, `includeNonInteractive`, `status`, `since`); `status=warm` is the cheap choice for a live indicator. Bearer auth, like the rest of `/v1`.
+
+The response is `text/event-stream`. Each `event: sessions` frame carries the same shape as a `since` page:
+
+```
+event: sessions
+data: {"sessions":[<SessionListEntry>...],"removed":["id",...],"cursor":1788396252071.123}
+```
+
+- **First frame is always sent**, even when empty, so the client has a `cursor` without a separate GET. It holds every row the filter matches (narrowed the way `since` narrows a list when one is given).
+- **Later frames carry only rows whose state moved**, as whole rows rather than field diffs, so a missed frame is healed by the next one for that session. Merge them the way an incremental list page is merged.
+- **What counts as a change:** anything the row shows other than `updatedAt` (busy, `awaitingInput`, armed tasks, unread, title, priority, attached clients, model, agent, warm to cold, create, delete). `updatedAt` moves on every transcript chunk and is not a trigger; it arrives whenever a frame is sent for another reason, so treat it as approximate between frames.
+- **`removed`** names ids that left. On a `status=warm` stream that includes a session that went cold (it is no longer in the warm set); on an unfiltered stream it is the store's deleted ids, and a cooled session arrives as a cold row instead.
+- Changes are coalesced over roughly 100 ms, so a burst produces one frame.
+- A `: ping` comment is sent every 20 s, and the daemon re-reads at the same moment, which is also how rows merged in from peers (which no local event announces) reach a stream.
+
+**Resume.** Reconnect with `since=<last cursor>`. Keep a slow poll of `GET /v1/sessions` as a backstop; the stream is an accelerator, not the only source of truth.
+
 #### `GET /v1/sessions/:id`
 
 Single-session info — same shape as one entry from `GET /v1/sessions`, looked up by id. Lets callers that already know a `sessionId` read its `agentId`, `currentModel`, `currentUsage`, `status`, `busy`, `awaitingInput`, etc. without scanning the full list. Works on both live and cold sessions.
