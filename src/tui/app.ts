@@ -3067,15 +3067,61 @@ async function runSession(
     );
   };
 
-  // Periodically poll the daemon for the current session's forkSynthesisState.
-  // When synthesis completes (field removed) or fails, clears the banner
-  // indicator and stops polling. Uses a 5s interval — enough cadence to
-  // give visible feedback without hammering the daemon.
+  // Watches the current session's forkSynthesisState. When synthesis
+  // completes (field removed) or fails, clears the banner indicator and stops
+  // watching.
+  // What a synthesis state (from the poll or the stream) means for the banner.
+  const handleSynthesisState = (
+    state: "running" | "failed" | undefined,
+  ): void => {
+    if (state === undefined) {
+      // Synthesis completed — field removed.
+      screen.setSynthesisIndicator(null);
+      screen.notify("synthesis complete", 2000);
+      stopSynthesisPoll();
+    } else if (state === "failed") {
+      screen.setSynthesisIndicator("▲ synthesis failed");
+      screen.notify("synthesis failed — fork still usable via recall", 8000);
+      stopSynthesisPoll();
+    }
+    // "running" → keep watching, indicator stays.
+  };
+
+  // Pushed over the session's own stream when the daemon has one; the 5s poll
+  // then only backstops it. A daemon without the stream keeps the poll alone.
+  let synthesisStreamAbort: AbortController | null = null;
+  let synthesisStreamHealthy = false;
+  let synthesisBackstopTicks = 0;
+
   const startSynthesisPoll = (): void => {
     if (synthesisPollTimer !== null) {
       return;
     }
+    const abort = new AbortController();
+    synthesisStreamAbort = abort;
+    const watched = resolvedSessionId;
+    void streamSessionPages(target, {
+      sessionId: watched,
+      signal: abort.signal,
+      onFrame: (frame) => {
+        synthesisStreamHealthy = true;
+        const row = frame.sessions[0];
+        if (row !== undefined) {
+          handleSynthesisState(row.forkSynthesisState);
+        }
+      },
+      onDisconnect: () => {
+        synthesisStreamHealthy = false;
+      },
+    }).then((outcome) => {
+      if (outcome === "unsupported") {
+        synthesisStreamHealthy = false;
+      }
+    });
     synthesisPollTimer = setInterval(async () => {
+      if (synthesisStreamHealthy && ++synthesisBackstopTicks % 6 !== 0) {
+        return;
+      }
       try {
         const res = await fetch(
           `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}`,
@@ -3085,23 +3131,7 @@ async function runSession(
           return;
         }
         const data = (await res.json()) as { forkSynthesisState?: "running" | "failed" };
-        if (data.forkSynthesisState === undefined) {
-          // Synthesis completed — field removed.
-          screen.setSynthesisIndicator(null);
-          screen.notify("synthesis complete", 2000);
-          if (synthesisPollTimer !== null) {
-            clearInterval(synthesisPollTimer);
-            synthesisPollTimer = null;
-          }
-        } else if (data.forkSynthesisState === "failed") {
-          screen.setSynthesisIndicator("▲ synthesis failed");
-          screen.notify("synthesis failed — fork still usable via recall", 8000);
-          if (synthesisPollTimer !== null) {
-            clearInterval(synthesisPollTimer);
-            synthesisPollTimer = null;
-          }
-        }
-        // "running" → keep polling, indicator stays.
+        handleSynthesisState(data.forkSynthesisState);
       } catch {
         // Non-fatal: silently skip on any error.
       }
@@ -3112,6 +3142,9 @@ async function runSession(
       clearInterval(synthesisPollTimer);
       synthesisPollTimer = null;
     }
+    synthesisStreamAbort?.abort();
+    synthesisStreamAbort = null;
+    synthesisStreamHealthy = false;
   };
 
   const stopColdWatch = (): void => {
@@ -3119,6 +3152,9 @@ async function runSession(
       clearInterval(coldWatchTimer);
       coldWatchTimer = null;
     }
+    coldStreamAbort?.abort();
+    coldStreamAbort = null;
+    coldStreamHealthy = false;
   };
 
   // An idle-close leaves us orphaned, not merely idle: the daemon cleared
@@ -3136,13 +3172,96 @@ async function runSession(
   // state, so it stays the user's call: a typed prompt. We only ride a
   // revival somebody else already paid for, which costs one attach on an
   // already-open socket.
+  // What the session's status means for the cold banner, whether it came from
+  // the poll or the stream: once it reads warm somebody revived it.
+  let coldHandling = false;
+  const handleColdWatchStatus = async (
+    status: "warm" | "cold" | undefined,
+  ): Promise<void> => {
+    if (status !== "warm" || coldHandling || teardownStarted) {
+      return;
+    }
+    coldHandling = true;
+    try {
+      stopColdWatch();
+      writeDebugLine({
+        src: "cold-watch",
+        step: "warm-detected",
+        sessionId: resolvedSessionId,
+      });
+      // Same handshake as a transport reconnect (after_message replay
+      // anchored on lastSeenMessageId, pendingTurns reconcile, banner
+      // repaint), minus the initialize: this socket never dropped and
+      // is already initialized.
+      //
+      // The seam line is deferred to beforeReplay so it only paints when
+      // the replay actually carries events. Riding a revival that has
+      // produced nothing yet (the common case: somebody attached but the
+      // agent hasn't spoken) leaves scrollback untouched, and the marker
+      // stays adjacent to the turns it is disclaiming.
+      if (onReconnect) {
+        await onReconnect({
+          skipInitialize: true,
+          beforeReplay: () => {
+            screenRef?.appendLines([
+              {
+                prefix: "  ",
+                body: "-- session resumed by another client, catching up --",
+                bodyStyle: "muted",
+              },
+            ]);
+          },
+        });
+      }
+    } catch {
+      // Daemon down or unreachable, keep watching. If the WS is also
+      // down the transport-level reconnect owns recovery instead.
+    } finally {
+      coldHandling = false;
+    }
+  };
+
+  // Pushed over the session's own stream when the daemon has one; the poll
+  // then only backstops it. A daemon without the stream keeps the poll alone.
+  let coldStreamAbort: AbortController | null = null;
+  let coldStreamHealthy = false;
+  let coldBackstopTicks = 0;
+
   const startColdWatch = (): void => {
     if (coldWatchTimer !== null) {
       return;
     }
+    const abort = new AbortController();
+    coldStreamAbort = abort;
+    void streamSessionPages(target, {
+      sessionId: resolvedSessionId,
+      signal: abort.signal,
+      onFrame: (frame) => {
+        coldStreamHealthy = true;
+        // The record is gone for good (deleted): nothing will ever go warm.
+        if (frame.removed.includes(resolvedSessionId)) {
+          stopColdWatch();
+          return;
+        }
+        const row = frame.sessions[0];
+        if (row !== undefined) {
+          void handleColdWatchStatus(row.status);
+        }
+      },
+      onDisconnect: () => {
+        coldStreamHealthy = false;
+      },
+    }).then((outcome) => {
+      if (outcome === "unsupported") {
+        coldStreamHealthy = false;
+      }
+    });
     let inFlight = false;
     coldWatchTimer = setInterval(async () => {
       if (inFlight || teardownStarted) {
+        return;
+      }
+      if (coldStreamHealthy && ++coldBackstopTicks % 10 !== 0) {
         return;
       }
       inFlight = true;
@@ -3161,42 +3280,9 @@ async function runSession(
           return;
         }
         const data = (await res.json()) as { status?: "warm" | "cold" };
-        if (data.status !== "warm") {
-          return;
-        }
-        stopColdWatch();
-        writeDebugLine({
-          src: "cold-watch",
-          step: "warm-detected",
-          sessionId: resolvedSessionId,
-        });
-        // Same handshake as a transport reconnect (after_message replay
-        // anchored on lastSeenMessageId, pendingTurns reconcile, banner
-        // repaint), minus the initialize: this socket never dropped and
-        // is already initialized.
-        //
-        // The seam line is deferred to beforeReplay so it only paints when
-        // the replay actually carries events. Riding a revival that has
-        // produced nothing yet (the common case: somebody attached but the
-        // agent hasn't spoken) leaves scrollback untouched, and the marker
-        // stays adjacent to the turns it is disclaiming.
-        if (onReconnect) {
-          await onReconnect({
-            skipInitialize: true,
-            beforeReplay: () => {
-              screenRef?.appendLines([
-                {
-                  prefix: "  ",
-                  body: "-- session resumed by another client, catching up --",
-                  bodyStyle: "muted",
-                },
-              ]);
-            },
-          });
-        }
+        await handleColdWatchStatus(data.status);
       } catch {
-        // Daemon down or unreachable, keep polling. If the WS is also
-        // down the transport-level reconnect owns recovery instead.
+        // Daemon down or unreachable, keep polling.
       } finally {
         inFlight = false;
       }
@@ -6217,10 +6303,7 @@ async function runSession(
       sessionElapsedTimer = null;
     }
     // Synthesis poller — same cleanup pattern as the elapsed timer.
-    if (synthesisPollTimer !== null) {
-      clearInterval(synthesisPollTimer);
-      synthesisPollTimer = null;
-    }
+    stopSynthesisPoll();
     // Cold watch: unbounded by design, so teardown is the only thing that
     // stops it short of the session going warm. Left running it would keep
     // the event loop alive and reattach into a dead screen.

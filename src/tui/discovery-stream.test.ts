@@ -159,6 +159,37 @@ describe("streamSessionPages", () => {
     expect(waits).toEqual([1000, 2000]);
   });
 
+  it("follows one session's stream when given a session id, with no list filters or cursor", async () => {
+    const abort = new AbortController();
+    const urls: string[] = [];
+    let call = 0;
+    let seen = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      urls.push(url);
+      call++;
+      return streamResponse([
+        sse({ sessions: [row("abc")], removed: [], cursor: call }),
+      ]);
+    });
+    await streamSessionPages(target, {
+      sessionId: "hydra_session_abc",
+      status: "warm",
+      signal: abort.signal,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      sleep: async () => undefined,
+      onFrame: () => {
+        seen++;
+        if (seen === 2) {
+          abort.abort();
+        }
+      },
+    });
+    expect(urls).toEqual([
+      "http://127.0.0.1:1/v1/sessions/hydra_session_abc/stream",
+      "http://127.0.0.1:1/v1/sessions/hydra_session_abc/stream",
+    ]);
+  });
+
   it("reports an older daemon (404) as unsupported without retrying", async () => {
     const abort = new AbortController();
     const fetchImpl = vi.fn(async () => new Response(null, { status: 404 }));

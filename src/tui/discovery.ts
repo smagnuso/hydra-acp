@@ -382,6 +382,9 @@ export function drainSseData(buffer: string): {
 const STREAM_BACKOFF_MS = [1_000, 2_000, 5_000, 15_000];
 
 export interface SessionStreamOptions {
+  // Follow this one session's row (GET /v1/sessions/:id/stream) instead of
+  // the list. It has no cursor, so a reconnect starts from the current row.
+  sessionId?: string;
   includeNonInteractive?: boolean;
   status?: "warm" | "cold";
   signal: AbortSignal;
@@ -426,15 +429,21 @@ export async function streamSessionPages(
   let failures = 0;
   while (!opts.signal.aborted) {
     try {
-      const url = new URL(`${target.baseUrl}/v1/sessions/stream`);
-      if (opts.includeNonInteractive) {
-        url.searchParams.set("includeNonInteractive", "true");
-      }
-      if (opts.status) {
-        url.searchParams.set("status", opts.status);
-      }
-      if (cursor !== undefined) {
-        url.searchParams.set("since", String(cursor));
+      const url = new URL(
+        opts.sessionId !== undefined
+          ? `${target.baseUrl}/v1/sessions/${encodeURIComponent(opts.sessionId)}/stream`
+          : `${target.baseUrl}/v1/sessions/stream`,
+      );
+      if (opts.sessionId === undefined) {
+        if (opts.includeNonInteractive) {
+          url.searchParams.set("includeNonInteractive", "true");
+        }
+        if (opts.status) {
+          url.searchParams.set("status", opts.status);
+        }
+        if (cursor !== undefined) {
+          url.searchParams.set("since", String(cursor));
+        }
       }
       const response = await fetchImpl(url.toString(), {
         headers: {
