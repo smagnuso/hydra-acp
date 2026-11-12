@@ -844,6 +844,18 @@ const IDLE_MARK = "○";
 const BLOCKED_MARK = "◦";
 const UNREAD_MARK = "●";
 
+// Anything blocked on the user first, then whatever is working, mid-turn
+// above merely armed. Stable within a group, so callers pass them
+// most-recently-used first. Shared with session cycling so the keys walk
+// the rows in the order they are drawn.
+export function sortLiveSessions<
+  T extends { blocked: boolean; busy: boolean; armed: boolean },
+>(sessions: readonly T[]): T[] {
+  const rank = (e: T): number =>
+    (e.blocked ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
+  return [...sessions].sort((a, b) => rank(a) - rank(b));
+}
+
 export const sessionsGadget: Gadget = {
   id: "sessions",
   title: "sessions",
@@ -872,14 +884,7 @@ export const sessionsGadget: Gadget = {
       .join("\u0000"),
   render: (s, ctx) => {
     const { truncate, cellWidth } = ctx.metrics;
-    // Anything blocked on the user first, then whatever is working —
-    // mid-turn above merely armed, since a turn in flight is the louder of
-    // the two. Stable within a group: the caller supplies them
-    // most-recently-used first, and a list that reshuffles under the pointer
-    // is worse than one that doesn't move.
-    const rank = (e: SidebarLiveSession): number =>
-      (e.blocked ? 0 : 3) + (e.busy ? 0 : e.armed ? 1 : 2);
-    const sorted = [...s.liveSessions].sort((a, b) => rank(a) - rank(b));
+    const sorted = sortLiveSessions(s.liveSessions);
     return sorted.map((entry) => {
       const working = entry.busy || entry.armed;
       const marker = `${entry.blocked ? BLOCKED_MARK : " "}${

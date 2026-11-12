@@ -11370,6 +11370,10 @@ export function mapKeyName(name: string): KeyName | null {
     case "ALT_TAB":
     case "META_TAB":
       return "alt-tab";
+    case "CTRL_UP":
+      return "ctrl-up";
+    case "CTRL_DOWN":
+      return "ctrl-down";
     case "CTRL_T":
       return "ctrl-t";
     case "SHIFT_TAB":

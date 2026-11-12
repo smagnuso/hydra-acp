@@ -17,6 +17,8 @@ export type KeyName =
   | "alt-n"
   | "alt-p"
   | "alt-tab"
+  | "ctrl-up"
+  | "ctrl-down"
   | "shift-tab"
   | "tab"
   | "up"
@@ -690,8 +692,10 @@ export class InputDispatcher {
       }
       case "alt-n":
       case "alt-tab":
+      case "ctrl-down":
         return [{ type: "next-live-session" }];
       case "alt-p":
+      case "ctrl-up":
         return [{ type: "prev-live-session" }];
       case "ctrl-r":
         return this.startHistorySearch();

@@ -168,6 +168,7 @@ import {
   sanitizeProcessOutput,
   sidebarGadgetId,
 } from "./sidebar/process-gadget.js";
+import { sortLiveSessions } from "./sidebar/gadgets.js";
 import { expandSidebarGadgets } from "./sidebar/registry.js";
 import {
   InputDispatcher,
@@ -1053,8 +1054,8 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^Y", "yank last kill"],
   null,
   ["^P", "switch session (picker)"],
-  ["Alt+N / Alt+Tab", "next warm session"],
-  ["Alt+P", "previous warm session"],
+  ["Alt+N / Alt+Tab / ^↓", "next warm session (list order)"],
+  ["Alt+P / ^↑", "previous warm session (list order)"],
   ["^T", "transpose chars mid-line; otherwise show / hide thoughts"],
   ["^S", "show / hide sidebar (with an empty draft; amends otherwise)"],
   ["^V", "paste image from clipboard"],
@@ -6697,7 +6698,14 @@ async function runSession(
       return;
     // status=warm: this only ever looks at live sessions, so there's no
     // reason to make the daemon walk the store for the cold ones.
-    const live = await listSessions(target, { status: "warm" });
+    const live = sortLiveSessions(
+      (await listSessions(target, { status: "warm" })).map((s) => ({
+        s,
+        busy: s.busy === true,
+        armed: (s.armedTasks ?? 0) > 0,
+        blocked: s.awaitingInput === true,
+      })),
+    ).map((e) => e.s);
     if (live.length <= 1)
       return;
     const idx = live.findIndex((s) => s.sessionId === resolvedSessionId);

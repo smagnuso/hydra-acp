@@ -23,6 +23,16 @@ function k(name: KeyName): KeyEvent {
 }
 
 describe("InputDispatcher", () => {
+  it.each([
+    ["alt-n", "next-live-session"],
+    ["ctrl-down", "next-live-session"],
+    ["alt-p", "prev-live-session"],
+    ["ctrl-up", "prev-live-session"],
+  ] as const)("%s cycles sessions", (name, type) => {
+    const d = new InputDispatcher();
+    expect(d.feed(k(name))).toEqual([{ type }]);
+  });
+
   it("state() aliases the live buffer — callers must snapshot to detect in-place mutation", () => {
     // ^K at col=0 with content rewrites the current line without moving
     // row/col. Callers that compare before/after via state() will miss
