@@ -9590,6 +9590,9 @@ async function runSession(
   // that timer is started and cleared with the turn, so it doesn't exist
   // while idle — precisely when the idle counter needs ticking.
   const SIDEBAR_SLOW_TICKS = 5;
+  // The sessions list is one cheap in-memory daemon query and carries the
+  // state dots (blocked, busy, unread), so it polls faster than the rest.
+  const LIVE_SESSIONS_TICKS = 2;
   let sidebarTicker: NodeJS.Timeout | null = null;
   let sidebarTickCount = 0;
 
@@ -9610,7 +9613,10 @@ async function runSession(
       if (slowTick && screen.isSidebarGadgetActive("git")) {
         pollGitOnce();
       }
-      if (slowTick && screen.isSidebarGadgetActive("sessions")) {
+      if (
+        sidebarTickCount % LIVE_SESSIONS_TICKS === 0 &&
+        screen.isSidebarGadgetActive("sessions")
+      ) {
         pollLiveSessionsOnce();
       }
       if (slowTick && screen.isSidebarGadgetActive("resources")) {
@@ -10396,6 +10402,11 @@ async function runSession(
     if (event.kind === "user-text" && typeof event.text === "string") {
       replayedPromptTexts.push(event.text);
     }
+  }
+  // Fetch the live-session list now rather than after the drain, so it
+  // arrives while the replay renders instead of after it.
+  if (viewPrefs.sidebarVisible && screen.isSidebarGadgetActive("sessions")) {
+    pollLiveSessionsOnce();
   }
   screen.pauseRepaint();
   replayDraining = true;

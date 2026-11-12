@@ -1895,6 +1895,16 @@ export class Screen {
       this.handleRawStdin(Buffer.from(text.slice(2), "binary"));
       return;
     }
+    // Ctrl+Up / Ctrl+Down. terminal-kit only knows these for some TERM
+    // values; under tmux-256color it drops them, so match the exact chunk.
+    if (text === "\x1b[1;5A") {
+      this.onKey([{ type: "key", name: "ctrl-up" }]);
+      return;
+    }
+    if (text === "\x1b[1;5B") {
+      this.onKey([{ type: "key", name: "ctrl-down" }]);
+      return;
+    }
     // Two families of "modified key" sequences leak through terminal-kit
     // because it doesn't parse them, and would otherwise insert literal
     // "[27;2;73~" / "[13;2u" etc. into the buffer:
