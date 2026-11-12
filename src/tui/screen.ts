@@ -8074,7 +8074,9 @@ export class Screen {
       const overflow = this.attachments.length - MAX_CHIP_ROWS;
       const att = this.attachments[i];
       const label = att
-        ? `${att.name ?? "image"} · ${formatSize(att.sizeBytes)}`
+        ? att.name
+          ? `${att.name} · ${formatSize(att.sizeBytes)}`
+          : formatSize(att.sizeBytes)
         : "";
       const sig = isLast
         ? `chip|${w}|overflow|${overflow}`

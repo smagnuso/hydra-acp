@@ -225,8 +225,8 @@ async function writeNative(
         env,
         buf,
         "xclip",
-        ["-selection", "clipboard", "-i"],
-        ["-selection", "primary", "-i"],
+        ["-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
+        ["-selection", "primary", "-t", "UTF8_STRING", "-i"],
         wantClip,
         wantPrim,
       );
@@ -236,8 +236,8 @@ async function writeNative(
         env,
         buf,
         "wl-copy",
-        [],
-        ["--primary"],
+        ["--type", "text/plain;charset=utf-8"],
+        ["--primary", "--type", "text/plain;charset=utf-8"],
         wantClip,
         wantPrim,
       );

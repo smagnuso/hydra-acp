@@ -263,7 +263,7 @@ export function formatEvent(
           lines.push({
             prefix: "│ ",
             prefixStyle: "user",
-            body: `[img] ${a.name ?? "image"}`,
+            body: a.name ? `[img] ${a.name}` : "[img]",
             bodyStyle: "user",
             fillRow: true,
           });

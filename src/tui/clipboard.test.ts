@@ -469,8 +469,18 @@ describe("writeClipboard", () => {
     const primarySink: Buffer[] = [];
     const { spawn, calls } = makeSpawnFake([
       { cmd: "which", args: ["wl-copy"], code: 0 },
-      { cmd: "wl-copy", args: [], code: 0, stdinSink: sink },
-      { cmd: "wl-copy", args: ["--primary"], code: 0, stdinSink: primarySink },
+      {
+        cmd: "wl-copy",
+        args: ["--type", "text/plain;charset=utf-8"],
+        code: 0,
+        stdinSink: sink,
+      },
+      {
+        cmd: "wl-copy",
+        args: ["--primary", "--type", "text/plain;charset=utf-8"],
+        code: 0,
+        stdinSink: primarySink,
+      },
     ]);
     const result = await writeClipboard("wayland-text", {
       platform: "linux",
@@ -480,7 +490,7 @@ describe("writeClipboard", () => {
     });
     expect(result).toEqual({ ok: true, method: "wl-copy" });
     expect(calls.map((c) => c.cmd)).toEqual(["which", "wl-copy", "wl-copy"]);
-    expect(calls[2]?.args).toEqual(["--primary"]);
+    expect(calls[2]?.args).toEqual(["--primary", "--type", "text/plain;charset=utf-8"]);
     expect(Buffer.concat(sink).toString("utf-8")).toBe("wayland-text");
     expect(Buffer.concat(primarySink).toString("utf-8")).toBe("wayland-text");
   });
@@ -495,13 +505,13 @@ describe("writeClipboard", () => {
       { cmd: "which", args: ["xclip"], code: 0 },
       {
         cmd: "xclip",
-        args: ["-selection", "clipboard", "-i"],
+        args: ["-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
         code: 0,
         stdinSink: sink,
       },
       {
         cmd: "xclip",
-        args: ["-selection", "primary", "-i"],
+        args: ["-selection", "primary", "-t", "UTF8_STRING", "-i"],
         code: 0,
         stdinSink: primarySink,
       },
@@ -532,11 +542,11 @@ describe("writeClipboard", () => {
       { cmd: "which", args: ["xclip"], code: 0 },
       {
         cmd: "xclip",
-        args: ["-selection", "clipboard", "-i"],
+        args: ["-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
         code: 0,
         stdinSink: sink,
       },
-      { cmd: "xclip", args: ["-selection", "primary", "-i"], code: 1 },
+      { cmd: "xclip", args: ["-selection", "primary", "-t", "UTF8_STRING", "-i"], code: 1 },
     ]);
     const result = await writeClipboard("x11-text", {
       platform: "linux",
@@ -555,7 +565,7 @@ describe("writeClipboard", () => {
       { cmd: "which", args: ["xclip"], code: 0 },
       {
         cmd: "xclip",
-        args: ["-selection", "clipboard", "-i"],
+        args: ["-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
         code: 0,
         stdinSink: sink,
       },
@@ -569,7 +579,7 @@ describe("writeClipboard", () => {
     });
     expect(result).toEqual({ ok: true, method: "xclip" });
     expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
-    expect(calls[1]?.args).toEqual(["-selection", "clipboard", "-i"]);
+    expect(calls[1]?.args).toEqual(["-selection", "clipboard", "-t", "UTF8_STRING", "-i"]);
     expect(Buffer.concat(sink).toString("utf-8")).toBe("only-clip");
   });
 
@@ -579,7 +589,7 @@ describe("writeClipboard", () => {
       { cmd: "which", args: ["xclip"], code: 0 },
       {
         cmd: "xclip",
-        args: ["-selection", "primary", "-i"],
+        args: ["-selection", "primary", "-t", "UTF8_STRING", "-i"],
         code: 0,
         stdinSink: sink,
       },
@@ -593,7 +603,7 @@ describe("writeClipboard", () => {
     });
     expect(result).toEqual({ ok: true, method: "xclip" });
     expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
-    expect(calls[1]?.args).toEqual(["-selection", "primary", "-i"]);
+    expect(calls[1]?.args).toEqual(["-selection", "primary", "-t", "UTF8_STRING", "-i"]);
     expect(Buffer.concat(sink).toString("utf-8")).toBe("only-prim");
   });
 
@@ -904,8 +914,8 @@ describe("Linux clipboard backend fallback", () => {
     expect(calls.map((call) => [call.cmd, call.args])).toEqual([
       ["which", ["xclip"]],
       ["which", ["wl-copy"]],
-      ["wl-copy", []],
-      ["wl-copy", ["--primary"]],
+      ["wl-copy", ["--type", "text/plain;charset=utf-8"]],
+      ["wl-copy", ["--primary", "--type", "text/plain;charset=utf-8"]],
     ]);
   });
 
