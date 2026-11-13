@@ -129,7 +129,7 @@ export async function runDaemonRestart(): Promise<void> {
     }
     if (outcome.how !== "graceful" && !(await waitForExit(info.pid))) {
       process.stderr.write(
-        `Daemon pid ${info.pid} did not exit after SIGTERM; aborting restart.\n`,
+        `Daemon pid ${info.pid} did not exit within 15s of SIGTERM; aborting restart. See \`hydra daemon logs\`.\n`,
       );
       process.exit(1);
     }
@@ -148,7 +148,8 @@ export async function runDaemonRestart(): Promise<void> {
   }
 }
 
-async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
+// Longer than the daemon's own 10s hard-exit so a slow but healthy shutdown is not mistaken for a hang.
+async function waitForExit(pid: number, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) {
