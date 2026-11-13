@@ -342,6 +342,8 @@ export interface SessionInit {
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
   scheduleSynopsis?: () => void;
+  // Regenerate the title every N completed turns. 0 or unset disables.
+  autoTitle?: number;
   // Fire-and-forget callback letting SessionManager snapshot an isolated
   // session's workspace at a turn boundary. Session deliberately knows
   // nothing about providers or git; it only knows when a turn ended.
@@ -937,6 +939,8 @@ export class Session {
   // out-of-band synopsis without taking a direct dependency on
   // SessionManager.
   private scheduleSynopsisHook?: () => void;
+  private autoTitle = 0;
+  private turnsSinceAutoTitle = 0;
   private scheduleWorkspaceSnapshotHook?: () => void;
   // Fire-and-forget hook for `/hydra compact` and `/hydra agent` —
   // calls back to the manager's compaction scheduler so the slash
@@ -1596,6 +1600,7 @@ export class Session {
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
+    this.autoTitle = init.autoTitle ?? 0;
     this.scheduleWorkspaceSnapshotHook = init.scheduleWorkspaceSnapshot;
     this.scheduleCompactionHook = init.scheduleCompaction;
     this.resolveAgentIdHook = init.resolveAgentId;
@@ -4102,6 +4107,13 @@ export class Session {
     // momentarily coherent. Fire-and-forget by contract, because the
     // alternative is making every turn wait on a tree walk.
     this.scheduleWorkspaceSnapshotHook?.();
+    if (this.autoTitle > 0 && stopReason === "end_turn") {
+      this.turnsSinceAutoTitle += 1;
+      if (this.turnsSinceAutoTitle >= this.autoTitle) {
+        this.turnsSinceAutoTitle = 0;
+        this.scheduleSynopsisHook?.();
+      }
+    }
     if (promptMessageId !== undefined && stopReason !== undefined) {
       this.recordTerminal(promptMessageId, stopReason);
       const notifier = this.pendingTurnNotifiers.get(promptMessageId);

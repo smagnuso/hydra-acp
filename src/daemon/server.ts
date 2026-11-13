@@ -275,6 +275,7 @@ export async function startDaemon(
     sessionDefaults: config.sessionDefaults,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,
+    autoTitle: config.autoTitle,
     compactionAgent: config.compaction?.agent,
     compactionModel: config.compaction?.model,
     defaultTransformers: config.defaultTransformers,

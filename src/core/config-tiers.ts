@@ -113,6 +113,7 @@ export const CONFIG_TIERS: { [K in keyof HydraConfig]-?: ConfigKeyTier } = {
   // --- warn: snapshotted at boot, drift reported ----------------------
   synopsisAgent: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   synopsisModel: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
+  autoTitle: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   compaction: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   defaultTransformers: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },
   disableWorkspaceSnapshots: { reload: "warn", overlay: "inert", overlayNote: DAEMON_ONLY },

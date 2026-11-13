@@ -495,6 +495,8 @@ export interface SessionManagerOptions {
   tombstones?: TombstoneStore;
   // Compaction configuration forwarded to the synopsis coordinator and
   // used by the onSynthesisArtifact hook (swap logic).
+  // Regenerate session titles every N completed turns; 0 or unset is off.
+  autoTitle?: number;
   compaction?: {
     // Number of recent turns kept verbatim in the seed after compaction.
     tailK?: number;
@@ -531,6 +533,7 @@ export class SessionManager {
   private sessionDefaults: Record<string, Record<string, string>>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
+  private autoTitle = 0;
   private compactionAgent?: string;
   private compactionModel?: string;
   readonly defaultTransformers: string[];
@@ -625,6 +628,7 @@ export class SessionManager {
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
     this.compactionAgent = options.compactionAgent;
+    this.autoTitle = options.autoTitle ?? 0;
     this.compactionModel = options.compactionModel;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
@@ -1346,6 +1350,7 @@ export class SessionManager {
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      autoTitle: this.autoTitle,
       scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
@@ -1723,6 +1728,7 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      autoTitle: this.autoTitle,
       scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
@@ -1886,6 +1892,7 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      autoTitle: this.autoTitle,
       scheduleWorkspaceSnapshot: () => this.scheduleWorkspaceSnapshot(session),
       scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       resolveAgentId: async (id) => (await this.registry.getAgent(id))?.id,
