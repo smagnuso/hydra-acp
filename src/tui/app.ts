@@ -2149,6 +2149,9 @@ async function runSession(
   let currentSidechain: SidechainEventEmitter | null = null;
   let btwSessionId: string | null = null;
   let btwReusableDirty = false;
+  // A fork taken mid-turn is a snapshot of partial progress, so it can't be
+  // reused once the turn has moved on.
+  let btwForkedMidTurn = false;
   let btwStartGen = 0;
 
   // Count of prompts currently in flight on the daemon — across ALL
@@ -7874,13 +7877,16 @@ async function runSession(
         // makes follow-up /btws feel snappy. If main HAS moved, the
         // retained context is stale — kill the old fork and start fresh.
         let reuseSessionId: string | null = null;
-        if (btwSessionId !== null && !btwReusableDirty) {
+        if (btwSessionId !== null && !btwReusableDirty && !btwForkedMidTurn) {
           reuseSessionId = btwSessionId;
         } else if (btwSessionId !== null) {
           void killSession(target, btwSessionId).catch(() => undefined);
           btwSessionId = null;
         }
         btwReusableDirty = false;
+        if (reuseSessionId === null) {
+          btwForkedMidTurn = pendingTurns > 0;
+        }
         screen.openBtwOverlay();
         screen.setBtwOverlayStatus({ label: "busy", style: "busy" });
         const buffer = new BtwOverlayBuffer({

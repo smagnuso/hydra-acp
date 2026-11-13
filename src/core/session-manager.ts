@@ -7075,9 +7075,17 @@ export class SessionManager {
         slicedHistory = sourceHistory.slice(0, ci + 1);
       } else {
         const found = findLastTurnComplete(sourceHistory);
-        if (found) {
+        if (found && opts.side) {
+          // An aside keeps the in-flight turn so the user can ask about
+          // findings while it runs; the seed renders it as an open turn.
+          forkedAt = found.messageId;
+          slicedHistory = sourceHistory;
+        } else if (found) {
           forkedAt = found.messageId;
           slicedHistory = sourceHistory.slice(0, found.index + 1);
+        } else if (opts.side) {
+          forkedAt = "";
+          slicedHistory = sourceHistory;
         } else {
           // Source has no completed turns yet (e.g. a freshly-spawned
           // session that hasn't received a real prompt). Fork at the

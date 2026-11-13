@@ -426,6 +426,34 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
     expect(forkMeta.summarizedThroughEntry).toBe(2);
   });
 
+  it("a side fork keeps the in-flight turn; a plain verbatim fork drops it", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        throw new Error("spawner should not be called from forkSession");
+      },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_side_inflight",
+        history: [
+          userPrompt("one"),
+          turnComplete("m_one"),
+          userPrompt("two"),
+          agentChunk("partial findings"),
+        ],
+      }),
+    );
+
+    const side = await manager.forkSession(source.sessionId, { side: {} });
+    expect(side.forkedAt).toBe("m_one");
+    expect((await readHistory(side.sessionId)).length).toBe(4);
+
+    const plain = await manager.forkSession(source.sessionId, { mode: "verbatim" });
+    expect((await readHistory(plain.sessionId)).length).toBe(2);
+  });
+
   it("forkAt slices history in synthesis mode too", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
