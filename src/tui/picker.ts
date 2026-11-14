@@ -363,7 +363,7 @@ type HelpEntry = readonly [string, string] | null;
 const HELP_ENTRIES: ReadonlyArray<HelpEntry> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
-  ["typing in list", "jumps focus back to composer with that key"],
+  ["g (in list)", "focus the composer without typing"],
   ["mouse-hover composer", "Enter from anywhere creates a new session"],
   null,
   ["↑ / ↓, n / p, ^p / ^n", "navigate sessions"],
@@ -5282,14 +5282,13 @@ export async function pickSession(
           paintIndicator();
           return;
         }
-        // Unbound printable char while focus is in the session list:
-        // pull focus up into the composer and feed the character so the
-        // user can just start typing a new-session prompt without first
-        // pressing ↑ to land on the composer box.
-        composerHover = false;
-        selectedIdx = 0;
-        composer.feed({ type: "char", ch: name });
-        renderFromScratch();
+        if (name === "g") {
+          composerHover = false;
+          selectedIdx = 0;
+          renderFromScratch();
+          return;
+        }
+        // Other unbound printable chars are ignored in the list.
         return;
       }
       switch (name) {
