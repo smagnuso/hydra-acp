@@ -6701,6 +6701,7 @@ async function runSession(
         };
         if (choice.prompt !== undefined) {
           nextOpts.initialPrompt = choice.prompt;
+          saveDraftToGlobalHistory(choice.prompt);
         }
         if (choice.attachments && choice.attachments.length > 0) {
           nextOpts.initialAttachments = choice.attachments;
@@ -11267,6 +11268,15 @@ async function runSession(
   return await sessionDone;
 }
 
+// A prompt typed in the picker is only recorded once its session is up, so a
+// failed agent start would lose it. Write it to the global history as soon as
+// the picker returns it; runSession's later record dedups against this line.
+function saveDraftToGlobalHistory(prompt: string): void {
+  appendHistoryLine(paths.globalTuiHistoryFile(), prompt).catch(
+    () => undefined,
+  );
+}
+
 async function resolveSession(
   term: termkit.Terminal,
   config: HydraConfig,
@@ -11446,6 +11456,7 @@ async function resolveSession(
       }
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
+        saveDraftToGlobalHistory(choice.prompt);
       }
       if (choice.attachments && choice.attachments.length > 0) {
         opts.initialAttachments = choice.attachments;
