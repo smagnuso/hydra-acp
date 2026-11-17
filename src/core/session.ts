@@ -4304,7 +4304,11 @@ export class Session {
     if (toolCallId === undefined) {
       return;
     }
-    const rawInput = update.rawInput as Record<string, unknown> | undefined;
+    // pi-acp sends rawInput: null for some tool calls; treat it as absent.
+    const rawInput =
+      typeof update.rawInput === "object" && update.rawInput !== null
+        ? (update.rawInput as Record<string, unknown>)
+        : undefined;
     const claudeMeta = extractClaudeCodeMeta(update._meta);
     this.rememberToolLabel(toolCallId, update, rawInput, claudeMeta);
     this.noteBackgroundTaskStopped(update, rawInput, claudeMeta);

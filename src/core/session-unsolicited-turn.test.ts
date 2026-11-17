@@ -846,6 +846,18 @@ describe("armed background tasks", () => {
     ]);
   });
 
+  it("labels from the title when pi-acp sends a null rawInput", async () => {
+    const { session } = await armDuringTurn({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_null",
+      title: "read",
+      rawInput: null,
+    });
+    expect(session.armedBackgroundTasks).toMatchObject([
+      { toolCallId: "toolu_null", label: "read" },
+    ]);
+  });
+
   it("keeps a task id that a later update does not repeat", async () => {
     // The id and the backgrounded-ness arrive on different updates:
     // Monitor reports a taskId, Bash reports run_in_background, and
