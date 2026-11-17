@@ -426,6 +426,65 @@ describe("readClipboard — Linux", () => {
   });
 });
 
+describe("readClipboard — oversized Linux image", () => {
+  const big = Buffer.alloc(11 * 1024 * 1024, 1);
+
+  async function run(resizeTool: string | null, resized: Buffer) {
+    const tmp = await freshTmpdir();
+    const inner = makeSpawnFake([
+      { cmd: "which", args: ["wl-paste"], code: 0 },
+      { cmd: "wl-paste", args: ["--list-types"], code: 0, stdout: Buffer.from("image/png\n") },
+      { cmd: "wl-paste", args: ["-t", "image/png"], code: 0, stdout: big },
+    ]);
+    const calls: string[] = [];
+    let primed = 0;
+    const spawn: SpawnLike = (cmd, args, options) => {
+      if (primed < 3) {
+        primed++;
+        return inner.spawn(cmd, args, options);
+      }
+      calls.push(cmd);
+      const found = cmd === "which" && args[0] === resizeTool;
+      const { spawn: one } = makeSpawnFake([
+        {
+          cmd,
+          args,
+          code: cmd === "which" ? (found ? 0 : 1) : 0,
+          writeFile:
+            cmd === resizeTool ? { path: args[args.length - 1] as string, bytes: resized } : undefined,
+        },
+      ]);
+      return one(cmd, args, options);
+    };
+    const result = await readClipboard({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "wayland-0" },
+      spawn,
+      tmpdir: () => tmp,
+    });
+    return { result, calls };
+  }
+
+  it("downscales through ImageMagick when over the cap", async () => {
+    const small = Buffer.from([1, 2, 3, 4]);
+    const { result, calls } = await run("magick", small);
+    expect(result.ok).toBe(true);
+    if (result.ok && result.kind === "image") {
+      expect(result.attachment.sizeBytes).toBe(4);
+      expect(result.attachment.mimeType).toBe("image/png");
+    }
+    expect(calls).toContain("magick");
+  });
+
+  it("keeps the size error and hints at tools when none is installed", async () => {
+    const { result } = await run(null, Buffer.alloc(0));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/max 10.*install ImageMagick or ffmpeg/);
+    }
+  });
+});
+
 describe("writeClipboard", () => {
   it("pipes text to pbcopy on macOS", async () => {
     const sink: Buffer[] = [];

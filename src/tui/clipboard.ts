@@ -486,6 +486,63 @@ async function readWindows(
   };
 }
 
+const DOWNSCALE_MAX_EDGE = 2048;
+
+// Best-effort resize of an oversized clipboard image via an external tool.
+// Tries PNG first (keeps text crisp), then JPEG; null when nothing fits.
+async function downscaleImage(
+  env: ClipboardEnv,
+  buf: Buffer,
+  mimeType: string,
+): Promise<{ mimeType: string; buf: Buffer } | null> {
+  const edge = DOWNSCALE_MAX_EDGE;
+  const ffScale = `scale=w=if(gt(iw\\,ih)\\,min(${edge}\\,iw)\\,-2):h=if(gt(iw\\,ih)\\,-2\\,min(${edge}\\,ih))`;
+  const tools: Array<{ cmd: string; args: (i: string, o: string) => string[] }> = [
+    { cmd: "magick", args: (i, o) => [i, "-resize", `${edge}x${edge}>`, o] },
+    { cmd: "convert", args: (i, o) => [i, "-resize", `${edge}x${edge}>`, o] },
+    { cmd: "ffmpeg", args: (i, o) => ["-v", "error", "-y", "-i", i, "-vf", ffScale, o] },
+  ];
+  let tool: (typeof tools)[number] | null = null;
+  for (const t of tools) {
+    if (await which(env, t.cmd)) {
+      tool = t;
+      break;
+    }
+  }
+  if (!tool) {
+    return null;
+  }
+  const inExt = mimeType === "image/jpeg" ? ".jpg" : mimeType === "image/gif" ? ".gif" : mimeType === "image/webp" ? ".webp" : ".png";
+  const base = path.join(env.tmpdir(), `hydra-resize-${Date.now()}-${process.pid}`);
+  const inPath = `${base}-in${inExt}`;
+  const outputs: Array<{ ext: string; mime: string }> = [
+    { ext: ".png", mime: "image/png" },
+    { ext: ".jpg", mime: "image/jpeg" },
+  ];
+  try {
+    await fs.writeFile(inPath, buf);
+    for (const o of outputs) {
+      const outPath = `${base}-out${o.ext}`;
+      try {
+        await run(env.spawn, tool.cmd, tool.args(inPath, outPath));
+        const res = await fs.readFile(outPath);
+        if (res.length > 0 && res.length <= MAX_ATTACHMENT_BYTES) {
+          return { mimeType: o.mime, buf: res };
+        }
+      } catch {
+        // try the next output format
+      } finally {
+        await fs.unlink(outPath).catch(() => undefined);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await fs.unlink(inPath).catch(() => undefined);
+  }
+}
+
 async function readLinux(env: ClipboardEnv): Promise<ClipboardReadResult> {
   const tool = await detectLinuxTool(env);
   if (!tool) {
@@ -505,19 +562,24 @@ async function readLinux(env: ClipboardEnv): Promise<ClipboardReadResult> {
         tool.imageArgs(imageMime),
       );
       if (buf.length > 0) {
+        let out = { mimeType: imageMime, buf };
         if (buf.length > MAX_ATTACHMENT_BYTES) {
-          return {
-            ok: false,
-            reason: `clipboard image is ${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)}`,
-          };
+          const scaled = await downscaleImage(env, buf, imageMime);
+          if (!scaled) {
+            return {
+              ok: false,
+              reason: `clipboard image is ${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)} (install ImageMagick or ffmpeg to auto-resize)`,
+            };
+          }
+          out = scaled;
         }
         return {
           ok: true,
           kind: "image",
           attachment: {
-            mimeType: imageMime,
-            data: buf.toString("base64"),
-            sizeBytes: buf.length,
+            mimeType: out.mimeType,
+            data: out.buf.toString("base64"),
+            sizeBytes: out.buf.length,
           },
         };
       }
