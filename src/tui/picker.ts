@@ -212,6 +212,9 @@ export interface PickOptions {
   // When the picker is opened from inside a session (^p), pre-select that
   // session's row so the user can drop straight back in with Enter.
   currentSessionId?: string;
+  // Open straight into the find layer, restoring prefs.lastFind. Set when
+  // backing out of a transcript that was opened from a find hit.
+  openFind?: boolean;
   // Seed the composer with this text on open. Used when the agent
   // picker's Esc re-shows the session picker — the prompt the user
   // already typed for the new session is restored into the composer box.
@@ -306,6 +309,10 @@ export interface PickerPrefs {
   // closure. Never cleared implicitly; to forget a search, empty the
   // query box (^U) and Esc out.
   lastFind?: FindState;
+  // Session a find hit just opened. While that session is on screen, Esc
+  // in its view-only transcript returns to the find results. Cleared as
+  // soon as any picker opens.
+  findReturnSessionId?: string;
   // A named tui.defaultHost, held until a picker open whose session list
   // can say whether it is a remote or an imported machine. Cleared once
   // it resolves, or as soon as the user cycles the host filter by hand.
@@ -3175,6 +3182,11 @@ export async function pickSession(
       term.grabInput(false);
       writeDebugLine({ src: "grab", site: "picker.detachInput", on: false });
     };
+    // Wipe the results so they don't linger while the transcript loads.
+    const clearPickerFrame = (): void => {
+      term.moveTo(1, 1);
+      term.eraseDisplayBelow();
+    };
     const cleanup = (): void => {
       if (resolved) {
         return;
@@ -4112,7 +4124,9 @@ export async function pickSession(
           hit.snippets[findSnippetIdx]?.recordedAt ?? hit.snippets[0]?.recordedAt;
         if (isImportedPassive) {
           persistFind();
+          prefs.findReturnSessionId = hit.sessionId;
           cleanup();
+          clearPickerFrame();
           const result: PickerResult = {
             kind: "attach",
             sessionId: hit.sessionId,
@@ -4132,16 +4146,16 @@ export async function pickSession(
             title: hit.title,
             cwd: hit.cwd,
           }, focus);
-          if (action === "cancel") {
-            persistFind();
-            cleanup();
-            resolve({ kind: "abort" });
+          // ^C and Esc both return to the results; abort would resume the
+          // session the picker was opened from, not the hit's.
+          // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
+          if (action === "cancel" || action === "back") {
             return;
           }
-          // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
-          if (action === "back") return;
           persistFind();
+          prefs.findReturnSessionId = hit.sessionId;
           cleanup();
+          clearPickerFrame();
           const result: PickerResult = {
             kind: "attach",
             sessionId: hit.sessionId,
@@ -5779,6 +5793,10 @@ export async function pickSession(
       term.hideCursor(false);
     };
     installGrab();
+    if (opts.openFind === true) {
+      openFindLayer();
+    }
+    delete prefs.findReturnSessionId;
     // Shared by ^Z suspend and ^X (edit composer in $EDITOR): tear down
     // everything a foreground process would fight over (grab, alt
     // screen), and its reverse. Route alt-screen re-entry through

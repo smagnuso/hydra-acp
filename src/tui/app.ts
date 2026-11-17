@@ -4249,6 +4249,18 @@ async function runSession(
           }
           continue;
         }
+        // Esc in a transcript opened from a find hit goes back to the
+        // find results so the next hit is one key away. Ahead of
+        // the scrolled-back snap: opening at a match is always scrolled back.
+        if (
+          ev.type === "key" &&
+          ev.name === "escape" &&
+          opts.readonly === true &&
+          pickerPrefs.findReturnSessionId === resolvedSessionId
+        ) {
+          void switchSession(true).catch(() => undefined);
+          continue;
+        }
         // Escape while scrolled back snaps the viewport to the bottom
         // instead of falling through to the composer. Runs after modal /
         // overlay / search interceptors so they keep priority, but
@@ -6359,7 +6371,7 @@ async function runSession(
     }
   };
 
-  const switchSession = async (): Promise<void> => {
+  const switchSession = async (openFind = false): Promise<void> => {
     writeDebugLine({
       src: "switch-session",
       step: "entered",
@@ -6498,6 +6510,7 @@ async function runSession(
           target,
           currentSessionId: resolvedSessionId,
           prefs: pickerPrefs,
+          ...(openFind ? { openFind: true } : {}),
           ...(composerAgentId ? { composerAgentId } : {}),
           ...(composerModel ? { composerModel } : {}),
           ...(availableAgents.length > 0 ? { availableAgents } : {}),
