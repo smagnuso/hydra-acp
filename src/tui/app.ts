@@ -144,6 +144,7 @@ import {
   type AuthRetryOutcome,
 } from "./auth-required-banner.js";
 import { promptStartupFailureBanner } from "./startup-failure-banner.js";
+import { isSessionAuthError, recoverSessionAuth, replayNeedsSessionAuth } from "./session-auth.js";
 import {
   emergencyTerminalReset,
   formatElapsed,
@@ -3991,6 +3992,7 @@ async function runSession(
   // meantime).
   let pendingPrefill: { text: string; attachments: Attachment[] } | null =
     null;
+  let authInProgress = false;
 
   // Tell the wrap/truncate engine how this terminal draws ambiguous-width
   // glyphs before any line is measured, so the column budget matches the
@@ -4343,6 +4345,7 @@ async function runSession(
     { name: "/help", description: "Show TUI built-in commands" },
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
+    { name: "/auth", description: "Sign in again for this session's agent" },
     { name: "/sessions", description: "List sessions" },
     { name: "/resume", description: "Switch sessions (open the picker)" },
     {
@@ -7632,6 +7635,39 @@ async function runSession(
 
   // Returns true if the input was a TUI built-in slash command and was
   // handled locally; the caller should skip enqueueing / sending it.
+  const signInForSession = async (): Promise<void> => {
+    if (opts.readonly === true) {
+      screen.notify("view-only: login disabled");
+      return;
+    }
+    if (authInProgress || pendingTurns > 0) {
+      screen.notify("Use /auth once the current turn or login has finished.");
+      return;
+    }
+    authInProgress = true;
+    try {
+      const message = await recoverSessionAuth({
+        isLocal: target.isLocal,
+        agentId: resolvedAgentId,
+        sessionId: resolvedSessionId,
+        request: (method, params) => conn.request(method, params),
+        showBanner: (methods, authenticate) =>
+          promptAuthRequiredBanner(term, resolvedAgentId, {
+            description: "Sign in for this session using its configured account and environment.",
+          }, methods, { authenticate }),
+        suspend: () => screen.stop(),
+        resume: () => screen.start(),
+      });
+      if (message) {
+        screen.appendLines([{ prefix: "  ", body: message, bodyStyle: "notice" }]);
+      }
+    } catch (err: unknown) {
+      screen.notify(`login failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      authInProgress = false;
+    }
+  };
+
   const handleBuiltinCommand = (text: string): boolean => {
     // Trim trailing whitespace only — a leading space (or a multi-line
     // paste whose first line is blank) should escape slash-command
@@ -7770,6 +7806,10 @@ async function runSession(
             screen.notify(`rename failed: ${err.message}`);
           },
         );
+        return true;
+      }
+      case "/auth": {
+        void signInForSession();
         return true;
       }
       case "/sessions":
@@ -8186,6 +8226,7 @@ async function runSession(
     };
     turnsInFlight.push(entry);
     let stopReason: string | undefined;
+    let authenticationFailed = false;
     try {
       const response = (await conn.request("session/prompt", {
         sessionId: resolvedSessionId,
@@ -8195,6 +8236,7 @@ async function runSession(
         stopReason = response.stopReason;
       }
     } catch (err) {
+      authenticationFailed = !forceStopRequested && isSessionAuthError(err);
       // The send didn't make it through hydra → there will never be a
       // prompt_queue_added for this echo. Splice it out wherever it
       // sits (still in FIFO, or already bound to a messageId).
@@ -8225,7 +8267,9 @@ async function runSession(
           {
             prefix: "× ",
             prefixStyle: "tool-status-fail",
-            body: (err as Error).message,
+            body: authenticationFailed
+              ? "Authentication required. Opening login for this session's configured account. Use /auth to reopen it."
+              : (err as Error).message,
             bodyStyle: "tool-status-fail",
           },
         ]);
@@ -8298,6 +8342,9 @@ async function runSession(
           screen.refreshPrompt();
         }
       }
+    }
+    if (authenticationFailed) {
+      await signInForSession();
     }
   };
 
@@ -11263,6 +11310,15 @@ async function runSession(
       (opts.initialAttachments && opts.initialAttachments.length > 0))
   ) {
     enqueuePrompt(opts.initialPrompt ?? "", opts.initialAttachments ?? []);
+  }
+
+  if (
+    opts.readonly !== true &&
+    pendingTurns === 0 &&
+    finishSession !== null &&
+    replayNeedsSessionAuth(buffered.map(({ event }) => event))
+  ) {
+    await signInForSession();
   }
 
   return await sessionDone;
