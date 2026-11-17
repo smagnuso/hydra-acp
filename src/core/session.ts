@@ -342,7 +342,9 @@ export interface SessionInit {
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
   scheduleSynopsis?: () => void;
-  // Regenerate the title every N completed turns. 0 or unset disables.
+  // Regenerate the title every N completed turns. 0 disables all automatic
+  // retitling. Unset keeps only the one-shot retitle after the first turn
+  // when the title is still just the first prompt.
   autoTitle?: number;
   // Fire-and-forget callback letting SessionManager snapshot an isolated
   // session's workspace at a turn boundary. Session deliberately knows
@@ -939,8 +941,11 @@ export class Session {
   // out-of-band synopsis without taking a direct dependency on
   // SessionManager.
   private scheduleSynopsisHook?: () => void;
-  private autoTitle = 0;
+  private autoTitle: number | undefined;
   private turnsSinceAutoTitle = 0;
+  // First usable prompt text, held until the first clean turn end so the
+  // one-shot placeholder-title check can run. Cleared once checked.
+  private firstTurnTitleCandidate: string | undefined;
   private scheduleWorkspaceSnapshotHook?: () => void;
   // Fire-and-forget hook for `/hydra compact` and `/hydra agent` —
   // calls back to the manager's compaction scheduler so the slash
@@ -1600,7 +1605,7 @@ export class Session {
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
-    this.autoTitle = init.autoTitle ?? 0;
+    this.autoTitle = init.autoTitle;
     this.scheduleWorkspaceSnapshotHook = init.scheduleWorkspaceSnapshot;
     this.scheduleCompactionHook = init.scheduleCompaction;
     this.resolveAgentIdHook = init.resolveAgentId;
@@ -4107,11 +4112,20 @@ export class Session {
     // momentarily coherent. Fire-and-forget by contract, because the
     // alternative is making every turn wait on a tree walk.
     this.scheduleWorkspaceSnapshotHook?.();
-    if (this.autoTitle > 0 && stopReason === "end_turn") {
-      this.turnsSinceAutoTitle += 1;
-      if (this.turnsSinceAutoTitle >= this.autoTitle) {
-        this.turnsSinceAutoTitle = 0;
-        this.scheduleSynopsisHook?.();
+    if (stopReason === "end_turn") {
+      const candidate = this.firstTurnTitleCandidate;
+      if (candidate !== undefined) {
+        this.firstTurnTitleCandidate = undefined;
+        if (isFirstPromptPlaceholderTitle(this.title, candidate)) {
+          this.scheduleSynopsisHook?.();
+        }
+      }
+      if (this.autoTitle !== undefined && this.autoTitle > 0) {
+        this.turnsSinceAutoTitle += 1;
+        if (this.turnsSinceAutoTitle >= this.autoTitle) {
+          this.turnsSinceAutoTitle = 0;
+          this.scheduleSynopsisHook?.();
+        }
       }
     }
     if (promptMessageId !== undefined && stopReason !== undefined) {
@@ -6518,6 +6532,9 @@ export class Session {
       return;
     }
     this._titleSeedPending = false;
+    if (this.autoTitle === undefined) {
+      this.firstTurnTitleCandidate = text;
+    }
     this.setTitle(seed);
   }
 
@@ -12329,6 +12346,23 @@ function renderConfigOptionBlock(o: ConfigOption): string {
     return showName ? `  ${marker} ${valueCell}  ${c.name}` : `  ${marker} ${valueCell}`;
   });
   return `${header}\n${rows.join("\n")}`;
+}
+
+const PLACEHOLDER_TITLE_MIN = 40;
+
+// True when `title` is just the head of the first prompt: the daemon's own
+// seed, or an agent that clips the raw prompt (pi-acp cuts at 80 chars).
+// A short title is left alone, since retitling it buys nothing.
+export function isFirstPromptPlaceholderTitle(
+  title: string | undefined,
+  prompt: string,
+): boolean {
+  const norm = (v: string): string => v.replace(/\s+/g, " ").trim();
+  const t = norm((title ?? "").replace(/…$/, ""));
+  if (t.length < PLACEHOLDER_TITLE_MIN) {
+    return false;
+  }
+  return norm(prompt).startsWith(t);
 }
 
 export function firstLine(text: string, max: number): string | undefined {

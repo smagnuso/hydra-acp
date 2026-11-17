@@ -879,9 +879,10 @@ export const HydraConfig = z.object({
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → the agent uses its default.
   synopsisModel: z.string().optional(),
-  // Regenerate each session's title every N completed turns. Absent or 0
-  // never retitles automatically. Optional rather than defaulted so config
-  // fixtures need not carry it.
+  // Regenerate each session's title every N completed turns. 0 disables all
+  // automatic retitling. Absent keeps only the one-shot retitle after the
+  // first turn when the title is still the first prompt. Optional rather
+  // than defaulted so absent stays distinguishable from an explicit 0.
   autoTitle: z.number().int().nonnegative().optional(),
   // Compaction settings for manual session summarization (triggered via
   // `/hydra compact` or `POST /v1/sessions/:id/compact`). The daemon does

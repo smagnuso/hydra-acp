@@ -495,7 +495,8 @@ export interface SessionManagerOptions {
   tombstones?: TombstoneStore;
   // Compaction configuration forwarded to the synopsis coordinator and
   // used by the onSynthesisArtifact hook (swap logic).
-  // Regenerate session titles every N completed turns; 0 or unset is off.
+  // Regenerate session titles every N completed turns. 0 turns all automatic
+  // retitling off; unset keeps only the one-shot first-turn retitle.
   autoTitle?: number;
   compaction?: {
     // Number of recent turns kept verbatim in the seed after compaction.
@@ -533,7 +534,7 @@ export class SessionManager {
   private sessionDefaults: Record<string, Record<string, string>>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
-  private autoTitle = 0;
+  private autoTitle: number | undefined;
   private compactionAgent?: string;
   private compactionModel?: string;
   readonly defaultTransformers: string[];
@@ -628,7 +629,7 @@ export class SessionManager {
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
     this.compactionAgent = options.compactionAgent;
-    this.autoTitle = options.autoTitle ?? 0;
+    this.autoTitle = options.autoTitle;
     this.compactionModel = options.compactionModel;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
