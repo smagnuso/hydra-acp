@@ -10077,6 +10077,7 @@ export class Screen {
         }
       }
       let after = bodyText.slice(selEnd);
+      let afterBase = selEnd;
       if (carriesEscapes && selEnd > selStart) {
         // The inverse writer ends with a full SGR reset, dropping any
         // SGR span that opened before the
@@ -10088,9 +10089,12 @@ export class Screen {
         const prime = sgrTokensOnly(bodyText.slice(0, selEnd));
         if (prime.length > 0) {
           after = prime + after;
+          // The prime is not part of bodyText, so link spans and search
+          // columns must be offset back by its length.
+          afterBase = selEnd - prime.length;
         }
       }
-      renderPiece(after, selEnd);
+      renderPiece(after, afterBase);
     } else {
       renderPiece(bodyText, 0);
     }
