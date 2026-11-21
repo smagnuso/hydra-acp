@@ -2055,7 +2055,29 @@ export class Session {
       return;
     }
     this.maybeApplyAgentSessionInfo(envelope);
-    this.recordAndBroadcast("session/update", withEditStats(envelope));
+    this.recordAndBroadcast(
+      "session/update",
+      withEditStats(this.withCanonicalTitle(envelope)),
+    );
+  }
+
+  // Clients must never see an agent title the daemon declined to adopt, or
+  // they diverge from the picker (which reads the stored title).
+  private withCanonicalTitle<T>(envelope: T): T {
+    const update = (envelope as { update?: Record<string, unknown> }).update;
+    if (
+      !update ||
+      update.sessionUpdate !== "session_info_update" ||
+      typeof update.title !== "string" ||
+      update.title.trim() === this.title
+    ) {
+      return envelope;
+    }
+    const { title: _dropped, ...rest } = update;
+    return {
+      ...(envelope as object),
+      update: this.title ? { ...rest, title: this.title } : rest,
+    } as T;
   }
 
   // Arms recall in place when another agent reports it already compacted

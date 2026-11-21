@@ -3342,6 +3342,41 @@ describe("Session", () => {
       expect((await session.getHistorySnapshot()).length).toBe(before + 1);
     });
 
+    it("rewrites a declined agent title to the canonical one before broadcast", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new TrackedSession({
+        sessionId: "hydra_session_CT",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CT",
+        historyStore: new TrackedHistoryStore(),
+        title: "Stored title",
+        upstreamRespawned: true,
+      });
+      const a = makeClient();
+      session.attach(a.client, "full");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_CT",
+        update: { sessionUpdate: "session_info_update", title: "Agent guess" },
+      });
+
+      expect(session.title).toBe("Stored title");
+      const sent = a.stream.sent.filter(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update",
+      );
+      expect(sent).toHaveLength(1);
+      expect(
+        (sent[0] as { params: { update: { title?: string } } }).params.update
+          .title,
+      ).toBe("Stored title");
+    });
+
     it("session_info_update is broadcast live and prepended to replay as a synthetic snapshot", async () => {
       const { session, mock } = makeSession("hydra_session_TH", "u_TH");
       const requestMock = mock.agent.connection.request as ReturnType<
