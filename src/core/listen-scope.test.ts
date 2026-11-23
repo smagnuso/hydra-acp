@@ -11,6 +11,7 @@ import {
   selfSignedAltNames,
   summarizeCert,
 } from "./listen-scope.js";
+import { onPlatform } from "./platform-stub.js";
 import { mintSelfSignedCert } from "./self-signed.js";
 import { deriveRemoteName } from "./system-info.js";
 import { hasBin, isCertsUnavailableError, isPermissionError, parseTailscaleStatus } from "./tailscale.js";
@@ -31,13 +32,23 @@ describe("applyListenScope", () => {
     expect(() => HydraConfig.parse(raw)).not.toThrow();
   });
 
-  it("writes cert paths under the home directory as ~/ so the config is portable", () => {
+  it("writes cert paths under the home directory as ~/ so the config is portable", async () => {
     const raw: Record<string, unknown> = {};
-    applyListenScope(raw, { host: "100.64.0.5", tls: TLS }, "/h");
+    await onPlatform("linux", () =>
+      applyListenScope(raw, { host: "100.64.0.5", tls: TLS }, "/h"),
+    );
     expect((raw.daemon as { tls: unknown }).tls).toEqual({
       cert: "~/.hydra-acp/tls/cert.pem",
       key: "~/.hydra-acp/tls/key.pem",
     });
+  });
+
+  it("keeps full cert paths on Windows, where ~ is not expanded by every shell", async () => {
+    const raw: Record<string, unknown> = {};
+    await onPlatform("win32", () =>
+      applyListenScope(raw, { host: "100.64.0.5", tls: TLS }, "/h"),
+    );
+    expect((raw.daemon as { tls: unknown }).tls).toEqual(TLS);
   });
 
   it("drops a stale publicHost when the new scope has none", () => {
