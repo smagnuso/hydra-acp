@@ -5,6 +5,7 @@
 
 import { X509Certificate } from "node:crypto";
 import * as os from "node:os";
+import { shortenHomePath } from "./paths.js";
 import { isLoopbackHost } from "./remote-url.js";
 
 export const LISTEN_SCOPES = ["local", "tailnet", "all"] as const;
@@ -36,6 +37,7 @@ function daemonSection(raw: Record<string, unknown>): Record<string, unknown> {
 export function applyListenScope(
   raw: Record<string, unknown>,
   settings: ScopeSettings | undefined,
+  home: string = os.homedir(),
 ): void {
   const daemon = daemonSection(raw);
   if (!settings) {
@@ -45,7 +47,12 @@ export function applyListenScope(
     return;
   }
   daemon.host = settings.host;
-  daemon.tls = { cert: settings.tls.cert, key: settings.tls.key };
+  // Home-relative so a config synced between linux and mac stays valid;
+  // the daemon expands it on read.
+  daemon.tls = {
+    cert: shortenHomePath(settings.tls.cert, home),
+    key: shortenHomePath(settings.tls.key, home),
+  };
   if (settings.publicHost) {
     daemon.publicHost = settings.publicHost;
   } else {

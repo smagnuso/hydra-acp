@@ -31,6 +31,15 @@ describe("applyListenScope", () => {
     expect(() => HydraConfig.parse(raw)).not.toThrow();
   });
 
+  it("writes cert paths under the home directory as ~/ so the config is portable", () => {
+    const raw: Record<string, unknown> = {};
+    applyListenScope(raw, { host: "100.64.0.5", tls: TLS }, "/h");
+    expect((raw.daemon as { tls: unknown }).tls).toEqual({
+      cert: "~/.hydra-acp/tls/cert.pem",
+      key: "~/.hydra-acp/tls/key.pem",
+    });
+  });
+
   it("drops a stale publicHost when the new scope has none", () => {
     const raw: Record<string, unknown> = { daemon: { publicHost: "old.example" } };
     applyListenScope(raw, { host: "0.0.0.0", tls: TLS });
